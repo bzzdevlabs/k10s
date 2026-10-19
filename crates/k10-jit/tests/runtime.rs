@@ -160,41 +160,52 @@ fn preemption_resumes_with_live_registers() {
     mb.export("main", main);
     let m = mb.build();
     let it = Interp::new(&m).unwrap();
-    let n = 300_000;
-    let mut im = k10_ir::new_memory(&m, 12);
-    let expected = it.invoke(&mut im, 12, &mut CountingHost { interrupts: 0 }, main, &[n]);
     let jit = compile(&m).unwrap();
-    let mut mem = GuardedMem::for_module(&m, 12);
-    let mut host = CountingHost { interrupts: 0 };
-    let mut d = Dispatch {
-        host: &mut host,
-        mem: mem.base(),
-        mem_len: mem.size() + 8,
-        params: vec![2],
-        interrupts: 0,
-        preempt_on_call: false,
-    };
-    let (lo, _) = stack_bounds();
-    let mut ctx = ctx_for(&mut mem, lo + HOST_RESERVE, on_interrupt, &mut d as *mut Dispatch as *mut c_void);
-    let ctx_ptr: *mut VmCtx = &mut ctx;
-    // SAFETY: as in preemption_traps_infinite_loop.
-    let limit: &AtomicUsize = unsafe { &(*ctx_ptr).stack_limit };
-    let done = AtomicBool::new(false);
-    let r = std::thread::scope(|s| {
-        s.spawn(|| {
-            while !done.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_micros(200));
-                limit.store(usize::MAX, Ordering::Relaxed);
-            }
+    // The loop must outlive at least one ticker period. A fast (release) build can finish 300k iterations before the
+    // ticker thread is even scheduled, so grow `n` until the run was actually preempted.
+    let mut n = 300_000;
+    for attempt in 0.. {
+        let mut im = k10_ir::new_memory(&m, 12);
+        let expected = it.invoke(&mut im, 12, &mut CountingHost { interrupts: 0 }, main, &[n]);
+        let mut mem = GuardedMem::for_module(&m, 12);
+        let mut host = CountingHost { interrupts: 0 };
+        let mut d = Dispatch {
+            host: &mut host,
+            mem: mem.base(),
+            mem_len: mem.size() + 8,
+            params: vec![2],
+            interrupts: 0,
+            preempt_on_call: false,
+        };
+        let (lo, _) = stack_bounds();
+        let mut ctx = ctx_for(&mut mem, lo + HOST_RESERVE, on_interrupt, &mut d as *mut Dispatch as *mut c_void);
+        let ctx_ptr: *mut VmCtx = &mut ctx;
+        // SAFETY: as in preemption_traps_infinite_loop.
+        let limit: &AtomicUsize = unsafe { &(*ctx_ptr).stack_limit };
+        let done = AtomicBool::new(false);
+        let started = std::sync::Barrier::new(2);
+        let r = std::thread::scope(|s| {
+            s.spawn(|| {
+                started.wait();
+                while !done.load(Ordering::Relaxed) {
+                    limit.store(usize::MAX, Ordering::Relaxed);
+                    std::thread::sleep(Duration::from_micros(200));
+                }
+            });
+            started.wait();
+            // SAFETY: valid ctx/memory/hooks; the ticker only stores to `stack_limit`.
+            let r = unsafe { jit.invoke(ctx_ptr, main, &[n]) };
+            done.store(true, Ordering::Relaxed);
+            r
         });
-        // SAFETY: valid ctx/memory/hooks; the ticker only stores to `stack_limit`.
-        let r = unsafe { jit.invoke(ctx_ptr, main, &[n]) };
-        done.store(true, Ordering::Relaxed);
-        r
-    });
-    assert_eq!(r, expected);
-    assert!(d.interrupts > 0, "the ticker never interrupted the loop");
-    eprintln!("resumed after {} interrupts", d.interrupts);
+        assert_eq!(r, expected);
+        if d.interrupts > 0 {
+            eprintln!("resumed after {} interrupts (n = {n})", d.interrupts);
+            break;
+        }
+        assert!(attempt < 6, "the ticker never interrupted the loop, even with n = {n}");
+        n *= 4;
+    }
 }
 
 // ------------------------------------------------------------------------------------------------ host traps

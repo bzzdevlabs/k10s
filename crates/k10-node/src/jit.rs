@@ -119,12 +119,12 @@ impl Code for JitCode {
         let host = std::ptr::from_mut(host).cast::<HostCtx<'static>>();
         let mut inv = Invocation { host, mem: mem.as_mut_ptr(), mem_len, panic: None };
         let limit = stack_limit(scratch);
-        const _: () = assert!(std::mem::size_of::<VmCtx>() <= std::mem::size_of::<[u64; 16]>());
-        let ctx = addr_of_mut!(scratch.jit).cast::<VmCtx>();
-        // SAFETY: `scratch.jit` is 128 bytes, 8-aligned, owned by this fiber, and only ever accessed through raw
-        // pointers (the ticker may store into `stack_limit` concurrently, which is why that word is written
-        // atomically and no reference to the whole `VmCtx` is created). Every field is written before the JIT reads
-        // it; `jit_private` is owned by the JIT (saved/restored by `invoke`).
+        const _: () = assert!(std::mem::size_of::<VmCtx>() <= std::mem::size_of::<crate::exec::JitCtx>());
+        let ctx = scratch.jit_ctx().cast::<VmCtx>();
+        // SAFETY: `jit_ctx()` is a stable 128-byte, 8-aligned heap box owned by this fiber, held outside any
+        // `&mut Scratch` and only ever accessed through raw pointers (the ticker stores into `stack_limit`
+        // concurrently, which is why that word is written atomically and no reference to the whole `VmCtx` is
+        // created). Every field is written before the JIT reads it; `jit_private` is owned by the JIT.
         unsafe {
             addr_of_mut!((*ctx).mem_base).write(inv.mem);
             addr_of_mut!((*ctx).mem_mask).write(size as u64 - 1);
@@ -343,7 +343,8 @@ mod tests {
         let f = code.export("handle").unwrap();
         let r = std::thread::scope(|s| {
             if let Some(b) = preempt {
-                let word = &scratch.jit[2] as *const u64 as usize; // VmCtx.stack_limit (+16)
+                // VmCtx.stack_limit lives at offset 16 (index 2) of the JIT scratch box.
+                let word = unsafe { scratch.jit_ctx().cast::<u64>().add(2) } as usize;
                 s.spawn(move || {
                     b.wait();
                     for _ in 0..200 {

@@ -36,7 +36,8 @@ An instance handles one request at a time (actor semantics); the runtime runs ma
 | `kv_put` | (kptr, klen, vptr, vlen) | 0 |
 | `kv_del` | (kptr, klen) | 1 if the key existed, else 0 |
 
-Keys ≤ 1 KiB, values ≤ 1 MiB (else trap `Host(2)`).
+Keys ≤ 1 KiB, values ≤ 1 MiB (else trap `Host(2)`). Each service has a live-bytes quota (default 256 MiB,
+`--kv-max`); a `kv_put` that would exceed it traps `Host(3)` and stores nothing (delete entries to make room).
 
 ## Misc
 | name | params | returns |

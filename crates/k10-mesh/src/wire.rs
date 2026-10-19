@@ -15,6 +15,7 @@
 //! | 5    | Blob          | hash:[32] bytes |
 //! | 6    | BlobMissing   | hash:[32] |
 //! | 7    | Call          | deadline_ms:u32 method:u8 service_len:u8 service path_len:u16 path body |
+//! (`path` is carried as raw bytes, not UTF-8: a service's request path may be arbitrary bytes.)
 //! | 8    | CallResult    | status:i32 body |
 //! | 9    | Ping          | — |
 //! | 10   | Pong          | — |
@@ -57,8 +58,8 @@ pub enum Msg<'a> {
     GetBlob { hash: [u8; 32] },
     Blob { hash: [u8; 32], bytes: &'a [u8] },
     BlobMissing { hash: [u8; 32] },
-    /// `method`: `req_method` code (0 GET, 1 POST, 2 PUT, 3 DELETE, 4 other).
-    Call { service: &'a str, path: &'a str, body: &'a [u8], deadline_ms: u32, method: u8 },
+    /// `method`: `req_method` code (0 GET, 1 POST, 2 PUT, 3 DELETE, 4 other). `path` is raw request-path bytes.
+    Call { service: &'a str, path: &'a [u8], body: &'a [u8], deadline_ms: u32, method: u8 },
     CallResult { status: i32, body: &'a [u8] },
     Ping,
     Pong,
@@ -123,9 +124,23 @@ impl<'a> Msg<'a> {
         }
     }
 
-    /// Appends one complete frame to `out` (no intermediate allocation; reserve once, write once).
-    /// Panics if a `Call` service name exceeds 255 bytes or its path 65535 bytes (validate before).
-    pub fn encode(&self, request_id: u64, out: &mut Vec<u8>) {
+    /// Appends one complete frame to `out` (no intermediate allocation; reserve once, write once). Returns
+    /// `Err` without touching `out` when a field is too long for the wire (a `Call` service > 255 bytes or path
+    /// > 65535 bytes) or the whole frame would exceed 4 GiB — the caller fails that one request instead of the
+    /// process panicking on hostile input.
+    pub fn encode(&self, request_id: u64, out: &mut Vec<u8>) -> Result<(), WireError> {
+        if let Msg::Call { service, path, body, .. } = self {
+            if service.len() > u8::MAX as usize {
+                return Err(WireError::Malformed("call service name too long"));
+            }
+            if path.len() > u16::MAX as usize {
+                return Err(WireError::Malformed("call path too long"));
+            }
+            // 4 GiB frame guard up front (so nothing is written on failure).
+            if 9 + 8 + 1 + 1 + service.len() + 2 + path.len() + body.len() > u32::MAX as usize {
+                return Err(WireError::Malformed("call frame too large"));
+            }
+        }
         let start = out.len();
         out.reserve(HEADER_LEN + self.payload_len_hint());
         encode_header(out, self.kind(), request_id, 0);
@@ -139,13 +154,12 @@ impl<'a> Msg<'a> {
                 out.extend_from_slice(bytes);
             }
             Msg::Call { service, path, body, deadline_ms, method } => {
-                assert!(service.len() <= u8::MAX as usize && path.len() <= u16::MAX as usize, "service/path too long");
                 put_u32(out, *deadline_ms);
                 out.push(*method);
                 out.push(service.len() as u8);
                 out.extend_from_slice(service.as_bytes());
                 put_u16(out, path.len() as u16);
-                out.extend_from_slice(path.as_bytes());
+                out.extend_from_slice(path);
                 out.extend_from_slice(body);
             }
             Msg::CallResult { status, body } => {
@@ -154,8 +168,16 @@ impl<'a> Msg<'a> {
             }
             Msg::Ping | Msg::Pong => {}
         }
-        let len = u32::try_from(out.len() - start - 4).expect("frame larger than 4 GiB");
-        out[start..start + 4].copy_from_slice(&len.to_le_bytes());
+        match u32::try_from(out.len() - start - 4) {
+            Ok(len) => {
+                out[start..start + 4].copy_from_slice(&len.to_le_bytes());
+                Ok(())
+            }
+            Err(_) => {
+                out.truncate(start);
+                Err(WireError::Malformed("frame larger than 4 GiB"))
+            }
+        }
     }
 
     fn payload_len_hint(&self) -> usize {
@@ -185,7 +207,7 @@ impl<'a> Msg<'a> {
                 let n = r.u8()? as usize;
                 let service = core::str::from_utf8(r.bytes(n)?).map_err(|_| WireError::Malformed("service name"))?;
                 let n = r.u16()? as usize;
-                let path = core::str::from_utf8(r.bytes(n)?).map_err(|_| WireError::Malformed("call path"))?;
+                let path = r.bytes(n)?;
                 Msg::Call { service, path, body: r.rest(), deadline_ms, method }
             }
             KIND_CALL_RESULT => Msg::CallResult { status: r.i32()?, body: r.rest() },
@@ -334,9 +356,11 @@ mod tests {
             Msg::GetBlob { hash: [3; 32] },
             Msg::Blob { hash: [4; 32], bytes: &[1, 2, 3, 4, 5] },
             Msg::BlobMissing { hash: [5; 32] },
-            Msg::Call { service: "echo", path: "/hello?x=1", body: b"payload", deadline_ms: 250, method: 0 },
-            Msg::Call { service: "e", path: "", body: b"", deadline_ms: 0, method: 1 },
-            Msg::Call { service: "todo", path: "/7", body: b"title", deadline_ms: u32::MAX, method: 3 },
+            Msg::Call { service: "echo", path: b"/hello?x=1", body: b"payload", deadline_ms: 250, method: 0 },
+            Msg::Call { service: "e", path: b"", body: b"", deadline_ms: 0, method: 1 },
+            Msg::Call { service: "todo", path: b"/7", body: b"title", deadline_ms: u32::MAX, method: 3 },
+            // Non-UTF-8 path round-trips byte for byte (raw bytes on the wire).
+            Msg::Call { service: "svc", path: &[0xFF, 0x00, 0xFE], body: b"x", deadline_ms: 1, method: 4 },
             Msg::CallResult { status: -3, body: b"" },
             Msg::CallResult { status: 200, body: b"ok" },
             Msg::Ping,
@@ -349,7 +373,7 @@ mod tests {
         let msgs = all_msgs();
         let mut stream = Vec::new();
         for (i, m) in msgs.iter().enumerate() {
-            m.encode(1000 + i as u64, &mut stream);
+            m.encode(1000 + i as u64, &mut stream).unwrap();
         }
         for chunk in [1usize, 2, 3, 7, 13, 64, stream.len()] {
             let mut d = FrameDecoder::default();
@@ -374,7 +398,7 @@ mod tests {
     fn header_only_encoding_matches() {
         let body = [9u8; 100];
         let mut a = Vec::new();
-        Msg::Blob { hash: [1; 32], bytes: &body }.encode(7, &mut a);
+        Msg::Blob { hash: [1; 32], bytes: &body }.encode(7, &mut a).unwrap();
         let mut b = Vec::new();
         encode_header(&mut b, KIND_BLOB, 7, 132);
         b.extend_from_slice(&[1; 32]);
@@ -421,21 +445,37 @@ mod tests {
     #[test]
     fn call_layout_and_method() {
         let mut f = Vec::new();
-        Msg::Call { service: "ab", path: "/p", body: b"xyz", deadline_ms: 0x0102_0304, method: 2 }.encode(9, &mut f);
+        Msg::Call { service: "ab", path: b"/p", body: b"xyz", deadline_ms: 0x0102_0304, method: 2 }.encode(9, &mut f).unwrap();
         assert_eq!(&f[HEADER_LEN..], &[4, 3, 2, 1, 2, 2, b'a', b'b', 2, 0, b'/', b'p', b'x', b'y', b'z']);
         match Msg::decode(KIND_CALL, &f[HEADER_LEN..]).unwrap() {
             Msg::Call { service, path, body, deadline_ms, method } => {
-                assert_eq!((service, path, body, deadline_ms, method), ("ab", "/p", &b"xyz"[..], 0x0102_0304, 2));
+                assert_eq!((service, path, body, deadline_ms, method), ("ab", &b"/p"[..], &b"xyz"[..], 0x0102_0304, 2));
             }
             m => panic!("{m:?}"),
         }
+    }
+
+    /// An oversize service name or path is refused by `encode` (returns `Err`, writes nothing) instead of panicking:
+    /// a tenant cannot crash the mesh thread with a huge `call` target.
+    #[test]
+    fn oversize_call_fields_are_refused_not_panicked() {
+        let long_path = vec![b'a'; (u16::MAX as usize) + 1];
+        let mut out = Vec::new();
+        assert!(Msg::Call { service: "s", path: &long_path, body: b"", deadline_ms: 1, method: 0 }.encode(1, &mut out).is_err());
+        assert!(out.is_empty(), "nothing written on failure");
+        let long_name = "x".repeat(256);
+        assert!(Msg::Call { service: &long_name, path: b"/", body: b"", deadline_ms: 1, method: 0 }.encode(1, &mut out).is_err());
+        assert!(out.is_empty());
+        // A path at exactly the limit still encodes.
+        let ok_path = vec![b'a'; u16::MAX as usize];
+        assert!(Msg::Call { service: "s", path: &ok_path, body: b"", deadline_ms: 1, method: 0 }.encode(1, &mut out).is_ok());
     }
 
     #[test]
     fn default_cap_admits_the_largest_blob() {
         let blob = vec![7u8; crate::bundle::MAX_BLOB_BYTES];
         let mut f = Vec::new();
-        Msg::Blob { hash: [1; 32], bytes: &blob }.encode(3, &mut f);
+        Msg::Blob { hash: [1; 32], bytes: &blob }.encode(3, &mut f).unwrap();
         let mut d = FrameDecoder::default();
         d.feed(&f);
         let fr = d.next().unwrap().unwrap();
@@ -449,7 +489,7 @@ mod tests {
     #[test]
     fn spare_commit_reads_in_place() {
         let mut frame = Vec::new();
-        Msg::Ping.encode(5, &mut frame);
+        Msg::Ping.encode(5, &mut frame).unwrap();
         let mut d = FrameDecoder::default();
         let s = d.spare(64);
         s[..frame.len()].copy_from_slice(&frame);

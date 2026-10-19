@@ -23,15 +23,15 @@ everything is done.
 | Kubernetes + bare-process baselines, Go loadgen | `bench/k8s`, `bench/native`, `bench/loadgen` | done (preliminary numbers) |
 
 ## In flight (uncommitted work may exist in the working tree)
-1. **Chaos / soak / abuse campaign** + fixes for the unsafe-code review findings (mesh-thread panic on lossy path
+1. DONE (committed) — **Chaos / soak / abuse campaign** + fixes for the unsafe-code review findings (mesh-thread panic on lossy path
    encoding, uncapped host copies, KV quota, snapshot/mincore, MAP_FIXED fallback, VmCtx aliasing, catch_unwind →
    abort, --mem race, preemption race, peer-link buffering, EMFILE spin, admin limits). Touches `crates/k10-node`,
    `crates/k10s`, `crates/k10-mesh` (wire: path as raw bytes, `encode` returns `Result`).
-2. **Metal phase 2** (JIT engine, cluster membership, SMP) — finished in the working tree under `metal/`, NOT yet
+2. DONE (committed) — **Metal phase 2** (JIT engine, cluster membership, SMP) — finished in the working tree under `metal/`, NOT yet
    committed because it builds against the uncommitted k10-mesh wire change from (1). Commit both together.
 3. **Comparative benchmark harness** `bench/k10s/`, `bench/compare.py`, `bench/run-final.sh` →
    `bench/results/COMPARISON.md` (preliminary).
-4. **Research tasks** `docs/TASK-universal-os.md` → `docs/research/universal-os.md` and
+4. native-hardware DONE (docs/research/native-hardware.md); universal-os still running — **Research tasks** `docs/TASK-universal-os.md` → `docs/research/universal-os.md` and
    `docs/TASK-native-hardware.md` → `docs/research/native-hardware.md` (experiments live outside the repo in
    `/home/qgerard/dev/k10s-research/`).
 
@@ -49,3 +49,12 @@ everything is done.
   `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`; push `main` to `origin` after each verified commit.
 - Use separate cargo target dirs per concurrent agent (`target/node`, `target/chaos`, …) to avoid lock contention.
 - Never touch Docker containers/images not created by k10s scripts (the machine has the user's own).
+
+## Follow-ups found by the reliability campaign (next agent)
+- examples: add `heap_reset()` at the top of `handle` in chain/compute/nbody (per-request heap leak → trap every ~4k
+  requests); counter/todo lose updates under concurrency → add atomic KV host functions (`kv_add`, `kv_cas`) in
+  HOSTAPI + node + metal + Ten prelude, or document `max_instances = 1`.
+- Review items 9 (peer-link buffering caps) and 10 (EMFILE listener spin); node-wide buffered-bytes budget; per-service
+  memory reservation; chaos driver should also fault the seed node; multi-hour soak to rule out the 40 KB/min RSS drift
+  seen on one cluster node.
+- Native-hardware open questions for the user are listed at the end of docs/research/native-hardware.md.

@@ -39,7 +39,7 @@ use crate::router::Completion;
 use crate::sys::{self, mono_ns, Epoll, Fd};
 use k10_mesh::driver::UdpDriver;
 use k10_mesh::sha256::sha256;
-use k10_mesh::wire::{FrameDecoder, Msg};
+use k10_mesh::wire::{FrameDecoder, Msg, DEFAULT_MAX_FRAME, HEADER_LEN};
 use k10_mesh::{DesiredState, Event, Manifest, Member, MemberState, NodeId};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
@@ -132,7 +132,7 @@ enum In {
     GetBlob([u8; 32]),
     Blob([u8; 32], Vec<u8>),
     BlobMissing,
-    Call { service: String, path: String, body: Vec<u8>, deadline_ms: u32, method: u8 },
+    Call { service: String, path: Vec<u8>, body: Vec<u8>, deadline_ms: u32, method: u8 },
     CallResult { status: i32, body: Vec<u8> },
     Ping,
     Pong,
@@ -149,7 +149,7 @@ impl In {
             Msg::BlobMissing { .. } => In::BlobMissing,
             Msg::Call { service, path, body, deadline_ms, method } => In::Call {
                 service: service.to_string(),
-                path: path.to_string(),
+                path: path.to_vec(),
                 body: body.to_vec(),
                 deadline_ms,
                 method,
@@ -358,7 +358,7 @@ impl Mesh {
                 }
                 MeshMsg::Served { link, gen, id, status, body } => {
                     if self.link_live(link, gen) {
-                        self.queue(link, &Msg::CallResult { status, body: &body }, id);
+                        let _ = self.queue(link, &Msg::CallResult { status, body: &body }, id);
                     }
                 }
                 MeshMsg::SetDesired { version, hash } => {
@@ -530,7 +530,7 @@ impl Mesh {
                 let version = f.want.version;
                 let id = self.new_id();
                 self.fetch.as_mut().unwrap().reqs.insert(id);
-                self.queue(li, &Msg::GetManifest { version }, id);
+                let _ = self.queue(li, &Msg::GetManifest { version }, id);
             } else {
                 self.request_blobs(li);
             }
@@ -543,7 +543,7 @@ impl Mesh {
         for hash in missing {
             let id = self.new_id();
             self.fetch.as_mut().unwrap().reqs.insert(id);
-            self.queue(li, &Msg::GetBlob { hash }, id);
+            let _ = self.queue(li, &Msg::GetBlob { hash }, id);
         }
     }
 
@@ -689,16 +689,21 @@ impl Mesh {
                     }
                     c.tried.push(p);
                     let Some(li) = self.link_for(p) else { continue };
-                    if c.service.len() > u8::MAX as usize || c.req.path.len() >= u16::MAX as usize {
-                        return self.fail_call(c, CALL_UNAVAILABLE, "service name or path too long to forward");
+                    // Validate against the wire limits (raw path bytes, not a lossy UTF-8 expansion) and the frame
+                    // cap, so a hostile `call` target/body fails this one request with -2 instead of poisoning the
+                    // shared peer link or crashing the mesh thread.
+                    let frame_len = HEADER_LEN + 8 + 1 + 1 + c.service.len() + 2 + c.req.path.len() + c.req.body.len();
+                    if c.service.len() > u8::MAX as usize || c.req.path.len() > u16::MAX as usize || frame_len > DEFAULT_MAX_FRAME {
+                        return self.fail_call(c, CALL_UNAVAILABLE, "call target or body too large to forward");
                     }
                     let id = self.new_id();
                     let now = mono_ns();
                     let deadline_ms = (c.deadline.saturating_sub(now) / 1_000_000).clamp(1, u32::MAX as u64) as u32;
-                    let path = String::from_utf8_lossy(&c.req.path);
                     let method = c.req.method.clamp(0, 4) as u8;
-                    let call = Msg::Call { service: &c.service, path: &path, body: &c.req.body, deadline_ms, method };
-                    let start = self.queue(li, &call, id);
+                    let call = Msg::Call { service: &c.service, path: &c.req.path, body: &c.req.body, deadline_ms, method };
+                    let Some(start) = self.queue(li, &call, id) else {
+                        return self.fail_call(c, CALL_UNAVAILABLE, "call could not be framed");
+                    };
                     let l = self.links[li as usize].as_mut().unwrap();
                     l.outstanding += 1;
                     c.link = li;
@@ -799,7 +804,7 @@ impl Mesh {
     /// Serves a call forwarded by a peer.
     fn serve_call(&mut self, li: u32, id: u64, service: String, req: Request, deadline_ms: u32) {
         if !self.cs.serving() {
-            self.queue(li, &Msg::CallResult { status: STATUS_NOT_HERE, body: b"node leaving" }, id);
+            let _ = self.queue(li, &Msg::CallResult { status: STATUS_NOT_HERE, body: b"node leaving" }, id);
             return;
         }
         self.cs.stats.served_for_peers.fetch_add(1, Relaxed);
@@ -824,18 +829,22 @@ impl Mesh {
     }
 
     /// Appends a frame to a link's write buffer (written at the end of the loop iteration). Returns the frame's
-    /// offset in the link's byte stream.
-    fn queue(&mut self, li: u32, m: &Msg<'_>, id: u64) -> u64 {
+    /// offset in the link's byte stream, or `None` if the message could not be framed (oversize field): `encode`
+    /// writes nothing in that case, so the stream stays intact.
+    fn queue(&mut self, li: u32, m: &Msg<'_>, id: u64) -> Option<u64> {
         let l = self.links[li as usize].as_mut().unwrap();
         let start = l.queued;
         let before = l.wbuf.len();
-        m.encode(id, &mut l.wbuf);
+        if let Err(e) = m.encode(id, &mut l.wbuf) {
+            eprintln!("k10s: mesh: dropping un-encodable frame: {e}");
+            return None;
+        }
         l.queued += (l.wbuf.len() - before) as u64;
         if !l.dirty {
             l.dirty = true;
             self.dirty.push(li);
         }
-        start
+        Some(start)
     }
 
     fn add_link(&mut self, fd: Fd, peer: Option<NodeId>, dialed: bool) -> io::Result<u32> {
@@ -874,7 +883,7 @@ impl Mesh {
             bytes_out: 0,
         });
         let me = self.udp.gossip().local().clone();
-        self.queue(li, &Msg::Hello { member: me }, 0);
+        let _ = self.queue(li, &Msg::Hello { member: me }, 0);
         self.view_dirty = true;
         Ok(li)
     }
@@ -1066,23 +1075,23 @@ impl Mesh {
             In::GetManifest => {
                 let cur = self.cs.store.current();
                 let bytes: &[u8] = cur.as_ref().map(|s| s.bytes.as_slice()).unwrap_or(&[]);
-                self.queue(li, &Msg::Manifest { bytes }, id);
+                let _ = self.queue(li, &Msg::Manifest { bytes }, id);
             }
             In::GetBlob(hash) => match self.cs.store.blob(&hash) {
                 Some(b) => {
-                    self.queue(li, &Msg::Blob { hash, bytes: &b }, id);
+                    let _ = self.queue(li, &Msg::Blob { hash, bytes: &b }, id);
                 }
                 None => {
-                    self.queue(li, &Msg::BlobMissing { hash }, id);
+                    let _ = self.queue(li, &Msg::BlobMissing { hash }, id);
                 }
             },
             m @ (In::Manifest(_) | In::Blob(..) | In::BlobMissing) => self.on_fetch_reply(id, m),
             In::Call { service, path, body, deadline_ms, method } => {
-                self.serve_call(li, id, service, Request { method: method.min(4) as i64, path: path.into_bytes(), body }, deadline_ms)
+                self.serve_call(li, id, service, Request { method: method.min(4) as i64, path, body }, deadline_ms)
             }
             In::CallResult { status, body } => self.on_call_result(id, status, body),
             In::Ping => {
-                self.queue(li, &Msg::Pong, id);
+                let _ = self.queue(li, &Msg::Pong, id);
             }
             In::Pong => {}
         }

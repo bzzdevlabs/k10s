@@ -33,7 +33,11 @@ pub(crate) fn run(node: Arc<NodeShared>) {
             busy = true;
             if now.saturating_sub(since) >= slice {
                 let w = s.running_word.load(Acquire);
-                if !w.is_null() {
+                // Re-read `running_since`: if it changed, the shard finished that fiber and may have started another
+                // since we read the word, so storing now would preempt the wrong (just-started) fiber. Skip it; the
+                // next tick catches a genuinely over-budget fiber. `running_since` is a per-resume monotonic
+                // timestamp, so equality means the same run is still in progress.
+                if !w.is_null() && s.running_since.load(Acquire) == since {
                     // SAFETY: see module docs — the pointee (a fiber's preemption word) outlives the ticker.
                     unsafe { (*w).store(usize::MAX, Relaxed) };
                     s.stats.preempt_requests.fetch_add(1, Relaxed);

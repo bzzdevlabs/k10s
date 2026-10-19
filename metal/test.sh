@@ -1,18 +1,26 @@
 #!/usr/bin/env bash
 # End-to-end test of k10-metal under QEMU/KVM:
-#   1. in-kernel self tests (k10.selftest → isa-debug-exit status 33);
+#   1. in-kernel self tests (k10.selftest → isa-debug-exit status 33), both engines;
+#   then, for each engine (ENGINES, default "jit interp"; the JIT is the default, `k10.engine=interp` selects the
+#   interpreter):
 #   2. boot with the test bundle, wait for the "ready" serial line, check every service over HTTP
-#      (status codes and bodies), traps → 500 + instance replaced, KV, instance state vs fresh, service calls;
+#      (status codes and bodies), traps → 500 + instance replaced, KV, instance state vs fresh, service calls,
+#      the Ten-compiled services (SHA-256 chain, f64 n-body, merge sort in 2 MiB, KV/JSON REST API);
 #   3. isolation: CPU-bound infinite loops (spin) running while other services keep answering;
 #   4. redeploy over HTTP (POST /_k10s/apply) and check the new service set;
 #   5. keep-alive load with bench/bin/loadgen (if present): no errors;
 #   6. the same functional checks with a tiny guest (MEM_SMALL, default 8M).
-# Environment: TEST_PORT (default 18090), MEM (64M), MEM_SMALL (8M), BIOS (firmware, empty = SeaBIOS).
+#   Then: embedded bundle, qboot firmware, no panic in any serial log.
+# Environment: TEST_PORT (default 18090), MEM (64M), MEM_SMALL (8M), BIOS (firmware, empty = SeaBIOS), ENGINES.
 set -uo pipefail
 cd "$(dirname "$0")"
 PORT="${TEST_PORT:-18090}"
 MEM="${MEM:-64M}"
 MEM_SMALL="${MEM_SMALL:-8M}"
+ENGINES="${ENGINES:-jit interp}"
+# Also run the JIT suite on this many CPUs (0 = skip).
+SMP="${SMP:-4}"
+NCPU=1
 LOADGEN=../bench/bin/loadgen
 OUT=out/test
 mkdir -p "$OUT"
@@ -25,7 +33,7 @@ ko() { echo "  FAIL $*"; fail=$((fail + 1)); }
 U="http://127.0.0.1:$PORT"
 
 qemu_args() { # $1 = mem
-    local a=(-M pc -enable-kvm -cpu host -m "$1" -smp 1 -nodefaults -display none -no-reboot
+    local a=(-M pc -enable-kvm -cpu host -m "$1" -smp "$NCPU" -nodefaults -display none -no-reboot
         -device isa-debug-exit,iobase=0xf4,iosize=0x04
         -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$PORT-:80"
         -device virtio-net-pci,disable-modern=on,netdev=n0,romfile=
@@ -35,10 +43,10 @@ qemu_args() { # $1 = mem
 }
 
 QPID=
-boot() { # $1 = mem, $2 = bundle, $3 = log
+boot() { # $1 = mem, $2 = bundle, $3 = log, $4 = kernel command line
     rm -f "$3"
     # shellcheck disable=SC2046
-    qemu-system-x86_64 $(qemu_args "$1") -initrd "$2" -serial "file:$3" &
+    qemu-system-x86_64 $(qemu_args "$1") -initrd "$2" -serial "file:$3" -append "${4:-}" &
     QPID=$!
     for _ in $(seq 1 200); do
         grep -q "k10-metal ready" "$3" 2>/dev/null && return 0
@@ -94,6 +102,15 @@ functional() {
     expect "unknown service" "$U/nope" 404 'no such service'
     expect "spin -> budget trap" "$U/spin" 500 'Interrupted'
     expect "status" "$U/_k10s/status" 200 '"services":\['
+    # Services compiled from Ten (examples/*.ten) with k10-lang.
+    expect "sha (Ten: SHA-256 chain x1000)" "$U/sha/?n=1000" 200 '^cc2cbdc008d39ef7d46c8f4bd213c400cf60059acb1f0b409f7116b2912f2c9a$'
+    expect "nbody (Ten: f64)" "$U/nbody/?n=1000" 200 '^-0\.169075164.-0\.169087605$'
+    expect "sort (Ten: 2 MiB instance)" "$U/sort/?n=50000" 200 '^n=50000 checksum=6500369350017099242$'
+    expect "todo create (Ten: KV + JSON)" "$U/todo/" 201 '^\{"id":1,"title":"buy milk"\}$' -X POST --data-binary 'buy milk'
+    expect "todo update (PUT)" "$U/todo/1" 200 '^\{"id":1,"title":"buy oat milk"\}$' -X PUT --data-binary 'buy oat milk'
+    expect "todo list" "$U/todo/" 200 '^\[\{"id":1,"title":"buy oat milk"\}\]$'
+    expect "todo delete" "$U/todo/1" 200 '^\{"deleted":1\}$' -X DELETE
+    expect "todo gone" "$U/todo/1" 404 'not found'
 }
 
 echo "== selftest"
@@ -103,12 +120,16 @@ st=$?
 grep -E "  (ok|FAIL|info) " "$OUT/selftest.log" | sed 's/^/    /'
 [[ $st == 33 ]] && ok "selftest (exit $st)" || ko "selftest (exit $st)"
 
-echo "== functional ($MEM)"
-if boot "$MEM" out/bundle.k10b "$OUT/serial.log"; then
-    ok "boot: $(grep 'k10-metal ready' "$OUT/serial.log")"
+engine_suite() { # $1 = engine (jit | interp); NCPU = CPUs
+local E=$1 CMD="k10.engine=$1"
+((NCPU > 1)) && E="$1 smp$NCPU"
+echo "== [$E] functional ($MEM)"
+if boot "$MEM" out/bundle.k10b "$OUT/serial-${E// /-}.log" "$CMD"; then
+    ok "boot: $(grep 'k10-metal ready' "$OUT/serial-${E// /-}.log")"
+    expect "engine is $1" "$U/_k10s/status" 200 "\"engine\":\"$1\".*\"name\":\"sha\",[^}]*\"engine\":\"$1\""
     functional
 
-    echo "== isolation: 4 infinite loops (100 ms CPU budget each) vs. hello"
+    echo "== [$E] isolation: 4 infinite loops (100 ms CPU budget each) vs. hello"
     spins=()
     for _ in 1 2 3 4; do
         curl -s -m 10 -o /dev/null "$U/spin" &
@@ -127,7 +148,7 @@ if boot "$MEM" out/bundle.k10b "$OUT/serial.log"; then
     ((worst < 50)) && ok "50 hello requests during the spin storm, worst ${worst} ms" || ko "hello worst latency ${worst} ms during spins"
     expect "spin traps counted" "$U/_k10s/status" 200 '"name":"spin"[^}]*"interrupted":5'
 
-    echo "== redeploy over HTTP"
+    echo "== [$E] redeploy over HTTP"
     target/release/mkbundle -o "$OUT/v2.k10b" --version 2 --services hello,echo 2>/dev/null
     expect "apply v2" "$U/_k10s/apply" 200 '"version":2,"services":2' -X POST --data-binary "@$OUT/v2.k10b" -H 'Content-Type: application/octet-stream'
     expect "hello after apply" "$U/hello/" 200 '^hello from k10-metal$'
@@ -135,10 +156,10 @@ if boot "$MEM" out/bundle.k10b "$OUT/serial.log"; then
     expect "older version refused" "$U/_k10s/apply" 400 'older' -X POST --data-binary @out/bundle.k10b
     expect "garbage refused" "$U/_k10s/apply" 400 'apply failed' -X POST --data-binary 'not a bundle'
     target/release/mkbundle -o "$OUT/v3.k10b" --version 3 2>/dev/null
-    expect "apply v3 (all services back)" "$U/_k10s/apply" 200 '"version":3,"services":14' -X POST --data-binary "@$OUT/v3.k10b"
+    expect "apply v3 (all services back)" "$U/_k10s/apply" 200 '"version":3,"services":18' -X POST --data-binary "@$OUT/v3.k10b"
     expect "counter state kept across redeploys" "$U/counter" 200 '^3$'
 
-    echo "== call waiting for a busy callee (max_instances = 1)"
+    echo "== [$E] call waiting for a busy callee (max_instances = 1)"
     target/release/mkbundle -o "$OUT/v4.k10b" --version 4 --services hello,spin,callspin --max-instances 1 2>/dev/null
     expect "apply v4" "$U/_k10s/apply" 200 '"version":4,"services":3' -X POST --data-binary "@$OUT/v4.k10b"
     c1=$(mktemp) c2=$(mktemp)
@@ -157,12 +178,12 @@ if boot "$MEM" out/bundle.k10b "$OUT/serial.log"; then
     fi
     expect "spin instance replaced after traps" "$U/_k10s/status" 200 '"name":"spin"[^}]*"instances":0[^}]*"interrupted":2'
     target/release/mkbundle -o "$OUT/v5.k10b" --version 5 2>/dev/null
-    expect "apply v5 (back to all services)" "$U/_k10s/apply" 200 '"version":5,"services":14' -X POST --data-binary "@$OUT/v5.k10b"
+    expect "apply v5 (back to all services)" "$U/_k10s/apply" 200 '"version":5,"services":18' -X POST --data-binary "@$OUT/v5.k10b"
 
     if [[ -x $LOADGEN ]]; then
-        echo "== keep-alive load (loadgen, 64 connections, 3 s)"
+        echo "== [$E] keep-alive load (loadgen, 64 connections, 3 s)"
         r=$($LOADGEN -addr "127.0.0.1:$PORT" -path /hello/ -conns 64 -duration 3s -warmup 500ms 2>/dev/null)
-        echo "    $r" | cut -c1-300
+        echo "    $(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print('rps %.0f p50 %s us p99 %s us' % (d['rps'], d['latency_us']['p50'], d['latency_us']['p99']))" "$r" 2>/dev/null)"
         errs=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(sum(d.get('errors',{}).values()) if isinstance(d.get('errors'),dict) else d.get('errors',0))" "$r" 2>/dev/null || echo "?")
         [[ "$errs" == 0 ]] && ok "loadgen: no errors" || ko "loadgen errors: $errs"
         r=$($LOADGEN -addr "127.0.0.1:$PORT" -path /chain -conns 16 -duration 2s -warmup 300ms 2>/dev/null)
@@ -170,15 +191,19 @@ if boot "$MEM" out/bundle.k10b "$OUT/serial.log"; then
         [[ "$errs" == 0 ]] && ok "loadgen chain (service calls under load): no errors" || ko "loadgen chain errors: $errs"
     fi
     expect "still healthy" "$U/_k10s/status" 200 '"5xx":[0-9]+'
+    if ((NCPU > 1)); then
+        busy=$(curl -s "$U/_k10s/status" | python3 -c "import json,sys; d=json.load(sys.stdin); print(sum(1 for c in d['cpus'] if c['tasks_run'] > 0), len(d['cpus']))")
+        [[ "${busy% *}" -ge 2 && "${busy#* }" == "$NCPU" ]] && ok "$NCPU CPUs online, ${busy% *} ran invocations" || ko "CPUs that ran invocations / online: $busy"
+    fi
 else
     ko "boot (no ready line):"
-    tail -5 "$OUT/serial.log"
+    tail -5 "$OUT/serial-${E// /-}.log"
 fi
 shutdown
 
-echo "== functional ($MEM_SMALL guest)"
-if boot "$MEM_SMALL" out/bundle.k10b "$OUT/serial-small.log"; then
-    ok "boot: $(grep 'k10-metal ready' "$OUT/serial-small.log")"
+echo "== [$E] functional ($MEM_SMALL guest)"
+if boot "$MEM_SMALL" out/bundle.k10b "$OUT/serial-small-${E// /-}.log" "$CMD"; then
+    ok "boot: $(grep 'k10-metal ready' "$OUT/serial-small-${E// /-}.log")"
     functional
     if [[ -x $LOADGEN ]]; then
         r=$($LOADGEN -addr "127.0.0.1:$PORT" -path /hello/ -conns 16 -duration 2s -warmup 300ms 2>/dev/null)
@@ -187,9 +212,19 @@ if boot "$MEM_SMALL" out/bundle.k10b "$OUT/serial-small.log"; then
     fi
 else
     ko "boot $MEM_SMALL (no ready line)"
-    tail -5 "$OUT/serial-small.log"
+    tail -5 "$OUT/serial-small-${E// /-}.log"
 fi
 shutdown
+}
+
+for e in $ENGINES; do
+    engine_suite "$e"
+done
+if ((SMP > 1)); then
+    NCPU=$SMP
+    engine_suite jit
+    NCPU=1
+fi
 if [[ -f out/k10-metal-embedded.elf ]]; then
     echo "== embedded bundle (no -initrd)"
     rm -f "$OUT/serial-embedded.log"

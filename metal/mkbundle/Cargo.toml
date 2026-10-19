@@ -1,6 +1,6 @@
 [package]
 name = "mkbundle"
-description = "Host tool: builds test TIR services with k10_ir::builder and writes a k10_mesh::Bundle"
+description = "Host tool: builds test TIR services (k10_ir::builder, and Ten sources with k10-lang) and writes a k10_mesh::Bundle"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,3 +8,4 @@ license.workspace = true
 [dependencies]
 k10-ir = { path = "../../crates/k10-ir" }
 k10-mesh = { path = "../../crates/k10-mesh" }
+k10-lang = { path = "../../crates/k10-lang" }

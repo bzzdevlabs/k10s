@@ -74,11 +74,19 @@ pub struct KvConfig {
     pub flush_interval: Duration,
     /// Logs smaller than this are never compacted.
     pub compact_min: u64,
+    /// Per-service quota on live KV bytes (encoded size of the live entries). A `kv_put` that would push a
+    /// namespace past it is refused (trap `Host(3)`), so one service cannot fill the node's memory and disk. 0
+    /// disables the quota.
+    pub max_bytes: u64,
 }
+
+/// Default per-service KV quota (256 MiB of live data). Generous for real workloads (the examples use kilobytes),
+/// bounded enough that a hostile service cannot exhaust the node.
+pub const DEFAULT_KV_MAX_BYTES: u64 = 256 << 20;
 
 impl Default for KvConfig {
     fn default() -> Self {
-        KvConfig { flush_interval: Duration::from_millis(2), compact_min: 1 << 20 }
+        KvConfig { flush_interval: Duration::from_millis(2), compact_min: 1 << 20, max_bytes: DEFAULT_KV_MAX_BYTES }
     }
 }
 
@@ -106,6 +114,8 @@ pub struct KvNs {
     name: String,
     /// Records are logged (the store has a directory).
     durable: bool,
+    /// Per-service live-bytes quota (0 = unlimited); see [`KvConfig::max_bytes`].
+    max_bytes: u64,
     inner: Mutex<Inner>,
     /// Only the flusher (and shutdown) touch the file.
     file: Mutex<Option<File>>,
@@ -127,30 +137,35 @@ impl KvNs {
         self.get_with(key, |v| v.map(|v| v.to_vec()))
     }
 
-    pub fn put(&self, key: &[u8], val: &[u8]) {
+    /// Stores `key → val`. Returns `false` (storing nothing) when the write would push the namespace past its
+    /// live-bytes quota ([`KvConfig::max_bytes`]); the caller turns that into a trap.
+    #[must_use]
+    pub fn put(&self, key: &[u8], val: &[u8]) -> bool {
         {
             let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let add = rec_size(key.len(), val.len());
+            let old_contrib = g.map.get(key).map(|old| rec_size(key.len(), old.len())).unwrap_or(0);
+            let new_live = g.live_bytes - old_contrib + add;
+            if self.max_bytes != 0 && new_live > self.max_bytes {
+                return false; // quota exceeded: nothing is mutated
+            }
             if self.durable {
                 encode_rec(&mut g.pending, OP_PUT, key, val);
-                g.log_bytes += rec_size(key.len(), val.len());
+                g.log_bytes += add;
             }
-            let add = rec_size(key.len(), val.len());
             let inner = &mut *g;
+            inner.live_bytes = new_live;
             match inner.map.get_mut(key) {
-                Some(old) => {
-                    // keeps the key allocation
-                    inner.live_bytes = inner.live_bytes - rec_size(key.len(), old.len()) + add;
-                    *old = val.into();
-                }
+                Some(old) => *old = val.into(), // keeps the key allocation
                 None => {
                     inner.map.insert(key.into(), val.into());
-                    inner.live_bytes += add;
                 }
             }
         }
         if self.durable {
             self.mark_dirty();
         }
+        true
     }
 
     /// Returns whether the key existed.
@@ -256,7 +271,7 @@ impl KvStore {
                 replay(&ns, &d.join(format!("{name}.log")))?;
             }
             let sh = store.shared.clone();
-            let h = std::thread::Builder::new().name("k10s-kv".into()).spawn(move || flusher(sh))?;
+            let h = std::thread::Builder::new().name("k10s-kv".into()).spawn(move || crate::sys::run_or_abort("kv-flusher", || flusher(sh)))?;
             *store.flusher.lock().unwrap() = Some(h);
         }
         Ok(store)
@@ -270,6 +285,7 @@ impl KvStore {
                 Arc::new(KvNs {
                     name: service.to_string(),
                     durable: self.shared.dir.is_some(),
+                    max_bytes: self.shared.cfg.max_bytes,
                     inner: Mutex::new(Inner::default()),
                     file: Mutex::new(None),
                     signal: self.shared.signal.clone(),
@@ -497,17 +513,17 @@ mod tests {
             let a = s.ns("alpha");
             let b = s.ns("beta");
             for i in 0..1000u32 {
-                a.put(format!("k{i}").as_bytes(), &i.to_le_bytes());
+                let _ = a.put(format!("k{i}").as_bytes(), &i.to_le_bytes());
             }
             for i in 0..500u32 {
                 a.del(format!("k{i}").as_bytes());
             }
-            a.put(b"k999", b"last");
-            b.put(b"x", b"y");
-            b.put(b"x", b"z");
+            let _ = a.put(b"k999", b"last");
+            let _ = b.put(b"x", b"y");
+            let _ = b.put(b"x", b"z");
             assert!(b.del(b"x"));
             assert!(!b.del(b"x"));
-            b.put(b"keep", &vec![7u8; 100_000]);
+            let _ = b.put(b"keep", &vec![7u8; 100_000]);
             s.shutdown();
         }
         let s = KvStore::open(Some(&d), KvConfig::default()).unwrap();
@@ -529,8 +545,8 @@ mod tests {
         {
             let s = KvStore::open(Some(&d), KvConfig::default()).unwrap();
             let a = s.ns("t");
-            a.put(b"a", b"1");
-            a.put(b"b", b"2");
+            let _ = a.put(b"a", b"1");
+            let _ = a.put(b"b", b"2");
             s.shutdown();
         }
         let p = d.join("t.log");
@@ -548,7 +564,7 @@ mod tests {
             assert_eq!(a.get(b"b"), Some(b"2".to_vec()));
             assert_eq!(a.get(b"c"), None);
             assert_eq!(fs::metadata(&p).unwrap().len(), full.len() as u64, "tail truncated");
-            a.put(b"d", b"4");
+            let _ = a.put(b"d", b"4");
             s.shutdown();
         }
         // Corrupt a byte in the middle of the first record: replay stops there.
@@ -567,13 +583,13 @@ mod tests {
     #[test]
     fn compaction_shrinks_and_preserves() {
         let d = tmpdir("compact");
-        let cfg = KvConfig { flush_interval: Duration::from_millis(1), compact_min: 4096 };
+        let cfg = KvConfig { flush_interval: Duration::from_millis(1), compact_min: 4096, ..KvConfig::default() };
         {
             let s = KvStore::open(Some(&d), cfg.clone()).unwrap();
             let a = s.ns("c");
             for round in 0..50u32 {
                 for i in 0..100u32 {
-                    a.put(format!("key{i}").as_bytes(), format!("value-{round}-{i}").as_bytes());
+                    let _ = a.put(format!("key{i}").as_bytes(), format!("value-{round}-{i}").as_bytes());
                 }
             }
             s.flush_now();
@@ -584,7 +600,7 @@ mod tests {
             let on_disk = fs::metadata(d.join("c.log")).unwrap().len();
             assert_eq!(on_disk, log);
             // writes after compaction append to the new file
-            a.put(b"after", b"compaction");
+            let _ = a.put(b"after", b"compaction");
             s.shutdown();
         }
         let s = KvStore::open(Some(&d), cfg).unwrap();
@@ -601,7 +617,7 @@ mod tests {
         let d = tmpdir("bg");
         let s = KvStore::open(Some(&d), KvConfig::default()).unwrap();
         let a = s.ns("bg");
-        a.put(b"k", b"v");
+        let _ = a.put(b"k", b"v");
         let t0 = std::time::Instant::now();
         while fs::metadata(d.join("bg.log")).map(|m| m.len()).unwrap_or(0) == 0 {
             assert!(t0.elapsed() < Duration::from_secs(5), "flusher did not write");
@@ -615,8 +631,41 @@ mod tests {
     fn memory_only() {
         let s = KvStore::open(None, KvConfig::default()).unwrap();
         let a = s.ns("m");
-        a.put(b"k", b"v");
+        let _ = a.put(b"k", b"v");
         assert_eq!(a.get(b"k"), Some(b"v".to_vec()));
         assert_eq!(a.sizes().1, 0);
+    }
+
+    /// The per-service live-bytes quota refuses writes past the cap (storing nothing), while overwrites and deletes
+    /// that free room keep working — a hostile service cannot grow the store without bound.
+    #[test]
+    fn per_service_quota_bounds_growth() {
+        let cfg = KvConfig { max_bytes: 64 * 1024, ..KvConfig::default() };
+        let s = KvStore::open(None, cfg).unwrap();
+        let a = s.ns("q");
+        let val = vec![0u8; 1000];
+        let mut stored = 0;
+        for i in 0..1000u32 {
+            if a.put(format!("k{i}").as_bytes(), &val) {
+                stored += 1;
+            } else {
+                break;
+            }
+        }
+        assert!(stored > 10 && stored < 100, "quota should bound to ~64 KiB of entries, stored {stored}");
+        assert!(a.sizes().0 <= 64 * 1024, "live bytes within quota: {}", a.sizes().0);
+        // A rejected write stored nothing.
+        assert_eq!(a.get(format!("k{stored}").as_bytes()), None);
+        // Overwriting an existing key with a same-size value stays within quota.
+        assert!(a.put(b"k0", &val), "overwrite within quota");
+        // Deleting frees room for a new key.
+        assert!(a.del(b"k1"));
+        assert!(a.put(b"fresh", &val), "put after del should fit");
+        // Quota 0 = unlimited.
+        let s2 = KvStore::open(None, KvConfig { max_bytes: 0, ..KvConfig::default() }).unwrap();
+        let b = s2.ns("u");
+        for i in 0..1000u32 {
+            assert!(b.put(format!("k{i}").as_bytes(), &val), "unlimited quota");
+        }
     }
 }

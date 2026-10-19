@@ -8,7 +8,7 @@ use k10_ir::sem::check_range;
 use k10_ir::{Module, Trap};
 
 use super::engine::HostCalls;
-use super::{Level, RT};
+use super::Level;
 use crate::coro::{self, Yield};
 use crate::time;
 
@@ -33,8 +33,8 @@ pub enum HostFn {
     Config,
 }
 
-/// (name, parameter count, function).
-const TABLE: [(&str, u8, HostFn); 17] = [
+/// (name, parameter count, function), in `HostFn` order.
+pub(crate) const TABLE: [(&str, u8, HostFn); 17] = [
     ("input_len", 0, HostFn::InputLen),
     ("input_read", 3, HostFn::InputRead),
     ("req_path", 2, HostFn::ReqPath),
@@ -156,14 +156,11 @@ impl HostCalls for Level<'_> {
                 if kr.len() > MAX_KEY {
                     return Err(TRAP_KV_LIMIT);
                 }
-                let rt = RT.borrow();
-                let Some(v) = rt.kv_get(&self.svc.name, &mem[kr]) else { return Ok(-1) };
+                let Some(v) = super::kv_get(&self.svc.name, &mem[kr]) else { return Ok(-1) };
                 let len = v.len() as i64;
                 let n = len.min(arg(3).max(0));
                 if n > 0 {
                     let dr = range(mem, arg(2), n)?;
-                    let v = v.to_vec();
-                    drop(rt);
                     mem[dr].copy_from_slice(&v[..n as usize]);
                 }
                 Ok(len)
@@ -174,8 +171,7 @@ impl HostCalls for Level<'_> {
                 if kr.len() > MAX_KEY || vr.len() > MAX_VALUE {
                     return Err(TRAP_KV_LIMIT);
                 }
-                let mut rt = RT.borrow_mut();
-                if !rt.kv_put(&self.svc.name, &mem[kr], &mem[vr]) {
+                if !super::kv_put(&self.svc.name, &mem[kr], &mem[vr]) {
                     return Err(TRAP_KV_LIMIT);
                 }
                 Ok(0)
@@ -185,12 +181,12 @@ impl HostCalls for Level<'_> {
                 if kr.len() > MAX_KEY {
                     return Err(TRAP_KV_LIMIT);
                 }
-                Ok(RT.borrow_mut().kv_del(&self.svc.name, &mem[kr]) as i64)
+                Ok(super::kv_del(&self.svc.name, &mem[kr]) as i64)
             }
             HostFn::Log => {
                 let r = range(mem, arg(0), arg(1))?;
                 let line = &mem[r.start..r.start + r.len().min(MAX_LOG_LINE)];
-                RT.borrow_mut().log(&self.svc.name, line);
+                super::log(&self.svc.name, line);
                 Ok(0)
             }
             HostFn::NowNs => Ok(time::now_ns() as i64),
@@ -206,10 +202,9 @@ impl HostCalls for Level<'_> {
     }
 
     fn safepoint(&mut self) -> Result<(), Trap> {
-        if !time::PREEMPT.load(core::sync::atomic::Ordering::Relaxed) {
+        if !time::take_preempt() {
             return Ok(());
         }
-        time::PREEMPT.store(false, core::sync::atomic::Ordering::Relaxed);
         if self.cpu.used() >= self.cpu.deadline.get() {
             return Err(Trap::Interrupted);
         }

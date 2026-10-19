@@ -27,9 +27,11 @@ pub enum Tag {
     Kernel,
     /// Boot modules (the `-initrd` bundle) until consumed.
     Module,
+    /// JIT machine code (read+execute pages).
+    Code,
 }
-pub const NTAGS: usize = 7;
-pub const TAG_NAMES: [&str; NTAGS] = ["heap_small", "heap_large", "slots", "stacks", "net", "kernel", "boot_module"];
+pub const NTAGS: usize = 8;
+pub const TAG_NAMES: [&str; NTAGS] = ["heap_small", "heap_large", "slots", "stacks", "net", "kernel", "boot_module", "code"];
 
 pub struct Frames {
     bitmap: *mut u64,

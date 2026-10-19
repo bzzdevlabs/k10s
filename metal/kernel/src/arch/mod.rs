@@ -3,6 +3,7 @@
 pub mod gdt;
 pub mod idt;
 pub mod apic;
+pub mod paging;
 
 use core::arch::asm;
 

@@ -682,10 +682,10 @@ impl ClusterSetup {
         );
         let applier = {
             let cs = cs.clone();
-            std::thread::Builder::new().name("k10s-applier".into()).spawn(move || cs.applier())?
+            std::thread::Builder::new().name("k10s-applier".into()).spawn(move || crate::sys::run_or_abort("applier", || cs.applier()))?
         };
         let m = mesh::Mesh::new(cs.clone(), inbox, driver, listener)?;
-        let mesh = std::thread::Builder::new().name("k10s-mesh".into()).spawn(move || m.run())?;
+        let mesh = std::thread::Builder::new().name("k10s-mesh".into()).spawn(move || crate::sys::run_or_abort("mesh", || m.run()))?;
         Ok(Cluster { cs, mesh: Some(mesh), applier: Some(applier) })
     }
 }

@@ -22,7 +22,8 @@ pub struct Snapshot {
     fd: Fd,
     /// Bytes of the slot covered by the snapshot (page multiple, ≤ slot stride). Beyond it the state is zero.
     extent: usize,
-    /// Copy of `[0, extent)` (used when mapping is not allowed).
+    /// The non-zero pages' bytes, concatenated in `nonzero` order (used when mapping is not allowed). Only the
+    /// pages a copy must write are kept, so a sparse slot costs `nonzero.len()` pages, not `extent`.
     bytes: Vec<u8>,
     /// Indices of the non-zero pages (the only ones a copy needs to write).
     nonzero: Vec<usize>,
@@ -32,17 +33,18 @@ impl Snapshot {
     /// Captures the current memory of `slot`.
     pub fn capture(slot: &Slot) -> io::Result<Snapshot> {
         let stride = slot.stride();
-        let mut resident = Vec::new();
-        // SAFETY: the slot is a live mapping of `stride` bytes.
-        unsafe { sys::mincore(slot.base(), stride, &mut resident)? };
         let mem = slot.bytes();
+        // Scan every page for non-zero content. (We do not use `mincore` to pre-select resident pages: a page that
+        // `init()` dirtied and the kernel then swapped out reads as non-resident, and `mincore` would drop it from
+        // the snapshot — a fresh instance would then compute on zeros. Reading a never-touched page faults in the
+        // shared zero page, so scanning untouched pages is cheap and this runs once per service version.)
         let mut nonzero: Vec<usize> = Vec::new();
-        for (i, &r) in resident.iter().enumerate() {
-            if r & 1 != 0 {
-                let p = &mem[i * PAGE..(i + 1) * PAGE];
-                if p.iter().any(|&b| b != 0) {
-                    nonzero.push(i);
-                }
+        let mut bytes: Vec<u8> = Vec::new();
+        for i in 0..stride / PAGE {
+            let p = &mem[i * PAGE..(i + 1) * PAGE];
+            if p.iter().any(|&b| b != 0) {
+                nonzero.push(i);
+                bytes.extend_from_slice(p);
             }
         }
         let extent = nonzero.last().map(|&i| (i + 1) * PAGE).unwrap_or(0);
@@ -60,7 +62,7 @@ impl Snapshot {
             sys::pwrite_all(&fd, &mem[start * PAGE..end * PAGE], (start * PAGE) as u64)?;
             i += 1;
         }
-        Ok(Snapshot { fd, extent, bytes: mem[..extent].to_vec(), nonzero })
+        Ok(Snapshot { fd, extent, bytes, nonzero })
     }
 
     pub fn extent(&self) -> usize {
@@ -71,11 +73,11 @@ impl Snapshot {
         self.nonzero.len()
     }
 
-    /// Writes the non-zero pages into a zeroed slot.
+    /// Writes the non-zero pages into a zeroed slot. `self.bytes` holds those pages packed in `nonzero` order.
     fn copy_into(&self, slot: &mut Slot) {
         let m = slot.full();
-        for &i in &self.nonzero {
-            m[i * PAGE..(i + 1) * PAGE].copy_from_slice(&self.bytes[i * PAGE..(i + 1) * PAGE]);
+        for (j, &i) in self.nonzero.iter().enumerate() {
+            m[i * PAGE..(i + 1) * PAGE].copy_from_slice(&self.bytes[j * PAGE..(j + 1) * PAGE]);
         }
     }
 
@@ -94,6 +96,13 @@ impl Snapshot {
         if map && sys::mmap_fixed_file_private(slot.base(), self.extent, self.fd.raw()).is_ok() {
             slot.mapped = self.extent;
             stats.snapshot_mapped.fetch_add(1, Relaxed);
+        } else if map {
+            // A failed `MAP_FIXED` can leave `[base, base+extent)` unmapped (the kernel unmaps the target range
+            // before the commit-charge check), so `copy_into` would write into a hole and SIGSEGV. Re-map fresh
+            // anonymous memory over the prefix first; if even that fails, fail instance creation (the caller leaks
+            // the slot rather than hand out a half-mapped one).
+            sys::mmap_fixed_anon(slot.base(), self.extent)?;
+            self.copy_into(slot);
         } else {
             self.copy_into(slot);
         }
@@ -133,6 +142,8 @@ mod tests {
         let snap = Snapshot::capture(&src).unwrap();
         assert_eq!(snap.extent(), 6 * 4096);
         assert_eq!(snap.pages(), 2);
+        // Only the non-zero pages are kept (not the whole `extent`): a far-but-sparse touch stays cheap.
+        assert_eq!(snap.bytes.len(), 2 * 4096, "snapshot keeps only non-zero pages");
         for allow_map in [true, false] {
             let mut s = pools.alloc(16).unwrap();
             unsafe {

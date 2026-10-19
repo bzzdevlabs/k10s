@@ -18,6 +18,9 @@ pub struct Slot {
     mem_log2: u8,
 }
 
+// SAFETY: a slot is exclusively owned memory (frames from the allocator); whichever CPU owns the `Slot` uses it.
+unsafe impl Send for Slot {}
+
 impl Slot {
     /// Bytes of physical memory the slot occupies.
     pub fn footprint(&self) -> usize {

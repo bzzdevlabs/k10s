@@ -156,6 +156,8 @@ long_mode_entry:
 );
 
 extern "C" {
+    static boot_stack_bottom: u8;
+    static boot_stack_top: u8;
     static pvh_start_info_ptr: u64;
     static __kernel_start: u8;
     static __kernel_end: u8;
@@ -170,4 +172,9 @@ pub fn start_info_paddr() -> u64 {
 /// `[start, end)` of the loaded kernel image (code, data, bss, boot page tables and boot stack).
 pub fn kernel_image() -> (u64, u64) {
     (&raw const __kernel_start as u64, &raw const __kernel_end as u64)
+}
+
+/// `[bottom, top)` of the boot stack (the scheduler's stack).
+pub fn boot_stack() -> (u64, u64) {
+    (&raw const boot_stack_bottom as u64, &raw const boot_stack_top as u64)
 }

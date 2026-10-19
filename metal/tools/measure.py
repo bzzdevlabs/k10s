@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """k10-metal measurements (writes out/results/<section>.json and prints a summary).
 
-  tools/measure.py [sections...]      sections: size boot ram mem http spin linux   (default: all)
+  tools/measure.py [sections...]      sections: size boot ram mem http spin engines smp linux   (default: all)
 
 Environment: PORT (base host port, default 18090), RUNS (boot runs, default 10), REPS (http repetitions, default 3),
 DUR (loadgen seconds per run, default 5). Needs ./build.sh and, for `linux`, tools/linux-compare.sh to have built
@@ -32,8 +32,8 @@ LINUX_KERNEL = f"/boot/vmlinuz-{os.uname().release}"
 QBOOT = "/usr/share/qemu/qboot.rom"
 
 
-def qemu_cmd(mem="64M", kernel=KERNEL, initrd=BUNDLE, append="", port=PORT, bios=None, net=True, debug_exit=True):
-    c = ["qemu-system-x86_64", "-name", "k10,debug-threads=on", "-M", "pc", "-enable-kvm", "-cpu", "host", "-m", mem, "-smp", "1", "-nodefaults",
+def qemu_cmd(mem="64M", kernel=KERNEL, initrd=BUNDLE, append="", port=PORT, bios=None, net=True, debug_exit=True, smp=1):
+    c = ["qemu-system-x86_64", "-name", "k10,debug-threads=on", "-M", "pc", "-enable-kvm", "-cpu", "host", "-m", mem, "-smp", str(smp), "-nodefaults",
          "-display", "none", "-serial", "stdio", "-no-reboot"]
     if debug_exit:
         c += ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]
@@ -404,6 +404,104 @@ def sec_spin():
     save("spin", {"summary": summary, "raw": r})
 
 
+def sec_engines():
+    """JIT vs interpreter on the same services, interleaved (REPS boots per engine):
+    * per-invocation CPU time measured inside the guest with `/_k10s/bench/<n>/<service>/...` (n invocations back to
+      back in one task; TSC time while the invocation runs, host calls included, network excluded): min and median;
+    * end-to-end latency and throughput with one keep-alive connection (loadgen, DUR s);
+    * JIT compile time and code size per module, and kernel entry -> ready with the 18-service bundle."""
+    workloads = [("hello", "/hello/", 2000), ("compute n=1000 (xorshift, builder)", "/compute?n=1000", 500),
+                 ("sha n=1000 (Ten SHA-256 chain)", "/sha/?n=1000", 40), ("nbody n=1000 (Ten f64)", "/nbody/?n=1000", 40),
+                 ("sort n=50000 (Ten merge sort)", "/sort/?n=50000", 10), ("todo GET (Ten KV + JSON)", "/todo/", 2000)]
+    raw = {}
+    compile_info = {}
+    for rep in range(REPS):
+        for engine in ("jit", "interp"):
+            g = Guest(qemu_cmd(append=f"k10.engine={engine}"), "k10-metal ready")
+            assert g.ready is not None, engine
+            time.sleep(0.05)  # the rest of the ready line (the console is slow)
+            m = re.search(r"ready ([0-9.]+)ms", g.drain())
+            raw.setdefault(f"{engine} kmain->ready ms", []).append(float(m.group(1)) if m else None)
+            st = status(PORT)
+            for sv in st["services"]:
+                ci = compile_info.setdefault(sv["name"], {"tir_bytes": sv["code_bytes"]})
+                if engine == "jit":
+                    ci["native_bytes"] = sv["native_bytes"]
+                    ci.setdefault("compile_us", []).append(sv["compile_us"])
+            for label, path, n in workloads:
+                if engine == "interp":
+                    n = max(5, n // 10)
+                b = json.loads(http(PORT, f"/_k10s/bench/{n}{path}", timeout=120)[1])
+                lg = loadgen(PORT, path, 1, dur=DUR, warmup="200ms")
+                res = {"cpu_min_us": b["min_us"], "cpu_p50_us": b["p50_us"], "bench_steal_ms": b["steal_ms"],
+                       "rps_c1": round(lg["rps"]), "p50_us": lg["latency_us"]["p50"], "p99_us": lg["latency_us"]["p99"],
+                       "errors": lg["errors"], "loadavg": float(loadavg())}
+                raw.setdefault(f"{engine} {label}", []).append(res)
+                print(f"rep {rep} {engine} {label}: {res}", flush=True)
+            g.kill()
+    summary = {}
+    for k, runs in raw.items():
+        if k.endswith("ms"):
+            summary[k] = med(runs)
+        else:
+            summary[k] = {f: med([r.get(f) for r in runs]) for f in runs[0]}
+    for label, _, _ in workloads:
+        j, i = summary[f"jit {label}"], summary[f"interp {label}"]
+        summary[f"speedup {label}"] = {
+            "cpu_min": round(i["cpu_min_us"] / j["cpu_min_us"], 1) if j["cpu_min_us"] else None,
+            "cpu_p50": round(i["cpu_p50_us"] / j["cpu_p50_us"], 1) if j["cpu_p50_us"] else None,
+            "latency_p50": round(i["p50_us"] / j["p50_us"], 1) if j["p50_us"] else None,
+        }
+    for v in compile_info.values():
+        if "compile_us" in v:
+            v["compile_us"] = med(v["compile_us"])
+    summary["code"] = compile_info
+    print(json.dumps(summary, indent=1))
+    save("engines", {"summary": summary, "raw": raw})
+
+
+def sec_smp():
+    """Throughput scaling with -smp 1/2/4 (JIT): a CPU-bound service (SHA-256 chain, ~0.9 ms per request) and
+    `hello` (network-bound), closed loop, interleaved; per-CPU invocation counts and busy time from the guest."""
+    cases = [("sha n=1000, 16 conns", "/sha/?n=1000", 16), ("nbody n=1000, 16 conns", "/nbody/?n=1000", 16),
+             ("hello, 64 conns", "/hello/", 64)]
+    raw = {}
+    for rep in range(REPS):
+        for n in (1, 2, 4):
+            g = Guest(qemu_cmd(mem="128M", smp=n), "k10-metal ready")
+            assert g.ready is not None
+            for label, path, conns in cases:
+                http(PORT, path)
+                st0 = status(PORT)
+                c0 = g.threads_cpu()
+                lg = loadgen(PORT, path, conns)
+                c1 = g.threads_cpu()
+                st1 = status(PORT)
+                up = st1["uptime_ms"] - st0["uptime_ms"]
+                busy = []
+                for a, b in zip(st0["cpus"], st1["cpus"]):
+                    busy.append(round(100 * (1 - (b["halted_ms"] - a["halted_ms"]) / up), 1))
+                tasks = [b["tasks_run"] - a["tasks_run"] for a, b in zip(st0["cpus"], st1["cpus"])]
+                vcpu = sum(v - c0.get(k, 0) for k, v in c1.items() if "CPU" in k)
+                res = {"rps": round(lg["rps"]), "p50_us": lg["latency_us"]["p50"], "p99_us": lg["latency_us"]["p99"],
+                       "errors": lg["errors"], "cpus_online": len(st1["cpus"]), "tasks_per_cpu": tasks,
+                       "busy_pct_per_cpu": busy, "vcpu_threads_cpu_s": round(vcpu, 2), "loadavg": float(loadavg())}
+                raw.setdefault(f"smp{n} {label}", []).append(res)
+                print(f"rep {rep} smp{n} {label}: {res}", flush=True)
+            g.kill()
+    summary = {}
+    for k, runs in raw.items():
+        summary[k] = {f: med([r[f] for r in runs]) for f in ("rps", "p50_us", "p99_us", "errors", "loadavg")}
+        summary[k]["tasks_per_cpu"] = runs[len(runs) // 2]["tasks_per_cpu"]
+        summary[k]["busy_pct_per_cpu"] = runs[len(runs) // 2]["busy_pct_per_cpu"]
+    for label, _, _ in cases:
+        base = summary[f"smp1 {label}"]["rps"]
+        for n in (2, 4):
+            summary[f"smp{n} {label}"]["scaling_vs_smp1"] = round(summary[f"smp{n} {label}"]["rps"] / base, 2) if base else None
+    print(json.dumps(summary, indent=1))
+    save("smp", {"summary": summary, "raw": raw})
+
+
 def sec_linux():
     r = {"kernel": LINUX_KERNEL, "kernel_bytes": os.path.getsize(LINUX_KERNEL),
          "initramfs_boot_bytes": os.path.getsize("out/linux/initramfs-boot.cpio"),
@@ -460,7 +558,7 @@ def sec_linux_ram(r=None):
 
 
 SECTIONS = {"size": sec_size, "boot": sec_boot, "ram": sec_ram, "mem": sec_mem, "http": sec_http, "spin": sec_spin,
-            "linux": sec_linux, "linux_ram": sec_linux_ram}
+            "engines": sec_engines, "smp": sec_smp, "linux": sec_linux, "linux_ram": sec_linux_ram}
 
 if __name__ == "__main__":
     print(f"host load average: {loadavg()}")

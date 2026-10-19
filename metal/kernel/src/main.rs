@@ -2,13 +2,16 @@
 //!
 //! Workloads are isolated by construction (TIR's masked memory accesses, structured control flow and a closed
 //! host API), so the kernel needs no processes, no system calls, no user/kernel boundary and no per-workload page
-//! tables: one identity-mapped address space, one core, a timer, a NIC and a console.
+//! tables: one identity-mapped address space (W^X, NX), one or more CPUs, a timer, a NIC and a console.
 //!
-//! Boot: PVH entry (boot.rs) → `kmain`: console, GDT/IDT, memory map → frame allocator + heap, TSC clock, local
-//! APIC timer, PCI → virtio-net → smoltcp, deployment bundle → services, then the main loop:
+//! Boot: PVH entry (boot.rs) → `kmain`: per-CPU state, console, GDT/IDT, memory map → frame allocator + heap, page
+//! permissions, TSC clock, local APIC timer, application processors (smp.rs), PCI → virtio-net → smoltcp, cluster
+//! layer (optional), deployment bundle → services (JIT-compiled), then CPU 0's main loop (the other CPUs run
+//! `runtime::worker_main`):
 //!
 //! ```text
-//! loop { NIC rx → TCP → HTTP requests → runtime queue → run invocations (2 ms slices) → responses → NIC tx;
+//! loop { NIC rx → TCP → HTTP requests → dispatch to a CPU → gossip / peer links → run this CPU's invocations
+//!        (2 ms slices) → responses (from every CPU) → NIC tx;
 //!        idle: arm the one-shot timer for the next deadline, enable RX interrupts, hlt }
 //! ```
 
@@ -19,15 +22,18 @@ extern crate alloc;
 
 mod arch;
 mod boot;
+mod cluster;
 mod coro;
 mod http;
 mod mem;
 mod net;
 mod pci;
+mod percpu;
 mod pvh;
 mod runtime;
 mod selftest;
 mod serial;
+mod smp;
 mod sync;
 mod time;
 mod virtio_net;
@@ -70,6 +76,8 @@ pub fn boot_ms() -> f64 {
 #[no_mangle]
 extern "C" fn kmain() -> ! {
     let tsc0 = arch::rdtsc();
+    // Per-CPU state first: locks (and so the console) need the CPU index.
+    percpu::init_cpu(0);
     serial::init();
     arch::gdt::init();
     arch::idt::init();
@@ -78,6 +86,7 @@ extern "C" fn kmain() -> ! {
     let bi = unsafe { pvh::parse(boot::start_info_paddr()) };
     let kernel = boot::kernel_image();
     frames::init(&bi, kernel);
+    arch::paging::init();
     let fs = frames::stats();
     TOTAL_RAM.store(frames::total_ram(&bi), Ordering::Relaxed);
     RESERVE.store((fs.usable / 16).max(256 << 10), Ordering::Relaxed);
@@ -88,6 +97,8 @@ extern "C" fn kmain() -> ! {
     let t_clock = arch::rdtsc();
     arch::apic::init();
     arch::apic::calibrate(time::tsc_hz());
+    percpu::this().apic_id.store(arch::apic::id(), Ordering::Relaxed);
+    percpu::this().online.store(true, Ordering::Release);
     arch::interrupts_enable();
     let t_apic = arch::rdtsc();
 
@@ -95,14 +106,23 @@ extern "C" fn kmain() -> ! {
     // unless `k10.verbose` is given; the ready line carries the essentials.
     let verbose = bi.has_flag("k10.verbose") || bi.has_flag("k10.selftest");
     VERBOSE.store(verbose, Ordering::Relaxed);
+    // Execution engine: the JIT unless `k10.engine=interp`. JIT frames live on the coroutine stacks.
+    let jit = bi.arg("k10.engine") != Some("interp");
+    runtime::engine::set_jit(jit);
+    coro::set_stack_size(if jit { coro::STACK_SIZE_JIT } else { coro::STACK_SIZE_INTERP });
+    // Application processors (`-smp N`; `k10.smp=N` limits how many are used).
+    let ncpu = smp::start_aps(bi.arg("k10.smp").and_then(|v| v.parse().ok()).unwrap_or(percpu::MAX_CPUS));
+    runtime::set_cpus(ncpu);
     if verbose { kprintln!(
-        "k10-metal: {} KiB RAM ({} KiB usable), kernel image {} KiB, TSC {} MHz ({:?}), timer: {}, cmdline \"{}\"",
+        "k10-metal: {} KiB RAM ({} KiB usable), kernel image {} KiB, TSC {} MHz ({:?}), timer: {}, NX {}, engine {}, cmdline \"{}\"",
         total_ram() >> 10,
         fs.usable >> 10,
         (kernel.1 - kernel.0) >> 10,
         time::tsc_hz() / 1_000_000,
         src,
         if arch::apic::uses_tsc_deadline() { "TSC-deadline" } else { "LAPIC one-shot" },
+        if arch::paging::nx_enabled() { "on" } else { "off" },
+        if jit { "jit" } else { "interp" },
         bi.cmdline()
     ); }
 
@@ -138,19 +158,37 @@ extern "C" fn kmain() -> ! {
         net::HTTP_PORT
     ); }
 
+    // Cluster mode (k10.join= / k10.gossip= / k10.cluster): gossip + peer links; the desired state comes from the
+    // cluster (a boot bundle is applied like an operator apply: installed, then announced).
+    let clustered = match cluster::config(&bi) {
+        Some(cfg) => cluster::start(cfg, &mut net),
+        None => false,
+    };
+    let apply_boot = |bytes: &[u8]| -> Result<(), alloc::string::String> {
+        if clustered {
+            match cluster::operator_apply(bytes) {
+                Some((200, _)) => Ok(()),
+                Some((_, e)) => Err(e),
+                None => Err("cluster not running".into()),
+            }
+        } else {
+            runtime::apply(bytes).map(|_| ())
+        }
+    };
+
     // Deployment: -initrd bundle (PVH module 0), else the embedded one, else wait for POST /_k10s/apply.
     let t_apply0 = arch::rdtsc();
-    let mut source = "none";
+    let mut source = if clustered { "cluster" } else { "none" };
     if let Some(m) = bi.modules().first().copied() {
         // SAFETY: the module range is reserved in the frame allocator until released below.
         let bytes = unsafe { core::slice::from_raw_parts(m.paddr as *const u8, m.size as usize) };
-        match runtime::apply(bytes) {
+        match apply_boot(bytes) {
             Ok(_) => source = "initrd",
             Err(e) => kprintln!("boot bundle (initrd) rejected: {e}"),
         }
         frames::release_module(m.paddr, m.size);
     } else if !EMBEDDED_BUNDLE.is_empty() {
-        match runtime::apply(EMBEDDED_BUNDLE) {
+        match apply_boot(EMBEDDED_BUNDLE) {
             Ok(_) => source = "embedded",
             Err(e) => kprintln!("embedded bundle rejected: {e}"),
         }
@@ -172,13 +210,15 @@ extern "C" fn kmain() -> ! {
         us(t_apply0, t_apply)
     ); }
     let fs = frames::stats();
-    let n = runtime::RT.borrow().service_names().count();
+    let n = runtime::service_count();
     kprintln!(
-        "k10-metal ready {:.2}ms vm->kmain={:.1}ms svc={} src={} used={}K img={}K ram={}K",
+        "k10-metal ready {:.2}ms vm->kmain={:.1}ms svc={} src={} engine={} cpus={} used={}K img={}K ram={}K",
         boot_ns as f64 / 1e6,
         time::vm_to_kmain_ns() as f64 / 1e6,
         n,
         source,
+        if jit { "jit" } else { "interp" },
+        ncpu,
         (fs.usable - fs.free) >> 10,
         (kernel.1 - kernel.0) >> 10,
         total_ram() >> 10
@@ -197,8 +237,11 @@ fn main_loop(net: &mut net::Net, spin_ns: u64) -> ! {
     loop {
         net.poll_ingress();
         net.service(&mut runtime::submit);
-        runtime::run_round();
-        let replies = runtime::RT.borrow_mut().take_replies();
+        cluster::poll(net);
+        runtime::run_cpu0();
+        // Forwards created by invocations (`call` of remote services), answers to peers' calls.
+        cluster::poll(net);
+        let replies = runtime::take_replies();
         for r in replies {
             net.respond(r.conn, r.status, r.content_type, &r.body);
         }
@@ -208,7 +251,7 @@ fn main_loop(net: &mut net::Net, spin_ns: u64) -> ! {
         runtime::housekeeping();
 
         let now = time::now_ns();
-        let busy = runtime::RT.borrow().has_work() || net.dev.rx.pending() || net.has_work();
+        let busy = runtime::has_work() || net.dev.rx.pending() || net.has_work() || cluster::has_work(net);
         if let Some(t) = spin_from.take() {
             POLLING_TSC.fetch_add(arch::rdtsc() - t, Ordering::Relaxed);
         }
@@ -235,7 +278,10 @@ fn idle(net: &mut net::Net) {
     if let Some(d) = net.poll_delay_ns() {
         wait_ns = wait_ns.min(d);
     }
-    if let Some(t) = runtime::RT.borrow().next_deadline_ns() {
+    if let Some(t) = runtime::next_deadline_ns() {
+        wait_ns = wait_ns.min(t.saturating_sub(time::now_ns()));
+    }
+    if let Some(t) = cluster::next_deadline_ns() {
         wait_ns = wait_ns.min(t.saturating_sub(time::now_ns()));
     }
     if wait_ns == 0 {
@@ -243,10 +289,14 @@ fn idle(net: &mut net::Net) {
     }
     arch::apic::arm_timer(arch::rdtsc() + time::ns_to_tsc(wait_ns));
     arch::interrupts_disable();
+    // Other CPUs post replies and forwards, then wake us with an IPI if we are idle (see runtime::worker_main).
+    let me = percpu::this();
+    me.idle.store(true, Ordering::SeqCst);
     net.dev.rx_interrupts(true);
-    if !net.dev.rx.pending() {
+    if !net.dev.rx.pending() && !runtime::has_work() {
         arch::enable_and_halt(); // returns after the interrupt handler ran
     }
+    me.idle.store(false, Ordering::SeqCst);
     arch::interrupts_enable();
     net.dev.rx_interrupts(false);
 }

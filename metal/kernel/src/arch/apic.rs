@@ -21,6 +21,9 @@ const REG_LVT_TIMER: usize = 0x320;
 const REG_TIMER_INIT: usize = 0x380;
 const REG_TIMER_CUR: usize = 0x390;
 const REG_TIMER_DIV: usize = 0x3E0;
+const REG_ICR_LO: usize = 0x300;
+const REG_ICR_HI: usize = 0x310;
+const ICR_PENDING: u32 = 1 << 12;
 
 static BASE: AtomicU64 = AtomicU64::new(0xFEE0_0000);
 static TSC_DEADLINE: AtomicBool = AtomicBool::new(false);
@@ -52,6 +55,12 @@ fn disable_pic() {
 
 pub fn init() {
     disable_pic();
+    init_local();
+}
+
+/// Enables this CPU's local APIC and configures its timer (every CPU; the boot CPU also masks the 8259s and
+/// calibrates).
+pub fn init_local() {
     let base = rdmsr(IA32_APIC_BASE);
     // Global enable (bit 11), keep xAPIC mode (bit 10 clear).
     wrmsr(IA32_APIC_BASE, (base | (1 << 11)) & !(1 << 10));
@@ -105,6 +114,40 @@ pub fn arm_timer(deadline: u64) {
 
 pub fn eoi() {
     write(REG_EOI, 0);
+}
+
+fn icr_wait() {
+    while read(REG_ICR_LO) & ICR_PENDING != 0 {
+        core::hint::spin_loop();
+    }
+}
+
+/// Fixed-delivery IPI with `vector` to the CPU whose local APIC id is `apic_id`.
+pub fn send_ipi(apic_id: u32, vector: u8) {
+    // Interrupts off: the two ICR writes must not be split by a handler that sends an IPI too.
+    let was = super::interrupts_enabled();
+    super::interrupts_disable();
+    icr_wait();
+    write(REG_ICR_HI, apic_id << 24);
+    write(REG_ICR_LO, vector as u32);
+    if was {
+        super::interrupts_enable();
+    }
+}
+
+/// INIT, then two STARTUP IPIs with `vector` (page `vector * 4096`), to every other CPU (MP spec / SDM 8.4.4.1).
+pub fn start_all_aps(vector: u8, delay_us: &dyn Fn(u64)) {
+    icr_wait();
+    write(REG_ICR_HI, 0);
+    write(REG_ICR_LO, 0x000C_4500); // all excluding self, level assert, INIT
+    icr_wait();
+    delay_us(1000);
+    for _ in 0..2 {
+        write(REG_ICR_HI, 0);
+        write(REG_ICR_LO, 0x000C_4600 | vector as u32); // all excluding self, STARTUP
+        icr_wait();
+        delay_us(200);
+    }
 }
 
 pub fn id() -> u32 {

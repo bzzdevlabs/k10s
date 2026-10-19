@@ -40,7 +40,7 @@ use crate::http::{self, Method, Parse, RequestHead};
 use crate::node::NodeShared;
 use crate::router::Completion;
 use crate::service::{bump, NoInstance, Placement, Queued, ServiceRt, ServiceTable};
-use crate::slot::{Slot, SlotPools, TAIL};
+use crate::slot::{Slot, SlotPools};
 use crate::snapshot::Snapshot;
 use crate::sys::{self, mono_ns, EventFd, Epoll, Fd};
 use k10_ir::Trap;
@@ -602,17 +602,15 @@ unsafe fn run_job(f: *mut Fiber, job: &Job) -> Outcome {
     }
 }
 
-/// Drops a fiber's executor buffers (after a deep recursion they can be megabytes).
+/// Drops a fiber's executor buffers (after a deep recursion they can be megabytes) and points preemption back at the
+/// fiber's own word. The JIT `VmCtx` box keeps its stable address (the ticker may still hold a pointer into it); only
+/// the interpreter buffers are released.
 ///
 /// # Safety
 /// The fiber must not be running an invocation (its scratch is not borrowed).
 unsafe fn reset_scratch(f: *mut Fiber) {
     let sc = &mut *(*f).scratch.get();
-    let (lo, hi, published, running) = (sc.stack_lo, sc.stack_hi, sc.published(), sc.running());
-    *sc = Scratch::new(&(*f).preempt);
-    sc.bind(published, running);
-    sc.stack_lo = lo;
-    sc.stack_hi = hi;
+    sc.reset_heavy(&(*f).preempt);
     // Back to the fiber's own word (a JIT invocation re-points it at its `VmCtx`).
     (*f).preempt_word = &(*f).preempt;
 }
@@ -949,6 +947,9 @@ impl Shard {
             }
             (*f).seq += 1;
             (*f).cpu_ns = 0;
+            // Clear any stale preemption left by the previous job (the ticker may have set it just as that job
+            // finished), so a fresh invocation does not take a spurious interrupt at its first safepoint.
+            (*f).preempt.store(0, Relaxed);
             (*f).budget_ns = job.svc().cpu_budget_ns();
             (*f).depth = job.depth;
             (*f).deadline = job.deadline;
@@ -1245,11 +1246,12 @@ impl Shard {
     }
 
     fn new_instance(&mut self, svc: &Arc<ServiceRt>) -> Result<u32, String> {
-        let stride = (1u64 << svc.mem_log2()) + TAIL as u64;
-        if self.node.mem.slot_bytes_used.load(Relaxed) + stride > self.node.cfg.mem_limit {
-            return Err("node memory limit reached".into());
-        }
-        let slot = self.pools.alloc(svc.mem_log2()).map_err(|e| format!("cannot allocate instance memory: {e}"))?;
+        // Atomic reserve-and-allocate against the node memory cap (see `SlotPools::alloc_within`): concurrent shards
+        // cannot both pass the check and overshoot `--mem`.
+        let slot = self
+            .pools
+            .alloc_within(svc.mem_log2(), self.node.cfg.mem_limit)
+            .map_err(|e| format!("cannot allocate instance memory: {e}"))?;
         let inst = Box::new(Instance { svc: svc.clone(), slot, idle_since: 0 });
         let ii = match self.free_instances.pop() {
             Some(i) => {
@@ -1852,13 +1854,26 @@ impl Shard {
             match crate::admin::handle(&self.node, h.method, &h.target, body) {
                 crate::admin::AdminOut::Respond { status, ctype, body } => self.respond(idx, gen, status, &body, Some(ctype)),
                 crate::admin::AdminOut::Apply(bytes) => {
+                    // Bound concurrent apply helpers: each holds its (up to 256 MiB) bundle body while it prepares
+                    // modules under the single apply lock, so a flood of large applies could otherwise pin unbounded
+                    // memory and threads. Beyond the cap, shed load with 429 (the operator retries).
+                    const MAX_APPLY_IN_FLIGHT: usize = 2;
+                    let n = self.node.apply_in_flight.fetch_add(1, SeqCst);
+                    if n >= MAX_APPLY_IN_FLIGHT {
+                        self.node.apply_in_flight.fetch_sub(1, SeqCst);
+                        self.respond(idx, gen, 429, b"{\"ok\":false,\"error\":\"too many concurrent applies\"}", Some("application/json"));
+                        return;
+                    }
                     let node = self.node.clone();
                     let me = self.me.clone();
                     let spawned = std::thread::Builder::new().name("k10s-apply".into()).spawn(move || {
-                        let (status, body) = crate::admin::apply_bytes(&node, &bytes);
+                        let r = catch_unwind(AssertUnwindSafe(|| crate::admin::apply_bytes(&node, &bytes)));
+                        node.apply_in_flight.fetch_sub(1, SeqCst);
+                        let (status, body) = r.unwrap_or((500, b"{\"ok\":false,\"error\":\"apply panicked\"}".to_vec()));
                         me.send(Msg::AdminDone { conn: idx, gen, status, body });
                     });
                     if spawned.is_err() {
+                        self.node.apply_in_flight.fetch_sub(1, SeqCst);
                         self.respond(idx, gen, 503, b"{\"ok\":false,\"error\":\"cannot spawn\"}", Some("application/json"));
                     }
                 }

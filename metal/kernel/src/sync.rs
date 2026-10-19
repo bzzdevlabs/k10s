@@ -1,16 +1,19 @@
-//! Single-core synchronization: the kernel runs on one CPU, so mutual exclusion against interrupt handlers is
-//! "disable interrupts", and re-entrancy (an exception while holding a lock) is detected instead of deadlocking.
+//! Synchronization. [`IrqLock`] is a spinlock that also disables interrupts on the holding CPU (so an interrupt
+//! handler can never spin on a lock its own CPU holds); taking it again on the CPU that holds it — only possible
+//! from an exception handler — panics instead of deadlocking. [`Global`] is for state that only one CPU (and never
+//! an interrupt handler) touches: a `RefCell`, so a borrow held across a coroutine switch panics instead of
+//! aliasing.
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::arch;
 
-/// A lock that disables interrupts while held. Locking it again while held (only possible from an exception
-/// handler on this single core) panics; [`IrqLock::force_unlock`] exists for the panic path.
+/// A spinlock that disables interrupts while held. [`IrqLock::force_unlock`] exists for the panic path.
 pub struct IrqLock<T> {
-    locked: AtomicBool,
+    /// 0 = free, else the holder's CPU index + 1.
+    locked: AtomicU32,
     value: UnsafeCell<T>,
 }
 
@@ -24,14 +27,23 @@ pub struct IrqGuard<'a, T> {
 
 impl<T> IrqLock<T> {
     pub const fn new(v: T) -> Self {
-        IrqLock { locked: AtomicBool::new(false), value: UnsafeCell::new(v) }
+        IrqLock { locked: AtomicU32::new(0), value: UnsafeCell::new(v) }
     }
 
     pub fn lock(&self) -> IrqGuard<'_, T> {
         let was = arch::interrupts_enabled();
         arch::interrupts_disable();
-        if self.locked.swap(true, Ordering::Acquire) {
-            panic!("IrqLock: re-entrant lock");
+        let me = crate::percpu::id() as u32 + 1;
+        loop {
+            match self.locked.compare_exchange_weak(0, me, Ordering::Acquire, Ordering::Relaxed) {
+                Ok(_) => break,
+                Err(owner) if owner == me => panic!("IrqLock: re-entrant lock"),
+                Err(_) => {
+                    while self.locked.load(Ordering::Relaxed) != 0 {
+                        core::hint::spin_loop();
+                    }
+                }
+            }
         }
         IrqGuard { lock: self, irq_was_enabled: was }
     }
@@ -42,7 +54,7 @@ impl<T> IrqLock<T> {
     /// The previous holder must never run again (we are about to halt).
     pub unsafe fn force_unlock(&self) {
         arch::interrupts_disable();
-        self.locked.store(false, Ordering::Release);
+        self.locked.store(0, Ordering::Release);
     }
 }
 
@@ -59,16 +71,16 @@ impl<T> DerefMut for IrqGuard<'_, T> {
 }
 impl<T> Drop for IrqGuard<'_, T> {
     fn drop(&mut self) {
-        self.lock.locked.store(false, Ordering::Release);
+        self.lock.locked.store(0, Ordering::Release);
         if self.irq_was_enabled {
             arch::interrupts_enable();
         }
     }
 }
 
-/// Single-core global state: interior mutability without a lock, for data that is only ever touched from the
-/// main loop / coroutines (never from interrupt handlers). Borrowing is checked at run time (RefCell), so a borrow
-/// accidentally held across a coroutine switch panics instead of aliasing.
+/// State owned by one CPU: interior mutability without a lock, for data that is only ever touched from that CPU's
+/// main loop / coroutines (never from interrupt handlers or other CPUs). Borrowing is checked at run time
+/// (RefCell), so a borrow accidentally held across a coroutine switch panics instead of aliasing.
 pub struct Global<T>(core::cell::RefCell<T>);
 unsafe impl<T> Sync for Global<T> {}
 impl<T> Global<T> {

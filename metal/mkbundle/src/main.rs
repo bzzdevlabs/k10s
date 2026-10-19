@@ -1,13 +1,18 @@
-//! mkbundle — builds test services as TIR modules with `k10_ir::builder` (no Ten compiler needed) and writes a
-//! deployable `k10_mesh::Bundle` (manifest + code blobs).
+//! mkbundle — builds test services and writes a deployable `k10_mesh::Bundle` (manifest + code blobs).
 //!
 //! ```text
 //! mkbundle [-o out/bundle.k10b] [--version N] [--services a,b,...] [--replicate NAME:COUNT] [--mem-log2 K]
+//!          [--max-instances N] [--ten-dir DIR | --no-ten]
 //! mkbundle --list
 //! ```
 //!
-//! Services (all import only what they use; memory layout: data at 0.., scratch at 1024.., buffers at 4096..):
-//! hello, echo, compute, counter, chain, spin, callspin, trap, instcount, freshcount, config, log, time, random.
+//! Services built as TIR with `k10_ir::builder` (all import only what they use; memory layout: data at 0..,
+//! scratch at 1024.., buffers at 4096..): hello, echo, compute, counter, chain, spin, callspin, trap, instcount,
+//! freshcount, config, log, time, random.
+//!
+//! Services compiled from Ten sources with `k10_lang::compile_file` (from `--ten-dir`, default the repository's
+//! `examples/`): sha (compute.ten, SHA-256 chain), nbody (nbody.ten, f64), sort (sort.ten, 2 MiB memory),
+//! todo (todo.ten, KV + JSON REST API).
 
 use std::collections::BTreeMap;
 use std::process::exit;
@@ -318,6 +323,24 @@ struct Def {
     config: &'static [u8],
 }
 
+/// Services compiled from Ten sources: (service name, file in the Ten directory, cpu_ms, memory log2 if larger
+/// than the module's minimum).
+const TEN: &[(&str, &str, u32, Option<u8>)] = &[
+    ("sha", "compute.ten", 30_000, None),
+    ("nbody", "nbody.ten", 30_000, None),
+    ("sort", "sort.ten", 30_000, Some(21)),
+    ("todo", "todo.ten", 1000, None),
+];
+
+fn compile_ten(dir: &std::path::Path, file: &str) -> Module {
+    let path = dir.join(file);
+    let mut sources = k10_lang::Sources::new();
+    k10_lang::compile_file_with_sources(&path, &mut sources).unwrap_or_else(|d| {
+        eprintln!("{}", k10_lang::render_diagnostics(&d, &sources));
+        panic!("{}: compile error", path.display())
+    })
+}
+
 const DEFS: &[Def] = &[
     Def { name: "hello", build: hello, cpu_ms: 1000, fresh: false, config: b"" },
     Def { name: "echo", build: echo, cpu_ms: 1000, fresh: false, config: b"" },
@@ -338,7 +361,7 @@ const DEFS: &[Def] = &[
 fn usage() -> ! {
     eprintln!(
         "usage: mkbundle [-o FILE] [--version N] [--services a,b,..] [--replicate NAME:COUNT] [--mem-log2 K] \
-         [--max-instances N] | --list"
+         [--max-instances N] [--ten-dir DIR | --no-ten] | --list"
     );
     exit(2)
 }
@@ -350,6 +373,8 @@ fn main() {
     let mut replicate: Option<(String, usize)> = None;
     let mut mem_log2: Option<u8> = None;
     let mut max_instances = 64u32;
+    let mut ten_dir = Some(std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples")));
+    let mut list = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut val = || args.next().unwrap_or_else(|| usage());
@@ -364,24 +389,34 @@ fn main() {
             }
             "--mem-log2" => mem_log2 = Some(val().parse().unwrap_or_else(|_| usage())),
             "--max-instances" => max_instances = val().parse().unwrap_or_else(|_| usage()),
-            "--list" => {
-                for d in DEFS {
-                    let m = (d.build)();
-                    let bytes = k10_ir::encode(&m);
-                    println!("{:<11} {:>5} bytes  cpu_ms={:<5} fresh={}", d.name, bytes.len(), d.cpu_ms, d.fresh);
-                }
-                return;
-            }
+            "--ten-dir" => ten_dir = Some(val().into()),
+            "--no-ten" => ten_dir = None,
+            "--list" => list = true,
             _ => usage(),
         }
+    }
+    // Every service: (name, module, cpu_ms, fresh, config, memory log2 override).
+    type Svc = (String, Module, u32, bool, Vec<u8>, Option<u8>);
+    let mut all: Vec<Svc> = DEFS.iter().map(|d| (d.name.to_string(), (d.build)(), d.cpu_ms, d.fresh, d.config.to_vec(), None)).collect();
+    if let Some(dir) = &ten_dir {
+        for &(name, file, cpu_ms, mem) in TEN {
+            all.push((name.to_string(), compile_ten(dir, file), cpu_ms, false, Vec::new(), mem));
+        }
+    }
+    if list {
+        for (name, m, cpu_ms, fresh, _, _) in &all {
+            let bytes = k10_ir::encode(m);
+            println!("{:<11} {:>5} bytes  cpu_ms={:<5} fresh={}", name, bytes.len(), cpu_ms, fresh);
+        }
+        return;
     }
 
     let mut services = Vec::new();
     let mut blobs: Vec<Vec<u8>> = Vec::new();
-    let mut add = |name: String, d: &Def| {
-        let m = (d.build)();
-        k10_ir::validate(&m).unwrap_or_else(|e| panic!("{}: invalid module: {e:?}", d.name));
-        let bytes = k10_ir::encode(&m);
+    let mut add = |name: String, d: &Svc| {
+        let m = &d.1;
+        k10_ir::validate(m).unwrap_or_else(|e| panic!("{}: invalid module: {e:?}", d.0));
+        let bytes = k10_ir::encode(m);
         let hash = sha256(&bytes);
         if !blobs.iter().any(|b| sha256(b) == hash) {
             blobs.push(bytes);
@@ -390,24 +425,24 @@ fn main() {
             name,
             code_hash: hash,
             replicas: 1,
-            mem_log2: mem_log2.unwrap_or(m.min_mem_log2.max(16)),
+            mem_log2: mem_log2.or(d.5).unwrap_or(m.min_mem_log2.max(16)).max(m.min_mem_log2),
             max_instances,
-            cpu_ms: d.cpu_ms,
-            fresh: d.fresh,
-            config: d.config.to_vec(),
+            cpu_ms: d.2,
+            fresh: d.3,
+            config: d.4.clone(),
         });
     };
     if let Some((name, count)) = &replicate {
-        let d = DEFS.iter().find(|d| d.name == name).unwrap_or_else(|| usage());
+        let d = all.iter().find(|d| &d.0 == name).unwrap_or_else(|| usage());
         for i in 0..*count {
             add(format!("{name}-{i}"), d);
         }
     } else {
-        for d in DEFS {
-            if only.as_ref().is_some_and(|o| !o.iter().any(|n| n == d.name)) {
+        for d in &all {
+            if only.as_ref().is_some_and(|o| !o.iter().any(|n| *n == d.0)) {
                 continue;
             }
-            add(d.name.to_string(), d);
+            add(d.0.clone(), d);
         }
     }
     services.sort_by(|a, b| a.name.cmp(&b.name));

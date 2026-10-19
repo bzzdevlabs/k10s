@@ -11,13 +11,14 @@ SECTIONS
 
     .text : ALIGN(4K)
     {
+        __text_start = .;
         KEEP(*(.text.boot32))
         *(.text .text.*)
     }
 
-    .rodata : ALIGN(4K) { *(.rodata .rodata.*) }
+    .rodata : ALIGN(4K) { __rodata_start = .; *(.rodata .rodata.*) }
 
-    .data : ALIGN(4K) { *(.data .data.*) }
+    .data : ALIGN(4K) { __data_start = .; *(.data .data.*) }
 
     .bss (NOLOAD) : ALIGN(4K)
     {

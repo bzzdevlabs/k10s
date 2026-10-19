@@ -125,8 +125,29 @@ impl SlotPools {
 
     /// Allocates a zeroed slot of `2^log2 + TAIL` bytes.
     pub fn alloc(&mut self, log2: u8) -> io::Result<Slot> {
+        self.alloc_within(log2, u64::MAX)
+    }
+
+    /// Allocates a zeroed slot, but only if the node-wide address space handed to slots would stay `≤ limit`
+    /// afterwards. The limit is reserved with a single compare-exchange so concurrent shards cannot both pass the
+    /// check and overshoot `--mem` (the reservation is backed out if the slot cannot then be mapped).
+    pub fn alloc_within(&mut self, log2: u8, limit: u64) -> io::Result<Slot> {
         assert!((12..=36).contains(&log2), "slot size class out of range");
         let stats = self.stats.clone();
+        let stride = (1usize << log2) as u64 + TAIL as u64;
+        // Atomic reserve against the node memory cap (shared by every shard).
+        let mut cur = stats.slot_bytes_used.load(Relaxed);
+        loop {
+            if cur + stride > limit {
+                return Err(io::Error::new(io::ErrorKind::OutOfMemory, "node memory limit reached"));
+            }
+            match stats.slot_bytes_used.compare_exchange_weak(cur, cur + stride, Relaxed, Relaxed) {
+                Ok(_) => break,
+                Err(c) => cur = c,
+            }
+        }
+        // Any early return from here on must back the reservation out.
+        let backout = |stats: &MemStats| stats.slot_bytes_used.fetch_sub(stride, Relaxed);
         let c = self.classes[log2 as usize].get_or_insert_with(|| SizeClass {
             log2,
             stride: (1usize << log2) + TAIL,
@@ -141,7 +162,13 @@ impl SlotPools {
             if c.bump == c.bump_end {
                 let n = (REGION_BYTES / c.stride).clamp(1, MAX_REGION_SLOTS);
                 let len = n * c.stride;
-                let base = sys::mmap_reserve(len)?;
+                let base = match sys::mmap_reserve(len) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        backout(&stats);
+                        return Err(e);
+                    }
+                };
                 // SAFETY: our fresh reservation.
                 unsafe { sys::madv_nohugepage(base, len) };
                 stats.reserved_bytes.fetch_add(len as u64, Relaxed);
@@ -154,7 +181,7 @@ impl SlotPools {
             p
         };
         stats.slots_used.fetch_add(1, Relaxed);
-        stats.slot_bytes_used.fetch_add(c.stride as u64, Relaxed);
+        // slot_bytes_used was already reserved above.
         Ok(Slot { base, log2: c.log2, mapped: 0 })
     }
 

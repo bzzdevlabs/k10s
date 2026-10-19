@@ -206,6 +206,9 @@ pub struct NodeShared {
     /// Max instances with a snapshot mapped (VMA budget, from `vm.max_map_count`).
     pub snapshot_map_budget: u64,
     apply_lock: Mutex<()>,
+    /// Apply helper threads currently holding a bundle body (running or waiting on `apply_lock`). Bounded so a flood
+    /// of large `apply` requests cannot pin unbounded memory / threads.
+    pub apply_in_flight: AtomicUsize,
     /// Round-robin shard choice for [`NodeShared::serve_local`].
     serve_rr: AtomicUsize,
     /// Installed by the cluster layer (weak: the cluster owns the node, not the other way round).
@@ -521,6 +524,7 @@ impl Node {
             // 2 VMAs per mapped snapshot; keep room for fiber stacks (2 VMAs each) and everything else.
             snapshot_map_budget: max_maps.saturating_sub(2 * (shards_n * cfg_max_fibers) as u64 + 8192) / 2,
             apply_lock: Mutex::new(()),
+            apply_in_flight: AtomicUsize::new(0),
             serve_rr: AtomicUsize::new(0),
             cluster: OnceLock::new(),
         });
@@ -536,7 +540,9 @@ impl Node {
         }
         let tk = {
             let sh = shared.clone();
-            std::thread::Builder::new().name("k10s-ticker".into()).spawn(move || crate::ticker::run(sh))?
+            std::thread::Builder::new()
+                .name("k10s-ticker".into())
+                .spawn(move || sys::run_or_abort("ticker", || crate::ticker::run(sh)))?
         };
         let _ = shared.ticker.set(tk.thread().clone());
         let mut shard_threads = Vec::new();
@@ -546,10 +552,10 @@ impl Node {
                 if sh.cfg.pin_threads {
                     sys::pin_to_cpu(i);
                 }
-                match shard::Shard::new(i, sh.clone(), Some(l)) {
+                sys::run_or_abort(&format!("shard-{i}"), || match shard::Shard::new(i, sh.clone(), Some(l)) {
                     Ok(mut s) => s.run(),
                     Err(e) => eprintln!("k10s: shard {i} failed to start: {e}"),
-                }
+                });
             })?;
             shard_threads.push(h);
         }

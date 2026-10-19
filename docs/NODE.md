@@ -97,8 +97,8 @@ docs/HOSTAPI.md, implemented once in `host.rs` (`HostCtx::dispatch(HostFn, args,
 - `output_status` values outside 100..=599 are stored as 500. The optional result of `handle()` is ignored.
 - Imports must match a host function's name and parameter count; `results` may be 1 (the spec) or 0 (result
   discarded). Unknown names are rejected at apply time.
-- Trap codes: `Host(1)` response body over 16 MiB, `Host(2)` KV key > 1 KiB or value > 1 MiB, `Host(0x7FFF)`
-  internal error (host panic).
+- Trap codes: `Host(1)` response body over 16 MiB, `Host(2)` KV key > 1 KiB or value > 1 MiB, `Host(3)` KV
+  per-service quota exhausted, `Host(0x7FFF)` internal error (host panic).
 - `random`: per-invocation wyrand stream seeded from a per-shard generator (seeded by `getrandom`). `now_ns` is
   `CLOCK_MONOTONIC`, `time_ms` `CLOCK_REALTIME`.
 
@@ -153,7 +153,10 @@ status ≥ 0, −1 unknown service, −2 unavailable (crash backoff with nothing
   record. **Group commit**: `kv_put`/`kv_del` return once the record is buffered; the flusher batches for 2 ms, writes
   every dirty log and `fdatasync`s them. **Durability window**: an acknowledged write can be lost if the process or
   machine dies within ≈ 2 ms + write + fsync time. Compaction rewrites a log from the map when it exceeds 2× the live
-  size (and 1 MiB). Without `--data` the store is memory-only.
+  size (and 1 MiB). Without `--data` the store is memory-only. **Per-service quota**: a `kv_put` that would push a
+  namespace past its live-bytes quota (default 256 MiB, `--kv-max`, 0 = unlimited) traps `Host(3)` and stores nothing,
+  so one service cannot fill the node's memory/disk (it bounds live bytes; the log is then bounded at ~2× that by
+  compaction). Deleting entries frees room.
 - `log`: per-service ring (1000 lines / 256 KiB, lines ≤ 4 KiB), optionally echoed to stderr (`--log-stderr`).
 
 ## Shutdown

@@ -7,13 +7,16 @@
 //! * Each accepted socket becomes a `Conn`: bytes are accumulated until a full request (head + Content-Length
 //!   body) is present, the request goes to the runtime, and its response is written back. One request per
 //!   connection is in flight at a time (pipelined requests wait in the input buffer).
+//! * For cluster mode (`cluster.rs`): UDP sockets, extra listening TCP ports whose accepted sockets are handed to
+//!   their owner, and outgoing TCP connections. Sockets live in the same `SocketSet` as the HTTP ones.
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::net::SocketAddr;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
-use smoltcp::socket::tcp;
+use smoltcp::socket::{tcp, udp};
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpCidr, Ipv4Address};
 
@@ -95,7 +98,7 @@ impl core::fmt::Display for Snapshot {
 pub fn on_irq() {
     NET_IRQS.fetch_add(1, Ordering::Relaxed);
     if PREEMPT_ON_RX.load(Ordering::Relaxed) {
-        crate::time::PREEMPT.store(true, Ordering::Relaxed);
+        crate::time::request_preempt();
         crate::virtio_net::set_rx_interrupts(false);
     }
 }
@@ -162,16 +165,36 @@ pub struct Stats {
     pub bad_requests: u64,
 }
 
+/// A listening TCP port other than HTTP: a pool of LISTEN sockets, topped up after every packet like HTTP's.
+struct ExtraPort {
+    port: u16,
+    rx: usize,
+    tx: usize,
+    spare: usize,
+    listeners: Vec<SocketHandle>,
+    accepted: Vec<SocketHandle>,
+}
+
 pub struct Net {
     pub dev: VirtioNet,
     iface: Interface,
     sockets: SocketSet<'static>,
     listeners: Vec<SocketHandle>,
+    extra: Vec<ExtraPort>,
+    next_local_port: u16,
     conns: Vec<Option<Conn>>,
     free_conns: Vec<u32>,
     next_gen: u32,
     pub limits: Limits,
     pub stats: Stats,
+}
+
+/// smoltcp endpoint of an IPv4 socket address (IPv6 is not configured).
+fn endpoint(a: SocketAddr) -> Option<smoltcp::wire::IpEndpoint> {
+    match a {
+        SocketAddr::V4(v4) => Some(v4.into()),
+        SocketAddr::V6(_) => None,
+    }
 }
 
 fn now() -> Instant {
@@ -192,6 +215,8 @@ impl Net {
             iface,
             sockets: SocketSet::new(vec![]),
             listeners: Vec::new(),
+            extra: Vec::new(),
+            next_local_port: 49152 + (seed % 8192) as u16,
             conns: Vec::new(),
             free_conns: Vec::new(),
             next_gen: 1,
@@ -230,6 +255,91 @@ impl Net {
             }
             self.listeners.push(self.sockets.add(s));
         }
+    }
+
+    fn refill_extra(&mut self) {
+        for e in &mut self.extra {
+            while e.listeners.len() < e.spare {
+                if crate::mem::frames::free_bytes() < (e.rx + e.tx) as u64 + crate::reserve_bytes() {
+                    break;
+                }
+                let mut s = tcp::Socket::new(tcp::SocketBuffer::new(vec![0u8; e.rx]), tcp::SocketBuffer::new(vec![0u8; e.tx]));
+                s.set_nagle_enabled(false);
+                s.set_ack_delay(None);
+                if s.listen(e.port).is_err() {
+                    break;
+                }
+                e.listeners.push(self.sockets.add(s));
+            }
+            let mut i = 0;
+            while i < e.listeners.len() {
+                if self.sockets.get::<tcp::Socket>(e.listeners[i]).is_listening() {
+                    i += 1;
+                } else {
+                    e.accepted.push(e.listeners.swap_remove(i));
+                }
+            }
+        }
+    }
+
+    /// Listens on another TCP port (`spare` sockets in LISTEN state, buffers `rx`/`tx` bytes); accepted sockets are
+    /// collected with [`Net::take_accepted`].
+    pub fn listen_extra(&mut self, port: u16, rx: usize, tx: usize, spare: usize) {
+        self.extra.push(ExtraPort { port, rx, tx, spare, listeners: Vec::new(), accepted: Vec::new() });
+        self.refill_extra();
+    }
+
+    /// Sockets accepted on an extra port since the last call (they may still be in SYN-RECEIVED).
+    pub fn take_accepted(&mut self, port: u16) -> Vec<SocketHandle> {
+        self.extra.iter_mut().find(|e| e.port == port).map(|e| core::mem::take(&mut e.accepted)).unwrap_or_default()
+    }
+
+    /// Opens a TCP connection to `to` (non-blocking; poll the socket's state).
+    pub fn tcp_connect(&mut self, to: SocketAddr, rx: usize, tx: usize) -> Option<SocketHandle> {
+        if crate::mem::frames::free_bytes() < (rx + tx) as u64 + crate::reserve_bytes() {
+            return None;
+        }
+        let mut s = tcp::Socket::new(tcp::SocketBuffer::new(vec![0u8; rx]), tcp::SocketBuffer::new(vec![0u8; tx]));
+        s.set_nagle_enabled(false);
+        s.set_ack_delay(None);
+        // Ephemeral ports cycle through 49152..65535.
+        let port = self.next_local_port;
+        self.next_local_port = if port >= 65535 { 49152 } else { port + 1 };
+        s.connect(self.iface.context(), endpoint(to)?, port).ok()?;
+        Some(self.sockets.add(s))
+    }
+
+    pub fn tcp(&mut self, h: SocketHandle) -> &mut tcp::Socket<'static> {
+        self.sockets.get_mut::<tcp::Socket>(h)
+    }
+
+    pub fn remove_socket(&mut self, h: SocketHandle) {
+        self.sockets.remove(h);
+    }
+
+    /// A UDP socket bound to `port` with room for `packets` datagrams of up to `mtu` bytes each way.
+    pub fn udp_bind(&mut self, port: u16, packets: usize, mtu: usize) -> Option<SocketHandle> {
+        let buf = || udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; packets], vec![0u8; packets * mtu]);
+        let mut s = udp::Socket::new(buf(), buf());
+        s.bind(port).ok()?;
+        Some(self.sockets.add(s))
+    }
+
+    /// Next received datagram, handed to `f` with its source.
+    pub fn udp_recv(&mut self, h: SocketHandle, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+        match self.sockets.get_mut::<udp::Socket>(h).recv() {
+            Ok((data, meta)) => {
+                f(data, meta.endpoint.into());
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Queues a datagram (false if the socket's send buffer is full).
+    pub fn udp_send(&mut self, h: SocketHandle, to: SocketAddr, data: &[u8]) -> bool {
+        let Some(ep) = endpoint(to) else { return false };
+        self.sockets.get_mut::<udp::Socket>(h).send_slice(data, ep).is_ok()
     }
 
     /// Moves listeners that received a SYN into the connection table.
@@ -271,11 +381,17 @@ impl Net {
         self.iface.poll_maintenance(t);
         loop {
             self.refill_listeners();
+            if !self.extra.is_empty() {
+                self.refill_extra();
+            }
             match self.iface.poll_ingress_single(t, &mut self.dev, &mut self.sockets) {
                 smoltcp::iface::PollIngressSingleResult::None => break,
                 _ => any = true,
             }
             self.accept();
+        }
+        if !self.extra.is_empty() {
+            self.refill_extra();
         }
         any
     }

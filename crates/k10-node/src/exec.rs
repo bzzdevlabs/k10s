@@ -19,13 +19,18 @@ use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering::*};
 use std::sync::Arc;
 
+/// Room for a JIT backend's `VmCtx` (16 `u64` = 128 bytes; the JIT asserts `size_of::<VmCtx>()` fits).
+pub type JitCtx = [u64; 16];
+
 /// Per-fiber scratch state reused across invocations (lives as long as the fiber, at a stable address).
 pub struct Scratch {
     /// Interpreter value/frame stacks.
     pub interp: InterpStack,
-    /// Room for a JIT backend's `VmCtx` (opaque to the runtime; the ticker may write its `stack_limit` word
-    /// concurrently, so backends access it through raw pointers only).
-    pub jit: [u64; 16],
+    /// Heap-allocated room for a JIT backend's `VmCtx`, at a stable address for the fiber's lifetime. Held as a raw
+    /// pointer, **not** an inline field, so no `&mut Scratch` ever covers it: the ticker writes its `stack_limit`
+    /// word concurrently through a pointer derived from here, and an inline field would make that a data race / an
+    /// aliasing violation against the `&mut Scratch` held during `invoke`. Reached only through [`Scratch::jit_ctx`].
+    jit: *mut JitCtx,
     /// Lowest usable address of the fiber's stack (just above its guard page); 0 when not running on a fiber.
     /// A JIT sets `VmCtx.real_stack_limit = stack_lo + HOST_RESERVE`.
     pub stack_lo: usize,
@@ -42,7 +47,7 @@ impl Scratch {
     pub(crate) fn new(own_word: *const AtomicUsize) -> Self {
         Scratch {
             interp: InterpStack::new(),
-            jit: [0; 16],
+            jit: Box::into_raw(Box::new([0u64; 16])),
             stack_lo: 0,
             stack_hi: 0,
             preempt_word: own_word,
@@ -51,18 +56,27 @@ impl Scratch {
         }
     }
 
+    /// Raw pointer to the fiber's JIT `VmCtx` scratch (stable for the fiber's life). The JIT casts it to `VmCtx` and
+    /// (re)initializes it field by field each invocation; the ticker writes its `stack_limit` word concurrently.
+    pub fn jit_ctx(&self) -> *mut JitCtx {
+        self.jit
+    }
+
+    /// Drops the interpreter's (possibly large, after deep recursion) buffers and points preemption back at `own`,
+    /// keeping the JIT `VmCtx` box at its stable address (the ticker may still hold a pointer into it). Used by the
+    /// scheduler after a `StackOverflow` trap and when trimming an idle fiber's stack.
+    ///
+    /// # Safety
+    /// The fiber must not be running an invocation (its scratch is not borrowed by JIT/interpreter code).
+    pub(crate) fn reset_heavy(&mut self, own: *const AtomicUsize) {
+        self.interp = InterpStack::new();
+        self.preempt_word = own;
+    }
+
     /// Connects the scratch to its fiber (see [`Scratch::set_preempt_word`]).
     pub(crate) fn bind(&mut self, published: *mut *const AtomicUsize, running: *const AtomicPtr<AtomicUsize>) {
         self.published = published;
         self.running = running;
-    }
-
-    pub(crate) fn published(&self) -> *mut *const AtomicUsize {
-        self.published
-    }
-
-    pub(crate) fn running(&self) -> *const AtomicPtr<AtomicUsize> {
-        self.running
     }
 
     /// The word the ticker writes `usize::MAX` into to preempt this fiber.
@@ -93,6 +107,15 @@ impl Scratch {
                 (*self.running).store(w as *mut AtomicUsize, Release);
             }
         }
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        // Free the JIT `VmCtx` box. A `Scratch` is dropped only with its fiber (teardown, after the ticker thread
+        // has been joined), so nothing holds a pointer into the box any more.
+        // SAFETY: `jit` came from `Box::into_raw` in `new` and is never freed elsewhere.
+        unsafe { drop(Box::from_raw(self.jit)) };
     }
 }
 

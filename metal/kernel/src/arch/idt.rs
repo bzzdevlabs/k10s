@@ -11,6 +11,8 @@ use crate::kprintln;
 
 pub const VEC_TIMER: u8 = 0x20;
 pub const VEC_NET: u8 = 0x21;
+/// Inter-processor wake-up: work was queued for this CPU (the handler only acknowledges; the point is leaving `hlt`).
+pub const VEC_WAKE: u8 = 0x22;
 pub const VEC_SPURIOUS: u8 = 0xFF;
 /// Number of stubs 0..NSTUBS, plus the spurious vector.
 const NSTUBS: usize = 48;
@@ -164,14 +166,19 @@ pub fn init() {
             (*idt)[v] = gate(isr_stub_table[v], ist);
         }
         (*idt)[VEC_SPURIOUS as usize] = gate(isr_stub_spurious, 0);
-        #[repr(C, packed)]
-        struct Ptr {
-            limit: u16,
-            base: u64,
-        }
-        let p = Ptr { limit: (size_of::<[Entry; 256]>() - 1) as u16, base: idt as u64 };
-        asm!("lidt [{}]", in(reg) &p, options(readonly, nostack, preserves_flags));
     }
+    load();
+}
+
+/// Loads the (shared) IDT on this CPU.
+pub fn load() {
+    #[repr(C, packed)]
+    struct Ptr {
+        limit: u16,
+        base: u64,
+    }
+    let p = Ptr { limit: (size_of::<[Entry; 256]>() - 1) as u16, base: &raw const IDT as u64 };
+    unsafe { asm!("lidt [{}]", in(reg) &p, options(readonly, nostack, preserves_flags)) };
 }
 
 const EXCEPTIONS: [&str; 32] = [
@@ -192,6 +199,10 @@ extern "C" fn isr_dispatch(f: &mut Frame) {
         }
         VEC_NET => {
             crate::net::on_irq();
+            super::apic::eoi();
+        }
+        VEC_WAKE => {
+            crate::percpu::this().wakeups.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             super::apic::eoi();
         }
         VEC_SPURIOUS => {}
@@ -221,6 +232,7 @@ fn exception(f: &Frame) -> ! {
     if let Some(s) = crate::coro::current_stack() {
         kprintln!("    running on coroutine stack {:#x}..{:#x}", s.0, s.1);
     }
+    kprintln!("    on CPU {}", crate::percpu::id());
     super::qemu_exit(super::EXIT_FAILURE);
     super::halt_forever()
 }

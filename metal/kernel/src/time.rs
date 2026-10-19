@@ -4,7 +4,7 @@
 //!
 //! Also home of the preemption request flag set by the timer interrupt (see `runtime::sched`).
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::arch::{self, cpuid, inb, outb, rdtsc, wrmsr};
 
@@ -21,11 +21,64 @@ pub fn vm_to_kmain_ns() -> u64 {
     VM_TO_KMAIN_NS.load(Ordering::Relaxed)
 }
 
-/// TSC value at which the running invocation must be preempted (u64::MAX = none).
-pub static PREEMPT_AT: AtomicU64 = AtomicU64::new(u64::MAX);
-/// Set by the timer interrupt when `PREEMPT_AT` has passed; polled at TIR safepoints.
-pub static PREEMPT: AtomicBool = AtomicBool::new(false);
+// Preemption state is per CPU (`percpu::PerCpu`: `preempt_at`, `preempt`, `preempt_word`); these act on the
+// calling CPU.
+
 pub static TIMER_IRQS: AtomicU64 = AtomicU64::new(0);
+
+/// Clears this CPU's preemption request; returns whether one was pending.
+#[inline]
+pub fn take_preempt() -> bool {
+    crate::percpu::this().preempt.swap(false, Ordering::Relaxed)
+}
+
+/// Starts a new slice on this CPU: no request pending, preemption due at TSC `at` (u64::MAX: none). The caller
+/// arms the timer.
+#[inline]
+pub fn set_preempt_at(at: u64) {
+    let c = crate::percpu::this();
+    c.preempt.store(false, Ordering::Relaxed);
+    c.preempt_at.store(at, Ordering::Relaxed);
+}
+
+/// TSC value at which this CPU's running invocation must be preempted.
+#[inline]
+pub fn preempt_at() -> u64 {
+    crate::percpu::this().preempt_at.load(Ordering::Relaxed)
+}
+
+/// Moves this CPU's preemption deadline earlier (keeps a pending request).
+#[inline]
+pub fn tighten_preempt_at(at: u64) {
+    crate::percpu::this().preempt_at.store(at, Ordering::Relaxed);
+}
+
+/// Requests preemption of this CPU's running invocation at its next safepoint (interpreter: the flag; JIT: the flag
+/// and the running context's stack limit, so that the next JIT safepoint calls the interrupt hook,
+/// docs/JIT-ABI.md). Callable from interrupt handlers.
+#[inline]
+pub fn request_preempt() {
+    let c = crate::percpu::this();
+    c.preempt.store(true, Ordering::Relaxed);
+    let w = c.preempt_word.load(Ordering::Relaxed);
+    if !w.is_null() {
+        // SAFETY: a published word stays valid until it is unpublished (runtime::jit), on this CPU.
+        unsafe { (*w).store(usize::MAX, Ordering::Relaxed) };
+    }
+}
+
+/// Publishes `w` as this CPU's running JIT context's preemption word (null: none) and returns the previous one. A
+/// request that is already pending is forwarded to the new word.
+#[inline]
+pub fn set_preempt_word(w: *mut AtomicUsize) -> *mut AtomicUsize {
+    let c = crate::percpu::this();
+    let old = c.preempt_word.swap(w, Ordering::Relaxed);
+    if !w.is_null() && c.preempt.load(Ordering::Relaxed) {
+        // SAFETY: the caller publishes a live word.
+        unsafe { (*w).store(usize::MAX, Ordering::Relaxed) };
+    }
+    old
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum Source {
@@ -85,11 +138,13 @@ pub fn unix_ms() -> u64 {
     BOOT_UNIX_MS.load(Ordering::Relaxed) + now_ms()
 }
 
-/// Timer interrupt: request preemption if the running invocation's slice/budget deadline has passed.
+/// Timer interrupt: request preemption if this CPU's running invocation's slice/budget deadline has passed.
 pub fn on_timer_irq() {
     TIMER_IRQS.fetch_add(1, Ordering::Relaxed);
-    if rdtsc() >= PREEMPT_AT.load(Ordering::Relaxed) {
-        PREEMPT.store(true, Ordering::Relaxed);
+    let c = crate::percpu::this();
+    c.timer_irqs.fetch_add(1, Ordering::Relaxed);
+    if rdtsc() >= c.preempt_at.load(Ordering::Relaxed) {
+        request_preempt();
     }
 }
 

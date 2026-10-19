@@ -9,6 +9,20 @@ use std::ptr;
 
 pub const PAGE: usize = 4096;
 
+/// Runs a long-lived runtime thread's body, aborting the whole process if it panics.
+///
+/// A worker thread (shard, ticker, mesh, applier, KV flusher) holds raw pointers into shared state and other
+/// threads assume it is alive; if it unwound and died, the node would keep running as a zombie (gossip stops, the
+/// mesh inbox grows unbounded, a shard's instances leak, the ticker stops preempting). Fail-stop is safer than a
+/// silently broken node, so a panic here aborts. The body is `AssertUnwindSafe` because the process ends on panic:
+/// nothing observes any half-updated state afterwards.
+pub fn run_or_abort(name: &str, body: impl FnOnce()) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).is_err() {
+        eprintln!("k10s: thread `{name}` panicked — aborting the process (fail-stop)");
+        std::process::abort();
+    }
+}
+
 #[inline]
 pub fn cvt(r: libc::c_int) -> io::Result<libc::c_int> {
     if r < 0 {

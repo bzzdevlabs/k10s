@@ -17,10 +17,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Response body limit (16 MiB): exceeding it traps `Host(1)`.
 pub const MAX_OUTPUT: usize = 16 << 20;
+/// Largest `call` target (`service` or `service/path`) copied out of instance memory. Bounds the transient
+/// allocation (a slot can be up to 64 GiB) and matches the wire limits (service ≤ 255, path ≤ 65535).
+pub const MAX_CALL_TARGET: usize = 64 << 10;
+/// Largest `call` request body (same as the response-body limit).
+pub const MAX_CALL_BODY: usize = MAX_OUTPUT;
 /// Trap code for an oversized response body.
 pub const TRAP_OUTPUT_LIMIT: u32 = 1;
 /// Trap code for an oversized KV key/value.
 pub const TRAP_KV_LIMIT: u32 = 2;
+/// Trap code for a `kv_put` refused because the service's KV quota is exhausted ([`crate::kv::KvConfig::max_bytes`]).
+pub const TRAP_KV_QUOTA: u32 = 3;
 /// Trap code used when a host function panicked (runtime bug) — the invocation is aborted.
 pub const TRAP_INTERNAL: u32 = 0x7FFF;
 
@@ -205,8 +212,19 @@ impl HostCtx<'_> {
                 Ok(0)
             }
             HostFn::Call => {
-                let name = range(mem, size, arg(a, 0), arg(a, 1))?.to_vec();
-                let body = range(mem, size, arg(a, 2), arg(a, 3))?.to_vec();
+                // Range-check both args first (masked, ≤ S), then bound the copies: a slot can be up to 64 GiB and
+                // these `to_vec`s are not counted by `--mem`. Oversize target → unavailable; oversize body → the
+                // same trap as an oversize response (`Host(1)`).
+                let name = range(mem, size, arg(a, 0), arg(a, 1))?;
+                if name.len() > MAX_CALL_TARGET {
+                    return Ok(CALL_UNAVAILABLE);
+                }
+                let name = name.to_vec();
+                let body = range(mem, size, arg(a, 2), arg(a, 3))?;
+                if body.len() > MAX_CALL_BODY {
+                    return Err(Trap::Host(TRAP_OUTPUT_LIMIT));
+                }
+                let body = body.to_vec();
                 let (st, resp) = self.sched.call(name, body);
                 self.call_status = st;
                 self.call_body = resp;
@@ -240,7 +258,9 @@ impl HostCtx<'_> {
                 if key.len() > MAX_KEY || val.len() > MAX_VALUE {
                     return Err(Trap::Host(TRAP_KV_LIMIT));
                 }
-                self.kv.put(key, val);
+                if !self.kv.put(key, val) {
+                    return Err(Trap::Host(TRAP_KV_QUOTA));
+                }
                 Ok(0)
             }
             HostFn::KvDel => {
@@ -290,6 +310,10 @@ mod tests {
     }
 
     fn with_ctx(f: impl FnOnce(&mut HostCtx, &mut [u8])) {
+        with_ctx_sized(4096, f)
+    }
+
+    fn with_ctx_sized(size: usize, f: impl FnOnce(&mut HostCtx, &mut [u8])) {
         let store = KvStore::open(None, KvConfig::default()).unwrap();
         let ns = store.ns("t");
         let log = LogRing::new("t", 10, 1000, false);
@@ -309,8 +333,30 @@ mod tests {
             sched: &mut sched,
             preempt: &pw,
         };
-        let mut mem = vec![0u8; 4096 + 8];
+        let mut mem = vec![0u8; size + 8];
         f(&mut ctx, &mut mem);
+    }
+
+    /// `call` with an over-long target is refused (-2) before the target is copied out of the slot; an over-long
+    /// body traps `Host(1)`. Both bound the transient copy a hostile instance can force (a slot is not `--mem`-counted
+    /// for these copies).
+    #[test]
+    fn call_target_and_body_are_capped() {
+        with_ctx_sized(128 << 10, |c, mem| {
+            // A target just over the cap: refused as unavailable, sched never invoked.
+            assert_eq!(c.dispatch(HostFn::Call, &[0, (MAX_CALL_TARGET + 1) as i64, 0, 0], mem), Ok(CALL_UNAVAILABLE));
+            // A target at the cap reaches the scheduler (unknown service here).
+            mem[0..6].copy_from_slice(b"echo/x");
+            assert_eq!(c.dispatch(HostFn::Call, &[0, 6, 10, 2], mem), Ok(201));
+        });
+        // Body over MAX_CALL_BODY traps like an oversize response.
+        with_ctx_sized(MAX_CALL_BODY + (64 << 10), |c, mem| {
+            mem[0..6].copy_from_slice(b"echo/x");
+            assert_eq!(
+                c.dispatch(HostFn::Call, &[0, 6, 0, (MAX_CALL_BODY + 1) as i64], mem),
+                Err(Trap::Host(TRAP_OUTPUT_LIMIT))
+            );
+        });
     }
 
     #[test]

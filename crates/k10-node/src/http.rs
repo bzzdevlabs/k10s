@@ -241,7 +241,10 @@ pub fn parse_head(buf: &[u8], lim: &Limits) -> Parse {
         };
     }
     let content_length = content_length.unwrap_or(0);
-    let limit = if target.starts_with("/_k10s/") { lim.max_admin_body } else { lim.max_body };
+    // Only `/_k10s/apply` carries a large body (a bundle with code blobs); every other endpoint (status, metrics,
+    // logs, health) and every service gets the ordinary body limit, so a big body cannot be aimed at them.
+    let is_apply = target.split('?').next() == Some("/_k10s/apply");
+    let limit = if is_apply { lim.max_admin_body } else { lim.max_body };
     if content_length > limit {
         return Parse::Error(413, "request body too large");
     }

@@ -17,6 +17,7 @@ license = "Apache-2.0"
 [workspace.dependencies]
 k10-ir = { path = "../crates/k10-ir", default-features = false }
 k10-mesh = { path = "../crates/k10-mesh", default-features = false }
+k10-jit = { path = "../crates/k10-jit", default-features = false }
 
 [profile.dev]
 panic = "abort"
@@ -28,3 +29,13 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 debug = false
+
+# The JIT compiler runs once per module at apply time: optimize it for size (it is the largest part of the image).
+[profile.release.package.k10-jit]
+opt-level = "s"
+
+[profile.release.package.k10-mesh]
+opt-level = "s"
+
+[profile.release.package.k10-metal]
+opt-level = "s"
