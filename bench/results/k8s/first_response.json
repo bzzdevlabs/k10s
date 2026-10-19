@@ -1,7 +1,7 @@
 {
  "experiment": "first_response",
  "env": {
-  "date": "2026-10-19T12:08:27+0200",
+  "date": "2026-10-19T21:51:33+0200",
   "host_kernel": "6.1.0-53-amd64",
   "host_cpu": "Intel(R) Core(TM) i7-7820HQ CPU @ 2.90GHz",
   "host_threads": 8,
@@ -23,25 +23,25 @@
  },
  "runs": [
   {
-   "scale_cmd_ms": 81,
-   "to_scheduled_ms": 164,
-   "to_ready_ms": 1617,
-   "to_first_http_ms": 1852,
-   "scheduled_to_first_http_ms": 1688
+   "scale_cmd_ms": 105,
+   "to_scheduled_ms": 197,
+   "to_ready_ms": 1172,
+   "to_first_http_ms": 1147,
+   "scheduled_to_first_http_ms": 950
   },
   {
-   "scale_cmd_ms": 119,
-   "to_scheduled_ms": 204,
-   "to_ready_ms": 1732,
-   "to_first_http_ms": 1835,
-   "scheduled_to_first_http_ms": 1631
+   "scale_cmd_ms": 98,
+   "to_scheduled_ms": 183,
+   "to_ready_ms": 1042,
+   "to_first_http_ms": 1165,
+   "scheduled_to_first_http_ms": 982
   },
   {
-   "scale_cmd_ms": 178,
-   "to_scheduled_ms": 272,
-   "to_ready_ms": 1839,
-   "to_first_http_ms": 1883,
-   "scheduled_to_first_http_ms": 1611
+   "scale_cmd_ms": 91,
+   "to_scheduled_ms": 183,
+   "to_ready_ms": 1790,
+   "to_first_http_ms": 1796,
+   "scheduled_to_first_http_ms": 1613
   }
  ]
 }

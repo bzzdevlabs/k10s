@@ -19,22 +19,29 @@ kube-proxy, sidecars, probes, and a control plane to manage it all. k10s isolate
 
 Design rationale: [docs/DESIGN.md](docs/DESIGN.md) · evidence from the literature: [docs/research.md](docs/research.md)
 
-## Measured on one laptop (preliminary)
+## Measured on one laptop
 
-i7-7820HQ (4 cores / 8 threads), all three systems on the same machine. The machine was shared with other jobs
-during these runs; final numbers will come from `bench/run-final.sh` on a quiet machine. Read
-[bench/results/COMPARISON.md](bench/results/COMPARISON.md) (and its caveats) before quoting.
+i7-7820HQ (4 cores / 8 threads); Kubernetes v1.34 (kind), the same Go services as bare processes, and k10s, each
+suite started on an idle machine by `bench/run-final.sh`. Details and caveats:
+[bench/results/COMPARISON.md](bench/results/COMPARISON.md) · summary: [docs/REPORT.md](docs/REPORT.md).
 
 | | Kubernetes (kind, 1 node) | k10s (1 node) |
 |---|---|---|
-| Idle platform memory (working set) | 579 MiB | 3.3 MiB |
-| Idle CPU | 13.6 % of a core | 0.04 % |
-| Memory per echo replica (N = 100) | 10.4 MiB | ~10 KiB |
-| Deploy one service → first HTTP 200 | 1.85 s | 15 ms |
-| Start 100 replicas/services → all serving | 18.3 s | 23 ms |
-| Node dies → its services answer again | ~350 s (pod eviction) | 5–13 ms (failover routing), re-placed ~1 s |
+| Idle platform memory (working set) | 583 MiB | 1.3 MiB |
+| Idle CPU | 21.9 % of a core | 0.10 % |
+| Memory per echo replica (N = 100) | 11.0 MiB | 10.2 KiB |
+| Deploy one service → first HTTP 200 | 1.17 s | 24 ms |
+| 100 replicas/services → all serving | 17.6 s | 28 ms |
+| echo at 64 connections | 87 k req/s | 180 k req/s |
+| Service-to-service hop at 64 connections | 25.6 k req/s | 171 k req/s |
+| CPU per echo request | 47 µs | 20 µs |
+| Hung node → workloads replaced elsewhere (3 nodes) | 353 s | 1.1 s |
+| Rolling update | 3.7 s, 11 failed probes | 0.022 s, 0 failed |
 | Echo artifact | 2.4 MB container image | 157 B module |
-| Node software | kubelet + containerd + runc 120 MB, plus control plane | one 1.6 MB static binary (node, JIT, compiler, CLI) |
+| Node software | kubelet + containerd + runc 120 MB, plus control plane | one 1.7 MB static binary (node, JIT, compiler, CLI) |
+
+k10s also outruns the same services run as bare Linux processes (echo 180 k vs 109 k req/s). It is slower on
+CPU-bound code: Ten's SHA-256 takes 2.5× as long as Go's hand-written assembly (1.1–1.6× vs portable Go).
 
 Bare metal (`metal/`, QEMU/KVM): a 694 KB kernel, ready ~3 ms after kernel entry, serving HTTP in 3 MiB of RAM;
 the same kernel joins a cluster of Linux-hosted nodes.

@@ -1,70 +1,44 @@
 {
  "experiment": "rollout",
  "env": {
-  "date": "2026-10-19T20:29:44+0200",
+  "date": "2026-10-20T00:52:16+0200",
   "host_kernel": "6.1.0-53-amd64",
   "host_cpu": "Intel(R) Core(TM) i7-7820HQ CPU @ 2.90GHz",
   "host_threads": 8,
   "host_mem_gib": 62.7,
   "loadavg": [
-   5.17,
-   4.73,
-   6.99
+   2.18,
+   3.02,
+   4.05
   ],
   "k10s_binary": "/home/qgerard/dev/k10s/bench/.cache/k10s/bin/k10s",
-  "k10s_binary_bytes": 11455728,
+  "k10s_binary_bytes": 11595032,
   "k10s_build": {
    "source": "/home/qgerard/dev/k10s/target/node/release/k10s",
-   "source_mtime": "2026-10-19T17:56:23+0200",
-   "copied_at": "2026-10-19T19:23:30+0200",
-   "git_rev": "d4e67f3",
+   "source_mtime": "2026-10-19T21:19:31+0200",
+   "copied_at": "2026-10-19T23:48:59+0200",
+   "git_rev": "412ad4f",
    "crates_dirty_at_copy": false,
-   "sha256": "2f87b7d18e2bab90",
+   "sha256": "3431263df371baf9",
    "crates_rs_files_newer_than_binary": 0
   },
   "note": "k10s node processes on the host kernel (not inside the Docker Desktop VM used by the kind baseline)",
   "shards_single": 8,
   "shards_cluster_node": 2,
   "cgroup_scopes": true,
-  "chain_module": "bench chain.ten"
+  "chain_module": "examples chain.ten"
  },
  "runs": [
   {
    "probes": 597,
    "failed_after_event": 0,
    "outage_window_ms": 0,
-   "apply_cmd_ms": 8.406438981182873,
-   "new_version_everywhere_ms": 15.322134015150368,
+   "apply_cmd_ms": 15.471805993001908,
+   "new_version_everywhere_ms": 22.11889799218625,
    "per_addr_ms": {
-    "127.0.0.1:28080": 10.24263899307698
+    "127.0.0.1:28080": 17.024416010826826
    },
-   "old_version_gone_ms": 15.98250400274992,
-   "not_switched": [],
-   "apply_ok": true,
-   "load": {
-    "requests": 11000,
-    "errors": 0,
-    "errors_by_kind": {},
-    "p99_us": 1432,
-    "max_us": 8151
-   },
-   "mode": "single-8",
-   "update": "v1->v2",
-   "replicas": 1,
-   "loadavg_start": 3.17,
-   "loadavg_end": 3.39,
-   "noisy": true
-  },
-  {
-   "probes": 597,
-   "failed_after_event": 0,
-   "outage_window_ms": 0,
-   "apply_cmd_ms": 9.122573013883084,
-   "new_version_everywhere_ms": 15.834694029763341,
-   "per_addr_ms": {
-    "127.0.0.1:28080": 10.739099001511931
-   },
-   "old_version_gone_ms": 16.41755399759859,
+   "old_version_gone_ms": 22.665488999336958,
    "not_switched": [],
    "apply_ok": true,
    "load": {
@@ -72,25 +46,77 @@
     "errors": 0,
     "errors_by_kind": {},
     "p99_us": 1448,
-    "max_us": 15849
+    "max_us": 5215
    },
    "mode": "single-8",
-   "update": "v2->v1",
+   "update": "v1->v2",
    "replicas": 1,
-   "loadavg_start": 3.39,
-   "loadavg_end": 3.02,
+   "loadavg_start": 1.51,
+   "loadavg_end": 1.51,
    "noisy": true
   },
   {
    "probes": 597,
    "failed_after_event": 0,
    "outage_window_ms": 0,
-   "apply_cmd_ms": 18.714172998443246,
-   "new_version_everywhere_ms": 25.43672698084265,
+   "apply_cmd_ms": 14.953112986404449,
+   "new_version_everywhere_ms": 21.854656981304288,
    "per_addr_ms": {
-    "127.0.0.1:28080": 20.347985031548887
+    "127.0.0.1:28080": 16.76181802758947
    },
-   "old_version_gone_ms": 26.031796995084733,
+   "old_version_gone_ms": 22.562053985893726,
+   "not_switched": [],
+   "apply_ok": true,
+   "load": {
+    "requests": 11000,
+    "errors": 0,
+    "errors_by_kind": {},
+    "p99_us": 1480,
+    "max_us": 8944
+   },
+   "mode": "single-8",
+   "update": "v2->v1",
+   "replicas": 1,
+   "loadavg_start": 1.63,
+   "loadavg_end": 1.69,
+   "noisy": true
+  },
+  {
+   "probes": 597,
+   "failed_after_event": 0,
+   "outage_window_ms": 0,
+   "apply_cmd_ms": 17.41562900133431,
+   "new_version_everywhere_ms": 24.41660303156823,
+   "per_addr_ms": {
+    "127.0.0.1:28080": 19.32983403094113
+   },
+   "old_version_gone_ms": 24.941829033195972,
+   "not_switched": [],
+   "apply_ok": true,
+   "load": {
+    "requests": 11000,
+    "errors": 0,
+    "errors_by_kind": {},
+    "p99_us": 1432,
+    "max_us": 16767
+   },
+   "mode": "single-8",
+   "update": "v1->v2",
+   "replicas": 1,
+   "loadavg_start": 1.56,
+   "loadavg_end": 1.47,
+   "noisy": true
+  },
+  {
+   "probes": 597,
+   "failed_after_event": 0,
+   "outage_window_ms": 0,
+   "apply_cmd_ms": 15.353135007899255,
+   "new_version_everywhere_ms": 23.6639819922857,
+   "per_addr_ms": {
+    "127.0.0.1:28080": 18.51862098556012
+   },
+   "old_version_gone_ms": 24.66489002108574,
    "not_switched": [],
    "apply_ok": true,
    "load": {
@@ -98,25 +124,25 @@
     "errors": 0,
     "errors_by_kind": {},
     "p99_us": 1448,
-    "max_us": 6701
+    "max_us": 7822
    },
    "mode": "single-8",
-   "update": "v1->v2",
+   "update": "v2->v1",
    "replicas": 1,
-   "loadavg_start": 3.1,
-   "loadavg_end": 2.93,
+   "loadavg_start": 1.47,
+   "loadavg_end": 1.66,
    "noisy": true
   },
   {
    "probes": 597,
    "failed_after_event": 0,
    "outage_window_ms": 0,
-   "apply_cmd_ms": 17.353667004499584,
-   "new_version_everywhere_ms": 23.96571502322331,
+   "apply_cmd_ms": 9.442471025977284,
+   "new_version_everywhere_ms": 16.626821015961468,
    "per_addr_ms": {
-    "127.0.0.1:28080": 18.90043105231598
+    "127.0.0.1:28080": 11.539942992385477
    },
-   "old_version_gone_ms": 24.53554404200986,
+   "old_version_gone_ms": 17.20158802345395,
    "not_switched": [],
    "apply_ok": true,
    "load": {
@@ -124,107 +150,81 @@
     "errors": 0,
     "errors_by_kind": {},
     "p99_us": 1432,
-    "max_us": 3181
-   },
-   "mode": "single-8",
-   "update": "v2->v1",
-   "replicas": 1,
-   "loadavg_start": 2.7,
-   "loadavg_end": 2.74,
-   "noisy": true
-  },
-  {
-   "probes": 597,
-   "failed_after_event": 0,
-   "outage_window_ms": 0,
-   "apply_cmd_ms": 14.728996029589325,
-   "new_version_everywhere_ms": 22.438549029175192,
-   "per_addr_ms": {
-    "127.0.0.1:28080": 17.34499301528558
-   },
-   "old_version_gone_ms": 23.050776042509824,
-   "not_switched": [],
-   "apply_ok": true,
-   "load": {
-    "requests": 11000,
-    "errors": 0,
-    "errors_by_kind": {},
-    "p99_us": 1464,
-    "max_us": 10720
+    "max_us": 7504
    },
    "mode": "single-8",
    "update": "v1->v2",
    "replicas": 1,
-   "loadavg_start": 2.68,
-   "loadavg_end": 2.59,
+   "loadavg_start": 1.66,
+   "loadavg_end": 1.9,
    "noisy": true
   },
   {
    "probes": 597,
    "failed_after_event": 0,
    "outage_window_ms": 0,
-   "apply_cmd_ms": 17.456967965699732,
-   "new_version_everywhere_ms": 24.0036670002155,
+   "apply_cmd_ms": 14.684063964523375,
+   "new_version_everywhere_ms": 21.64653199724853,
    "per_addr_ms": {
-    "127.0.0.1:28080": 18.943357979878783
+    "127.0.0.1:28080": 16.5796359651722
    },
-   "old_version_gone_ms": 24.50748800765723,
+   "old_version_gone_ms": 22.191140975337476,
    "not_switched": [],
    "apply_ok": true,
    "load": {
     "requests": 11000,
     "errors": 0,
     "errors_by_kind": {},
-    "p99_us": 1464,
-    "max_us": 6872
+    "p99_us": 1432,
+    "max_us": 8227
    },
    "mode": "single-8",
    "update": "v2->v1",
    "replicas": 1,
-   "loadavg_start": 2.59,
-   "loadavg_end": 2.93,
+   "loadavg_start": 1.9,
+   "loadavg_end": 1.56,
    "noisy": true
   },
   {
-   "probes": 596,
+   "probes": 597,
    "failed_after_event": 0,
    "outage_window_ms": 0,
-   "apply_cmd_ms": 9.403191972523928,
-   "new_version_everywhere_ms": 17.52840296830982,
+   "apply_cmd_ms": 10.608482989482582,
+   "new_version_everywhere_ms": 20.10684396373108,
    "per_addr_ms": {
-    "127.0.0.1:28181": 11.950893967878073,
-    "127.0.0.1:28182": 12.188396009150892,
-    "127.0.0.1:28183": 12.45615998050198
+    "127.0.0.1:28181": 14.00438096607104,
+    "127.0.0.1:28182": 14.48457600781694,
+    "127.0.0.1:28183": 14.946753974072635
    },
-   "old_version_gone_ms": 19.462435971945524,
+   "old_version_gone_ms": 22.94294099556282,
    "not_switched": [],
    "apply_ok": true,
    "load": {
     "requests": 11000,
     "errors": 0,
     "errors_by_kind": {},
-    "p99_us": 2864,
-    "max_us": 13285
+    "p99_us": 1448,
+    "max_us": 11637
    },
    "mode": "cluster-3",
    "update": "v1->v2",
    "replicas": 10,
-   "loadavg_start": 3.49,
-   "loadavg_end": 3.34,
+   "loadavg_start": 1.56,
+   "loadavg_end": 2.27,
    "noisy": true
   },
   {
    "probes": 598,
    "failed_after_event": 0,
    "outage_window_ms": 0,
-   "apply_cmd_ms": 14.657708001323044,
-   "new_version_everywhere_ms": 22.18370500486344,
+   "apply_cmd_ms": 14.692578988615423,
+   "new_version_everywhere_ms": 21.77222102181986,
    "per_addr_ms": {
-    "127.0.0.1:28181": 16.589078994002193,
-    "127.0.0.1:28182": 16.863027994986624,
-    "127.0.0.1:28183": 17.08409801358357
+    "127.0.0.1:28181": 16.276467009447515,
+    "127.0.0.1:28182": 16.46540203364566,
+    "127.0.0.1:28183": 16.701447020750493
    },
-   "old_version_gone_ms": 23.796560999471694,
+   "old_version_gone_ms": 23.290687007829547,
    "not_switched": [],
    "apply_ok": true,
    "load": {
@@ -232,55 +232,27 @@
     "errors": 0,
     "errors_by_kind": {},
     "p99_us": 1432,
-    "max_us": 16819
+    "max_us": 8006
    },
    "mode": "cluster-3",
    "update": "v2->v1",
    "replicas": 10,
-   "loadavg_start": 3.34,
-   "loadavg_end": 3.04,
-   "noisy": true
-  },
-  {
-   "probes": 598,
-   "failed_after_event": 0,
-   "outage_window_ms": 0,
-   "apply_cmd_ms": 17.627959023229778,
-   "new_version_everywhere_ms": 24.71505501307547,
-   "per_addr_ms": {
-    "127.0.0.1:28181": 19.259122025687248,
-    "127.0.0.1:28182": 19.429544976446778,
-    "127.0.0.1:28183": 19.652121991384774
-   },
-   "old_version_gone_ms": 26.268147979862988,
-   "not_switched": [],
-   "apply_ok": true,
-   "load": {
-    "requests": 11000,
-    "errors": 0,
-    "errors_by_kind": {},
-    "p99_us": 1432,
-    "max_us": 4115
-   },
-   "mode": "cluster-3",
-   "update": "v1->v2",
-   "replicas": 10,
-   "loadavg_start": 3.04,
-   "loadavg_end": 4.11,
+   "loadavg_start": 2.27,
+   "loadavg_end": 2.11,
    "noisy": true
   },
   {
    "probes": 597,
    "failed_after_event": 0,
    "outage_window_ms": 0,
-   "apply_cmd_ms": 9.431220008991659,
-   "new_version_everywhere_ms": 16.99974900111556,
+   "apply_cmd_ms": 20.1788010308519,
+   "new_version_everywhere_ms": 33.0059039988555,
    "per_addr_ms": {
-    "127.0.0.1:28181": 11.508015973959118,
-    "127.0.0.1:28182": 11.714570980984718,
-    "127.0.0.1:28183": 11.917355004698038
+    "127.0.0.1:28181": 26.274016010574996,
+    "127.0.0.1:28182": 27.035312028601766,
+    "127.0.0.1:28183": 27.873425045982003
    },
-   "old_version_gone_ms": 18.401748966425657,
+   "old_version_gone_ms": 36.09012602828443,
    "not_switched": [],
    "apply_ok": true,
    "load": {
@@ -288,55 +260,55 @@
     "errors": 0,
     "errors_by_kind": {},
     "p99_us": 1432,
-    "max_us": 4921
+    "max_us": 7098
+   },
+   "mode": "cluster-3",
+   "update": "v1->v2",
+   "replicas": 10,
+   "loadavg_start": 2.11,
+   "loadavg_end": 2.31,
+   "noisy": true
+  },
+  {
+   "probes": 597,
+   "failed_after_event": 0,
+   "outage_window_ms": 0,
+   "apply_cmd_ms": 15.84636198822409,
+   "new_version_everywhere_ms": 23.997740994673222,
+   "per_addr_ms": {
+    "127.0.0.1:28181": 18.461686035152525,
+    "127.0.0.1:28182": 18.690439988858998,
+    "127.0.0.1:28183": 18.928678997326642
+   },
+   "old_version_gone_ms": 25.594507984351367,
+   "not_switched": [],
+   "apply_ok": true,
+   "load": {
+    "requests": 11000,
+    "errors": 0,
+    "errors_by_kind": {},
+    "p99_us": 2064,
+    "max_us": 12776
    },
    "mode": "cluster-3",
    "update": "v2->v1",
    "replicas": 10,
-   "loadavg_start": 4.11,
-   "loadavg_end": 4.8,
+   "loadavg_start": 2.31,
+   "loadavg_end": 2.48,
    "noisy": true
   },
   {
    "probes": 597,
    "failed_after_event": 0,
    "outage_window_ms": 0,
-   "apply_cmd_ms": 15.893357980530709,
-   "new_version_everywhere_ms": 23.145993996877223,
+   "apply_cmd_ms": 15.271232987288386,
+   "new_version_everywhere_ms": 22.48695696471259,
    "per_addr_ms": {
-    "127.0.0.1:28181": 17.59762701112777,
-    "127.0.0.1:28182": 17.816228966694325,
-    "127.0.0.1:28183": 18.050409969873726
+    "127.0.0.1:28181": 16.95102296071127,
+    "127.0.0.1:28182": 17.210963007528335,
+    "127.0.0.1:28183": 17.4236879684031
    },
-   "old_version_gone_ms": 24.54156498424709,
-   "not_switched": [],
-   "apply_ok": true,
-   "load": {
-    "requests": 11000,
-    "errors": 0,
-    "errors_by_kind": {},
-    "p99_us": 1432,
-    "max_us": 12271
-   },
-   "mode": "cluster-3",
-   "update": "v1->v2",
-   "replicas": 10,
-   "loadavg_start": 4.8,
-   "loadavg_end": 5.1,
-   "noisy": true
-  },
-  {
-   "probes": 597,
-   "failed_after_event": 0,
-   "outage_window_ms": 0,
-   "apply_cmd_ms": 14.59821395110339,
-   "new_version_everywhere_ms": 22.12949696695432,
-   "per_addr_ms": {
-    "127.0.0.1:28181": 16.622244962491095,
-    "127.0.0.1:28182": 16.811452980618924,
-    "127.0.0.1:28183": 17.066703003365546
-   },
-   "old_version_gone_ms": 23.671245959121734,
+   "old_version_gone_ms": 23.941204010043293,
    "not_switched": [],
    "apply_ok": true,
    "load": {
@@ -344,13 +316,41 @@
     "errors": 0,
     "errors_by_kind": {},
     "p99_us": 1464,
-    "max_us": 14618
+    "max_us": 14824
+   },
+   "mode": "cluster-3",
+   "update": "v1->v2",
+   "replicas": 10,
+   "loadavg_start": 2.36,
+   "loadavg_end": 2.16,
+   "noisy": true
+  },
+  {
+   "probes": 597,
+   "failed_after_event": 0,
+   "outage_window_ms": 0,
+   "apply_cmd_ms": 14.549263985827565,
+   "new_version_everywhere_ms": 22.082768962718546,
+   "per_addr_ms": {
+    "127.0.0.1:28181": 16.418359999079257,
+    "127.0.0.1:28182": 16.696345002856106,
+    "127.0.0.1:28183": 17.01614900957793
+   },
+   "old_version_gone_ms": 23.735105991363525,
+   "not_switched": [],
+   "apply_ok": true,
+   "load": {
+    "requests": 11000,
+    "errors": 0,
+    "errors_by_kind": {},
+    "p99_us": 1448,
+    "max_us": 13011
    },
    "mode": "cluster-3",
    "update": "v2->v1",
    "replicas": 10,
-   "loadavg_start": 5.01,
-   "loadavg_end": 5.18,
+   "loadavg_start": 2.31,
+   "loadavg_end": 2.18,
    "noisy": true
   }
  ]

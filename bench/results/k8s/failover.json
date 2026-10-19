@@ -1,7 +1,7 @@
 {
  "experiment": "failover",
  "env": {
-  "date": "2026-10-19T12:25:08+0200",
+  "date": "2026-10-19T22:15:13+0200",
   "host_kernel": "6.1.0-53-amd64",
   "host_cpu": "Intel(R) Core(TM) i7-7820HQ CPU @ 2.90GHz",
   "host_threads": 8,
@@ -23,117 +23,117 @@
  },
  "runs": [
   {
-   "probes": 601,
-   "failed_after_event": 13,
-   "first_fail_ms_after_event": 90,
-   "last_fail_ms_after_event": 1780,
-   "first_success_after_last_fail_ms": 2283,
-   "outage_window_ms": 1690,
+   "probes": 648,
+   "failed_after_event": 12,
+   "first_fail_ms_after_event": 210,
+   "last_fail_ms_after_event": 912,
+   "first_success_after_last_fail_ms": 1412,
+   "outage_window_ms": 702,
    "scenario": "1-replica-graceful",
    "repeat": 1,
-   "replacement_ready_ms": 1631
-  },
-  {
-   "probes": 649,
-   "failed_after_event": 10,
-   "first_fail_ms_after_event": 94,
-   "last_fail_ms_after_event": 757,
-   "first_success_after_last_fail_ms": 1259,
-   "outage_window_ms": 663,
-   "scenario": "1-replica-graceful",
-   "repeat": 2,
-   "replacement_ready_ms": 1167
+   "replacement_ready_ms": 1207
   },
   {
    "probes": 599,
-   "failed_after_event": 15,
-   "first_fail_ms_after_event": 133,
-   "last_fail_ms_after_event": 1867,
-   "first_success_after_last_fail_ms": 2370,
-   "outage_window_ms": 1734,
+   "failed_after_event": 12,
+   "first_fail_ms_after_event": 153,
+   "last_fail_ms_after_event": 1817,
+   "first_success_after_last_fail_ms": 2319,
+   "outage_window_ms": 1664,
+   "scenario": "1-replica-graceful",
+   "repeat": 2,
+   "replacement_ready_ms": 1689
+  },
+  {
+   "probes": 648,
+   "failed_after_event": 17,
+   "first_fail_ms_after_event": 265,
+   "last_fail_ms_after_event": 1067,
+   "first_success_after_last_fail_ms": 1568,
+   "outage_window_ms": 802,
    "scenario": "1-replica-graceful",
    "repeat": 3,
-   "replacement_ready_ms": 1490
+   "replacement_ready_ms": 1300
   },
   {
-   "probes": 634,
+   "probes": 600,
    "failed_after_event": 11,
-   "first_fail_ms_after_event": 74,
-   "last_fail_ms_after_event": 896,
-   "first_success_after_last_fail_ms": 1399,
-   "outage_window_ms": 822,
+   "first_fail_ms_after_event": 211,
+   "last_fail_ms_after_event": 1856,
+   "first_success_after_last_fail_ms": 2357,
+   "outage_window_ms": 1645,
    "scenario": "1-replica-forced",
    "repeat": 1,
-   "replacement_ready_ms": 1085
+   "replacement_ready_ms": 1780
   },
   {
-   "probes": 597,
-   "failed_after_event": 20,
-   "first_fail_ms_after_event": 125,
-   "last_fail_ms_after_event": 1967,
-   "first_success_after_last_fail_ms": 2470,
-   "outage_window_ms": 1842,
+   "probes": 648,
+   "failed_after_event": 11,
+   "first_fail_ms_after_event": 114,
+   "last_fail_ms_after_event": 808,
+   "first_success_after_last_fail_ms": 1308,
+   "outage_window_ms": 694,
    "scenario": "1-replica-forced",
    "repeat": 2,
-   "replacement_ready_ms": 1419
+   "replacement_ready_ms": 1138
   },
   {
-   "probes": 597,
-   "failed_after_event": 19,
-   "first_fail_ms_after_event": 116,
-   "last_fail_ms_after_event": 1932,
-   "first_success_after_last_fail_ms": 2433,
-   "outage_window_ms": 1816,
+   "probes": 599,
+   "failed_after_event": 12,
+   "first_fail_ms_after_event": 92,
+   "last_fail_ms_after_event": 1756,
+   "first_success_after_last_fail_ms": 2257,
+   "outage_window_ms": 1664,
    "scenario": "1-replica-forced",
    "repeat": 3,
-   "replacement_ready_ms": 1822
+   "replacement_ready_ms": 1704
   },
   {
    "scenario": "3-replicas-delete-1-under-300rps",
    "repeat": 1,
-   "requests": 3594,
-   "errors": 7,
+   "requests": 3597,
+   "errors": 4,
    "errors_by_kind": {
-    "read": 7
+    "read": 4
    },
    "latency_us": {
-    "max": 32155,
-    "p50": 1432,
-    "p90": 2800,
-    "p99": 10560,
-    "p99.9": 15936
+    "max": 120541,
+    "p50": 2416,
+    "p90": 3248,
+    "p99": 7136,
+    "p99.9": 28800
    }
   },
   {
    "scenario": "3-replicas-delete-1-under-300rps",
    "repeat": 2,
-   "requests": 3594,
-   "errors": 7,
+   "requests": 3595,
+   "errors": 6,
    "errors_by_kind": {
-    "read": 7
+    "read": 6
    },
    "latency_us": {
-    "max": 28936,
-    "p50": 1464,
-    "p90": 3152,
-    "p99": 13376,
-    "p99.9": 23424
+    "max": 24931,
+    "p50": 2416,
+    "p90": 3248,
+    "p99": 5920,
+    "p99.9": 16192
    }
   },
   {
    "scenario": "3-replicas-delete-1-under-300rps",
    "repeat": 3,
-   "requests": 3593,
-   "errors": 8,
+   "requests": 3598,
+   "errors": 3,
    "errors_by_kind": {
-    "read": 8
+    "read": 3
    },
    "latency_us": {
-    "max": 28423,
-    "p50": 1384,
-    "p90": 2512,
-    "p99": 11840,
-    "p99.9": 23936
+    "max": 22918,
+    "p50": 2480,
+    "p90": 3280,
+    "p99": 6432,
+    "p99.9": 16320
    }
   }
  ]

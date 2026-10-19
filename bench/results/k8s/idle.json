@@ -1,7 +1,7 @@
 {
  "experiment": "idle",
  "env": {
-  "date": "2026-10-19T11:56:56+0200",
+  "date": "2026-10-19T21:39:57+0200",
   "host_kernel": "6.1.0-53-amd64",
   "host_cpu": "Intel(R) Core(TM) i7-7820HQ CPU @ 2.90GHz",
   "host_threads": 8,
@@ -23,109 +23,109 @@
  },
  "runs": [
   {
-   "window_s": 60.298134088516235,
-   "cluster_working_set_mib": 573.9140625,
-   "cluster_mem_current_mib": 1313.875,
-   "cluster_cpu_cores": 0.1755275376260062,
-   "rss_sum_mib": 1041.28515625,
-   "pss_sum_mib": 919.7705078125,
+   "window_s": 60.31103515625,
+   "cluster_working_set_mib": 575.09765625,
+   "cluster_mem_current_mib": 1314.703125,
+   "cluster_cpu_cores": 0.22176788982893042,
+   "rss_sum_mib": 1048.20703125,
+   "pss_sum_mib": 926.435546875,
    "nodes": {
     "k10s-bench-control-plane": {
-     "working_set_mib": 573.9140625,
-     "mem_current_mib": 1313.875,
-     "anon_mib": 486.52734375,
-     "kernel_mib": 57.5625,
-     "cpu_cores": 0.1755275376260062
+     "working_set_mib": 575.09765625,
+     "mem_current_mib": 1314.703125,
+     "anon_mib": 493.08203125,
+     "kernel_mib": 57.61328125,
+     "cpu_cores": 0.22176788982893042
     }
    },
    "components": {
     "systemd": {
-     "rss_mib": 12.828125,
-     "pss_mib": 9.17578125,
+     "rss_mib": 12.80859375,
+     "pss_mib": 9.201171875,
      "procs": 1,
-     "cpu_core_pct": 0.0
-    },
-    "containerd-shim": {
-     "rss_mib": 109.9921875,
-     "pss_mib": 51.32421875,
-     "procs": 9,
-     "cpu_core_pct": 0.19901113328621886
-    },
-    "pause": {
-     "rss_mib": 6.61328125,
-     "pss_mib": 1.041015625,
-     "procs": 9,
      "cpu_core_pct": 0.0
     },
     "containerd": {
-     "rss_mib": 66.12109375,
-     "pss_mib": 64.96875,
+     "rss_mib": 65.62109375,
+     "pss_mib": 64.4716796875,
      "procs": 1,
-     "cpu_core_pct": 0.9121343608951697
+     "cpu_core_pct": 1.1606499510188881
+    },
+    "containerd-shim": {
+     "rss_mib": 113.3359375,
+     "pss_mib": 54.66796875,
+     "procs": 9,
+     "cpu_core_pct": 0.4808406939935394
+    },
+    "pause": {
+     "rss_mib": 6.59375,
+     "pss_mib": 1.021484375,
+     "procs": 9,
+     "cpu_core_pct": 0.0
     },
     "kube-proxy": {
-     "rss_mib": 50.5703125,
-     "pss_mib": 50.56640625,
+     "rss_mib": 50.203125,
+     "pss_mib": 50.19921875,
      "procs": 1,
-     "cpu_core_pct": 0.04975278332155471
+     "cpu_core_pct": 0.06632285434393646
     },
     "kindnetd": {
-     "rss_mib": 46.27734375,
-     "pss_mib": 46.2734375,
+     "rss_mib": 47.5,
+     "pss_mib": 47.49609375,
      "procs": 1,
-     "cpu_core_pct": 0.033168522214369806
+     "cpu_core_pct": 0.03316142717196823
     },
     "coredns": {
-     "rss_mib": 125.3046875,
-     "pss_mib": 78.765625,
+     "rss_mib": 123.8515625,
+     "pss_mib": 76.94140625,
      "procs": 2,
-     "cpu_core_pct": 0.48094357210836225
+     "cpu_core_pct": 0.6466478298533805
     },
     "local-path-provisioner": {
-     "rss_mib": 35.9921875,
-     "pss_mib": 35.98828125,
+     "rss_mib": 36.03515625,
+     "pss_mib": 36.03125,
      "procs": 1,
-     "cpu_core_pct": 0.016584261107184903
+     "cpu_core_pct": 0.0
     },
     "sh": {
-     "rss_mib": 1.65234375,
-     "pss_mib": 0.52734375,
+     "rss_mib": 1.62890625,
+     "pss_mib": 0.515625,
      "procs": 1,
      "cpu_core_pct": 0.0
     },
     "kube-scheduler": {
-     "rss_mib": 57.9375,
-     "pss_mib": 57.93359375,
+     "rss_mib": 59.859375,
+     "pss_mib": 59.85546875,
      "procs": 1,
-     "cpu_core_pct": 1.0779769719670187
+     "cpu_core_pct": 1.3927799412226658
     },
     "kube-controller-manager": {
-     "rss_mib": 110.578125,
-     "pss_mib": 110.57421875,
+     "rss_mib": 110.27734375,
+     "pss_mib": 110.2734375,
      "procs": 1,
-     "cpu_core_pct": 2.6700660382567696
+     "cpu_core_pct": 3.1503355813369818
     },
     "kube-apiserver": {
-     "rss_mib": 261.546875,
-     "pss_mib": 261.54296875,
+     "rss_mib": 265.9375,
+     "pss_mib": 265.93359375,
      "procs": 1,
-     "cpu_core_pct": 5.20745798765606
+     "cpu_core_pct": 6.748350429495535
     },
     "etcd": {
-     "rss_mib": 56.49609375,
-     "pss_mib": 56.4921875,
+     "rss_mib": 55.54296875,
+     "pss_mib": 55.5390625,
      "procs": 1,
-     "cpu_core_pct": 2.9851669992932823
+     "cpu_core_pct": 3.680918416088474
     },
     "kubelet": {
-     "rss_mib": 88.51953125,
-     "pss_mib": 87.3427734375,
+     "rss_mib": 88.13671875,
+     "pss_mib": 86.966796875,
      "procs": 1,
-     "cpu_core_pct": 3.631953182473494
+     "cpu_core_pct": 4.659180517661537
     },
     "systemd-journal": {
-     "rss_mib": 10.85546875,
-     "pss_mib": 7.25390625,
+     "rss_mib": 10.875,
+     "pss_mib": 7.3212890625,
      "procs": 1,
      "cpu_core_pct": 0.0
     }
@@ -133,115 +133,115 @@
    "docker_stats": [
     {
      "name": "k10s-bench-control-plane",
-     "cpu": "13.87%",
-     "mem": "573.3MiB / 15.62GiB"
+     "cpu": "19.89%",
+     "mem": "574.4MiB / 15.62GiB"
     }
    ]
   },
   {
-   "window_s": 61.23172307014465,
-   "cluster_working_set_mib": 578.97265625,
-   "cluster_mem_current_mib": 1319.04296875,
-   "cluster_cpu_cores": 0.1330365632642445,
-   "rss_sum_mib": 1043.83203125,
-   "pss_sum_mib": 922.328125,
+   "window_s": 60.307196855545044,
+   "cluster_working_set_mib": 583.84765625,
+   "cluster_mem_current_mib": 1323.59765625,
+   "cluster_cpu_cores": 0.21749271536227927,
+   "rss_sum_mib": 1056.30859375,
+   "pss_sum_mib": 934.4677734375,
    "nodes": {
     "k10s-bench-control-plane": {
-     "working_set_mib": 578.97265625,
-     "mem_current_mib": 1319.04296875,
-     "anon_mib": 488.9375,
-     "kernel_mib": 57.55078125,
-     "cpu_cores": 0.1330365632642445
+     "working_set_mib": 583.84765625,
+     "mem_current_mib": 1323.59765625,
+     "anon_mib": 500.96484375,
+     "kernel_mib": 57.6640625,
+     "cpu_cores": 0.21749271536227927
     }
    },
    "components": {
     "systemd": {
-     "rss_mib": 12.828125,
-     "pss_mib": 9.1943359375,
+     "rss_mib": 12.80859375,
+     "pss_mib": 9.193359375,
      "procs": 1,
-     "cpu_core_pct": 0.0
-    },
-    "containerd-shim": {
-     "rss_mib": 109.94921875,
-     "pss_mib": 51.28125,
-     "procs": 9,
-     "cpu_core_pct": 0.27763386603583684
-    },
-    "pause": {
-     "rss_mib": 6.61328125,
-     "pss_mib": 1.041015625,
-     "procs": 9,
-     "cpu_core_pct": 0.0
+     "cpu_core_pct": 0.016581768879016523
     },
     "containerd": {
-     "rss_mib": 67.58203125,
-     "pss_mib": 66.4521484375,
+     "rss_mib": 65.73828125,
+     "pss_mib": 64.59765625,
      "procs": 1,
-     "cpu_core_pct": 0.8002387903385885
+     "cpu_core_pct": 1.2436326659262393
+    },
+    "containerd-shim": {
+     "rss_mib": 113.16796875,
+     "pss_mib": 54.5,
+     "procs": 9,
+     "cpu_core_pct": 0.2818900709432809
+    },
+    "pause": {
+     "rss_mib": 6.59375,
+     "pss_mib": 1.021484375,
+     "procs": 9,
+     "cpu_core_pct": 0.0
     },
     "kube-proxy": {
-     "rss_mib": 50.5703125,
-     "pss_mib": 50.56640625,
+     "rss_mib": 50.203125,
+     "pss_mib": 50.19921875,
      "procs": 1,
-     "cpu_core_pct": 0.01633140388446099
+     "cpu_core_pct": 0.016581768879016523
     },
     "kindnetd": {
-     "rss_mib": 46.27734375,
-     "pss_mib": 46.2734375,
+     "rss_mib": 46.92578125,
+     "pss_mib": 46.921875,
      "procs": 1,
-     "cpu_core_pct": 0.01633140388446099
+     "cpu_core_pct": 0.033163537758033046
     },
     "coredns": {
-     "rss_mib": 125.62890625,
-     "pss_mib": 79.03515625,
+     "rss_mib": 126.2265625,
+     "pss_mib": 79.2578125,
      "procs": 2,
-     "cpu_core_pct": 0.42461650099598575
+     "cpu_core_pct": 0.6632707551606609
     },
     "local-path-provisioner": {
-     "rss_mib": 35.89453125,
-     "pss_mib": 35.890625,
+     "rss_mib": 36.1484375,
+     "pss_mib": 36.14453125,
      "procs": 1,
-     "cpu_core_pct": 0.0
+     "cpu_core_pct": 0.033163537758033046
     },
     "sh": {
      "rss_mib": 1.625,
-     "pss_mib": 0.533203125,
+     "pss_mib": 0.5068359375,
      "procs": 1,
      "cpu_core_pct": 0.0
     },
     "kube-scheduler": {
-     "rss_mib": 57.99609375,
-     "pss_mib": 57.9921875,
+     "rss_mib": 59.97265625,
+     "pss_mib": 59.96875,
      "procs": 1,
-     "cpu_core_pct": 0.7185817709162835
+     "cpu_core_pct": 1.2933779725632888
     },
     "kube-controller-manager": {
-     "rss_mib": 107.05078125,
-     "pss_mib": 107.046875,
+     "rss_mib": 110.58984375,
+     "pss_mib": 110.5859375,
      "procs": 1,
-     "cpu_core_pct": 1.9760998700197798
+     "cpu_core_pct": 2.8023189405537927
     },
     "kube-apiserver": {
-     "rss_mib": 265.64453125,
-     "pss_mib": 265.640625,
+     "rss_mib": 269.44921875,
+     "pss_mib": 269.4453125,
      "procs": 1,
-     "cpu_core_pct": 3.8705427206172547
+     "cpu_core_pct": 6.86485231591284
     },
     "etcd": {
-     "rss_mib": 56.65234375,
-     "pss_mib": 56.6484375,
+     "rss_mib": 55.6953125,
+     "pss_mib": 55.69140625,
      "procs": 1,
-     "cpu_core_pct": 2.155745312748851
+     "cpu_core_pct": 3.48217146459347
     },
     "kubelet": {
-     "rss_mib": 88.6640625,
-     "pss_mib": 87.482421875,
+     "rss_mib": 90.2890625,
+     "pss_mib": 89.1171875,
      "procs": 1,
-     "cpu_core_pct": 2.5476990059759146
+     "cpu_core_pct": 4.609731748366594
     },
     "systemd-journal": {
-     "rss_mib": 10.85546875,
-     "pss_mib": 7.25,
+     "rss_mib": 10.875,
+     "pss_mib": 7.31640625,
      "procs": 1,
      "cpu_core_pct": 0.0
     }
@@ -249,115 +249,115 @@
    "docker_stats": [
     {
      "name": "k10s-bench-control-plane",
-     "cpu": "13.76%",
-     "mem": "578.4MiB / 15.62GiB"
+     "cpu": "22.26%",
+     "mem": "583.8MiB / 15.62GiB"
     }
    ]
   },
   {
-   "window_s": 60.30367684364319,
-   "cluster_working_set_mib": 583.54296875,
-   "cluster_mem_current_mib": 1323.75390625,
-   "cluster_cpu_cores": 0.1364004556691815,
-   "rss_sum_mib": 1049.09375,
-   "pss_sum_mib": 927.4638671875,
+   "window_s": 60.30319786071777,
+   "cluster_working_set_mib": 583.171875,
+   "cluster_mem_current_mib": 1323.08203125,
+   "cluster_cpu_cores": 0.2185717750896588,
+   "rss_sum_mib": 1050.84765625,
+   "pss_sum_mib": 929.0302734375,
    "nodes": {
     "k10s-bench-control-plane": {
-     "working_set_mib": 583.54296875,
-     "mem_current_mib": 1323.75390625,
-     "anon_mib": 494.08203125,
-     "kernel_mib": 57.57421875,
-     "cpu_cores": 0.1364004556691815
+     "working_set_mib": 583.171875,
+     "mem_current_mib": 1323.08203125,
+     "anon_mib": 495.31640625,
+     "kernel_mib": 57.66796875,
+     "cpu_cores": 0.2185717750896588
     }
    },
    "components": {
     "systemd": {
-     "rss_mib": 12.828125,
-     "pss_mib": 9.1708984375,
+     "rss_mib": 12.80859375,
+     "pss_mib": 9.2041015625,
      "procs": 1,
-     "cpu_core_pct": 0.0
-    },
-    "containerd-shim": {
-     "rss_mib": 109.984375,
-     "pss_mib": 51.31640625,
-     "procs": 9,
-     "cpu_core_pct": 0.2819065252700595
-    },
-    "pause": {
-     "rss_mib": 6.61328125,
-     "pss_mib": 1.041015625,
-     "procs": 9,
      "cpu_core_pct": 0.0
     },
     "containerd": {
-     "rss_mib": 68.0390625,
-     "pss_mib": 66.89453125,
+     "rss_mib": 66.125,
+     "pss_mib": 64.9970703125,
      "procs": 1,
-     "cpu_core_pct": 0.6964749447848528
+     "cpu_core_pct": 1.0115549782433035
+    },
+    "containerd-shim": {
+     "rss_mib": 113.0234375,
+     "pss_mib": 54.35546875,
+     "procs": 9,
+     "cpu_core_pct": 0.3316573699158373
+    },
+    "pause": {
+     "rss_mib": 6.59375,
+     "pss_mib": 1.021484375,
+     "procs": 9,
+     "cpu_core_pct": 0.0
     },
     "kube-proxy": {
-     "rss_mib": 48.94921875,
-     "pss_mib": 48.9453125,
+     "rss_mib": 49.39453125,
+     "pss_mib": 49.390625,
      "procs": 1,
-     "cpu_core_pct": 0.016582736780591734
+     "cpu_core_pct": 0.08291434247895932
     },
     "kindnetd": {
-     "rss_mib": 46.234375,
-     "pss_mib": 46.23046875,
+     "rss_mib": 46.9375,
+     "pss_mib": 46.93359375,
      "procs": 1,
-     "cpu_core_pct": 0.016582736780591734
+     "cpu_core_pct": 0.049748605487375586
     },
     "coredns": {
-     "rss_mib": 125.65625,
-     "pss_mib": 79.06640625,
+     "rss_mib": 126.5390625,
+     "pss_mib": 79.5703125,
      "procs": 2,
-     "cpu_core_pct": 0.315071998831243
+     "cpu_core_pct": 0.613566134344299
     },
     "local-path-provisioner": {
-     "rss_mib": 35.89453125,
-     "pss_mib": 35.890625,
+     "rss_mib": 36.1484375,
+     "pss_mib": 36.14453125,
      "procs": 1,
-     "cpu_core_pct": 0.016582736780591734
+     "cpu_core_pct": 0.016582868495791863
     },
     "sh": {
-     "rss_mib": 1.67578125,
-     "pss_mib": 0.509765625,
+     "rss_mib": 1.59375,
+     "pss_mib": 0.4951171875,
      "procs": 1,
      "cpu_core_pct": 0.0
     },
     "kube-scheduler": {
-     "rss_mib": 60.02734375,
-     "pss_mib": 60.0234375,
+     "rss_mib": 59.98828125,
+     "pss_mib": 59.984375,
      "procs": 1,
-     "cpu_core_pct": 0.7959713654684033
+     "cpu_core_pct": 1.4261266906381003
     },
     "kube-controller-manager": {
-     "rss_mib": 107.078125,
-     "pss_mib": 107.07421875,
+     "rss_mib": 105.12890625,
+     "pss_mib": 105.125,
      "procs": 1,
-     "cpu_core_pct": 1.940180203329233
+     "cpu_core_pct": 2.9517505922509515
     },
     "kube-apiserver": {
-     "rss_mib": 265.67578125,
-     "pss_mib": 265.671875,
+     "rss_mib": 269.5078125,
+     "pss_mib": 269.50390625,
      "procs": 1,
-     "cpu_core_pct": 3.830612196316691
+     "cpu_core_pct": 7.080884847703124
     },
     "etcd": {
-     "rss_mib": 58.7890625,
-     "pss_mib": 58.78515625,
+     "rss_mib": 55.8125,
+     "pss_mib": 55.80859375,
      "procs": 1,
-     "cpu_core_pct": 2.2055039918187007
+     "cpu_core_pct": 3.6648139375700017
     },
     "kubelet": {
-     "rss_mib": 90.79296875,
-     "pss_mib": 89.607421875,
+     "rss_mib": 90.37109375,
+     "pss_mib": 89.193359375,
      "procs": 1,
-     "cpu_core_pct": 2.9848926205065123
+     "cpu_core_pct": 4.3778772828890515
     },
     "systemd-journal": {
-     "rss_mib": 10.85546875,
-     "pss_mib": 7.236328125,
+     "rss_mib": 10.875,
+     "pss_mib": 7.302734375,
      "procs": 1,
      "cpu_core_pct": 0.0
     }
@@ -365,8 +365,8 @@
    "docker_stats": [
     {
      "name": "k10s-bench-control-plane",
-     "cpu": "10.24%",
-     "mem": "582.9MiB / 15.62GiB"
+     "cpu": "15.48%",
+     "mem": "582.4MiB / 15.62GiB"
     }
    ]
   }

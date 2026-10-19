@@ -1,7 +1,7 @@
 {
  "experiment": "nodefail",
  "env": {
-  "date": "2026-10-19T11:52:01+0200",
+  "date": "2026-10-19T22:52:40+0200",
   "host_kernel": "6.1.0-53-amd64",
   "host_cpu": "Intel(R) Core(TM) i7-7820HQ CPU @ 2.90GHz",
   "host_threads": 8,
@@ -23,45 +23,45 @@
  },
  "runs": [
   {
-   "node_notready_s": 48.7,
-   "node_tainted_unreachable_s": 48.7,
+   "node_notready_s": 51.1,
+   "node_tainted_unreachable_s": 51.1,
    "initial_ready_endpoints": 6,
-   "endpoints_reduced_s": 48.7,
-   "pods_marked_notready_on_victim_s": 48.7,
-   "first_pod_terminating_s": 349.5,
-   "replacement_pod_created_s": 349.5,
-   "all_replicas_ready_on_healthy_nodes_s": 349.5,
+   "endpoints_reduced_s": 51.1,
+   "pods_marked_notready_on_victim_s": 51.1,
+   "first_pod_terminating_s": 350.7,
+   "replacement_pod_created_s": 350.7,
+   "all_replicas_ready_on_healthy_nodes_s": 353.3,
    "probe": {
-    "probes_after_failure": 3369,
-    "failed": 78,
+    "probes_after_failure": 3422,
+    "failed": 77,
     "fail_ratio": 0.023,
-    "first_fail_s": 0.2,
-    "last_fail_s": 135.3
+    "first_fail_s": 0.1,
+    "last_fail_s": 46.3
    },
    "mode": "pause",
    "cap_s": 390,
-   "waited_s": 369,
+   "waited_s": 374,
    "initial_pod_distribution": " 3 k10s-bench3-worker; 3 k10s-bench3-worker2;"
   },
   {
-   "node_notready_s": 52.1,
-   "node_tainted_unreachable_s": 52.1,
+   "node_notready_s": 51.1,
+   "node_tainted_unreachable_s": 51.1,
    "initial_ready_endpoints": 6,
-   "endpoints_reduced_s": 52.1,
-   "pods_marked_notready_on_victim_s": 52.1,
-   "first_pod_terminating_s": 352.9,
-   "replacement_pod_created_s": 352.9,
-   "all_replicas_ready_on_healthy_nodes_s": 354.1,
+   "endpoints_reduced_s": 51.1,
+   "pods_marked_notready_on_victim_s": 51.1,
+   "first_pod_terminating_s": 351.0,
+   "replacement_pod_created_s": 351.0,
+   "all_replicas_ready_on_healthy_nodes_s": 352.2,
    "probe": {
-    "probes_after_failure": 3351,
-    "failed": 90,
-    "fail_ratio": 0.027,
-    "first_fail_s": 0.4,
-    "last_fail_s": 149.4
+    "probes_after_failure": 3371,
+    "failed": 80,
+    "fail_ratio": 0.024,
+    "first_fail_s": 0.2,
+    "last_fail_s": 121.0
    },
    "mode": "stop",
    "cap_s": 390,
-   "waited_s": 371,
+   "waited_s": 369,
    "initial_pod_distribution": " 3 k10s-bench3-worker; 3 k10s-bench3-worker2;"
   }
  ]

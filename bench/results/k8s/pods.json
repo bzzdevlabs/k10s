@@ -1,7 +1,7 @@
 {
  "experiment": "pods",
  "env": {
-  "date": "2026-10-19T12:07:58+0200",
+  "date": "2026-10-19T21:51:06+0200",
   "host_kernel": "6.1.0-53-amd64",
   "host_cpu": "Intel(R) Core(TM) i7-7820HQ CPU @ 2.90GHz",
   "host_threads": 8,
@@ -24,71 +24,61 @@
  "runs": [
   {
    "n": 1,
-   "working_set_delta_mib": 3.6015625,
-   "working_set_kib_per_pod": 3688.0,
-   "mem_current_kib_per_pod": 3956.0,
-   "kernel_kib_per_pod": 1716.0,
-   "rss_sum_kib_per_pod": 27676.0,
-   "pss_sum_kib_per_pod": 19464.0,
+   "working_set_delta_mib": 10.47265625,
+   "working_set_kib_per_pod": 10724.0,
+   "mem_current_kib_per_pod": 11028.0,
+   "kernel_kib_per_pod": 1704.0,
+   "rss_sum_kib_per_pod": 21180.0,
+   "pss_sum_kib_per_pod": 12972.0,
    "per_component": {
-    "kube-controller-manager": {
-     "rss_kib_per_pod": 24.0,
-     "pss_kib_per_pod": 24.0,
-     "procs_delta": 0
-    },
     "containerd-shim": {
-     "rss_kib_per_pod": 12292.0,
-     "pss_kib_per_pod": 4732.0,
+     "rss_kib_per_pod": 13316.0,
+     "pss_kib_per_pod": 5818.0,
      "procs_delta": 1
     },
-    "sh": {
-     "rss_kib_per_pod": -128.0,
-     "pss_kib_per_pod": -82.0,
-     "procs_delta": 0
-    },
-    "local-path-provisioner": {
-     "rss_kib_per_pod": 56.0,
-     "pss_kib_per_pod": 56.0,
-     "procs_delta": 0
-    },
     "containerd": {
-     "rss_kib_per_pod": 7556.0,
-     "pss_kib_per_pod": 7562.0,
+     "rss_kib_per_pod": 168.0,
+     "pss_kib_per_pod": 169.0,
      "procs_delta": 0
     },
-    "etcd": {
-     "rss_kib_per_pod": 124.0,
-     "pss_kib_per_pod": 124.0,
+    "kubelet": {
+     "rss_kib_per_pod": 84.0,
+     "pss_kib_per_pod": 84.0,
      "procs_delta": 0
     },
     "systemd-journal": {
      "rss_kib_per_pod": 12.0,
-     "pss_kib_per_pod": 18.0,
-     "procs_delta": 0
-    },
-    "coredns": {
-     "rss_kib_per_pod": 100.0,
-     "pss_kib_per_pod": 100.0,
+     "pss_kib_per_pod": 40.0,
      "procs_delta": 0
     },
     "kube-scheduler": {
-     "rss_kib_per_pod": 8.0,
-     "pss_kib_per_pod": 8.0,
+     "rss_kib_per_pod": 4.0,
+     "pss_kib_per_pod": 4.0,
      "procs_delta": 0
     },
-    "systemd": {
-     "rss_kib_per_pod": 4.0,
-     "pss_kib_per_pod": 14.0,
+    "kube-controller-manager": {
+     "rss_kib_per_pod": 36.0,
+     "pss_kib_per_pod": 36.0,
+     "procs_delta": 0
+    },
+    "sh": {
+     "rss_kib_per_pod": 32.0,
+     "pss_kib_per_pod": 6.0,
      "procs_delta": 0
     },
     "kube-apiserver": {
-     "rss_kib_per_pod": 196.0,
-     "pss_kib_per_pod": 196.0,
+     "rss_kib_per_pod": 24.0,
+     "pss_kib_per_pod": 24.0,
+     "procs_delta": 0
+    },
+    "coredns": {
+     "rss_kib_per_pod": 28.0,
+     "pss_kib_per_pod": 28.0,
      "procs_delta": 0
     },
     "pause": {
-     "rss_kib_per_pod": 756.0,
-     "pss_kib_per_pod": 42.0,
+     "rss_kib_per_pod": 752.0,
+     "pss_kib_per_pod": 38.0,
      "procs_delta": 1
     },
     "app": {
@@ -96,218 +86,188 @@
      "pss_kib_per_pod": 6612.0,
      "procs_delta": 1
     },
-    "kubelet": {
-     "rss_kib_per_pod": 60.0,
-     "pss_kib_per_pod": 58.0,
+    "etcd": {
+     "rss_kib_per_pod": 108.0,
+     "pss_kib_per_pod": 108.0,
      "procs_delta": 0
     }
    },
-   "all_ready_ms": 1177,
+   "all_ready_ms": 1146,
    "repeat": 1
   },
   {
    "n": 1,
-   "working_set_delta_mib": 13.13671875,
-   "working_set_kib_per_pod": 13452.0,
-   "mem_current_kib_per_pod": 13636.0,
-   "kernel_kib_per_pod": 1624.0,
-   "rss_sum_kib_per_pod": 24156.0,
-   "pss_sum_kib_per_pod": 15772.0,
+   "working_set_delta_mib": 10.6171875,
+   "working_set_kib_per_pod": 10872.0,
+   "mem_current_kib_per_pod": 11064.0,
+   "kernel_kib_per_pod": 1684.0,
+   "rss_sum_kib_per_pod": 21520.0,
+   "pss_sum_kib_per_pod": 13217.0,
    "per_component": {
+    "kube-apiserver": {
+     "rss_kib_per_pod": 20.0,
+     "pss_kib_per_pod": 20.0,
+     "procs_delta": 0
+    },
+    "kindnetd": {
+     "rss_kib_per_pod": 8.0,
+     "pss_kib_per_pod": 8.0,
+     "procs_delta": 0
+    },
+    "app": {
+     "rss_kib_per_pod": 6616.0,
+     "pss_kib_per_pod": 6612.0,
+     "procs_delta": 1
+    },
+    "systemd-journal": {
+     "rss_kib_per_pod": 16.0,
+     "pss_kib_per_pod": 22.0,
+     "procs_delta": 0
+    },
+    "coredns": {
+     "rss_kib_per_pod": 16.0,
+     "pss_kib_per_pod": 16.0,
+     "procs_delta": 0
+    },
+    "sh": {
+     "rss_kib_per_pod": 92.0,
+     "pss_kib_per_pod": 28.0,
+     "procs_delta": 0
+    },
+    "containerd": {
+     "rss_kib_per_pod": 844.0,
+     "pss_kib_per_pod": 841.0,
+     "procs_delta": 0
+    },
+    "etcd": {
+     "rss_kib_per_pod": 132.0,
+     "pss_kib_per_pod": 132.0,
+     "procs_delta": 0
+    },
+    "kube-scheduler": {
+     "rss_kib_per_pod": 8.0,
+     "pss_kib_per_pod": 8.0,
+     "procs_delta": 0
+    },
+    "kubelet": {
+     "rss_kib_per_pod": 44.0,
+     "pss_kib_per_pod": 32.0,
+     "procs_delta": 0
+    },
     "pause": {
      "rss_kib_per_pod": 748.0,
      "pss_kib_per_pod": 34.0,
      "procs_delta": 1
     },
-    "kube-scheduler": {
-     "rss_kib_per_pod": 1604.0,
-     "pss_kib_per_pod": 1604.0,
+    "kube-controller-manager": {
+     "rss_kib_per_pod": 40.0,
+     "pss_kib_per_pod": 40.0,
      "procs_delta": 0
     },
     "containerd-shim": {
-     "rss_kib_per_pod": 14728.0,
-     "pss_kib_per_pod": 7168.0,
-     "procs_delta": 1
-    },
-    "sh": {
-     "rss_kib_per_pod": 148.0,
-     "pss_kib_per_pod": 78.0,
-     "procs_delta": 0
-    },
-    "etcd": {
-     "rss_kib_per_pod": 88.0,
-     "pss_kib_per_pod": 88.0,
-     "procs_delta": 0
-    },
-    "containerd": {
-     "rss_kib_per_pod": 32.0,
-     "pss_kib_per_pod": 15.0,
-     "procs_delta": 0
-    },
-    "kube-apiserver": {
-     "rss_kib_per_pod": 28.0,
-     "pss_kib_per_pod": 28.0,
-     "procs_delta": 0
-    },
-    "coredns": {
-     "rss_kib_per_pod": 80.0,
-     "pss_kib_per_pod": 80.0,
-     "procs_delta": 0
-    },
-    "kubelet": {
-     "rss_kib_per_pod": 40.0,
-     "pss_kib_per_pod": 39.0,
-     "procs_delta": 0
-    },
-    "systemd-journal": {
-     "rss_kib_per_pod": 16.0,
-     "pss_kib_per_pod": 8.0,
-     "procs_delta": 0
-    },
-    "kube-controller-manager": {
-     "rss_kib_per_pod": 32.0,
-     "pss_kib_per_pod": 32.0,
-     "procs_delta": 0
-    },
-    "app": {
-     "rss_kib_per_pod": 6612.0,
-     "pss_kib_per_pod": 6608.0,
+     "rss_kib_per_pod": 12936.0,
+     "pss_kib_per_pod": 5438.0,
      "procs_delta": 1
     }
    },
-   "all_ready_ms": 1628,
+   "all_ready_ms": 1522,
    "repeat": 2
   },
   {
    "n": 1,
-   "working_set_delta_mib": 16.01953125,
-   "working_set_kib_per_pod": 16404.0,
-   "mem_current_kib_per_pod": 16592.0,
-   "kernel_kib_per_pod": 1672.0,
-   "rss_sum_kib_per_pod": 29040.0,
-   "pss_sum_kib_per_pod": 20976.0,
+   "working_set_delta_mib": 11.89453125,
+   "working_set_kib_per_pod": 12180.0,
+   "mem_current_kib_per_pod": 12392.0,
+   "kernel_kib_per_pod": 1636.0,
+   "rss_sum_kib_per_pod": 25196.0,
+   "pss_sum_kib_per_pod": 16848.0,
    "per_component": {
-    "kindnetd": {
-     "rss_kib_per_pod": 8.0,
-     "pss_kib_per_pod": 8.0,
-     "procs_delta": 0
-    },
-    "kube-apiserver": {
-     "rss_kib_per_pod": 2084.0,
-     "pss_kib_per_pod": 2084.0,
-     "procs_delta": 0
+    "app": {
+     "rss_kib_per_pod": 6612.0,
+     "pss_kib_per_pod": 6608.0,
+     "procs_delta": 1
     },
     "systemd-journal": {
      "rss_kib_per_pod": 8.0,
-     "pss_kib_per_pod": 13.0,
+     "pss_kib_per_pod": -30.0,
+     "procs_delta": 0
+    },
+    "kubelet": {
+     "rss_kib_per_pod": 8.0,
+     "pss_kib_per_pod": 1.0,
      "procs_delta": 0
     },
     "kube-controller-manager": {
-     "rss_kib_per_pod": 3576.0,
-     "pss_kib_per_pod": 3576.0,
-     "procs_delta": 0
-    },
-    "sh": {
-     "rss_kib_per_pod": -204.0,
-     "pss_kib_per_pod": -93.0,
-     "procs_delta": 0
-    },
-    "containerd-shim": {
-     "rss_kib_per_pod": 11840.0,
-     "pss_kib_per_pod": 4342.0,
-     "procs_delta": 1
-    },
-    "app": {
-     "rss_kib_per_pod": 6616.0,
-     "pss_kib_per_pod": 6612.0,
-     "procs_delta": 1
-    },
-    "kubelet": {
-     "rss_kib_per_pod": 2144.0,
-     "pss_kib_per_pod": 2152.0,
-     "procs_delta": 0
-    },
-    "containerd": {
-     "rss_kib_per_pod": 72.0,
-     "pss_kib_per_pod": 90.0,
-     "procs_delta": 0
-    },
-    "kube-scheduler": {
-     "rss_kib_per_pod": 2056.0,
-     "pss_kib_per_pod": 2056.0,
+     "rss_kib_per_pod": 516.0,
+     "pss_kib_per_pod": 516.0,
      "procs_delta": 0
     },
     "pause": {
-     "rss_kib_per_pod": 756.0,
-     "pss_kib_per_pod": 42.0,
+     "rss_kib_per_pod": 752.0,
+     "pss_kib_per_pod": 38.0,
      "procs_delta": 1
     },
-    "etcd": {
-     "rss_kib_per_pod": 84.0,
-     "pss_kib_per_pod": 84.0,
+    "kube-scheduler": {
+     "rss_kib_per_pod": 116.0,
+     "pss_kib_per_pod": 116.0,
      "procs_delta": 0
+    },
+    "kube-apiserver": {
+     "rss_kib_per_pod": 20.0,
+     "pss_kib_per_pod": 20.0,
+     "procs_delta": 0
+    },
+    "etcd": {
+     "rss_kib_per_pod": 96.0,
+     "pss_kib_per_pod": 96.0,
+     "procs_delta": 0
+    },
+    "kube-proxy": {
+     "rss_kib_per_pod": 4.0,
+     "pss_kib_per_pod": 4.0,
+     "procs_delta": 0
+    },
+    "containerd": {
+     "rss_kib_per_pod": 1172.0,
+     "pss_kib_per_pod": 1170.0,
+     "procs_delta": 0
+    },
+    "systemd": {
+     "rss_kib_per_pod": 28.0,
+     "pss_kib_per_pod": 16.0,
+     "procs_delta": 0
+    },
+    "sh": {
+     "rss_kib_per_pod": 136.0,
+     "pss_kib_per_pod": 63.0,
+     "procs_delta": 0
+    },
+    "coredns": {
+     "rss_kib_per_pod": 132.0,
+     "pss_kib_per_pod": 132.0,
+     "procs_delta": 0
+    },
+    "containerd-shim": {
+     "rss_kib_per_pod": 15596.0,
+     "pss_kib_per_pod": 8098.0,
+     "procs_delta": 1
     }
    },
-   "all_ready_ms": 1644,
+   "all_ready_ms": 1280,
    "repeat": 3
   },
   {
    "n": 10,
-   "working_set_delta_mib": 120.42578125,
-   "working_set_kib_per_pod": 12331.6,
-   "mem_current_kib_per_pod": 12490.8,
-   "kernel_kib_per_pod": 1704.8,
-   "rss_sum_kib_per_pod": 23110.8,
-   "pss_sum_kib_per_pod": 11018.2,
+   "working_set_delta_mib": 123.98828125,
+   "working_set_kib_per_pod": 12696.4,
+   "mem_current_kib_per_pod": 12842.4,
+   "kernel_kib_per_pod": 1698.8,
+   "rss_sum_kib_per_pod": 23489.2,
+   "pss_sum_kib_per_pod": 11369.9,
    "per_component": {
     "coredns": {
-     "rss_kib_per_pod": 24.8,
-     "pss_kib_per_pod": 18.4,
-     "procs_delta": 0
-    },
-    "etcd": {
-     "rss_kib_per_pod": 46.8,
-     "pss_kib_per_pod": 46.8,
-     "procs_delta": 0
-    },
-    "kube-controller-manager": {
-     "rss_kib_per_pod": 427.6,
-     "pss_kib_per_pod": 427.6,
-     "procs_delta": 0
-    },
-    "kindnetd": {
-     "rss_kib_per_pod": 1.6,
-     "pss_kib_per_pod": 1.6,
-     "procs_delta": 0
-    },
-    "systemd": {
-     "rss_kib_per_pod": 122.8,
-     "pss_kib_per_pod": 122.0,
-     "procs_delta": 0
-    },
-    "sh": {
-     "rss_kib_per_pod": -8.8,
-     "pss_kib_per_pod": -7.0,
-     "procs_delta": 0
-    },
-    "containerd-shim": {
-     "rss_kib_per_pod": 13283.6,
-     "pss_kib_per_pod": 5764.2,
-     "procs_delta": 10
-    },
-    "kube-apiserver": {
-     "rss_kib_per_pod": 1084.4,
-     "pss_kib_per_pod": 1084.4,
-     "procs_delta": 0
-    },
-    "containerd": {
-     "rss_kib_per_pod": 309.6,
-     "pss_kib_per_pod": 309.3,
-     "procs_delta": 0
-    },
-    "systemd-journal": {
-     "rss_kib_per_pod": 11.6,
-     "pss_kib_per_pod": 11.9,
+     "rss_kib_per_pod": 3.2,
+     "pss_kib_per_pod": 3.2,
      "procs_delta": 0
     },
     "pause": {
@@ -315,9 +275,170 @@
      "pss_kib_per_pod": 39.7,
      "procs_delta": 10
     },
+    "systemd-journal": {
+     "rss_kib_per_pod": 10.8,
+     "pss_kib_per_pod": 9.5,
+     "procs_delta": 0
+    },
+    "etcd": {
+     "rss_kib_per_pod": 240.8,
+     "pss_kib_per_pod": 240.8,
+     "procs_delta": 0
+    },
+    "kube-apiserver": {
+     "rss_kib_per_pod": 1253.2,
+     "pss_kib_per_pod": 1253.2,
+     "procs_delta": 0
+    },
+    "sh": {
+     "rss_kib_per_pod": 8.0,
+     "pss_kib_per_pod": 2.4,
+     "procs_delta": 0
+    },
+    "containerd-shim": {
+     "rss_kib_per_pod": 13426.8,
+     "pss_kib_per_pod": 5881.7,
+     "procs_delta": 10
+    },
+    "kube-proxy": {
+     "rss_kib_per_pod": 7.2,
+     "pss_kib_per_pod": 7.2,
+     "procs_delta": 0
+    },
+    "kube-scheduler": {
+     "rss_kib_per_pod": 0.8,
+     "pss_kib_per_pod": 0.8,
+     "procs_delta": 0
+    },
     "kubelet": {
-     "rss_kib_per_pod": 432.0,
-     "pss_kib_per_pod": 432.1,
+     "rss_kib_per_pod": 456.4,
+     "pss_kib_per_pod": 455.8,
+     "procs_delta": 0
+    },
+    "containerd": {
+     "rss_kib_per_pod": 466.0,
+     "pss_kib_per_pod": 466.1,
+     "procs_delta": 0
+    },
+    "app": {
+     "rss_kib_per_pod": 6612.4,
+     "pss_kib_per_pod": 2756.4,
+     "procs_delta": 10
+    },
+    "systemd": {
+     "rss_kib_per_pod": 161.2,
+     "pss_kib_per_pod": 162.3,
+     "procs_delta": 0
+    },
+    "kube-controller-manager": {
+     "rss_kib_per_pod": 84.0,
+     "pss_kib_per_pod": 84.0,
+     "procs_delta": 0
+    },
+    "kindnetd": {
+     "rss_kib_per_pod": 6.8,
+     "pss_kib_per_pod": 6.8,
+     "procs_delta": 0
+    }
+   },
+   "all_ready_ms": 1942,
+   "repeat": 1
+  },
+  {
+   "n": 10,
+   "working_set_delta_mib": 115.890625,
+   "working_set_kib_per_pod": 11867.2,
+   "mem_current_kib_per_pod": 11994.4,
+   "kernel_kib_per_pod": 1668.0,
+   "rss_sum_kib_per_pod": 22566.8,
+   "pss_sum_kib_per_pod": 10489.8,
+   "per_component": {
+    "app": {
+     "rss_kib_per_pod": 6614.0,
+     "pss_kib_per_pod": 2758.0,
+     "procs_delta": 10
+    },
+    "kindnetd": {
+     "rss_kib_per_pod": 13.6,
+     "pss_kib_per_pod": 13.6,
+     "procs_delta": 0
+    },
+    "containerd-shim": {
+     "rss_kib_per_pod": 13674.8,
+     "pss_kib_per_pod": 6161.8,
+     "procs_delta": 10
+    },
+    "systemd-journal": {
+     "rss_kib_per_pod": 12.0,
+     "pss_kib_per_pod": 12.1,
+     "procs_delta": 0
+    },
+    "kubelet": {
+     "rss_kib_per_pod": 238.8,
+     "pss_kib_per_pod": 237.9,
+     "procs_delta": 0
+    },
+    "kube-controller-manager": {
+     "rss_kib_per_pod": 515.2,
+     "pss_kib_per_pod": 515.2,
+     "procs_delta": 0
+    },
+    "kube-apiserver": {
+     "rss_kib_per_pod": 46.8,
+     "pss_kib_per_pod": 46.8,
+     "procs_delta": 0
+    },
+    "pause": {
+     "rss_kib_per_pod": 751.6,
+     "pss_kib_per_pod": 39.7,
+     "procs_delta": 10
+    },
+    "sh": {
+     "rss_kib_per_pod": -9.2,
+     "pss_kib_per_pod": -5.6,
+     "procs_delta": 0
+    },
+    "etcd": {
+     "rss_kib_per_pod": 232.4,
+     "pss_kib_per_pod": 232.4,
+     "procs_delta": 0
+    },
+    "coredns": {
+     "rss_kib_per_pod": 1.6,
+     "pss_kib_per_pod": 1.6,
+     "procs_delta": 0
+    },
+    "containerd": {
+     "rss_kib_per_pod": 475.2,
+     "pss_kib_per_pod": 477.0,
+     "procs_delta": 0
+    }
+   },
+   "all_ready_ms": 1601,
+   "repeat": 2
+  },
+  {
+   "n": 10,
+   "working_set_delta_mib": 99.6484375,
+   "working_set_kib_per_pod": 10204.0,
+   "mem_current_kib_per_pod": 10299.6,
+   "kernel_kib_per_pod": 1684.0,
+   "rss_sum_kib_per_pod": 20994.8,
+   "pss_sum_kib_per_pod": 8921.3,
+   "per_component": {
+    "systemd": {
+     "rss_kib_per_pod": 5.6,
+     "pss_kib_per_pod": 5.9,
+     "procs_delta": 0
+    },
+    "kube-apiserver": {
+     "rss_kib_per_pod": 14.8,
+     "pss_kib_per_pod": 14.8,
+     "procs_delta": 0
+    },
+    "etcd": {
+     "rss_kib_per_pod": 30.0,
+     "pss_kib_per_pod": 30.0,
      "procs_delta": 0
     },
     "app": {
@@ -325,238 +446,248 @@
      "pss_kib_per_pod": 2760.0,
      "procs_delta": 10
     },
-    "kube-scheduler": {
-     "rss_kib_per_pod": 7.2,
-     "pss_kib_per_pod": 7.2,
-     "procs_delta": 0
-    }
-   },
-   "all_ready_ms": 2501,
-   "repeat": 1
-  },
-  {
-   "n": 10,
-   "working_set_delta_mib": 110.46875,
-   "working_set_kib_per_pod": 11312.0,
-   "mem_current_kib_per_pod": 11435.6,
-   "kernel_kib_per_pod": 1662.0,
-   "rss_sum_kib_per_pod": 21955.2,
-   "pss_sum_kib_per_pod": 9863.5,
-   "per_component": {
-    "containerd-shim": {
-     "rss_kib_per_pod": 13340.0,
-     "pss_kib_per_pod": 5814.3,
-     "procs_delta": 10
-    },
-    "kube-apiserver": {
-     "rss_kib_per_pod": 432.4,
-     "pss_kib_per_pod": 432.4,
-     "procs_delta": 0
-    },
-    "kubelet": {
-     "rss_kib_per_pod": 171.2,
-     "pss_kib_per_pod": 171.1,
-     "procs_delta": 0
-    },
-    "systemd-journal": {
-     "rss_kib_per_pod": 13.2,
-     "pss_kib_per_pod": 13.6,
-     "procs_delta": 0
-    },
     "kube-controller-manager": {
-     "rss_kib_per_pod": 2.0,
-     "pss_kib_per_pod": 2.0,
-     "procs_delta": 0
-    },
-    "kindnetd": {
-     "rss_kib_per_pod": 8.4,
-     "pss_kib_per_pod": 8.4,
-     "procs_delta": 0
-    },
-    "app": {
-     "rss_kib_per_pod": 6612.8,
-     "pss_kib_per_pod": 2756.8,
-     "procs_delta": 10
-    },
-    "kube-proxy": {
-     "rss_kib_per_pod": 0.8,
-     "pss_kib_per_pod": 0.8,
-     "procs_delta": 0
-    },
-    "systemd": {
-     "rss_kib_per_pod": 60.8,
-     "pss_kib_per_pod": 61.0,
-     "procs_delta": 0
-    },
-    "containerd": {
-     "rss_kib_per_pod": 321.2,
-     "pss_kib_per_pod": 320.6,
+     "rss_kib_per_pod": 17.2,
+     "pss_kib_per_pod": 17.2,
      "procs_delta": 0
     },
     "coredns": {
      "rss_kib_per_pod": 2.4,
-     "pss_kib_per_pod": 2.4,
+     "pss_kib_per_pod": 2.8,
      "procs_delta": 0
     },
-    "kube-scheduler": {
-     "rss_kib_per_pod": 0.4,
-     "pss_kib_per_pod": 0.4,
+    "kubelet": {
+     "rss_kib_per_pod": 57.2,
+     "pss_kib_per_pod": 56.3,
      "procs_delta": 0
+    },
+    "containerd": {
+     "rss_kib_per_pod": 423.6,
+     "pss_kib_per_pod": 423.7,
+     "procs_delta": 0
+    },
+    "systemd-journal": {
+     "rss_kib_per_pod": 11.6,
+     "pss_kib_per_pod": 11.3,
+     "procs_delta": 0
+    },
+    "sh": {
+     "rss_kib_per_pod": -3.6,
+     "pss_kib_per_pod": -2.1,
+     "procs_delta": 0
+    },
+    "containerd-shim": {
+     "rss_kib_per_pod": 13068.8,
+     "pss_kib_per_pod": 5562.1,
+     "procs_delta": 10
     },
     "pause": {
      "rss_kib_per_pod": 751.2,
      "pss_kib_per_pod": 39.3,
      "procs_delta": 10
-    },
-    "etcd": {
-     "rss_kib_per_pod": 242.8,
-     "pss_kib_per_pod": 242.8,
-     "procs_delta": 0
-    },
-    "sh": {
-     "rss_kib_per_pod": -4.4,
-     "pss_kib_per_pod": -2.4,
-     "procs_delta": 0
     }
    },
-   "all_ready_ms": 2525,
-   "repeat": 2
-  },
-  {
-   "n": 10,
-   "working_set_delta_mib": 104.6328125,
-   "working_set_kib_per_pod": 10714.4,
-   "mem_current_kib_per_pod": 10811.2,
-   "kernel_kib_per_pod": 1670.0,
-   "rss_sum_kib_per_pod": 21416.0,
-   "pss_sum_kib_per_pod": 9309.3,
-   "per_component": {
-    "kubelet": {
-     "rss_kib_per_pod": 158.4,
-     "pss_kib_per_pod": 159.0,
-     "procs_delta": 0
-    },
-    "kube-apiserver": {
-     "rss_kib_per_pod": 11.2,
-     "pss_kib_per_pod": 11.2,
-     "procs_delta": 0
-    },
-    "kindnetd": {
-     "rss_kib_per_pod": 2.0,
-     "pss_kib_per_pod": 2.0,
-     "procs_delta": 0
-    },
-    "coredns": {
-     "rss_kib_per_pod": 5.2,
-     "pss_kib_per_pod": 5.2,
-     "procs_delta": 0
-    },
-    "kube-controller-manager": {
-     "rss_kib_per_pod": 211.2,
-     "pss_kib_per_pod": 211.2,
-     "procs_delta": 0
-    },
-    "etcd": {
-     "rss_kib_per_pod": 37.6,
-     "pss_kib_per_pod": 37.6,
-     "procs_delta": 0
-    },
-    "containerd-shim": {
-     "rss_kib_per_pod": 13158.4,
-     "pss_kib_per_pod": 5613.4,
-     "procs_delta": 10
-    },
-    "app": {
-     "rss_kib_per_pod": 6616.0,
-     "pss_kib_per_pod": 2760.0,
-     "procs_delta": 10
-    },
-    "containerd": {
-     "rss_kib_per_pod": 450.8,
-     "pss_kib_per_pod": 451.3,
-     "procs_delta": 0
-    },
-    "systemd-journal": {
-     "rss_kib_per_pod": 10.8,
-     "pss_kib_per_pod": 11.2,
-     "procs_delta": 0
-    },
-    "pause": {
-     "rss_kib_per_pod": 751.6,
-     "pss_kib_per_pod": 39.7,
-     "procs_delta": 10
-    },
-    "kube-proxy": {
-     "rss_kib_per_pod": 2.0,
-     "pss_kib_per_pod": 2.0,
-     "procs_delta": 0
-    },
-    "sh": {
-     "rss_kib_per_pod": 0.8,
-     "pss_kib_per_pod": 6.0,
-     "procs_delta": 0
-    }
-   },
-   "all_ready_ms": 2555,
+   "all_ready_ms": 2228,
    "repeat": 3
   },
   {
    "n": 50,
-   "working_set_delta_mib": 566.78125,
-   "working_set_kib_per_pod": 11607.68,
-   "mem_current_kib_per_pod": 11787.84,
-   "kernel_kib_per_pod": 1722.8,
-   "rss_sum_kib_per_pod": 22327.52,
-   "pss_sum_kib_per_pod": 9883.88,
+   "working_set_delta_mib": 564.12890625,
+   "working_set_kib_per_pod": 11553.36,
+   "mem_current_kib_per_pod": 11691.44,
+   "kernel_kib_per_pod": 1695.12,
+   "rss_sum_kib_per_pod": 22436.8,
+   "pss_sum_kib_per_pod": 9995.1,
    "per_component": {
-    "sh": {
-     "rss_kib_per_pod": 2.0,
-     "pss_kib_per_pod": 1.18,
+    "kubelet": {
+     "rss_kib_per_pod": 414.48,
+     "pss_kib_per_pod": 414.34,
      "procs_delta": 0
     },
-    "kube-controller-manager": {
-     "rss_kib_per_pod": 23.84,
-     "pss_kib_per_pod": 23.84,
-     "procs_delta": 0
-    },
-    "systemd": {
-     "rss_kib_per_pod": 77.36,
-     "pss_kib_per_pod": 77.46,
-     "procs_delta": 0
-    },
-    "app": {
-     "rss_kib_per_pod": 6616.56,
-     "pss_kib_per_pod": 2417.56,
-     "procs_delta": 50
-    },
-    "containerd": {
-     "rss_kib_per_pod": 795.76,
-     "pss_kib_per_pod": 795.5,
+    "kube-proxy": {
+     "rss_kib_per_pod": 18.48,
+     "pss_kib_per_pod": 18.48,
      "procs_delta": 0
     },
     "etcd": {
-     "rss_kib_per_pod": 154.08,
-     "pss_kib_per_pod": 154.08,
+     "rss_kib_per_pod": 154.32,
+     "pss_kib_per_pod": 154.32,
      "procs_delta": 0
     },
-    "pause": {
-     "rss_kib_per_pod": 750.88,
-     "pss_kib_per_pod": 37.82,
-     "procs_delta": 50
+    "systemd": {
+     "rss_kib_per_pod": 108.24,
+     "pss_kib_per_pod": 108.0,
+     "procs_delta": 0
     },
-    "coredns": {
-     "rss_kib_per_pod": 16.72,
-     "pss_kib_per_pod": 11.6,
+    "sh": {
+     "rss_kib_per_pod": 4.4,
+     "pss_kib_per_pod": 1.08,
      "procs_delta": 0
     },
     "kube-apiserver": {
-     "rss_kib_per_pod": 192.88,
-     "pss_kib_per_pod": 192.88,
+     "rss_kib_per_pod": 257.44,
+     "pss_kib_per_pod": 257.44,
+     "procs_delta": 0
+    },
+    "containerd-shim": {
+     "rss_kib_per_pod": 13232.96,
+     "pss_kib_per_pod": 5711.56,
+     "procs_delta": 50
+    },
+    "kindnetd": {
+     "rss_kib_per_pod": 3.04,
+     "pss_kib_per_pod": 3.04,
+     "procs_delta": 0
+    },
+    "systemd-journal": {
+     "rss_kib_per_pod": 8.48,
+     "pss_kib_per_pod": 7.82,
+     "procs_delta": 0
+    },
+    "coredns": {
+     "rss_kib_per_pod": 53.04,
+     "pss_kib_per_pod": 49.2,
+     "procs_delta": 0
+    },
+    "containerd": {
+     "rss_kib_per_pod": 687.52,
+     "pss_kib_per_pod": 687.48,
+     "procs_delta": 0
+    },
+    "app": {
+     "rss_kib_per_pod": 6656.96,
+     "pss_kib_per_pod": 2457.96,
+     "procs_delta": 50
+    },
+    "pause": {
+     "rss_kib_per_pod": 751.44,
+     "pss_kib_per_pod": 38.38,
+     "procs_delta": 50
+    },
+    "local-path-provisioner": {
+     "rss_kib_per_pod": 0.08,
+     "pss_kib_per_pod": 0.08,
+     "procs_delta": 0
+    },
+    "kube-controller-manager": {
+     "rss_kib_per_pod": 85.84,
+     "pss_kib_per_pod": 85.84,
+     "procs_delta": 0
+    },
+    "kube-scheduler": {
+     "rss_kib_per_pod": 0.08,
+     "pss_kib_per_pod": 0.08,
+     "procs_delta": 0
+    }
+   },
+   "all_ready_ms": 6978,
+   "repeat": 1
+  },
+  {
+   "n": 50,
+   "working_set_delta_mib": 538.0859375,
+   "working_set_kib_per_pod": 11020.0,
+   "mem_current_kib_per_pod": 11155.36,
+   "kernel_kib_per_pod": 1649.2,
+   "rss_sum_kib_per_pod": 21795.76,
+   "pss_sum_kib_per_pod": 9362.96,
+   "per_component": {
+    "kube-controller-manager": {
+     "rss_kib_per_pod": 2.48,
+     "pss_kib_per_pod": 2.48,
+     "procs_delta": 0
+    },
+    "etcd": {
+     "rss_kib_per_pod": 95.44,
+     "pss_kib_per_pod": 95.44,
+     "procs_delta": 0
+    },
+    "sh": {
+     "rss_kib_per_pod": -3.92,
+     "pss_kib_per_pod": -1.38,
+     "procs_delta": 0
+    },
+    "kube-scheduler": {
+     "rss_kib_per_pod": 0.32,
+     "pss_kib_per_pod": 0.32,
      "procs_delta": 0
     },
     "kindnetd": {
-     "rss_kib_per_pod": 5.92,
-     "pss_kib_per_pod": 5.92,
+     "rss_kib_per_pod": 20.96,
+     "pss_kib_per_pod": 20.96,
+     "procs_delta": 0
+    },
+    "app": {
+     "rss_kib_per_pod": 6657.04,
+     "pss_kib_per_pod": 2458.04,
+     "procs_delta": 50
+    },
+    "kubelet": {
+     "rss_kib_per_pod": 335.6,
+     "pss_kib_per_pod": 335.52,
+     "procs_delta": 0
+    },
+    "systemd-journal": {
+     "rss_kib_per_pod": 14.48,
+     "pss_kib_per_pod": 14.7,
+     "procs_delta": 0
+    },
+    "containerd-shim": {
+     "rss_kib_per_pod": 13242.48,
+     "pss_kib_per_pod": 5718.12,
+     "procs_delta": 50
+    },
+    "coredns": {
+     "rss_kib_per_pod": 0.56,
+     "pss_kib_per_pod": 0.56,
+     "procs_delta": 0
+    },
+    "pause": {
+     "rss_kib_per_pod": 751.28,
+     "pss_kib_per_pod": 38.22,
+     "procs_delta": 50
+    },
+    "containerd": {
+     "rss_kib_per_pod": 671.12,
+     "pss_kib_per_pod": 671.52,
+     "procs_delta": 0
+    },
+    "kube-apiserver": {
+     "rss_kib_per_pod": 5.28,
+     "pss_kib_per_pod": 5.28,
+     "procs_delta": 0
+    },
+    "kube-proxy": {
+     "rss_kib_per_pod": 2.64,
+     "pss_kib_per_pod": 2.64,
+     "procs_delta": 0
+    }
+   },
+   "all_ready_ms": 6744,
+   "repeat": 2
+  },
+  {
+   "n": 50,
+   "working_set_delta_mib": 524.46484375,
+   "working_set_kib_per_pod": 10741.04,
+   "mem_current_kib_per_pod": 10816.08,
+   "kernel_kib_per_pod": 1676.16,
+   "rss_sum_kib_per_pod": 21783.2,
+   "pss_sum_kib_per_pod": 9344.12,
+   "per_component": {
+    "kube-scheduler": {
+     "rss_kib_per_pod": 0.32,
+     "pss_kib_per_pod": 0.32,
+     "procs_delta": 0
+    },
+    "containerd": {
+     "rss_kib_per_pod": 562.4,
+     "pss_kib_per_pod": 562.5,
+     "procs_delta": 0
+    },
+    "sh": {
+     "rss_kib_per_pod": 1.36,
+     "pss_kib_per_pod": 0.62,
      "procs_delta": 0
     },
     "local-path-provisioner": {
@@ -565,467 +696,331 @@
      "procs_delta": 0
     },
     "containerd-shim": {
-     "rss_kib_per_pod": 13274.72,
-     "pss_kib_per_pod": 5749.08,
+     "rss_kib_per_pod": 13189.6,
+     "pss_kib_per_pod": 5665.18,
+     "procs_delta": 50
+    },
+    "app": {
+     "rss_kib_per_pod": 6660.48,
+     "pss_kib_per_pod": 2461.48,
      "procs_delta": 50
     },
     "kube-proxy": {
-     "rss_kib_per_pod": 8.0,
-     "pss_kib_per_pod": 8.0,
+     "rss_kib_per_pod": 0.56,
+     "pss_kib_per_pod": 0.56,
      "procs_delta": 0
     },
-    "systemd-journal": {
-     "rss_kib_per_pod": 8.4,
-     "pss_kib_per_pod": 8.54,
-     "procs_delta": 0
-    },
-    "kubelet": {
-     "rss_kib_per_pod": 398.48,
-     "pss_kib_per_pod": 398.5,
-     "procs_delta": 0
-    },
-    "kube-scheduler": {
-     "rss_kib_per_pod": 1.84,
-     "pss_kib_per_pod": 1.84,
-     "procs_delta": 0
-    }
-   },
-   "all_ready_ms": 8293,
-   "repeat": 1
-  },
-  {
-   "n": 50,
-   "working_set_delta_mib": 526.34375,
-   "working_set_kib_per_pod": 10779.52,
-   "mem_current_kib_per_pod": 10930.08,
-   "kernel_kib_per_pod": 1638.48,
-   "rss_sum_kib_per_pod": 21696.16,
-   "pss_sum_kib_per_pod": 9261.22,
-   "per_component": {
-    "containerd": {
-     "rss_kib_per_pod": 607.6,
-     "pss_kib_per_pod": 607.72,
-     "procs_delta": 0
-    },
-    "containerd-shim": {
-     "rss_kib_per_pod": 13053.76,
-     "pss_kib_per_pod": 5529.32,
-     "procs_delta": 50
-    },
-    "kubelet": {
-     "rss_kib_per_pod": 286.56,
-     "pss_kib_per_pod": 286.6,
+    "coredns": {
+     "rss_kib_per_pod": 3.2,
+     "pss_kib_per_pod": 1.92,
      "procs_delta": 0
     },
     "kindnetd": {
-     "rss_kib_per_pod": -3.6,
-     "pss_kib_per_pod": -3.6,
-     "procs_delta": 0
-    },
-    "sh": {
-     "rss_kib_per_pod": -2.96,
-     "pss_kib_per_pod": -1.22,
+     "rss_kib_per_pod": -0.4,
+     "pss_kib_per_pod": -0.4,
      "procs_delta": 0
     },
     "kube-controller-manager": {
-     "rss_kib_per_pod": 2.48,
-     "pss_kib_per_pod": 2.48,
-     "procs_delta": 0
-    },
-    "coredns": {
-     "rss_kib_per_pod": 6.24,
-     "pss_kib_per_pod": 4.96,
-     "procs_delta": 0
-    },
-    "app": {
-     "rss_kib_per_pod": 6615.04,
-     "pss_kib_per_pod": 2416.28,
-     "procs_delta": 50
-    },
-    "etcd": {
-     "rss_kib_per_pod": 114.08,
-     "pss_kib_per_pod": 114.08,
-     "procs_delta": 0
-    },
-    "systemd-journal": {
-     "rss_kib_per_pod": 14.08,
-     "pss_kib_per_pod": 14.4,
-     "procs_delta": 0
-    },
-    "kube-proxy": {
-     "rss_kib_per_pod": 7.6,
-     "pss_kib_per_pod": 7.6,
-     "procs_delta": 0
-    },
-    "systemd": {
-     "rss_kib_per_pod": 235.2,
-     "pss_kib_per_pod": 235.58,
-     "procs_delta": 0
-    },
-    "pause": {
-     "rss_kib_per_pod": 751.68,
-     "pss_kib_per_pod": 38.62,
-     "procs_delta": 50
-    },
-    "kube-apiserver": {
-     "rss_kib_per_pod": 8.24,
-     "pss_kib_per_pod": 8.24,
-     "procs_delta": 0
-    },
-    "kube-scheduler": {
-     "rss_kib_per_pod": 0.16,
-     "pss_kib_per_pod": 0.16,
-     "procs_delta": 0
-    }
-   },
-   "all_ready_ms": 11397,
-   "repeat": 2
-  },
-  {
-   "n": 50,
-   "working_set_delta_mib": 511.1484375,
-   "working_set_kib_per_pod": 10468.32,
-   "mem_current_kib_per_pod": 10549.2,
-   "kernel_kib_per_pod": 1614.4,
-   "rss_sum_kib_per_pod": 21198.56,
-   "pss_sum_kib_per_pod": 8757.88,
-   "per_component": {
-    "kindnetd": {
-     "rss_kib_per_pod": 32.32,
-     "pss_kib_per_pod": 32.32,
+     "rss_kib_per_pod": 2.0,
+     "pss_kib_per_pod": 2.0,
      "procs_delta": 0
     },
     "kubelet": {
-     "rss_kib_per_pod": 155.36,
-     "pss_kib_per_pod": 155.24,
+     "rss_kib_per_pod": 407.84,
+     "pss_kib_per_pod": 407.62,
      "procs_delta": 0
     },
-    "coredns": {
-     "rss_kib_per_pod": 7.36,
-     "pss_kib_per_pod": 7.36,
+    "pause": {
+     "rss_kib_per_pod": 750.4,
+     "pss_kib_per_pod": 37.34,
+     "procs_delta": 50
+    },
+    "kube-apiserver": {
+     "rss_kib_per_pod": 1.68,
+     "pss_kib_per_pod": 1.68,
      "procs_delta": 0
     },
-    "kube-scheduler": {
+    "systemd": {
+     "rss_kib_per_pod": 99.28,
+     "pss_kib_per_pod": 98.98,
+     "procs_delta": 0
+    },
+    "etcd": {
+     "rss_kib_per_pod": 95.36,
+     "pss_kib_per_pod": 95.36,
+     "procs_delta": 0
+    },
+    "systemd-journal": {
      "rss_kib_per_pod": 9.04,
-     "pss_kib_per_pod": 9.04,
-     "procs_delta": 0
-    },
-    "pause": {
-     "rss_kib_per_pod": 751.76,
-     "pss_kib_per_pod": 38.7,
-     "procs_delta": 50
-    },
-    "kube-controller-manager": {
-     "rss_kib_per_pod": 0.72,
-     "pss_kib_per_pod": 0.72,
-     "procs_delta": 0
-    },
-    "sh": {
-     "rss_kib_per_pod": 2.88,
-     "pss_kib_per_pod": 0.74,
-     "procs_delta": 0
-    },
-    "etcd": {
-     "rss_kib_per_pod": 49.76,
-     "pss_kib_per_pod": 49.76,
-     "procs_delta": 0
-    },
-    "app": {
-     "rss_kib_per_pod": 6612.56,
-     "pss_kib_per_pod": 2416.24,
-     "procs_delta": 50
-    },
-    "kube-apiserver": {
-     "rss_kib_per_pod": 2.32,
-     "pss_kib_per_pod": 2.32,
-     "procs_delta": 0
-    },
-    "kube-proxy": {
-     "rss_kib_per_pod": 0.08,
-     "pss_kib_per_pod": 0.08,
-     "procs_delta": 0
-    },
-    "systemd-journal": {
-     "rss_kib_per_pod": 13.2,
-     "pss_kib_per_pod": 13.06,
-     "procs_delta": 0
-    },
-    "containerd-shim": {
-     "rss_kib_per_pod": 12990.32,
-     "pss_kib_per_pod": 5461.88,
-     "procs_delta": 50
-    },
-    "containerd": {
-     "rss_kib_per_pod": 585.68,
-     "pss_kib_per_pod": 585.4,
-     "procs_delta": 0
-    },
-    "systemd": {
-     "rss_kib_per_pod": -14.8,
-     "pss_kib_per_pod": -14.98,
+     "pss_kib_per_pod": 8.88,
      "procs_delta": 0
     }
    },
-   "all_ready_ms": 7742,
+   "all_ready_ms": 7770,
    "repeat": 3
   },
   {
    "n": 100,
-   "working_set_delta_mib": 1077.71484375,
-   "working_set_kib_per_pod": 11035.8,
-   "mem_current_kib_per_pod": 11198.16,
-   "kernel_kib_per_pod": 1679.52,
-   "rss_sum_kib_per_pod": 21418.16,
-   "pss_sum_kib_per_pod": 8935.39,
+   "working_set_delta_mib": 1093.90234375,
+   "working_set_kib_per_pod": 11201.56,
+   "mem_current_kib_per_pod": 11334.56,
+   "kernel_kib_per_pod": 1668.36,
+   "rss_sum_kib_per_pod": 21616.44,
+   "pss_sum_kib_per_pod": 9138.23,
    "per_component": {
-    "systemd": {
-     "rss_kib_per_pod": 68.12,
-     "pss_kib_per_pod": 68.2,
-     "procs_delta": 0
-    },
-    "sh": {
-     "rss_kib_per_pod": 0.08,
-     "pss_kib_per_pod": 0.02,
-     "procs_delta": 0
-    },
-    "containerd": {
-     "rss_kib_per_pod": 669.88,
-     "pss_kib_per_pod": 669.73,
-     "procs_delta": 0
-    },
     "kindnetd": {
-     "rss_kib_per_pod": 0.72,
-     "pss_kib_per_pod": 0.72,
-     "procs_delta": 0
-    },
-    "coredns": {
-     "rss_kib_per_pod": 0.8,
-     "pss_kib_per_pod": 0.8,
-     "procs_delta": 0
-    },
-    "etcd": {
-     "rss_kib_per_pod": 119.88,
-     "pss_kib_per_pod": 119.88,
-     "procs_delta": 0
-    },
-    "kube-apiserver": {
-     "rss_kib_per_pod": 2.4,
-     "pss_kib_per_pod": 2.4,
-     "procs_delta": 0
-    },
-    "kube-proxy": {
-     "rss_kib_per_pod": 0.28,
-     "pss_kib_per_pod": 0.28,
-     "procs_delta": 0
-    },
-    "kube-scheduler": {
-     "rss_kib_per_pod": -1.52,
-     "pss_kib_per_pod": -1.52,
-     "procs_delta": 0
-    },
-    "app": {
-     "rss_kib_per_pod": 6613.12,
-     "pss_kib_per_pod": 2373.62,
-     "procs_delta": 100
-    },
-    "containerd-shim": {
-     "rss_kib_per_pod": 12957.12,
-     "pss_kib_per_pod": 5429.04,
-     "procs_delta": 100
-    },
-    "kube-controller-manager": {
-     "rss_kib_per_pod": 1.36,
-     "pss_kib_per_pod": 1.36,
-     "procs_delta": 0
-    },
-    "pause": {
-     "rss_kib_per_pod": 751.56,
-     "pss_kib_per_pod": 39.08,
-     "procs_delta": 100
-    },
-    "kubelet": {
-     "rss_kib_per_pod": 220.0,
-     "pss_kib_per_pod": 220.01,
-     "procs_delta": 0
-    },
-    "systemd-journal": {
-     "rss_kib_per_pod": 14.36,
-     "pss_kib_per_pod": 11.77,
-     "procs_delta": 0
-    }
-   },
-   "all_ready_ms": 18467,
-   "repeat": 1
-  },
-  {
-   "n": 100,
-   "working_set_delta_mib": 1033.2578125,
-   "working_set_kib_per_pod": 10580.56,
-   "mem_current_kib_per_pod": 10690.96,
-   "kernel_kib_per_pod": 1670.0,
-   "rss_sum_kib_per_pod": 21049.28,
-   "pss_sum_kib_per_pod": 8554.66,
-   "per_component": {
-    "etcd": {
-     "rss_kib_per_pod": 72.92,
-     "pss_kib_per_pod": 72.92,
-     "procs_delta": 0
-    },
-    "app": {
-     "rss_kib_per_pod": 6621.16,
-     "pss_kib_per_pod": 2378.52,
-     "procs_delta": 100
-    },
-    "containerd-shim": {
-     "rss_kib_per_pod": 12764.36,
-     "pss_kib_per_pod": 5234.42,
-     "procs_delta": 100
-    },
-    "pause": {
-     "rss_kib_per_pod": 751.24,
-     "pss_kib_per_pod": 38.76,
-     "procs_delta": 100
-    },
-    "kube-proxy": {
-     "rss_kib_per_pod": 0.92,
-     "pss_kib_per_pod": 0.92,
-     "procs_delta": 0
-    },
-    "kube-scheduler": {
-     "rss_kib_per_pod": -3.0,
-     "pss_kib_per_pod": -3.0,
-     "procs_delta": 0
-    },
-    "coredns": {
-     "rss_kib_per_pod": -5.44,
-     "pss_kib_per_pod": -5.44,
-     "procs_delta": 0
-    },
-    "containerd": {
-     "rss_kib_per_pod": 529.72,
-     "pss_kib_per_pod": 529.81,
-     "procs_delta": 0
-    },
-    "kube-controller-manager": {
-     "rss_kib_per_pod": 7.32,
-     "pss_kib_per_pod": 7.32,
-     "procs_delta": 0
-    },
-    "kubelet": {
-     "rss_kib_per_pod": 154.4,
-     "pss_kib_per_pod": 154.45,
-     "procs_delta": 0
-    },
-    "systemd": {
-     "rss_kib_per_pod": 0.04,
-     "pss_kib_per_pod": 0.12,
-     "procs_delta": 0
-    },
-    "kube-apiserver": {
-     "rss_kib_per_pod": 132.4,
-     "pss_kib_per_pod": 132.4,
-     "procs_delta": 0
-    },
-    "sh": {
-     "rss_kib_per_pod": -1.44,
-     "pss_kib_per_pod": -0.47,
-     "procs_delta": 0
-    },
-    "kindnetd": {
-     "rss_kib_per_pod": 3.36,
-     "pss_kib_per_pod": 3.36,
-     "procs_delta": 0
-    },
-    "systemd-journal": {
-     "rss_kib_per_pod": 21.32,
-     "pss_kib_per_pod": 10.57,
-     "procs_delta": 0
-    }
-   },
-   "all_ready_ms": 18257,
-   "repeat": 2
-  },
-  {
-   "n": 100,
-   "working_set_delta_mib": 1043.69921875,
-   "working_set_kib_per_pod": 10687.48,
-   "mem_current_kib_per_pod": 10797.52,
-   "kernel_kib_per_pod": 1669.4,
-   "rss_sum_kib_per_pod": 21225.68,
-   "pss_sum_kib_per_pod": 8723.02,
-   "per_component": {
-    "coredns": {
-     "rss_kib_per_pod": -2.56,
-     "pss_kib_per_pod": -2.56,
-     "procs_delta": 0
-    },
-    "kube-apiserver": {
-     "rss_kib_per_pod": -35.72,
-     "pss_kib_per_pod": -35.72,
-     "procs_delta": 0
-    },
-    "kube-controller-manager": {
-     "rss_kib_per_pod": 17.36,
-     "pss_kib_per_pod": 17.36,
-     "procs_delta": 0
-    },
-    "etcd": {
-     "rss_kib_per_pod": 32.28,
-     "pss_kib_per_pod": 32.28,
-     "procs_delta": 0
-    },
-    "app": {
-     "rss_kib_per_pod": 6639.36,
-     "pss_kib_per_pod": 2397.16,
-     "procs_delta": 100
-    },
-    "sh": {
-     "rss_kib_per_pod": 0.96,
-     "pss_kib_per_pod": 0.59,
-     "procs_delta": 0
-    },
-    "containerd-shim": {
-     "rss_kib_per_pod": 12969.96,
-     "pss_kib_per_pod": 5443.08,
-     "procs_delta": 100
-    },
-    "kubelet": {
-     "rss_kib_per_pod": 205.88,
-     "pss_kib_per_pod": 205.84,
-     "procs_delta": 0
-    },
-    "containerd": {
-     "rss_kib_per_pod": 594.0,
-     "pss_kib_per_pod": 593.79,
-     "procs_delta": 0
-    },
-    "pause": {
-     "rss_kib_per_pod": 751.72,
-     "pss_kib_per_pod": 39.24,
-     "procs_delta": 100
-    },
-    "systemd-journal": {
-     "rss_kib_per_pod": 30.88,
-     "pss_kib_per_pod": 10.48,
-     "procs_delta": 0
-    },
-    "kube-proxy": {
      "rss_kib_per_pod": 0.08,
      "pss_kib_per_pod": 0.08,
      "procs_delta": 0
     },
-    "kube-scheduler": {
-     "rss_kib_per_pod": 20.92,
-     "pss_kib_per_pod": 20.92,
+    "sh": {
+     "rss_kib_per_pod": 0.44,
+     "pss_kib_per_pod": 0.3,
      "procs_delta": 0
     },
-    "kindnetd": {
-     "rss_kib_per_pod": 0.56,
-     "pss_kib_per_pod": 0.56,
+    "systemd-journal": {
+     "rss_kib_per_pod": 12.4,
+     "pss_kib_per_pod": 10.72,
+     "procs_delta": 0
+    },
+    "containerd-shim": {
+     "rss_kib_per_pod": 12970.52,
+     "pss_kib_per_pod": 5448.61,
+     "procs_delta": 100
+    },
+    "kube-proxy": {
+     "rss_kib_per_pod": 21.6,
+     "pss_kib_per_pod": 21.6,
+     "procs_delta": 0
+    },
+    "coredns": {
+     "rss_kib_per_pod": 70.8,
+     "pss_kib_per_pod": 70.8,
+     "procs_delta": 0
+    },
+    "etcd": {
+     "rss_kib_per_pod": 70.6,
+     "pss_kib_per_pod": 70.6,
+     "procs_delta": 0
+    },
+    "containerd": {
+     "rss_kib_per_pod": 593.12,
+     "pss_kib_per_pod": 593.03,
+     "procs_delta": 0
+    },
+    "systemd": {
+     "rss_kib_per_pod": 143.72,
+     "pss_kib_per_pod": 143.8,
+     "procs_delta": 0
+    },
+    "kube-scheduler": {
+     "rss_kib_per_pod": 20.6,
+     "pss_kib_per_pod": 20.6,
+     "procs_delta": 0
+    },
+    "local-path-provisioner": {
+     "rss_kib_per_pod": 18.36,
+     "pss_kib_per_pod": 18.36,
+     "procs_delta": 0
+    },
+    "kube-apiserver": {
+     "rss_kib_per_pod": 18.92,
+     "pss_kib_per_pod": 18.92,
+     "procs_delta": 0
+    },
+    "kube-controller-manager": {
+     "rss_kib_per_pod": 21.64,
+     "pss_kib_per_pod": 21.64,
+     "procs_delta": 0
+    },
+    "pause": {
+     "rss_kib_per_pod": 751.32,
+     "pss_kib_per_pod": 38.84,
+     "procs_delta": 100
+    },
+    "app": {
+     "rss_kib_per_pod": 6657.64,
+     "pss_kib_per_pod": 2415.64,
+     "procs_delta": 100
+    },
+    "kubelet": {
+     "rss_kib_per_pod": 244.68,
+     "pss_kib_per_pod": 244.69,
      "procs_delta": 0
     }
    },
-   "all_ready_ms": 15262,
+   "all_ready_ms": 17949,
+   "repeat": 1
+  },
+  {
+   "n": 100,
+   "working_set_delta_mib": 1075.56640625,
+   "working_set_kib_per_pod": 11013.8,
+   "mem_current_kib_per_pod": 11124.4,
+   "kernel_kib_per_pod": 1667.16,
+   "rss_sum_kib_per_pod": 21540.72,
+   "pss_sum_kib_per_pod": 9054.12,
+   "per_component": {
+    "coredns": {
+     "rss_kib_per_pod": 0.08,
+     "pss_kib_per_pod": 0.08,
+     "procs_delta": 0
+    },
+    "sh": {
+     "rss_kib_per_pod": 0.24,
+     "pss_kib_per_pod": 0.25,
+     "procs_delta": 0
+    },
+    "systemd-journal": {
+     "rss_kib_per_pod": 15.08,
+     "pss_kib_per_pod": 10.35,
+     "procs_delta": 0
+    },
+    "etcd": {
+     "rss_kib_per_pod": 72.08,
+     "pss_kib_per_pod": 72.08,
+     "procs_delta": 0
+    },
+    "app": {
+     "rss_kib_per_pod": 6640.96,
+     "pss_kib_per_pod": 2398.32,
+     "procs_delta": 100
+    },
+    "kube-apiserver": {
+     "rss_kib_per_pod": 133.44,
+     "pss_kib_per_pod": 133.44,
+     "procs_delta": 0
+    },
+    "kindnetd": {
+     "rss_kib_per_pod": 4.08,
+     "pss_kib_per_pod": 4.08,
+     "procs_delta": 0
+    },
+    "kube-controller-manager": {
+     "rss_kib_per_pod": -5.84,
+     "pss_kib_per_pod": -5.84,
+     "procs_delta": 0
+    },
+    "kube-scheduler": {
+     "rss_kib_per_pod": 0.08,
+     "pss_kib_per_pod": 0.08,
+     "procs_delta": 0
+    },
+    "pause": {
+     "rss_kib_per_pod": 751.2,
+     "pss_kib_per_pod": 38.72,
+     "procs_delta": 100
+    },
+    "containerd-shim": {
+     "rss_kib_per_pod": 13193.68,
+     "pss_kib_per_pod": 5666.76,
+     "procs_delta": 100
+    },
+    "kube-proxy": {
+     "rss_kib_per_pod": -2.48,
+     "pss_kib_per_pod": -2.48,
+     "procs_delta": 0
+    },
+    "containerd": {
+     "rss_kib_per_pod": 523.68,
+     "pss_kib_per_pod": 523.86,
+     "procs_delta": 0
+    },
+    "kubelet": {
+     "rss_kib_per_pod": 214.44,
+     "pss_kib_per_pod": 214.44,
+     "procs_delta": 0
+    }
+   },
+   "all_ready_ms": 15503,
+   "repeat": 2
+  },
+  {
+   "n": 100,
+   "working_set_delta_mib": 1044.41015625,
+   "working_set_kib_per_pod": 10694.76,
+   "mem_current_kib_per_pod": 10804.56,
+   "kernel_kib_per_pod": 1671.52,
+   "rss_sum_kib_per_pod": 21069.64,
+   "pss_sum_kib_per_pod": 8582.55,
+   "per_component": {
+    "etcd": {
+     "rss_kib_per_pod": 32.56,
+     "pss_kib_per_pod": 32.56,
+     "procs_delta": 0
+    },
+    "systemd": {
+     "rss_kib_per_pod": 29.32,
+     "pss_kib_per_pod": 29.42,
+     "procs_delta": 0
+    },
+    "app": {
+     "rss_kib_per_pod": 6636.68,
+     "pss_kib_per_pod": 2394.68,
+     "procs_delta": 100
+    },
+    "coredns": {
+     "rss_kib_per_pod": -9.36,
+     "pss_kib_per_pod": -9.36,
+     "procs_delta": 0
+    },
+    "kube-controller-manager": {
+     "rss_kib_per_pod": 0.4,
+     "pss_kib_per_pod": 0.4,
+     "procs_delta": 0
+    },
+    "systemd-journal": {
+     "rss_kib_per_pod": 22.76,
+     "pss_kib_per_pod": 10.09,
+     "procs_delta": 0
+    },
+    "containerd": {
+     "rss_kib_per_pod": 553.16,
+     "pss_kib_per_pod": 553.23,
+     "procs_delta": 0
+    },
+    "containerd-shim": {
+     "rss_kib_per_pod": 12898.24,
+     "pss_kib_per_pod": 5376.35,
+     "procs_delta": 100
+    },
+    "kindnetd": {
+     "rss_kib_per_pod": 4.68,
+     "pss_kib_per_pod": 4.68,
+     "procs_delta": 0
+    },
+    "pause": {
+     "rss_kib_per_pod": 750.96,
+     "pss_kib_per_pod": 38.48,
+     "procs_delta": 100
+    },
+    "kube-scheduler": {
+     "rss_kib_per_pod": 0.92,
+     "pss_kib_per_pod": 0.92,
+     "procs_delta": 0
+    },
+    "kube-proxy": {
+     "rss_kib_per_pod": 0.76,
+     "pss_kib_per_pod": 0.76,
+     "procs_delta": 0
+    },
+    "kube-apiserver": {
+     "rss_kib_per_pod": -121.24,
+     "pss_kib_per_pod": -121.24,
+     "procs_delta": 0
+    },
+    "sh": {
+     "rss_kib_per_pod": -1.88,
+     "pss_kib_per_pod": -0.25,
+     "procs_delta": 0
+    },
+    "kubelet": {
+     "rss_kib_per_pod": 271.68,
+     "pss_kib_per_pod": 271.83,
+     "procs_delta": 0
+    }
+   },
+   "all_ready_ms": 17582,
    "repeat": 3
   }
  ]

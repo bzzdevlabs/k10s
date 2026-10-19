@@ -1,8 +1,8 @@
 # k10s — project status and resume guide
 
-PROJECT STATE: IN PROGRESS
+PROJECT STATE: COMPLETE
 
-Last updated: 2026-10-19. This file is the single place to learn where the project stands and what comes next; it is
+Last updated: 2026-10-20. All planned steps are done; remaining items below are the roadmap (docs/REPORT.md §8). This file is the single place to learn where the project stands and what comes next; it is
 kept current so work can resume in a fresh session.
 
 Keep-alive: the desktop scheduled task `k10s-session-watchdog` (17 and 47 past each hour) wakes the build session
@@ -29,19 +29,19 @@ everything is done.
    `crates/k10s`, `crates/k10-mesh` (wire: path as raw bytes, `encode` returns `Result`).
 2. DONE (committed) — **Metal phase 2** (JIT engine, cluster membership, SMP) — finished in the working tree under `metal/`, NOT yet
    committed because it builds against the uncommitted k10-mesh wire change from (1). Commit both together.
-3. RUNNING (resumed after usage limit) — **Comparative benchmark harness** `bench/k10s/`, `bench/compare.py`, `bench/run-final.sh` →
+3. DONE (committed 412ad4f) — **Comparative benchmark harness** `bench/k10s/`, `bench/compare.py`, `bench/run-final.sh` →
    `bench/results/COMPARISON.md` (preliminary).
 4. DONE — native-hardware (docs/research/native-hardware.md) and universal-os (docs/research/universal-os.md); prototypes on local branches research/native-hardware and research/universal-os (not merged, not pushed) — **Research tasks** `docs/TASK-universal-os.md` → `docs/research/universal-os.md` and
    `docs/TASK-native-hardware.md` → `docs/research/native-hardware.md` (experiments live outside the repo in
    `/home/qgerard/dev/k10s-research/`).
 
 ## Remaining steps, in order
-1. When (1) lands: run all suites (`CARGO_TARGET_DIR=target/node cargo test -p k10-ir -p k10-mesh -p k10-lang -p k10-jit
+1. DONE — When (1) lands: run all suites (`CARGO_TARGET_DIR=target/node cargo test -p k10-ir -p k10-mesh -p k10-lang -p k10-jit
    -p k10-node -p k10s`, and `K10S_BACKEND=interp` for node/k10s), `metal/test.sh`, `metal/cluster-test.sh`; commit
    crates + metal; push.
-2. Commit the benchmark harness; commit the research reports.
-3. On a quiet machine (no other agents): `bench/run-final.sh` → final `bench/results/COMPARISON.md`; commit.
-4. Write `docs/REPORT.md` (final results: what was built, measured gains vs Kubernetes, test evidence, limitations,
+2. DONE — Commit the benchmark harness; commit the research reports.
+3. DONE — final quiet run of `bench/run-final.sh` (2026-10-19 21:35 → 2026-10-20 00:52) → `bench/results/COMPARISON.md`.
+4. DONE — Write `docs/REPORT.md` (final results: what was built, measured gains vs Kubernetes, test evidence, limitations,
    roadmap) and refresh `README.md` numbers; commit; push.
 
 ## Conventions
