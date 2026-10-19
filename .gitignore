@@ -2,3 +2,6 @@
 *.k10
 /bench/results/raw/
 /bench/.cache/
+/bench/bin/
+/bench/results/**/.*.log
+/bench/results/**/.create_ms_*

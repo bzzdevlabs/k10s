@@ -1,0 +1,140 @@
+{
+ "experiment": "failover",
+ "env": {
+  "date": "2026-10-19T12:25:08+0200",
+  "host_kernel": "6.1.0-53-amd64",
+  "host_cpu": "Intel(R) Core(TM) i7-7820HQ CPU @ 2.90GHz",
+  "host_threads": 8,
+  "host_mem_gib": 62.7,
+  "docker_server": "28.3.3",
+  "docker_os": "Docker Desktop",
+  "docker_vm_kernel": "6.10.14-linuxkit",
+  "docker_vm_cpus": 8,
+  "docker_vm_mem_gib": 15.62,
+  "kind": "kind v0.30.0 go1.24.6 linux/amd64",
+  "kubectl_client": "v1.34.12",
+  "node_image": "kindest/node:v1.34.0@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a",
+  "cluster": "k10s-bench",
+  "k8s_version": "v1.34.0",
+  "node_kernel": "6.10.14-linuxkit",
+  "container_runtime": "containerd://2.1.3",
+  "nodes": 1,
+  "max_pods": "110"
+ },
+ "runs": [
+  {
+   "probes": 601,
+   "failed_after_event": 13,
+   "first_fail_ms_after_event": 90,
+   "last_fail_ms_after_event": 1780,
+   "first_success_after_last_fail_ms": 2283,
+   "outage_window_ms": 1690,
+   "scenario": "1-replica-graceful",
+   "repeat": 1,
+   "replacement_ready_ms": 1631
+  },
+  {
+   "probes": 649,
+   "failed_after_event": 10,
+   "first_fail_ms_after_event": 94,
+   "last_fail_ms_after_event": 757,
+   "first_success_after_last_fail_ms": 1259,
+   "outage_window_ms": 663,
+   "scenario": "1-replica-graceful",
+   "repeat": 2,
+   "replacement_ready_ms": 1167
+  },
+  {
+   "probes": 599,
+   "failed_after_event": 15,
+   "first_fail_ms_after_event": 133,
+   "last_fail_ms_after_event": 1867,
+   "first_success_after_last_fail_ms": 2370,
+   "outage_window_ms": 1734,
+   "scenario": "1-replica-graceful",
+   "repeat": 3,
+   "replacement_ready_ms": 1490
+  },
+  {
+   "probes": 634,
+   "failed_after_event": 11,
+   "first_fail_ms_after_event": 74,
+   "last_fail_ms_after_event": 896,
+   "first_success_after_last_fail_ms": 1399,
+   "outage_window_ms": 822,
+   "scenario": "1-replica-forced",
+   "repeat": 1,
+   "replacement_ready_ms": 1085
+  },
+  {
+   "probes": 597,
+   "failed_after_event": 20,
+   "first_fail_ms_after_event": 125,
+   "last_fail_ms_after_event": 1967,
+   "first_success_after_last_fail_ms": 2470,
+   "outage_window_ms": 1842,
+   "scenario": "1-replica-forced",
+   "repeat": 2,
+   "replacement_ready_ms": 1419
+  },
+  {
+   "probes": 597,
+   "failed_after_event": 19,
+   "first_fail_ms_after_event": 116,
+   "last_fail_ms_after_event": 1932,
+   "first_success_after_last_fail_ms": 2433,
+   "outage_window_ms": 1816,
+   "scenario": "1-replica-forced",
+   "repeat": 3,
+   "replacement_ready_ms": 1822
+  },
+  {
+   "scenario": "3-replicas-delete-1-under-300rps",
+   "repeat": 1,
+   "requests": 3594,
+   "errors": 7,
+   "errors_by_kind": {
+    "read": 7
+   },
+   "latency_us": {
+    "max": 32155,
+    "p50": 1432,
+    "p90": 2800,
+    "p99": 10560,
+    "p99.9": 15936
+   }
+  },
+  {
+   "scenario": "3-replicas-delete-1-under-300rps",
+   "repeat": 2,
+   "requests": 3594,
+   "errors": 7,
+   "errors_by_kind": {
+    "read": 7
+   },
+   "latency_us": {
+    "max": 28936,
+    "p50": 1464,
+    "p90": 3152,
+    "p99": 13376,
+    "p99.9": 23424
+   }
+  },
+  {
+   "scenario": "3-replicas-delete-1-under-300rps",
+   "repeat": 3,
+   "requests": 3593,
+   "errors": 8,
+   "errors_by_kind": {
+    "read": 8
+   },
+   "latency_us": {
+    "max": 28423,
+    "p50": 1384,
+    "p90": 2512,
+    "p99": 11840,
+    "p99.9": 23936
+   }
+  }
+ ]
+}

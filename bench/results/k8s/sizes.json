@@ -1,0 +1,69 @@
+{
+ "experiment": "sizes",
+ "env": {
+  "date": "2026-10-19T12:29:22+0200",
+  "host_kernel": "6.1.0-53-amd64",
+  "host_cpu": "Intel(R) Core(TM) i7-7820HQ CPU @ 2.90GHz",
+  "host_threads": 8,
+  "host_mem_gib": 62.7,
+  "docker_server": "28.3.3",
+  "docker_os": "Docker Desktop",
+  "docker_vm_kernel": "6.10.14-linuxkit",
+  "docker_vm_cpus": 8,
+  "docker_vm_mem_gib": 15.62,
+  "kind": "kind v0.30.0 go1.24.6 linux/amd64",
+  "kubectl_client": "v1.34.12",
+  "node_image": "kindest/node:v1.34.0@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a",
+  "cluster": "k10s-bench",
+  "k8s_version": "v1.34.0",
+  "node_kernel": "6.10.14-linuxkit",
+  "container_runtime": "containerd://2.1.3",
+  "nodes": 1,
+  "max_pods": "110"
+ },
+ "runs": [
+  {
+   "binaries_bytes": {
+    "echo": 5558456,
+    "compute": 5562552,
+    "chain": 6054072,
+    "counter": 5562552,
+    "loadgen": 2564280
+   },
+   "docker_images_bytes": {
+    "echo:v1": 2393160,
+    "compute:v1": 2395084,
+    "chain:v1": 2610168,
+    "counter:v1": 2395301
+   },
+   "kind_node_image_bytes": 445466597,
+   "kind_node_image_docker_images_size": "1.45GB",
+   "images_in_node": {
+    "docker.io/k10s-bench/chain:v1": 2610168,
+    "docker.io/k10s-bench/compute:v1": 2395084,
+    "docker.io/k10s-bench/counter:v1": 2395301,
+    "docker.io/k10s-bench/echo:v1": 2393160,
+    "docker.io/kindest/kindnetd:v20250512-df8de77b": 44375501,
+    "docker.io/kindest/local-path-helper:v20241212-8ac705d0": 3084671,
+    "docker.io/kindest/local-path-provisioner:v20250214-acbabc1a": 22540870,
+    "registry.k8s.io/coredns/coredns:v1.12.1": 22384805,
+    "registry.k8s.io/etcd:3.6.4-0": 74311308,
+    "registry.k8s.io/kube-apiserver-amd64:v1.34.0": 89044732,
+    "registry.k8s.io/kube-controller-manager-amd64:v1.34.0": 75998818,
+    "registry.k8s.io/kube-proxy-amd64:v1.34.0": 73135815,
+    "registry.k8s.io/kube-scheduler-amd64:v1.34.0": 53839458,
+    "registry.k8s.io/pause:3.10": 320368
+   },
+   "node_containerd_dir_kib": 1205668,
+   "node_etcd_dir_kib": 159364,
+   "k8s_binaries_in_node_bytes": {
+    "kubelet": 59195684,
+    "kubeadm": 74027192,
+    "kubectl": 60559544,
+    "containerd": 44277832,
+    "runc": 16794096,
+    "crictl": 42742321
+   }
+  }
+ ]
+}

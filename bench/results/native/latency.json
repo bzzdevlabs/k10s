@@ -1,0 +1,571 @@
+{
+ "experiment": "native_latency",
+ "env": {
+  "date": "2026-10-19T11:47:26+0200",
+  "host_kernel": "6.1.0-53-amd64",
+  "host_cpu": "Intel(R) Core(TM) i7-7820HQ CPU @ 2.90GHz",
+  "host_threads": 8,
+  "host_mem_gib": 62.7,
+  "note": "bare processes on the host kernel (not inside the Docker Desktop VM used by the kind baseline)"
+ },
+ "runs": [
+  {
+   "addr": "127.0.0.1:19100",
+   "body_bytes": 0,
+   "conns": 1,
+   "duration_s": 20,
+   "errors": 0,
+   "errors_by_kind": {},
+   "label": "native/echo",
+   "latency_us": {
+    "max": 13933,
+    "p50": 52,
+    "p90": 71,
+    "p99": 131,
+    "p99.9": 506
+   },
+   "loadgen_cpu_s": {
+    "sys": 7.403389,
+    "total": 10.843558999999999,
+    "user": 3.44017
+   },
+   "method": "GET",
+   "mode": "closed",
+   "path": "/",
+   "requests": 345745,
+   "rps": 17287.19006444769,
+   "target_rps": 0,
+   "warmup_s": 3,
+   "target": "echo",
+   "repeat": 1,
+   "place": "host"
+  },
+  {
+   "addr": "127.0.0.1:19100",
+   "body_bytes": 0,
+   "conns": 1,
+   "duration_s": 20,
+   "errors": 0,
+   "errors_by_kind": {},
+   "label": "native/echo",
+   "latency_us": {
+    "max": 16149,
+    "p50": 53,
+    "p90": 77,
+    "p99": 149,
+    "p99.9": 604
+   },
+   "loadgen_cpu_s": {
+    "sys": 7.228927,
+    "total": 10.607474,
+    "user": 3.3785469999999997
+   },
+   "method": "GET",
+   "mode": "closed",
+   "path": "/",
+   "requests": 331610,
+   "rps": 16580.430120948233,
+   "target_rps": 0,
+   "warmup_s": 3,
+   "target": "echo",
+   "repeat": 2,
+   "place": "host"
+  },
+  {
+   "addr": "127.0.0.1:19100",
+   "body_bytes": 0,
+   "conns": 1,
+   "duration_s": 20,
+   "errors": 0,
+   "errors_by_kind": {},
+   "label": "native/echo",
+   "latency_us": {
+    "max": 10559,
+    "p50": 52,
+    "p90": 73,
+    "p99": 137,
+    "p99.9": 516
+   },
+   "loadgen_cpu_s": {
+    "sys": 7.265015,
+    "total": 10.841262,
+    "user": 3.5762470000000004
+   },
+   "method": "GET",
+   "mode": "closed",
+   "path": "/",
+   "requests": 343049,
+   "rps": 17152.404913188446,
+   "target_rps": 0,
+   "warmup_s": 3,
+   "target": "echo",
+   "repeat": 3,
+   "place": "host"
+  },
+  {
+   "addr": "127.0.0.1:19100",
+   "body_bytes": 0,
+   "conns": 16,
+   "duration_s": 20,
+   "errors": 0,
+   "errors_by_kind": {},
+   "label": "native/echo",
+   "latency_us": {
+    "max": 66664,
+    "p50": 193,
+    "p90": 342,
+    "p99": 900,
+    "p99.9": 2224
+   },
+   "loadgen_cpu_s": {
+    "sys": 25.606527,
+    "total": 37.626397,
+    "user": 12.019870000000001
+   },
+   "method": "GET",
+   "mode": "closed",
+   "path": "/",
+   "requests": 1470943,
+   "rps": 73546.20129813097,
+   "target_rps": 0,
+   "warmup_s": 3,
+   "target": "echo",
+   "repeat": 1,
+   "place": "host"
+  },
+  {
+   "addr": "127.0.0.1:19100",
+   "body_bytes": 0,
+   "conns": 16,
+   "duration_s": 20,
+   "errors": 0,
+   "errors_by_kind": {},
+   "label": "native/echo",
+   "latency_us": {
+    "max": 22852,
+    "p50": 195,
+    "p90": 342,
+    "p99": 804,
+    "p99.9": 1880
+   },
+   "loadgen_cpu_s": {
+    "sys": 26.247162000000003,
+    "total": 38.395992,
+    "user": 12.14883
+   },
+   "method": "GET",
+   "mode": "closed",
+   "path": "/",
+   "requests": 1493945,
+   "rps": 74696.5423361624,
+   "target_rps": 0,
+   "warmup_s": 3,
+   "target": "echo",
+   "repeat": 2,
+   "place": "host"
+  },
+  {
+   "addr": "127.0.0.1:19100",
+   "body_bytes": 0,
+   "conns": 16,
+   "duration_s": 20,
+   "errors": 0,
+   "errors_by_kind": {},
+   "label": "native/echo",
+   "latency_us": {
+    "max": 24840,
+    "p50": 197,
+    "p90": 350,
+    "p99": 868,
+    "p99.9": 2064
+   },
+   "loadgen_cpu_s": {
+    "sys": 25.846633,
+    "total": 37.438231,
+    "user": 11.591598000000001
+   },
+   "method": "GET",
+   "mode": "closed",
+   "path": "/",
+   "requests": 1461671,
+   "rps": 73082.9322847856,
+   "target_rps": 0,
+   "warmup_s": 3,
+   "target": "echo",
+   "repeat": 3,
+   "place": "host"
+  },
+  {
+   "addr": "127.0.0.1:19100",
+   "body_bytes": 0,
+   "conns": 64,
+   "duration_s": 20,
+   "errors": 0,
+   "errors_by_kind": {},
+   "label": "native/echo",
+   "latency_us": {
+    "max": 37852,
+    "p50": 668,
+    "p90": 1480,
+    "p99": 3504,
+    "p99.9": 7200
+   },
+   "loadgen_cpu_s": {
+    "sys": 24.245817,
+    "total": 34.390586,
+    "user": 10.144769
+   },
+   "method": "GET",
+   "mode": "closed",
+   "path": "/",
+   "requests": 1607511,
+   "rps": 80372.41466808517,
+   "target_rps": 0,
+   "warmup_s": 3,
+   "target": "echo",
+   "repeat": 1,
+   "place": "host"
+  },
+  {
+   "addr": "127.0.0.1:19100",
+   "body_bytes": 0,
+   "conns": 64,
+   "duration_s": 20,
+   "errors": 0,
+   "errors_by_kind": {},
+   "label": "native/echo",
+   "latency_us": {
+    "max": 39520,
+    "p50": 644,
+    "p90": 1416,
+    "p99": 3408,
+    "p99.9": 6688
+   },
+   "loadgen_cpu_s": {
+    "sys": 25.445158999999997,
+    "total": 35.652381999999996,
+    "user": 10.207222999999999
+   },
+   "method": "GET",
+   "mode": "closed",
+   "path": "/",
+   "requests": 1681787,
+   "rps": 84086.18128373158,
+   "target_rps": 0,
+   "warmup_s": 3,
+   "target": "echo",
+   "repeat": 2,
+   "place": "host"
+  },
+  {
+   "addr": "127.0.0.1:19100",
+   "body_bytes": 0,
+   "conns": 64,
+   "duration_s": 20,
+   "errors": 0,
+   "errors_by_kind": {},
+   "label": "native/echo",
+   "latency_us": {
+    "max": 23841,
+    "p50": 628,
+    "p90": 1368,
+    "p99": 3280,
+    "p99.9": 6816
+   },
+   "loadgen_cpu_s": {
+    "sys": 25.743447000000003,
+    "total": 36.584313,
+    "user": 10.840866
+   },
+   "method": "GET",
+   "mode": "closed",
+   "path": "/",
+   "requests": 1724027,
+   "rps": 86198.53029091684,
+   "target_rps": 0,
+   "warmup_s": 3,
+   "target": "echo",
+   "repeat": 3,
+   "place": "host"
+  },
+  {
+   "addr": "127.0.0.1:19101",
+   "body_bytes": 0,
+   "conns": 1,
+   "duration_s": 20,
+   "errors": 0,
+   "errors_by_kind": {},
+   "label": "native/chain",
+   "latency_us": {
+    "max": 31495,
+    "p50": 165,
+    "p90": 247,
+    "p99": 572,
+    "p99.9": 2096
+   },
+   "loadgen_cpu_s": {
+    "sys": 3.200962,
+    "total": 4.668198,
+    "user": 1.4672360000000002
+   },
+   "method": "GET",
+   "mode": "closed",
+   "path": "/",
+   "requests": 103744,
+   "rps": 5187.161692032831,
+   "target_rps": 0,
+   "warmup_s": 3,
+   "target": "chain",
+   "repeat": 1,
+   "place": "host"
+  },
+  {
+   "addr": "127.0.0.1:19101",
+   "body_bytes": 0,
+   "conns": 1,
+   "duration_s": 20,
+   "errors": 0,
+   "errors_by_kind": {},
+   "label": "native/chain",
+   "latency_us": {
+    "max": 18676,
+    "p50": 159,
+    "p90": 229,
+    "p99": 474,
+    "p99.9": 1592
+   },
+   "loadgen_cpu_s": {
+    "sys": 3.317228,
+    "total": 4.8488620000000004,
+    "user": 1.531634
+   },
+   "method": "GET",
+   "mode": "closed",
+   "path": "/",
+   "requests": 111202,
+   "rps": 5560.088699675727,
+   "target_rps": 0,
+   "warmup_s": 3,
+   "target": "chain",
+   "repeat": 2,
+   "place": "host"
+  },
+  {
+   "addr": "127.0.0.1:19101",
+   "body_bytes": 0,
+   "conns": 1,
+   "duration_s": 20,
+   "errors": 0,
+   "errors_by_kind": {},
+   "label": "native/chain",
+   "latency_us": {
+    "max": 12926,
+    "p50": 155,
+    "p90": 219,
+    "p99": 434,
+    "p99.9": 1336
+   },
+   "loadgen_cpu_s": {
+    "sys": 3.2650460000000003,
+    "total": 4.910876,
+    "user": 1.6458300000000001
+   },
+   "method": "GET",
+   "mode": "closed",
+   "path": "/",
+   "requests": 114977,
+   "rps": 5748.830018504063,
+   "target_rps": 0,
+   "warmup_s": 3,
+   "target": "chain",
+   "repeat": 3,
+   "place": "host"
+  },
+  {
+   "addr": "127.0.0.1:19101",
+   "body_bytes": 0,
+   "conns": 16,
+   "duration_s": 20,
+   "errors": 0,
+   "errors_by_kind": {},
+   "label": "native/chain",
+   "latency_us": {
+    "max": 23687,
+    "p50": 636,
+    "p90": 1256,
+    "p99": 2960,
+    "p99.9": 6496
+   },
+   "loadgen_cpu_s": {
+    "sys": 8.686912999999999,
+    "total": 13.020351999999999,
+    "user": 4.333439
+   },
+   "method": "GET",
+   "mode": "closed",
+   "path": "/",
+   "requests": 410513,
+   "rps": 20524.218480914238,
+   "target_rps": 0,
+   "warmup_s": 3,
+   "target": "chain",
+   "repeat": 1,
+   "place": "host"
+  },
+  {
+   "addr": "127.0.0.1:19101",
+   "body_bytes": 0,
+   "conns": 16,
+   "duration_s": 20,
+   "errors": 0,
+   "errors_by_kind": {},
+   "label": "native/chain",
+   "latency_us": {
+    "max": 32486,
+    "p50": 636,
+    "p90": 1400,
+    "p99": 3504,
+    "p99.9": 9408
+   },
+   "loadgen_cpu_s": {
+    "sys": 8.410261,
+    "total": 12.332517000000001,
+    "user": 3.922256
+   },
+   "method": "GET",
+   "mode": "closed",
+   "path": "/",
+   "requests": 389444,
+   "rps": 19471.20808408793,
+   "target_rps": 0,
+   "warmup_s": 3,
+   "target": "chain",
+   "repeat": 2,
+   "place": "host"
+  },
+  {
+   "addr": "127.0.0.1:19101",
+   "body_bytes": 0,
+   "conns": 16,
+   "duration_s": 20,
+   "errors": 0,
+   "errors_by_kind": {},
+   "label": "native/chain",
+   "latency_us": {
+    "max": 20752,
+    "p50": 564,
+    "p90": 1004,
+    "p99": 2128,
+    "p99.9": 5152
+   },
+   "loadgen_cpu_s": {
+    "sys": 10.368327,
+    "total": 15.447686999999998,
+    "user": 5.079359999999999
+   },
+   "method": "GET",
+   "mode": "closed",
+   "path": "/",
+   "requests": 489831,
+   "rps": 24491.087253151894,
+   "target_rps": 0,
+   "warmup_s": 3,
+   "target": "chain",
+   "repeat": 3,
+   "place": "host"
+  },
+  {
+   "addr": "127.0.0.1:19101",
+   "body_bytes": 0,
+   "conns": 64,
+   "duration_s": 20,
+   "errors": 0,
+   "errors_by_kind": {},
+   "label": "native/chain",
+   "latency_us": {
+    "max": 25263,
+    "p50": 2096,
+    "p90": 4256,
+    "p99": 7904,
+    "p99.9": 13888
+   },
+   "loadgen_cpu_s": {
+    "sys": 9.183402,
+    "total": 13.283318999999999,
+    "user": 4.099917
+   },
+   "method": "GET",
+   "mode": "closed",
+   "path": "/",
+   "requests": 521190,
+   "rps": 26056.75269064601,
+   "target_rps": 0,
+   "warmup_s": 3,
+   "target": "chain",
+   "repeat": 1,
+   "place": "host"
+  },
+  {
+   "addr": "127.0.0.1:19101",
+   "body_bytes": 0,
+   "conns": 64,
+   "duration_s": 20,
+   "errors": 0,
+   "errors_by_kind": {},
+   "label": "native/chain",
+   "latency_us": {
+    "max": 43564,
+    "p50": 2128,
+    "p90": 4192,
+    "p99": 7776,
+    "p99.9": 13120
+   },
+   "loadgen_cpu_s": {
+    "sys": 9.15543,
+    "total": 13.154685,
+    "user": 3.9992550000000002
+   },
+   "method": "GET",
+   "mode": "closed",
+   "path": "/",
+   "requests": 518415,
+   "rps": 25917.71550203359,
+   "target_rps": 0,
+   "warmup_s": 3,
+   "target": "chain",
+   "repeat": 2,
+   "place": "host"
+  },
+  {
+   "addr": "127.0.0.1:19101",
+   "body_bytes": 0,
+   "conns": 64,
+   "duration_s": 20,
+   "errors": 0,
+   "errors_by_kind": {},
+   "label": "native/chain",
+   "latency_us": {
+    "max": 60780,
+    "p50": 2192,
+    "p90": 5216,
+    "p99": 14400,
+    "p99.9": 25984
+   },
+   "loadgen_cpu_s": {
+    "sys": 7.6871469999999995,
+    "total": 11.101336,
+    "user": 3.414189
+   },
+   "method": "GET",
+   "mode": "closed",
+   "path": "/",
+   "requests": 439959,
+   "rps": 21993.74706421633,
+   "target_rps": 0,
+   "warmup_s": 3,
+   "target": "chain",
+   "repeat": 3,
+   "place": "host"
+  }
+ ]
+}

@@ -1,0 +1,47 @@
+{
+ "experiment": "first_response",
+ "env": {
+  "date": "2026-10-19T12:08:27+0200",
+  "host_kernel": "6.1.0-53-amd64",
+  "host_cpu": "Intel(R) Core(TM) i7-7820HQ CPU @ 2.90GHz",
+  "host_threads": 8,
+  "host_mem_gib": 62.7,
+  "docker_server": "28.3.3",
+  "docker_os": "Docker Desktop",
+  "docker_vm_kernel": "6.10.14-linuxkit",
+  "docker_vm_cpus": 8,
+  "docker_vm_mem_gib": 15.62,
+  "kind": "kind v0.30.0 go1.24.6 linux/amd64",
+  "kubectl_client": "v1.34.12",
+  "node_image": "kindest/node:v1.34.0@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a",
+  "cluster": "k10s-bench",
+  "k8s_version": "v1.34.0",
+  "node_kernel": "6.10.14-linuxkit",
+  "container_runtime": "containerd://2.1.3",
+  "nodes": 1,
+  "max_pods": "110"
+ },
+ "runs": [
+  {
+   "scale_cmd_ms": 81,
+   "to_scheduled_ms": 164,
+   "to_ready_ms": 1617,
+   "to_first_http_ms": 1852,
+   "scheduled_to_first_http_ms": 1688
+  },
+  {
+   "scale_cmd_ms": 119,
+   "to_scheduled_ms": 204,
+   "to_ready_ms": 1732,
+   "to_first_http_ms": 1835,
+   "scheduled_to_first_http_ms": 1631
+  },
+  {
+   "scale_cmd_ms": 178,
+   "to_scheduled_ms": 272,
+   "to_ready_ms": 1839,
+   "to_first_http_ms": 1883,
+   "scheduled_to_first_http_ms": 1611
+  }
+ ]
+}

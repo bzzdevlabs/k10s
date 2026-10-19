@@ -1,0 +1,92 @@
+{
+ "experiment": "rollout",
+ "env": {
+  "date": "2026-10-19T12:29:19+0200",
+  "host_kernel": "6.1.0-53-amd64",
+  "host_cpu": "Intel(R) Core(TM) i7-7820HQ CPU @ 2.90GHz",
+  "host_threads": 8,
+  "host_mem_gib": 62.7,
+  "docker_server": "28.3.3",
+  "docker_os": "Docker Desktop",
+  "docker_vm_kernel": "6.10.14-linuxkit",
+  "docker_vm_cpus": 8,
+  "docker_vm_mem_gib": 15.62,
+  "kind": "kind v0.30.0 go1.24.6 linux/amd64",
+  "kubectl_client": "v1.34.12",
+  "node_image": "kindest/node:v1.34.0@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a",
+  "cluster": "k10s-bench",
+  "k8s_version": "v1.34.0",
+  "node_kernel": "6.10.14-linuxkit",
+  "container_runtime": "containerd://2.1.3",
+  "nodes": 1,
+  "max_pods": "110"
+ },
+ "runs": [
+  {
+   "probes": 1858,
+   "failed_after_event": 29,
+   "first_fail_ms_after_event": 594,
+   "last_fail_ms_after_event": 5718,
+   "first_success_after_last_fail_ms": 6221,
+   "outage_window_ms": 5124,
+   "update": "v1->v2",
+   "rollout_status_ms": 5028,
+   "rollout_and_old_pods_gone_ms": 5860
+  },
+  {
+   "probes": 1863,
+   "failed_after_event": 19,
+   "first_fail_ms_after_event": 258,
+   "last_fail_ms_after_event": 5547,
+   "first_success_after_last_fail_ms": 6051,
+   "outage_window_ms": 5289,
+   "update": "v2->v1",
+   "rollout_status_ms": 5255,
+   "rollout_and_old_pods_gone_ms": 6174
+  },
+  {
+   "probes": 1908,
+   "failed_after_event": 21,
+   "first_fail_ms_after_event": 238,
+   "last_fail_ms_after_event": 4669,
+   "first_success_after_last_fail_ms": 5171,
+   "outage_window_ms": 4431,
+   "update": "v1->v2",
+   "rollout_status_ms": 4593,
+   "rollout_and_old_pods_gone_ms": 5427
+  },
+  {
+   "probes": 1834,
+   "failed_after_event": 19,
+   "first_fail_ms_after_event": 417,
+   "last_fail_ms_after_event": 5210,
+   "first_success_after_last_fail_ms": 5713,
+   "outage_window_ms": 4793,
+   "update": "v2->v1",
+   "rollout_status_ms": 4879,
+   "rollout_and_old_pods_gone_ms": 5766
+  },
+  {
+   "probes": 1936,
+   "failed_after_event": 24,
+   "first_fail_ms_after_event": 406,
+   "last_fail_ms_after_event": 4454,
+   "first_success_after_last_fail_ms": 4957,
+   "outage_window_ms": 4048,
+   "update": "v1->v2",
+   "rollout_status_ms": 4262,
+   "rollout_and_old_pods_gone_ms": 4993
+  },
+  {
+   "probes": 1885,
+   "failed_after_event": 26,
+   "first_fail_ms_after_event": 196,
+   "last_fail_ms_after_event": 5458,
+   "first_success_after_last_fail_ms": 5960,
+   "outage_window_ms": 5262,
+   "update": "v2->v1",
+   "rollout_status_ms": 4494,
+   "rollout_and_old_pods_gone_ms": 5257
+  }
+ ]
+}

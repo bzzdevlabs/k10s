@@ -1,0 +1,68 @@
+{
+ "experiment": "nodefail",
+ "env": {
+  "date": "2026-10-19T11:52:01+0200",
+  "host_kernel": "6.1.0-53-amd64",
+  "host_cpu": "Intel(R) Core(TM) i7-7820HQ CPU @ 2.90GHz",
+  "host_threads": 8,
+  "host_mem_gib": 62.7,
+  "docker_server": "28.3.3",
+  "docker_os": "Docker Desktop",
+  "docker_vm_kernel": "6.10.14-linuxkit",
+  "docker_vm_cpus": 8,
+  "docker_vm_mem_gib": 15.62,
+  "kind": "kind v0.30.0 go1.24.6 linux/amd64",
+  "kubectl_client": "v1.34.12",
+  "node_image": "kindest/node:v1.34.0@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a",
+  "cluster": "k10s-bench3",
+  "k8s_version": "v1.34.0",
+  "node_kernel": "6.10.14-linuxkit",
+  "container_runtime": "containerd://2.1.3",
+  "nodes": 3,
+  "max_pods": "110"
+ },
+ "runs": [
+  {
+   "node_notready_s": 48.7,
+   "node_tainted_unreachable_s": 48.7,
+   "initial_ready_endpoints": 6,
+   "endpoints_reduced_s": 48.7,
+   "pods_marked_notready_on_victim_s": 48.7,
+   "first_pod_terminating_s": 349.5,
+   "replacement_pod_created_s": 349.5,
+   "all_replicas_ready_on_healthy_nodes_s": 349.5,
+   "probe": {
+    "probes_after_failure": 3369,
+    "failed": 78,
+    "fail_ratio": 0.023,
+    "first_fail_s": 0.2,
+    "last_fail_s": 135.3
+   },
+   "mode": "pause",
+   "cap_s": 390,
+   "waited_s": 369,
+   "initial_pod_distribution": " 3 k10s-bench3-worker; 3 k10s-bench3-worker2;"
+  },
+  {
+   "node_notready_s": 52.1,
+   "node_tainted_unreachable_s": 52.1,
+   "initial_ready_endpoints": 6,
+   "endpoints_reduced_s": 52.1,
+   "pods_marked_notready_on_victim_s": 52.1,
+   "first_pod_terminating_s": 352.9,
+   "replacement_pod_created_s": 352.9,
+   "all_replicas_ready_on_healthy_nodes_s": 354.1,
+   "probe": {
+    "probes_after_failure": 3351,
+    "failed": 90,
+    "fail_ratio": 0.027,
+    "first_fail_s": 0.4,
+    "last_fail_s": 149.4
+   },
+   "mode": "stop",
+   "cap_s": 390,
+   "waited_s": 371,
+   "initial_pod_distribution": " 3 k10s-bench3-worker; 3 k10s-bench3-worker2;"
+  }
+ ]
+}
