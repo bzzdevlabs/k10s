@@ -14,6 +14,7 @@
 extern crate alloc;
 
 mod codec;
+pub mod bundle;
 pub mod gossip;
 pub mod manifest;
 pub mod member;
@@ -26,6 +27,7 @@ pub mod driver;
 #[cfg(feature = "std")]
 pub mod sim;
 
+pub use bundle::Bundle;
 pub use codec::DecodeError;
 pub use gossip::{Config, DesiredState, Event, Gossip, Output, Stats};
 pub use manifest::{Manifest, ServiceSpec};
