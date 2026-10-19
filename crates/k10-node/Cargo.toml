@@ -1,6 +1,10 @@
 [package]
 name = "k10-node"
+description = "k10s hosted node runtime: shards, slots, coroutines, host API, HTTP ingress, KV"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
+k10-ir = { workspace = true }
+k10-mesh = { workspace = true }
+libc = { workspace = true }

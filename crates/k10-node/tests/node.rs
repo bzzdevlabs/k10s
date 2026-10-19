@@ -1,0 +1,653 @@
+//! End-to-end tests: a node started in-process on an ephemeral port, driven over HTTP (and the programmatic API
+//! where a test needs to pin work to a shard).
+
+mod common;
+use common::*;
+use k10_node::http::{Client, Method};
+use k10_node::{demo, SnapshotPolicy};
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::*};
+use std::time::{Duration, Instant};
+
+fn status(node: &k10_node::Node) -> String {
+    node.status_json()
+}
+
+#[test]
+fn call_same_shard_and_cross_shard() {
+    let node = start(config(2));
+    node.apply(bundle(vec![
+        svc("a", &demo::caller("b")),
+        svc("b", &demo::path_echo()).max(1),
+        svc("c", &demo::caller("e")),
+        svc("e", &demo::echo()),
+    ]))
+    .unwrap();
+    // Same shard: c (shard 0) calls e, which gets an instance on shard 0.
+    let r = node.invoke(0, "c", Method::Post, "/x", b"ping".to_vec());
+    assert_eq!((r.status, r.text().as_str()), (200, "ping"));
+    let s = status(&node);
+    assert_eq!(stat_from(&s, "cross_shard_replies"), 0, "{s}");
+    // Pin b's only instance (max_instances = 1) to shard 1, then call it from shard 0: the request is queued on
+    // b's node-wide queue, shard 1 is poked, runs it and replies through shard 0's inbox.
+    let r = node.invoke(1, "b", Method::Get, "/warm", Vec::new());
+    assert_eq!(r.text(), "method:0 path:/warm");
+    for i in 0..20 {
+        let r = node.invoke(0, "a", Method::Post, &format!("/p{i}"), b"x".to_vec());
+        assert_eq!((r.status, r.text()), (200, format!("method:1 path:/p{i}")));
+    }
+    let s = status(&node);
+    assert!(stat_from(&s, "cross_shard_replies") >= 20, "{s}");
+    assert_eq!(svc_stat(&s, "b", "created"), 1);
+    // Over HTTP too.
+    let r = post(&node, "/a/over/http?q=1", b"body");
+    assert_eq!((r.status, r.text().as_str()), (200, "method:1 path:/over/http?q=1"));
+    // Unknown target → 502 with code -1.
+    node.apply(bundle(vec![svc("u", &demo::caller("nosuch"))])).unwrap();
+    let r = get(&node, "/u");
+    assert_eq!((r.status, r.text().as_str()), (502, "call error -1"));
+    node.shutdown();
+}
+
+#[test]
+fn kv_and_bundle_persist_across_restart() {
+    let dir = tmpdir("persist");
+    let mk = || NodeConfig { data_dir: Some(dir.clone()), ..config(2) };
+    use k10_node::NodeConfig;
+    {
+        let node = start(mk());
+        node.apply(bundle(vec![svc("kv", &demo::kv()), svc("counter", &demo::counter())])).unwrap();
+        let mut c = client(&node);
+        assert_eq!(c.request("POST", "/kv/foo", b"bar").unwrap().status, 200);
+        assert_eq!(c.request("PUT", "/kv/gone", b"x").unwrap().status, 200);
+        assert_eq!(c.request("DELETE", "/kv/gone", b"").unwrap().status, 200);
+        assert_eq!(c.request("DELETE", "/kv/gone", b"").unwrap().status, 404);
+        assert_eq!(c.request("GET", "/kv/foo", b"").unwrap().text(), "bar");
+        assert_eq!(c.request("GET", "/kv/missing", b"").unwrap().status, 404);
+        for i in 1..=3 {
+            assert_eq!(c.request("GET", "/counter", b"").unwrap().text(), i.to_string());
+        }
+        node.shutdown();
+    }
+    let node = start(mk());
+    // The bundle was reloaded from the data directory; the KV log was replayed.
+    let mut c = client(&node);
+    assert_eq!(c.request("GET", "/kv/foo", b"").unwrap().text(), "bar");
+    assert_eq!(c.request("GET", "/kv/gone", b"").unwrap().status, 404);
+    assert_eq!(c.request("GET", "/counter", b"").unwrap().text(), "4");
+    node.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn trap_fails_request_and_replaces_instance() {
+    let node = start(config(1));
+    node.apply(bundle(vec![svc("m", &demo::memcount(false)), svc("bad", &demo::bad_read()).mem(12), svc("deep", &demo::deep())]))
+        .unwrap();
+    let mut c = client(&node);
+    assert_eq!(c.request("GET", "/m", b"").unwrap().text(), "1");
+    assert_eq!(c.request("GET", "/m", b"").unwrap().text(), "2");
+    let r = c.request("GET", "/m/trap", b"").unwrap();
+    assert_eq!(r.status, 500);
+    assert!(r.text().contains("Unreachable"), "{}", r.text());
+    // A new instance: memory state starts over.
+    assert_eq!(c.request("GET", "/m", b"").unwrap().text(), "1");
+    let s = status(&node);
+    assert_eq!(svc_stat(&s, "m", "traps"), 1);
+    assert_eq!(svc_stat(&s, "m", "created"), 2);
+    assert_eq!(svc_stat(&s, "m", "live"), 1);
+    // Host range check trap.
+    let r = c.request("POST", "/bad", &[1u8; 300]).unwrap();
+    assert_eq!(r.status, 500);
+    assert!(r.text().contains("MemOutOfBounds"), "{}", r.text());
+    // Stack overflow is a trap too; moderate recursion is fine.
+    assert_eq!(c.request("POST", "/deep", b"500").unwrap().text(), "500");
+    let r = c.request("POST", "/deep", b"100000").unwrap();
+    assert_eq!(r.status, 500);
+    assert!(r.text().contains("StackOverflow"), "{}", r.text());
+    assert_eq!(c.request("POST", "/deep", b"20").unwrap().text(), "20");
+    // The trap is in the service log.
+    let logs = c.request("GET", "/_k10s/logs/m", b"").unwrap().text();
+    assert!(logs.contains("trapped: Unreachable"), "{logs}");
+    node.shutdown();
+}
+
+#[test]
+fn crash_loop_backoff() {
+    let node = start(config(1));
+    node.apply(bundle(vec![svc("m", &demo::memcount(false))])).unwrap();
+    let mut c = client(&node);
+    for _ in 0..3 {
+        assert_eq!(c.request("GET", "/m/trap", b"").unwrap().status, 500);
+    }
+    // 3 consecutive traps: instance creation is backed off (100 ms) and nothing is alive → 503.
+    let r = c.request("GET", "/m", b"").unwrap();
+    assert_eq!(r.status, 503, "{}", r.text());
+    assert!(r.text().contains("crash-looping"));
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(c.request("GET", "/m", b"").unwrap().text(), "1");
+    node.shutdown();
+}
+
+#[test]
+fn cpu_budget_trap_and_fairness() {
+    // One shard: the busy loops and the well-behaved service share the same thread.
+    let node = start(config(1));
+    node.apply(bundle(vec![svc("spin", &demo::spin()).cpu(300), svc("echo", &demo::echo())])).unwrap();
+    let addr = node.http_addr().to_string();
+    let stop = AtomicBool::new(false);
+    let echo_n = AtomicU64::new(0);
+    let echo_max_us = AtomicU64::new(0);
+    std::thread::scope(|s| {
+        let spins: Vec<_> = (0..3)
+            .map(|_| {
+                let addr = addr.clone();
+                s.spawn(move || {
+                    let t = Instant::now();
+                    let r = Client::connect(&addr, Duration::from_secs(10)).unwrap().request("GET", "/spin", b"").unwrap();
+                    (r.status, r.text(), t.elapsed())
+                })
+            })
+            .collect();
+        s.spawn(|| {
+            let mut c = Client::connect(&addr, Duration::from_secs(10)).unwrap();
+            std::thread::sleep(Duration::from_millis(30));
+            while !stop.load(Relaxed) {
+                let t = Instant::now();
+                let r = c.request("GET", "/echo", b"").unwrap();
+                assert_eq!(r.status, 200);
+                echo_max_us.fetch_max(t.elapsed().as_micros() as u64, Relaxed);
+                echo_n.fetch_add(1, Relaxed);
+            }
+        });
+        for h in spins {
+            let (st, text, el) = h.join().unwrap();
+            assert_eq!(st, 500, "{text}");
+            assert!(text.contains("CPU budget"), "{text}");
+            assert!(el >= Duration::from_millis(290) && el < Duration::from_secs(5), "{el:?}");
+        }
+        stop.store(true, Relaxed);
+    });
+    let n = echo_n.load(Relaxed);
+    let max = echo_max_us.load(Relaxed);
+    eprintln!("echo while 3 busy loops ran: {n} requests, max latency {max} µs");
+    assert!(n >= 30, "echo starved: only {n} requests");
+    assert!(max < 100_000, "echo latency too high: {max} µs");
+    let s = status(&node);
+    assert_eq!(svc_stat(&s, "spin", "interrupted"), 3);
+    assert!(stat_from(&s, "preempt_requests") > 10, "{s}");
+    node.shutdown();
+}
+
+#[test]
+fn call_cycle_times_out_instead_of_deadlocking() {
+    let node = start(k10_node::NodeConfig { call_timeout: Duration::from_millis(500), ..config(2) });
+    node.apply(bundle(vec![
+        svc("a", &demo::caller("b")).max(1),
+        svc("b", &demo::caller("a")).max(1),
+        svc("echo", &demo::echo()),
+    ]))
+    .unwrap();
+    let t = Instant::now();
+    let r = get(&node, "/a");
+    let el = t.elapsed();
+    assert_eq!(r.status, 502, "{}", r.text());
+    assert!(r.text().contains("-3"), "{}", r.text());
+    assert!(el >= Duration::from_millis(450) && el < Duration::from_secs(3), "{el:?}");
+    // The node is healthy afterwards (and the cycle is still answered, not stuck).
+    assert_eq!(get(&node, "/echo").status, 200);
+    assert_eq!(get(&node, "/a").status, 502);
+    assert!(stat_from(&status(&node), "timeouts") >= 2);
+    node.shutdown();
+}
+
+#[test]
+fn max_instances_respected_and_requests_queue() {
+    let node = start(config(2));
+    node.apply(bundle(vec![svc("burn", &demo::burn()).config("100").max(2)])).unwrap();
+    let addr = node.http_addr().to_string();
+    let t = Instant::now();
+    std::thread::scope(|s| {
+        let hs: Vec<_> = (0..8)
+            .map(|_| {
+                let addr = addr.clone();
+                s.spawn(move || Client::connect(&addr, Duration::from_secs(10)).unwrap().request("GET", "/burn", b"").unwrap())
+            })
+            .collect();
+        for h in hs {
+            let r = h.join().unwrap();
+            assert_eq!((r.status, r.text().as_str()), (200, "done"));
+        }
+    });
+    let el = t.elapsed();
+    let s = status(&node);
+    assert_eq!(svc_stat(&s, "burn", "peak"), 2, "{s}");
+    assert!(svc_stat(&s, "burn", "created") <= 2);
+    assert!(svc_stat(&s, "burn", "queued") >= 6);
+    assert!(el >= Duration::from_millis(390), "8 × 100 ms on 2 instances took {el:?}");
+    node.shutdown();
+}
+
+#[test]
+fn idle_instances_are_reclaimed_down_to_one() {
+    let node = start(k10_node::NodeConfig { idle_timeout: Duration::from_millis(300), ..config(2) });
+    node.apply(bundle(vec![svc("burn", &demo::burn()).config("50")])).unwrap();
+    let addr = node.http_addr().to_string();
+    std::thread::scope(|s| {
+        for _ in 0..6 {
+            let addr = addr.clone();
+            s.spawn(move || {
+                let r = Client::connect(&addr, Duration::from_secs(10)).unwrap().request("GET", "/burn", b"").unwrap();
+                assert_eq!(r.status, 200);
+            });
+        }
+    });
+    let s = status(&node);
+    assert!(svc_stat(&s, "burn", "live") >= 2, "{s}");
+    let t = Instant::now();
+    loop {
+        let s = status(&node);
+        if svc_stat(&s, "burn", "live") == 1 {
+            assert!(svc_stat(&s, "burn", "reclaimed") >= 1);
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(5), "not reclaimed: {s}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // The warm instance still serves.
+    assert_eq!(get(&node, "/burn").status, 200);
+    node.shutdown();
+}
+
+#[test]
+fn apply_new_versions_under_load_without_errors() {
+    let node = start(config(2));
+    node.apply(bundle(vec![svc("svc", &demo::config_echo()).config("v1")])).unwrap();
+    let addr = node.http_addr().to_string();
+    let stop = AtomicBool::new(false);
+    let ok = AtomicU64::new(0);
+    let bad = AtomicU64::new(0);
+    let seen_v3 = AtomicU64::new(0);
+    std::thread::scope(|s| {
+        for _ in 0..8 {
+            s.spawn(|| {
+                let mut c = Client::connect(&addr, Duration::from_secs(10)).unwrap();
+                while !stop.load(Relaxed) {
+                    let r = c.request("GET", "/svc/x", b"").unwrap();
+                    if r.status == 200 {
+                        ok.fetch_add(1, Relaxed);
+                        if r.text().starts_with("method:") {
+                            seen_v3.fetch_add(1, Relaxed);
+                        }
+                    } else {
+                        eprintln!("bad response {} {}", r.status, r.text());
+                        bad.fetch_add(1, Relaxed);
+                    }
+                }
+            });
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        let r = node.apply(bundle(vec![svc("svc", &demo::config_echo()).config("v2")])).unwrap();
+        assert_eq!(r.updated, vec!["svc"]);
+        std::thread::sleep(Duration::from_millis(300));
+        // A different module.
+        let r = node.apply(bundle(vec![svc("svc", &demo::path_echo())])).unwrap();
+        assert_eq!(r.updated, vec!["svc"]);
+        std::thread::sleep(Duration::from_millis(300));
+        stop.store(true, Relaxed);
+    });
+    assert_eq!(bad.load(Relaxed), 0);
+    assert!(ok.load(Relaxed) > 100);
+    assert!(seen_v3.load(Relaxed) > 0);
+    assert_eq!(get(&node, "/svc/y").text(), "method:0 path:/y");
+    // Old versions drained: only the current version's instances remain.
+    let t = Instant::now();
+    loop {
+        let s = status(&node);
+        let live = svc_stat(&s, "svc", "live");
+        let slots = stat_from(&s, "slots_used");
+        if slots == live {
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(3), "old instances not drained: {s}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Removing a service.
+    node.apply(bundle(vec![svc("echo", &demo::echo())])).unwrap();
+    assert_eq!(get(&node, "/svc").status, 404);
+    node.shutdown();
+}
+
+#[test]
+fn fresh_services_and_init() {
+    let node = start(config(2));
+    node.apply(bundle(vec![
+        svc("plain", &demo::memcount(false)),
+        svc("fresh", &demo::memcount(false)).fresh(),
+        svc("initp", &demo::memcount(true)),
+        svc("initf", &demo::memcount(true)).fresh(),
+    ]))
+    .unwrap();
+    let mut c = client(&node);
+    for i in 1..=3 {
+        assert_eq!(c.request("GET", "/plain", b"").unwrap().text(), i.to_string());
+        assert_eq!(c.request("GET", "/fresh", b"").unwrap().text(), "1");
+        assert_eq!(c.request("GET", "/initp", b"").unwrap().text(), (1000 + i).to_string());
+        assert_eq!(c.request("GET", "/initf", b"").unwrap().text(), "1001");
+    }
+    // Concurrent requests on the fresh service (several instances mapped from the snapshot).
+    let addr = node.http_addr().to_string();
+    std::thread::scope(|s| {
+        for _ in 0..8 {
+            let addr = addr.clone();
+            s.spawn(move || {
+                let mut c = Client::connect(&addr, Duration::from_secs(10)).unwrap();
+                for _ in 0..20 {
+                    assert_eq!(c.request("GET", "/initf", b"").unwrap().text(), "1001");
+                }
+            });
+        }
+    });
+    let s = status(&node);
+    assert!(s.contains("\"snapshot\":{\"extent\""), "{s}");
+    node.shutdown();
+}
+
+#[test]
+fn snapshot_policy_all() {
+    let node = start(k10_node::NodeConfig { snapshots: SnapshotPolicy::All, snapshot_map_min: 0, ..config(2) });
+    node.apply(bundle(vec![svc("initp", &demo::memcount(true)), svc("dense", &demo::dense(8))])).unwrap();
+    let addr = node.http_addr().to_string();
+    std::thread::scope(|s| {
+        for _ in 0..6 {
+            let addr = addr.clone();
+            s.spawn(move || {
+                let mut c = Client::connect(&addr, Duration::from_secs(10)).unwrap();
+                for _ in 0..10 {
+                    let v: i64 = c.request("GET", "/initp", b"").unwrap().text().parse().unwrap();
+                    assert!(v > 1000);
+                    assert_eq!(c.request("GET", "/dense", b"").unwrap().text(), "192");
+                }
+            });
+        }
+    });
+    let n = node.prewarm(0, "dense", 50);
+    assert_eq!(n, 50);
+    let s = status(&node);
+    assert!(stat_from(&s, "snapshot_mapped") >= 50, "{s}");
+    node.shutdown();
+}
+
+#[test]
+fn admin_endpoints() {
+    let node = start(config(2));
+    node.apply(bundle(vec![svc("logger", &demo::logger()), svc("cfg", &demo::config_echo()).config("a=b")])).unwrap();
+    let mut c = client(&node);
+    assert_eq!(c.request("POST", "/logger", b"first line").unwrap().text(), "logged");
+    assert_eq!(c.request("POST", "/logger", b"second line\n").unwrap().text(), "logged");
+    let logs = c.request("GET", "/_k10s/logs/logger", b"").unwrap();
+    assert_eq!(logs.status, 200);
+    assert!(logs.text().contains(" first line\n") && logs.text().contains(" second line\n"), "{}", logs.text());
+    assert_eq!(c.request("GET", "/_k10s/logs/nosuch", b"").unwrap().status, 404);
+    assert_eq!(c.request("GET", "/cfg", b"").unwrap().text(), "a=b");
+    let m = c.request("GET", "/_k10s/metrics", b"").unwrap().text();
+    assert!(m.contains("k10s_service_requests_total{service=\"logger\"} 2"), "{m}");
+    assert!(m.contains("k10s_rss_bytes"));
+    let st = c.request("GET", "/_k10s/status", b"").unwrap().text();
+    assert!(st.starts_with('{') && st.ends_with('}'));
+    assert!(st.contains("\"name\":\"cfg\""));
+    assert_eq!(c.request("GET", "/_k10s/nope", b"").unwrap().status, 404);
+    assert_eq!(c.request("GET", "/_k10s/apply", b"").unwrap().status, 405);
+    assert_eq!(c.request("GET", "/_k10s/health", b"").unwrap().text(), "ok\n");
+    // apply over HTTP: garbage, then a real bundle, then a stale version.
+    let r = c.request("POST", "/_k10s/apply", b"garbage").unwrap();
+    assert_eq!(r.status, 400, "{}", r.text());
+    let b = bundle(vec![svc("echo", &demo::echo())]);
+    let r = c.request("POST", "/_k10s/apply", &b.encode()).unwrap();
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert!(r.text().contains("\"added\":[\"echo\"]"), "{}", r.text());
+    assert!(r.text().contains("\"removed\":[\"cfg\",\"logger\"]"), "{}", r.text());
+    let mut stale = bundle(vec![svc("echo", &demo::echo())]);
+    stale.manifest.version = 1;
+    let r = c.request("POST", "/_k10s/apply", &stale.encode()).unwrap();
+    assert_eq!(r.status, 409, "{}", r.text());
+    // Invalid module.
+    let mut bad = bundle(vec![svc("echo", &demo::echo())]);
+    bad.blobs[0].1 = b"K10M\x01\x0cjunk".to_vec();
+    bad.manifest.services[0].code_hash = k10_mesh::sha256::sha256(&bad.blobs[0].1);
+    bad.blobs[0].0 = bad.manifest.services[0].code_hash;
+    let r = c.request("POST", "/_k10s/apply", &bad.encode()).unwrap();
+    assert_eq!(r.status, 422, "{}", r.text());
+    assert_eq!(c.request("GET", "/echo", b"").unwrap().text(), "hello\n");
+    node.shutdown();
+}
+
+#[test]
+fn status_codes_and_big_bodies() {
+    let node = start(config(2));
+    node.apply(bundle(vec![svc("st", &demo::status_echo()), svc("echo", &demo::echo()).mem(21)])).unwrap();
+    let mut c = client(&node);
+    assert_eq!(c.request("POST", "/st", b"201").unwrap().status, 201);
+    assert_eq!(c.request("POST", "/st", b"404").unwrap().status, 404);
+    assert_eq!(c.request("POST", "/st", b"42").unwrap().status, 500);
+    let big: Vec<u8> = (0..1_000_000u32).map(|i| (i % 251) as u8).collect();
+    let r = c.request("POST", "/echo", &big).unwrap();
+    assert_eq!(r.status, 200);
+    assert!(r.body == big);
+    // Over the 16 MiB limit: 413 and the connection is closed.
+    let mut s = TcpStream::connect(node.http_addr()).unwrap();
+    s.write_all(b"POST /echo HTTP/1.1\r\ncontent-length: 20000000\r\n\r\n").unwrap();
+    let mut out = String::new();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    s.read_to_string(&mut out).unwrap();
+    assert!(out.starts_with("HTTP/1.1 413"), "{out}");
+    node.shutdown();
+}
+
+fn raw_exchange(addr: std::net::SocketAddr, req: &[u8]) -> String {
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    s.write_all(req).unwrap();
+    let mut out = Vec::new();
+    let _ = s.read_to_end(&mut out);
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[test]
+fn http_protocol_edges() {
+    let node = start(k10_node::NodeConfig { header_timeout: Duration::from_secs(1), ..config(2) });
+    node.apply(bundle(vec![svc("echo", &demo::echo()), svc("path", &demo::path_echo())])).unwrap();
+    let addr = node.http_addr();
+    // Pipelining: three requests in one write, answered in order; the last one closes.
+    let out = raw_exchange(
+        addr,
+        b"GET /path/1 HTTP/1.1\r\n\r\nPOST /echo HTTP/1.1\r\nContent-Length: 3\r\n\r\nabcGET /path/3 HTTP/1.1\r\nConnection: close\r\n\r\n",
+    );
+    let p1 = out.find("path:/1").unwrap();
+    let p2 = out.find("abc").unwrap();
+    let p3 = out.find("path:/3").unwrap();
+    assert!(p1 < p2 && p2 < p3, "{out}");
+    assert_eq!(out.matches("HTTP/1.1 200 OK").count(), 3);
+    // Chunked bodies are refused.
+    let out = raw_exchange(addr, b"POST /echo HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n");
+    assert!(out.starts_with("HTTP/1.1 411"), "{out}");
+    assert_eq!(out.matches("HTTP/1.1").count(), 1);
+    // Malformed request line.
+    assert!(raw_exchange(addr, b"BLAH\r\n\r\n").starts_with("HTTP/1.1 400"));
+    // HTTP/1.0 closes after the response; HEAD has no body.
+    let out = raw_exchange(addr, b"GET /echo HTTP/1.0\r\n\r\n");
+    assert!(out.ends_with("hello\n") && out.contains("connection: close"), "{out}");
+    let out = raw_exchange(addr, b"HEAD /echo HTTP/1.1\r\nConnection: close\r\n\r\n");
+    assert!(out.contains("content-length: 6") && !out.contains("hello"), "{out}");
+    // Partial input, byte by byte.
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.set_nodelay(true).unwrap();
+    for b in b"POST /echo HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello".iter() {
+        s.write_all(&[*b]).unwrap();
+    }
+    let mut c = Client::connect(&addr.to_string(), Duration::from_secs(5)).unwrap();
+    let _ = c.request("GET", "/echo", b"").unwrap();
+    let mut buf = [0u8; 256];
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let n = s.read(&mut buf).unwrap();
+    assert!(String::from_utf8_lossy(&buf[..n]).ends_with("\r\n\r\nhello"));
+    // Expect: 100-continue.
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    s.write_all(b"POST /echo HTTP/1.1\r\nContent-Length: 4\r\nExpect: 100-continue\r\n\r\n").unwrap();
+    let n = s.read(&mut buf).unwrap();
+    assert!(String::from_utf8_lossy(&buf[..n]).starts_with("HTTP/1.1 100 Continue"));
+    s.write_all(b"body").unwrap();
+    let n = s.read(&mut buf).unwrap();
+    assert!(String::from_utf8_lossy(&buf[..n]).ends_with("body"));
+    // Slowloris: an incomplete head is cut off after the header timeout.
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.write_all(b"GET /echo HTTP/1.1\r\nX-Slow: ").unwrap();
+    let t = Instant::now();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut rest = Vec::new();
+    let _ = s.read_to_end(&mut rest);
+    assert!(t.elapsed() >= Duration::from_millis(900) && t.elapsed() < Duration::from_secs(4), "{:?}", t.elapsed());
+    // Many keep-alive requests on one connection.
+    let mut c = Client::connect(&addr.to_string(), Duration::from_secs(5)).unwrap();
+    for i in 0..1000 {
+        let body = format!("req{i}");
+        assert_eq!(c.request("POST", "/echo", body.as_bytes()).unwrap().text(), body);
+    }
+    node.shutdown();
+}
+
+#[test]
+fn shutdown_drains_in_flight_requests() {
+    let node = start(config(2));
+    node.apply(bundle(vec![svc("burn", &demo::burn()).config("300")])).unwrap();
+    let addr = node.http_addr().to_string();
+    let h = std::thread::spawn(move || Client::connect(&addr, Duration::from_secs(10)).unwrap().request("GET", "/burn", b""));
+    std::thread::sleep(Duration::from_millis(100));
+    let t = Instant::now();
+    node.shutdown();
+    let r = h.join().unwrap().unwrap();
+    assert_eq!((r.status, r.text().as_str(), r.close), (200, "done", true));
+    assert!(t.elapsed() >= Duration::from_millis(150) && t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+}
+
+#[test]
+fn pipelined_requests_respect_backpressure() {
+    let node = start(config(1));
+    node.apply(bundle(vec![svc("echo", &demo::echo()).mem(21)])).unwrap();
+    // 200 pipelined 64 KiB echoes written before reading anything: the node must not buffer all responses.
+    let mut s = TcpStream::connect(node.http_addr()).unwrap();
+    let body = vec![b'x'; 64 << 10];
+    let mut req = format!("POST /echo HTTP/1.1\r\ncontent-length: {}\r\n\r\n", body.len()).into_bytes();
+    req.extend_from_slice(&body);
+    let writer = {
+        let mut s = s.try_clone().unwrap();
+        std::thread::spawn(move || {
+            for _ in 0..200 {
+                if s.write_all(&req).is_err() {
+                    break;
+                }
+            }
+        })
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    let st = status(&node);
+    assert!(stat_from(&st, "rss_bytes") < 200 << 20, "{st}");
+    let mut total = 0usize;
+    let mut buf = vec![0u8; 1 << 20];
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let want = 200 * (body.len() + 40);
+    while total < want - 200 * 40 {
+        let n = s.read(&mut buf).unwrap();
+        assert!(n > 0);
+        total += n;
+    }
+    writer.join().unwrap();
+    node.shutdown();
+}
+
+#[test]
+fn stress_calls_through_small_pools_across_shards_with_reapply() {
+    let node = start(k10_node::NodeConfig { call_timeout: Duration::from_secs(10), ..config(4) });
+    let mk = |cfg: &str| bundle(vec![svc("front", &demo::caller("back")).max(8), svc("back", &demo::burn()).config(cfg).max(3)]);
+    node.apply(mk("1")).unwrap();
+    let addr = node.http_addr().to_string();
+    let ok = AtomicU64::new(0);
+    std::thread::scope(|s| {
+        for _ in 0..32 {
+            s.spawn(|| {
+                let mut c = Client::connect(&addr, Duration::from_secs(30)).unwrap();
+                for _ in 0..30 {
+                    let r = c.request("POST", "/front", b"").unwrap();
+                    assert_eq!((r.status, r.text().as_str()), (200, "done"));
+                    ok.fetch_add(1, Relaxed);
+                }
+            });
+        }
+        // Re-apply new versions of `back` while requests are queued on it.
+        for v in ["2", "1", "2"] {
+            std::thread::sleep(Duration::from_millis(80));
+            node.apply(mk(v)).unwrap();
+        }
+    });
+    assert_eq!(ok.load(Relaxed), 32 * 30);
+    let s = status(&node);
+    assert!(svc_stat(&s, "back", "peak") <= 3, "{s}");
+    assert!(stat_from(&s, "queued_served") > 0, "{s}");
+    // Everything drains back to idle.
+    let t = Instant::now();
+    while stat_from(&status(&node), "fibers_busy") != 0 {
+        assert!(t.elapsed() < Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    node.shutdown();
+}
+
+#[test]
+fn many_idle_keepalive_connections_stay_cheap() {
+    let node = start(config(2));
+    node.apply(bundle(vec![svc("echo", &demo::echo())])).unwrap();
+    let addr = node.http_addr().to_string();
+    let _ = get(&node, "/echo");
+    let before = stat_from(&status(&node), "rss_bytes");
+    let mut clients: Vec<Client> = Vec::new();
+    for _ in 0..1000 {
+        let mut c = Client::connect(&addr, Duration::from_secs(10)).unwrap();
+        assert_eq!(c.request("GET", "/echo", b"").unwrap().status, 200);
+        clients.push(c);
+    }
+    let s = status(&node);
+    assert_eq!(stat_from(&s, "connections_open"), 1000);
+    let grown = stat_from(&s, "rss_bytes") - before;
+    assert!(grown < 8 << 20, "1000 idle connections cost {grown} bytes of RSS");
+    // They all still work.
+    for c in clients.iter_mut().step_by(97) {
+        assert_eq!(c.request("POST", "/echo", b"again").unwrap().text(), "again");
+    }
+    node.shutdown();
+}
+
+/// The cluster hook: a service placed on another node is handed to the installed router.
+#[test]
+fn remote_placement_goes_through_the_router() {
+    use k10_node::router::{Completion, RemoteRouter};
+    use k10_node::service::Placement;
+    struct Fake;
+    impl RemoteRouter for Fake {
+        fn forward(&self, service: &str, nodes: &[k10_mesh::NodeId], req: k10_node::host::Request, _d: u64, done: Completion) {
+            let body = format!("{service}@{}:{}", nodes.len(), String::from_utf8_lossy(&req.path));
+            std::thread::spawn(move || done.complete(203, body.into_bytes()));
+        }
+    }
+    let node = k10_node::Node::start_with_router(config(2), std::sync::Arc::new(Fake)).unwrap();
+    let b = bundle(vec![svc("far", &demo::echo()), svc("near", &demo::caller("far"))]);
+    node.shared()
+        .apply_with(b, false, &|s| if s.name == "far" { Placement::Remote { nodes: vec![k10_mesh::NodeId(7)] } } else { Placement::Local })
+        .unwrap();
+    let r = get(&node, "/far/x");
+    assert_eq!((r.status, r.text().as_str()), (203, "far@1:/x"));
+    let r = get(&node, "/near/y");
+    assert_eq!((r.status, r.text().as_str()), (203, "far@1:/y"));
+    node.shutdown();
+}

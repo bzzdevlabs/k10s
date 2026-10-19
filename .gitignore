@@ -5,3 +5,4 @@
 /bench/bin/
 /bench/results/**/.*.log
 /bench/results/**/.create_ms_*
+/metal/target/
