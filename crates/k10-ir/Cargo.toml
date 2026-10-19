@@ -6,4 +6,7 @@ edition.workspace = true
 
 [features]
 default = ["std"]
+# Uses std (hardware sqrt, std::error::Error impls). Without it the crate is no_std + alloc.
 std = []
+# Random valid-program generator (`k10_ir::gen`) for differential testing. Always compiled for this crate's tests.
+gen = ["std"]
