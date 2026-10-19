@@ -7,7 +7,8 @@ kept current so work can resume in a fresh session.
 
 Keep-alive: the desktop scheduled task `k10s-session-watchdog` (17 and 47 past each hour) wakes the build session
 (`local_96d994a5-1881-4af5-9a73-ee7953fae801`) when it has been idle for 25+ minutes, e.g. after a usage limit. It
-disables itself once the first line above reads `PROJECT STATE: COMPLETE` — set that only when everything is done.
+disables itself once the state line at the top is switched from IN PROGRESS to COMPLETE — do that only when
+everything is done.
 
 ## Built and verified (on `main`)
 | Component | Where | State |
