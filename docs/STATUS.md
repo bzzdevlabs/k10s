@@ -31,7 +31,7 @@ everything is done.
    committed because it builds against the uncommitted k10-mesh wire change from (1). Commit both together.
 3. RUNNING (resumed after usage limit) — **Comparative benchmark harness** `bench/k10s/`, `bench/compare.py`, `bench/run-final.sh` →
    `bench/results/COMPARISON.md` (preliminary).
-4. native-hardware DONE (docs/research/native-hardware.md); universal-os RUNNING (resumed) — **Research tasks** `docs/TASK-universal-os.md` → `docs/research/universal-os.md` and
+4. DONE — native-hardware (docs/research/native-hardware.md) and universal-os (docs/research/universal-os.md); prototypes on local branches research/native-hardware and research/universal-os (not merged, not pushed) — **Research tasks** `docs/TASK-universal-os.md` → `docs/research/universal-os.md` and
    `docs/TASK-native-hardware.md` → `docs/research/native-hardware.md` (experiments live outside the repo in
    `/home/qgerard/dev/k10s-research/`).
 
