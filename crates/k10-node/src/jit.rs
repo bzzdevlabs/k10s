@@ -251,7 +251,7 @@ unsafe extern "C" fn interrupt_adapter(ctx: *mut VmCtx) -> u32 {
 type Adapter = k10_jit::HostFn;
 
 /// One adapter per host function, indexed by `HostFn as usize` (= position in `HOST_FNS`).
-const ADAPTERS: [Adapter; 17] = [
+const ADAPTERS: [Adapter; 19] = [
     host_adapter::<0>,
     host_adapter::<1>,
     host_adapter::<2>,
@@ -269,6 +269,8 @@ const ADAPTERS: [Adapter; 17] = [
     host_adapter::<14>,
     host_adapter::<15>,
     host_adapter::<16>,
+    host_adapter::<17>,
+    host_adapter::<18>,
 ];
 
 const _: () = {

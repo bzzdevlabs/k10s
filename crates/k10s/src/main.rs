@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 const USAGE: &str = "usage:
   k10s node   [--http ADDR] [--data DIR] [--shards N] [--backend jit|interp] [--name NAME] [--mem SIZE]
               [--kv-max SIZE] (per-service KV quota, default 256MiB, 0 = unlimited)
+              [--conn-buffer-max SIZE] (bytes buffered in HTTP connections node-wide, default max(--mem/8, 64MiB))
               [--snapshots fresh|all] [--idle-timeout SECS] [--idle-spin-us N] [--log-stderr] [--pin]
               cluster mode (any of these flags turns it on):
               [--gossip ADDR] (UDP, default 0.0.0.0:7946)  [--rpc ADDR] (TCP, default 0.0.0.0:7947)
@@ -146,7 +147,7 @@ fn parse_size(s: &str) -> Result<u64, String> {
 fn cmd_node(args: &[String]) -> Result<(), String> {
     let a = Args::parse(args, &["log-stderr", "pin"])?;
     a.check_known(&[
-        "http", "data", "shards", "backend", "name", "mem", "kv-max", "snapshots", "idle-timeout", "idle-spin-us", "log-stderr",
+        "http", "data", "shards", "backend", "name", "mem", "kv-max", "conn-buffer-max", "snapshots", "idle-timeout", "idle-spin-us", "log-stderr",
         "pin", "rpc", "gossip", "join", "advertise", "probe-ms", "suspicion-mult", "leave-grace-ms",
     ])?;
     if !a.positional.is_empty() {
@@ -169,6 +170,9 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
     }
     if let Some(m) = a.get("kv-max") {
         cfg.kv.max_bytes = parse_size(m)?;
+    }
+    if let Some(m) = a.get("conn-buffer-max") {
+        cfg.conn_buffer_max = parse_size(m)?.max(1);
     }
     match a.get("snapshots") {
         None | Some("fresh") => cfg.snapshots = SnapshotPolicy::Fresh,

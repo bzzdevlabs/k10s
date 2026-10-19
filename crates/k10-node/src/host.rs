@@ -9,7 +9,7 @@
 //! so negative lengths trap. Copy-out functions (`input_read`, `call_resp_read`) check the whole destination range
 //! `(dst, n)` and then copy `min(n, available)` bytes.
 
-use crate::kv::{KvNs, MAX_KEY, MAX_VALUE};
+use crate::kv::{KvError, KvNs, MAX_KEY, MAX_VALUE};
 use crate::logs::LogRing;
 use k10_ir::sem::check_range;
 use k10_ir::Trap;
@@ -28,6 +28,8 @@ pub const TRAP_OUTPUT_LIMIT: u32 = 1;
 pub const TRAP_KV_LIMIT: u32 = 2;
 /// Trap code for a `kv_put` refused because the service's KV quota is exhausted ([`crate::kv::KvConfig::max_bytes`]).
 pub const TRAP_KV_QUOTA: u32 = 3;
+/// Trap code for `kv_add` on a value that is not an 8-byte integer.
+pub const TRAP_KV_NOT_INT: u32 = 4;
 /// Trap code used when a host function panicked (runtime bug) — the invocation is aborted.
 pub const TRAP_INTERNAL: u32 = 0x7FFF;
 
@@ -53,6 +55,8 @@ pub enum HostFn {
     KvGet,
     KvPut,
     KvDel,
+    KvAdd,
+    KvCas,
     Log,
     NowNs,
     TimeMs,
@@ -74,6 +78,8 @@ pub const HOST_FNS: &[(&str, u8, HostFn)] = &[
     ("kv_get", 4, HostFn::KvGet),
     ("kv_put", 4, HostFn::KvPut),
     ("kv_del", 2, HostFn::KvDel),
+    ("kv_add", 3, HostFn::KvAdd),
+    ("kv_cas", 5, HostFn::KvCas),
     ("log", 2, HostFn::Log),
     ("now_ns", 0, HostFn::NowNs),
     ("time_ms", 0, HostFn::TimeMs),
@@ -161,6 +167,13 @@ fn copy_out(mem: &mut [u8], size: u64, dst: i64, data: &[u8], off: i64, n: i64) 
 fn range(mem: &[u8], size: u64, p: i64, n: i64) -> Result<&[u8], Trap> {
     let s = check_range(p, n, size)?;
     Ok(&mem[s..s + n as usize])
+}
+
+fn kv_trap(e: KvError) -> Trap {
+    match e {
+        KvError::NotInt => Trap::Host(TRAP_KV_NOT_INT),
+        KvError::Quota => Trap::Host(TRAP_KV_QUOTA),
+    }
 }
 
 /// wyrand: fast, statistically good 64-bit generator (not cryptographic).
@@ -269,6 +282,31 @@ impl HostCtx<'_> {
                     return Err(Trap::Host(TRAP_KV_LIMIT));
                 }
                 Ok(self.kv.del(key) as i64)
+            }
+            HostFn::KvAdd => {
+                let key = range(mem, size, arg(a, 0), arg(a, 1))?;
+                if key.len() > MAX_KEY {
+                    return Err(Trap::Host(TRAP_KV_LIMIT));
+                }
+                self.kv.add(key, arg(a, 2)).map_err(kv_trap)
+            }
+            HostFn::KvCas => {
+                // buf = expected bytes (exp_len, or none if -1 = "absent") followed by the new bytes (new_len, or
+                // none if -1 = "delete").
+                let key = range(mem, size, arg(a, 0), arg(a, 1))?;
+                let (exp_len, new_len) = (arg(a, 3), arg(a, 4));
+                if exp_len < -1 || new_len < -1 {
+                    return Err(Trap::MemOutOfBounds);
+                }
+                let (e, n) = (exp_len.max(0), new_len.max(0));
+                let buf = range(mem, size, arg(a, 2), e.checked_add(n).ok_or(Trap::MemOutOfBounds)?)?;
+                if key.len() > MAX_KEY || e as usize > MAX_VALUE || n as usize > MAX_VALUE {
+                    return Err(Trap::Host(TRAP_KV_LIMIT));
+                }
+                let (exp, new) = buf.split_at(e as usize);
+                let exp = (exp_len >= 0).then_some(exp);
+                let new = (new_len >= 0).then_some(new);
+                self.kv.cas(key, exp, new).map(i64::from).map_err(kv_trap)
             }
             HostFn::Log => {
                 let s = range(mem, size, arg(a, 0), arg(a, 1))?;
@@ -415,6 +453,48 @@ mod tests {
             assert_eq!(c.dispatch(HostFn::KvPut, &[0, 1025, 10, 5], mem), Err(Trap::Host(TRAP_KV_LIMIT)));
             assert_eq!(c.dispatch(HostFn::KvGet, &[0, 1025, 10, 5], mem), Err(Trap::Host(TRAP_KV_LIMIT)));
             assert_eq!(c.dispatch(HostFn::KvPut, &[0, 3, 0, 5000], mem), Err(Trap::MemOutOfBounds));
+        });
+    }
+
+    #[test]
+    fn kv_atomic_functions() {
+        with_ctx(|c, mem| {
+            mem[0..1].copy_from_slice(b"n");
+            assert_eq!(c.dispatch(HostFn::KvAdd, &[0, 1, 0], mem), Ok(0));
+            assert_eq!(c.dispatch(HostFn::KvGet, &[0, 1, 100, 8], mem), Ok(-1), "delta 0 does not create");
+            assert_eq!(c.dispatch(HostFn::KvAdd, &[0, 1, 41], mem), Ok(41));
+            assert_eq!(c.dispatch(HostFn::KvAdd, &[0, 1, 1], mem), Ok(42));
+            assert_eq!(c.dispatch(HostFn::KvGet, &[0, 1, 100, 8], mem), Ok(8));
+            assert_eq!(&mem[100..108], &42i64.to_le_bytes());
+            // Not an 8-byte value.
+            mem[10..13].copy_from_slice(b"txt");
+            assert_eq!(c.dispatch(HostFn::KvPut, &[10, 3, 10, 3], mem), Ok(0));
+            assert_eq!(c.dispatch(HostFn::KvAdd, &[10, 3, 1], mem), Err(Trap::Host(TRAP_KV_NOT_INT)));
+            assert_eq!(c.dispatch(HostFn::KvAdd, &[0, 1025, 1], mem), Err(Trap::Host(TRAP_KV_LIMIT)));
+            assert_eq!(c.dispatch(HostFn::KvAdd, &[4090, 10, 1], mem), Err(Trap::MemOutOfBounds));
+            // kv_cas(key, buf, exp_len, new_len): buf = expected ++ new.
+            mem[20..22].copy_from_slice(b"k1");
+            mem[200..205].copy_from_slice(b"aabbb");
+            assert_eq!(c.dispatch(HostFn::KvCas, &[20, 2, 200, -1, 2], mem), Ok(1), "create aa");
+            assert_eq!(c.dispatch(HostFn::KvCas, &[20, 2, 200, -1, 2], mem), Ok(0), "already exists");
+            assert_eq!(c.dispatch(HostFn::KvCas, &[20, 2, 200, 2, 3], mem), Ok(1), "aa -> bbb");
+            assert_eq!(c.dispatch(HostFn::KvGet, &[20, 2, 300, 8], mem), Ok(3));
+            assert_eq!(&mem[300..303], b"bbb");
+            assert_eq!(c.dispatch(HostFn::KvCas, &[20, 2, 200, 2, 3], mem), Ok(0), "no longer aa");
+            assert_eq!(c.dispatch(HostFn::KvCas, &[20, 2, 202, 3, -1], mem), Ok(1), "compare-and-delete bbb");
+            assert_eq!(c.dispatch(HostFn::KvGet, &[20, 2, 300, 8], mem), Ok(-1));
+            assert_eq!(c.dispatch(HostFn::KvCas, &[20, 2, 0, -1, -1], mem), Ok(1), "absent, stays absent");
+            assert_eq!(c.dispatch(HostFn::KvCas, &[20, 2, 200, -2, 1], mem), Err(Trap::MemOutOfBounds));
+            assert_eq!(c.dispatch(HostFn::KvCas, &[20, 2, 200, 1, -3], mem), Err(Trap::MemOutOfBounds));
+            assert_eq!(c.dispatch(HostFn::KvCas, &[20, 2, 4000, 50, 50], mem), Err(Trap::MemOutOfBounds));
+            assert_eq!(c.dispatch(HostFn::KvCas, &[20, 2, 0, i64::MAX, i64::MAX], mem), Err(Trap::MemOutOfBounds));
+            assert_eq!(c.dispatch(HostFn::KvCas, &[0, 1025, 200, -1, 1], mem), Err(Trap::Host(TRAP_KV_LIMIT)));
+        });
+        with_ctx_sized(4 << 20, |c, mem| {
+            mem[0..1].copy_from_slice(b"k");
+            let big = (MAX_VALUE + 1) as i64;
+            assert_eq!(c.dispatch(HostFn::KvCas, &[0, 1, 16, -1, big], mem), Err(Trap::Host(TRAP_KV_LIMIT)));
+            assert_eq!(c.dispatch(HostFn::KvCas, &[0, 1, 16, big, 0], mem), Err(Trap::Host(TRAP_KV_LIMIT)));
         });
     }
 

@@ -213,7 +213,7 @@ unsafe extern "C" fn interrupt_hook(ctx: *mut VmCtx) -> u32 {
 }
 
 /// One thunk per host function, indexed by `HostFn as usize` (= position in `TABLE`).
-const THUNKS: [k10_jit::HostFn; 17] = [
+const THUNKS: [k10_jit::HostFn; 19] = [
     host_thunk::<0>,
     host_thunk::<1>,
     host_thunk::<2>,
@@ -231,6 +231,8 @@ const THUNKS: [k10_jit::HostFn; 17] = [
     host_thunk::<14>,
     host_thunk::<15>,
     host_thunk::<16>,
+    host_thunk::<17>,
+    host_thunk::<18>,
 ];
 
 const _: () = {

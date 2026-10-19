@@ -189,7 +189,8 @@ interpreter with an in-memory implementation of the whole host API.
 Source: `crates/k10-lang/src/std.ten`.
 - **Host API**: every function of docs/HOSTAPI.md, declared with its HOSTAPI name and parameters (`input_len`,
   `input_read`, `req_path`, `req_method`, `output_write`, `output_status`, `call`, `call_resp_len`,
-  `call_resp_read`, `kv_get`, `kv_put`, `kv_del`, `log`, `now_ns`, `time_ms`, `random`, `config`).
+  `call_resp_read`, `kv_get`, `kv_put`, `kv_del`, `kv_add`, `kv_cas`, `log`, `now_ns`, `time_ms`, `random`,
+  `config`).
   Constants `GET POST PUT DELETE OTHER_METHOD`, `CALL_UNKNOWN CALL_UNAVAILABLE CALL_TIMEOUT CALL_TRAPPED`,
   `I64_MIN I64_MAX`.
 - **Allocation** (power-of-two size classes with an 8-byte header and per-class free lists over a bump pointer;
@@ -209,8 +210,13 @@ Source: `crates/k10-lang/src/std.ten`.
 - **Bytes**: `mem_eq(a, b, n)`, `find_byte(p, n, b)`, `strlen(p)`, `str_eq(p, n, s: str)`,
   `starts_with(p, n, s: str)`, `copy_str(dst, s: str)`, `is_digit(c)`, `is_space(c)`, `fnv1a(p, n)` (64-bit).
 - **KV and calls**: `kv_read(key: str) -> *u8 | null`, `kv_write(key, p, n)`, `kv_get_int(key, default)`,
-  `kv_put_int(key, v)`, `kv_delete(key)`, `call_svc(name: str, req, n) -> status | error`, `call_read() -> *u8`,
-  `out_call_resp()`, `log_str(s: str)`.
+  `kv_put_int(key, v)` (decimal text), `kv_delete(key)`, `kv_add_int(key, delta) -> new value` (atomic, on an 8-byte
+  integer value; `delta = 0` reads; traps `Host(4)` on a value that is not 8 bytes, e.g. one written by
+  `kv_put_int`), `kv_cas_bytes(key, exp, exp_len, new, new_len) -> 1 | 0` (atomic compare-and-swap; `exp_len = -1`:
+  the key must be absent, `new_len = -1`: delete; copies `exp` and `new` into one heap buffer unless `new` directly
+  follows the expected bytes), `call_svc(name: str, req, n) -> status | error`, `call_read() -> *u8`,
+  `out_call_resp()`, `log_str(s: str)`. A `kv_read` then `kv_write` is not atomic: instances of a service run
+  concurrently, so read-modify-writes use `kv_add_int` or a `kv_cas_bytes` retry loop (examples/todo.ten).
 - **Misc**: `min`, `max`, `abs`, `fmin`, `fmax`, `align_up(x, a)`.
 
 ## Example

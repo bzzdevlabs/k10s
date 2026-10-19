@@ -111,6 +111,15 @@ functional() {
     expect "todo list" "$U/todo/" 200 '^\[\{"id":1,"title":"buy oat milk"\}\]$'
     expect "todo delete" "$U/todo/1" 200 '^\{"deleted":1\}$' -X DELETE
     expect "todo gone" "$U/todo/1" 404 'not found'
+    # Atomic KV (ids from kv_add, index updated with kv_cas): concurrent creates get distinct ids, none is lost.
+    local pids=() i n
+    for i in $(seq 1 16); do
+        curl -s -m 5 -o /dev/null -X POST --data-binary "c$i" "$U/todo/" &
+        pids+=($!)
+    done
+    wait "${pids[@]}"
+    n=$(curl -s -m 5 "$U/todo/" | python3 -c 'import json,sys; l=json.load(sys.stdin); print(len(l), len({x["id"] for x in l}))' 2>&1)
+    [[ "$n" == "16 16" ]] && ok "todo: 16 concurrent creates -> 16 distinct ids, all listed" || ko "todo concurrent creates: '$n'"
 }
 
 echo "== selftest"

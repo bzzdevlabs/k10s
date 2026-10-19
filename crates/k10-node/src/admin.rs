@@ -174,7 +174,8 @@ pub fn status_json(node: &NodeShared) -> String {
             "\"memory\":{{\"rss_bytes\":{},\"slots_used\":{},\"slot_bytes\":{},\"reserved_bytes\":{},",
             "\"snapshot_mapped\":{},\"mem_limit\":{}}},",
             "\"http_stats\":{{\"requests\":{},\"2xx\":{},\"4xx\":{},\"5xx\":{},\"admin\":{},\"connections_open\":{},",
-            "\"accepted\":{},\"rejected\":{},\"conn_timeouts\":{}}},",
+            "\"accepted\":{},\"rejected\":{},\"conn_timeouts\":{},\"accept_pauses\":{},\"buffered_bytes\":{},",
+            "\"buffer_max\":{},\"buffer_refused\":{}}},",
             "\"exec\":{{\"invocations\":{},\"instances\":{},\"instances_created\":{},\"fibers\":{},\"fibers_busy\":{},",
             "\"backlog\":{},\"preempt_requests\":{},\"yields\":{},\"calls\":{},\"calls_failed\":{},\"timeouts\":{},",
             "\"queued_served\":{},\"cross_shard_replies\":{}}},",
@@ -211,6 +212,10 @@ pub fn status_json(node: &NodeShared) -> String {
         shard_sum(node, |s| &s.conns_accepted),
         shard_sum(node, |s| &s.conns_rejected),
         shard_sum(node, |s| &s.conn_timeouts),
+        shard_sum(node, |s| &s.accept_pauses),
+        node.conn_buffered.load(Relaxed),
+        node.conn_buffer_max,
+        shard_sum(node, |s| &s.budget_refused),
         shard_sum(node, |s| &s.invocations),
         shard_sum(node, |s| &s.instances),
         shard_sum(node, |s| &s.instances_created),
@@ -284,6 +289,8 @@ pub fn metrics(node: &NodeShared) -> String {
         let _ = writeln!(o, "k10s_http_responses_total{{class=\"{class}\"}} {f}");
     }
     gauge(&mut o, "k10s_http_connections", "gauge", "Open HTTP connections", shard_sum(node, |s| &s.conns_open));
+    gauge(&mut o, "k10s_http_buffered_bytes", "gauge", "Bytes buffered in HTTP connections (request bodies, unsent responses)", node.conn_buffered.load(Relaxed));
+    gauge(&mut o, "k10s_http_buffer_refused_total", "counter", "Requests refused (503) by the connection buffer budget", shard_sum(node, |s| &s.budget_refused));
     gauge(&mut o, "k10s_invocations_total", "counter", "Invocations started", shard_sum(node, |s| &s.invocations));
     gauge(&mut o, "k10s_preemptions_total", "counter", "Preemption requests by the ticker", shard_sum(node, |s| &s.preempt_requests));
     gauge(&mut o, "k10s_calls_total", "counter", "Service-to-service calls", shard_sum(node, |s| &s.calls));

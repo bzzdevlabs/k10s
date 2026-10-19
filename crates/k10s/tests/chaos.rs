@@ -380,7 +380,7 @@ fn chaos_short() {
 #[ignore = "long chaos run (>= 20 min); set K10S_CHAOS_SECS"]
 fn chaos_long() {
     let secs: u64 = std::env::var("K10S_CHAOS_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(1200);
-    let seed = seed_from_env(0xC0ffee_1234);
+    let seed = seed_from_env(0x00C0_FFEE_1234);
     let stats = run_chaos("chaos-long", Duration::from_secs(secs), seed);
     assert!(stats.violations.is_empty(), "invariant violations ({} rounds): {:#?}", stats.verifications, stats.violations);
 }

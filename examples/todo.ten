@@ -3,15 +3,19 @@
 //   GET    /        → 200 [{"id":1,"title":"..."},...]   (creation order)
 //   POST   /        → 201 {"id":N,"title":"..."}         the request body is the title (plain text, ≤ 4 KiB)
 //   GET    /<id>    → 200 {"id":N,"title":"..."}         or 404 {"error":"not found"}
-//   PUT    /<id>    → 200 {"id":N,"title":"..."}         the body is the new title; 404 if absent
+//   PUT    /<id>    → 200 {"id":N,"title":"..."}         the body is the new title (≤ 4 KiB); 404 if absent
 //   DELETE /<id>    → 200 {"deleted":N}                  or 404
-//   otherwise       → 400 {"error":"bad id"} / 405 {"error":"method not allowed"}
+//   otherwise       → 400 {"error":"bad id"} / 405 {"error":"method not allowed"} / 413 {"error":"title too long"}
 //
-// Storage (this service's KV namespace): "next" = next id (decimal text), "index" = ids of the live items as
-// packed little-endian i64s, "item/<id>" = the title. There is no Go counterpart in bench/workloads/: it exercises
-// the KV host API, path parsing, `str` values and JSON output. The heap is a per-request arena (heap_reset).
+// Storage (this service's KV namespace): "last" = the last id handed out (an 8-byte integer incremented with
+// kv_add), "index" = ids of the live items as packed little-endian i64s, "item/<id>" = the title. Many instances
+// may serve requests at once, so every read-modify-write is atomic: ids come from kv_add (never handed out twice)
+// and the index is updated with compare-and-swap loops over kv_cas (no update is lost). There is no Go counterpart
+// in bench/workloads/: it exercises the KV host API, path parsing, `str` values and JSON output. The heap is a
+// per-request arena (heap_reset).
 
 buffer key: [u8; 32];
+data INDEX = "index";
 
 // Writes "item/<id>" into `key`; returns its length.
 fn item_key(id: i64) -> i64 {
@@ -34,16 +38,78 @@ fn error(code: i64, msg: str) {
     out_str("}");
 }
 
+// ------------------------------------------------------------------------------------------------------------
+// The index, updated with compare-and-swap loops. kv_cas takes one buffer holding the expected value followed by
+// the new one: read the index (n bytes, or none: -1), build the new value right after it, and swap only if the
+// index still holds what was read — otherwise another instance changed it meanwhile: read it again.
+
+global index_len: i64 = 0;
+
+// Reads the index into a heap buffer with room for a new value of up to n + 8 bytes after it. Sets index_len to
+// the index length in bytes, or -1 if there is no index yet.
+fn read_index() -> *u8 {
+    loop {
+        let n = kv_get(INDEX, sizeof(INDEX), null, 0);
+        let len = max(n, 0);
+        let buf = alloc(2 * len + 8);
+        if n < 0 || kv_get(INDEX, sizeof(INDEX), buf, len) == n {
+            index_len = n;
+            return buf;
+        }
+        free(buf); // the index changed size between the two reads
+    }
+}
+
+fn index_append(id: i64) {
+    loop {
+        let buf = read_index();
+        let len = max(index_len, 0);
+        memcpy(buf + len, buf, len);
+        *((buf + 2 * len) as *i64) = id;
+        if kv_cas(INDEX, sizeof(INDEX), buf, index_len, len + 8) == 1 {
+            return;
+        }
+        free(buf);
+    }
+}
+
+fn index_remove(id: i64) {
+    loop {
+        let buf = read_index();
+        let len = max(index_len, 0);
+        let old = buf as *i64;
+        let new = (buf + len) as *i64;
+        let kept = 0;
+        for i in 0..len / 8 {
+            if old[i] != id {
+                new[kept] = old[i];
+                kept += 1;
+            }
+        }
+        if kept * 8 == len || kv_cas(INDEX, sizeof(INDEX), buf, index_len, kept * 8) == 1 {
+            return;
+        }
+        free(buf);
+    }
+}
+
+// ------------------------------------------------------------------------------------------------------------
+
 fn list() {
     let idx = kv_read("index") as *i64;
     let count = last_len() / 8;
+    let first = 1;
     out_str("[");
     for i in 0..count {
         let id = idx[i];
         let title = kv_read(str(key, item_key(id)));
-        if i > 0 {
+        if title == null {
+            continue; // being created or deleted right now
+        }
+        if !first {
             out_str(",");
         }
+        first = 0;
         out_item(id, title, last_len());
     }
     out_str("]");
@@ -56,15 +122,10 @@ fn create() {
     }
     let title = read_body();
     let n = last_len();
-    let id = kv_get_int("next", 1);
-    kv_put_int("next", id + 1);
+    let id = kv_add_int("last", 1);
+    // Index first, then the item: a concurrent list skips the id until the item exists.
+    index_append(id);
     kv_write(str(key, item_key(id)), title, n);
-    let idx = kv_read("index");
-    let len = last_len();
-    let grown = alloc(len + 8);
-    memcpy(grown, idx, len);
-    *((grown + len) as *i64) = id;
-    kv_write("index", grown, len + 8);
     status(201);
     out_item(id, title, n);
 }
@@ -79,14 +140,24 @@ fn get(id: i64) {
 }
 
 fn update(id: i64) {
-    let k = item_key(id);
-    if kv_get(key, k, null, 0) < 0 {
-        error(404, "not found");
+    if input_len() > 4096 {
+        error(413, "title too long");
         return;
     }
     let title = read_body();
     let n = last_len();
-    kv_write(str(key, k), title, n);
+    let k = item_key(id);
+    // Replace the title only if the item still exists (a plain kv_put would resurrect an item deleted meanwhile).
+    loop {
+        let old = kv_read(str(key, k));
+        if old == null {
+            error(404, "not found");
+            return;
+        }
+        if kv_cas_bytes(str(key, k), old, last_len(), title, n) == 1 {
+            break;
+        }
+    }
     out_item(id, title, n);
 }
 
@@ -95,19 +166,20 @@ fn remove(id: i64) {
         error(404, "not found");
         return;
     }
-    let idx = kv_read("index") as *i64;
-    let count = last_len() / 8;
-    let kept = 0;
-    for i in 0..count {
-        if idx[i] != id {
-            idx[kept] = idx[i];
-            kept += 1;
-        }
-    }
-    kv_write("index", idx, kept * 8);
+    index_remove(id);
     out_str("{\"deleted\":");
     out_int(id);
     out_str("}");
+}
+
+// Earlier versions of this example kept the next id as decimal text under "next": continue from it (once; only
+// the instance whose compare-and-delete succeeds moves it to "last").
+export fn init() {
+    let old = kv_read("next");
+    let n = last_len();
+    if old != null && kv_cas_bytes("next", old, n, null, -1) == 1 {
+        kv_add_int("last", max(parse_int(old, n) - 1, 0));
+    }
 }
 
 export fn handle() {

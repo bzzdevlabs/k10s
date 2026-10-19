@@ -25,7 +25,7 @@ curl 'localhost:8090/_k10s/bench/100/sha/?n=1000' # 100 invocations back to back
 curl localhost:8090/_k10s/status
 curl --data-binary @out/bundle.k10b localhost:8090/_k10s/apply   # redeploy (manifest version must not go down)
 SMP=4 ./run.sh             # four CPUs: CPU 0 runs the network, CPU-heavy requests are spread over all four
-./test.sh                  # in-kernel self tests + 242 end-to-end checks: JIT, interpreter, JIT on 4 CPUs (TEST_PORT=18090)
+./test.sh                  # in-kernel self tests + 248 end-to-end checks: JIT, interpreter, JIT on 4 CPUs (TEST_PORT=18090)
 ./cluster-test.sh          # 2 hosted `k10s node` + 1 k10-metal guest: join, apply, routing, failover, rejoin
 tools/linux-compare.sh     # builds the Linux comparison guest (host kernel + tiny initramfs)
 tools/measure.py           # measurements -> out/results/*.json (see RESULTS.md); `engines` = JIT vs interpreter,
@@ -138,8 +138,9 @@ HTTP/1.1 supports keep-alive, pipelining (one request in flight per connection),
 * `/_k10s/bench/<n>/<service>/<rest>` runs `/<rest>` on `<service>` n times back to back in one task and answers
   the per-invocation CPU time (min, median, p90, mean; TSC time while the invocation runs, host calls included,
   network excluded) — how RESULTS.md compares the engines.
-* All 17 host functions of docs/HOSTAPI.md are implemented. `log` writes to the serial console and a ring buffer.
-  The KV store is per service and in memory, and survives redeploys. `call` runs a local service in the caller's
+* All 19 host functions of docs/HOSTAPI.md are implemented. `log` writes to the serial console and a ring buffer.
+  The KV store is per service and in memory, and survives redeploys. Every `kv_*` call runs under the node lock,
+  so `kv_add` and `kv_cas` are atomic across CPUs; a write that would eat into the heap reserve traps `Host(3)`. `call` runs a local service in the caller's
   coroutine, or (cluster mode) forwards to the node it is placed on.
 
 Apply validates every module, resolves imports by name and parameter count, and checks the `handle`/`init`
@@ -200,7 +201,7 @@ code. The engine is chosen at boot: the JIT unless `k10.engine=interp`. Both rea
   into sealed code frames (above) with `CodeBlob::write_to` and run with `BlobMeta::invoke` *on the coroutine
   stack*. The `VmCtx` lives in the invoking frame: `mem_base`/`mem_mask` = the slot (its 4 KiB tail covers the 8
   bytes the JIT may touch past `2^k`), `user` = the invocation's `HostCalls` and memory range, `host_fns` = one
-  `extern "C"` thunk per host function (17 monomorphic thunks); a host `Err(trap)` becomes `trap_request`.
+  `extern "C"` thunk per host function (19 monomorphic thunks); a host `Err(trap)` becomes `trap_request`.
   `real_stack_limit` = coroutine stack bottom + canary + 32 KiB host reserve: every JIT function entry checks its
   frame against it, so runaway recursion traps `StackOverflow` (≈ 2000 frames of a small function in the 64 KiB
   left for JIT frames; JIT coroutine stacks are 96 KiB instead of 32) and host functions, nested service calls'

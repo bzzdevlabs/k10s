@@ -100,6 +100,42 @@ fn kv_store() {
     assert_eq!(h.get("s", "/").trap, Some(Trap::Host(2)));
 }
 
+/// kv_add / kv_cas and the prelude's kv_add_int / kv_cas_bytes (all three buffer layouts it handles).
+#[test]
+fn kv_atomic() {
+    let src = r#"buffer v: [u8; 16];
+        export fn handle() {
+            heap_reset();
+            let m = req_method();
+            if m == POST {
+                out_int(kv_add_int("n", 5)); out_str(","); out_int(kv_add_int("n", -2)); out_str(",");
+                out_int(kv_add_int("n", 0)); out_str(",");
+                out_int(kv_add_int("absent", 0)); out_int(kv_get("absent", 6, null, 0)); out_str(",");
+                // Create if absent (exp_len -1, e == 0 path), then swap with a separate new buffer (copy path).
+                out_int(kv_cas_bytes("k", null, -1, "one", 3));
+                out_int(kv_cas_bytes("k", null, -1, "one", 3));
+                out_int(kv_cas_bytes("k", "one", 3, "two", 3));
+                out_int(kv_cas_bytes("k", "one", 3, "six", 3));
+                // Adjacent layout (no copy): v = "two" ++ "three".
+                memcpy(v, "twothree", 8);
+                out_int(kv_cas_bytes("k", v, 3, v + 3, 5));
+                out_str(",");
+                out(kv_read("k"), last_len()); out_str(",");
+                // Compare-and-delete, raw kv_cas.
+                out_int(kv_cas("k", 1, v, 5, -1)); out_int(kv_cas("k", 1, v + 3, 5, -1));
+                out_int(kv_get("k", 1, null, 0));
+                return;
+            }
+            kv_put("t", 1, "text", 4);
+            kv_add_int("t", 1);
+        }"#;
+    let mut h = host(&[("a", src)]);
+    assert_eq!(h.post("a", "/", b"").text(), "5,3,3,0-1,10101,three,01-1");
+    assert_eq!(h.kv("a").unwrap().get(&b"n"[..]), Some(&3i64.to_le_bytes().to_vec()));
+    // kv_add on a value that is not 8 bytes traps Host(4).
+    assert_eq!(h.get("a", "/").trap, Some(Trap::Host(4)));
+}
+
 #[test]
 fn calls_between_services() {
     let mut h = host(&[

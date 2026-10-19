@@ -44,6 +44,8 @@ enum HostFn {
     KvGet,
     KvPut,
     KvDel,
+    KvAdd,
+    KvCas,
     Log,
     NowNs,
     TimeMs,
@@ -65,6 +67,8 @@ pub const HOST_FUNCTIONS: &[(&str, u8)] = &[
     ("kv_get", 4),
     ("kv_put", 4),
     ("kv_del", 2),
+    ("kv_add", 3),
+    ("kv_cas", 5),
     ("log", 2),
     ("now_ns", 0),
     ("time_ms", 0),
@@ -87,6 +91,8 @@ fn host_fn(name: &str) -> Option<HostFn> {
         "kv_get" => KvGet,
         "kv_put" => KvPut,
         "kv_del" => KvDel,
+        "kv_add" => KvAdd,
+        "kv_cas" => KvCas,
         "log" => Log,
         "now_ns" => NowNs,
         "time_ms" => TimeMs,
@@ -197,6 +203,11 @@ impl TestHost {
     /// The KV store of a service.
     pub fn kv(&self, service: &str) -> Option<&BTreeMap<Vec<u8>, Vec<u8>>> {
         self.kv.get(service)
+    }
+
+    /// Sets a key in a service's KV store (e.g. data left by an earlier version of the service).
+    pub fn kv_set(&mut self, service: &str, key: &[u8], value: &[u8]) {
+        self.kv.entry(service.to_string()).or_default().insert(key.to_vec(), value.to_vec());
     }
 
     /// Discards the instance of a service (the next request creates a new one and runs `init` again).
@@ -391,6 +402,48 @@ impl Host for Invocation<'_> {
                     return Err(Trap::Host(2));
                 }
                 i64::from(self.host.kv.entry(self.service.clone()).or_default().remove(&key).is_some())
+            }
+            HostFn::KvAdd => {
+                let key = mem[range(mem, a[0], a[1])?].to_vec();
+                if key.len() > MAX_KEY {
+                    return Err(Trap::Host(2));
+                }
+                let store = self.host.kv.entry(self.service.clone()).or_default();
+                let cur = match store.get(&key) {
+                    None => 0,
+                    Some(v) => i64::from_le_bytes(<[u8; 8]>::try_from(&v[..]).map_err(|_| Trap::Host(4))?),
+                };
+                if a[2] != 0 {
+                    store.insert(key, cur.wrapping_add(a[2]).to_le_bytes().to_vec());
+                }
+                cur.wrapping_add(a[2])
+            }
+            HostFn::KvCas => {
+                let key = mem[range(mem, a[0], a[1])?].to_vec();
+                let (exp_len, new_len) = (a[3], a[4]);
+                if exp_len < -1 || new_len < -1 {
+                    return Err(Trap::MemOutOfBounds);
+                }
+                let (e, n) = (exp_len.max(0), new_len.max(0));
+                let buf = mem[range(mem, a[2], e.checked_add(n).ok_or(Trap::MemOutOfBounds)?)?].to_vec();
+                if key.len() > MAX_KEY || e as usize > MAX_VALUE || n as usize > MAX_VALUE {
+                    return Err(Trap::Host(2));
+                }
+                let (exp, new) = buf.split_at(e as usize);
+                let store = self.host.kv.entry(self.service.clone()).or_default();
+                let matches = match (store.get(&key), exp_len >= 0) {
+                    (None, false) => true,
+                    (Some(cur), true) => cur[..] == *exp,
+                    _ => false,
+                };
+                if matches {
+                    if new_len >= 0 {
+                        store.insert(key, new.to_vec());
+                    } else {
+                        store.remove(&key);
+                    }
+                }
+                i64::from(matches)
             }
             HostFn::Log => {
                 let line = String::from_utf8_lossy(&mem[range(mem, a[0], a[1])?]).into_owned();

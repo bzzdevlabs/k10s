@@ -42,7 +42,7 @@ fn example_svcs(variant: u64) -> Vec<Svc> {
         Svc::new("todo", ex("todo.ten")).mem(20).replicas(1),
     ];
     // A churned service toggled on re-apply, to exercise retirement + code unmap without unbounded growth.
-    if variant % 2 == 0 {
+    if variant.is_multiple_of(2) {
         v.push(Svc::new("hello", ex("hello.ten")).mem(16).replicas(2));
     } else {
         v.push(Svc::new("hello2", ex("hello.ten")).mem(16).replicas(1));
@@ -196,7 +196,7 @@ impl Mix {
             let _ = h.join();
         }
         let mut b: Vec<(String, u64)> = self.errs.lock().unwrap().iter().map(|(k, v)| (k.clone(), *v)).collect();
-        b.sort_by(|a, b| b.1.cmp(&a.1));
+        b.sort_by_key(|e| std::cmp::Reverse(e.1));
         (self.ok.load(Relaxed), self.err.load(Relaxed), b)
     }
 }
@@ -283,10 +283,8 @@ fn assert_no_leak(trends: &[Trend], violations: &mut Vec<String>) {
                     violations.push(format!("RSS still climbing: 1st {:.0} KB 2nd {:.0} KB", tr.first_half, tr.second_half));
                 }
             }
-            "instances" | "fibers" => {
-                if ratio > 3.0 && grew > 2000.0 {
-                    violations.push(format!("{} growing: 1st {:.0} 2nd {:.0}", tr.name, tr.first_half, tr.second_half));
-                }
+            "instances" | "fibers" if ratio > 3.0 && grew > 2000.0 => {
+                violations.push(format!("{} growing: 1st {:.0} 2nd {:.0}", tr.name, tr.first_half, tr.second_half));
             }
             _ => {}
         }

@@ -497,6 +497,75 @@ pub fn local_addr(fd: RawFd) -> io::Result<std::net::SocketAddr> {
     }
 }
 
+/// A log line printed at most once per 10 s; repeats in between are counted and reported with the next line.
+#[derive(Debug, Default)]
+pub struct RateLog {
+    last: u64,
+    suppressed: u64,
+}
+
+impl RateLog {
+    const PERIOD_NS: u64 = 10_000_000_000;
+
+    /// Prints `msg()` to stderr unless a line was printed less than 10 s ago (`now` = [`mono_ns`]).
+    pub fn log(&mut self, now: u64, msg: impl FnOnce() -> String) {
+        if self.last != 0 && now.saturating_sub(self.last) < Self::PERIOD_NS {
+            self.suppressed += 1;
+            return;
+        }
+        match std::mem::take(&mut self.suppressed) {
+            0 => eprintln!("{}", msg()),
+            n => eprintln!("{} ({n} similar message(s) suppressed)", msg()),
+        }
+        self.last = now.max(1);
+    }
+}
+
+/// Back-off of a level-triggered listening socket whose `accept` fails. A failing accept leaves the connection in
+/// the backlog, so the listener stays readable and `epoll_wait` would return at once, forever: a busy loop (and a
+/// log line per iteration) for as long as the process is out of file descriptors (`EMFILE`/`ENFILE`). The owner
+/// instead removes the listener from its epoll set until [`AcceptPause::until`] (10 ms, doubling up to 1 s while
+/// accepts keep failing); pending clients wait in the backlog meanwhile.
+#[derive(Debug, Default)]
+pub struct AcceptPause {
+    /// While non-zero, the listener is out of the epoll set until this time ([`mono_ns`]).
+    pub until: u64,
+    delay_ns: u64,
+    /// Number of pauses so far.
+    pub pauses: u64,
+    pub log: RateLog,
+}
+
+impl AcceptPause {
+    const MIN_NS: u64 = 10_000_000;
+    const MAX_NS: u64 = 1_000_000_000;
+
+    /// `accept` failed with `e` at `now`: starts (or extends) a pause and logs (rate-limited). Returns the end of
+    /// the pause.
+    pub fn failed(&mut self, now: u64, what: &str, e: &io::Error) -> u64 {
+        self.delay_ns = (self.delay_ns * 2).clamp(Self::MIN_NS, Self::MAX_NS);
+        self.until = now + self.delay_ns;
+        self.pauses += 1;
+        let ms = self.delay_ns / 1_000_000;
+        self.log.log(now, || format!("k10s: {what}: accept: {e}; not accepting connections for {ms} ms"));
+        self.until
+    }
+
+    /// An `accept` succeeded: the next failure starts again from the shortest pause.
+    pub fn succeeded(&mut self) {
+        self.delay_ns = 0;
+    }
+
+    /// The pause is over at `now`: the owner re-adds the listener (returns true once per pause).
+    pub fn resume_due(&mut self, now: u64) -> bool {
+        if self.until != 0 && now >= self.until {
+            self.until = 0;
+            return true;
+        }
+        false
+    }
+}
+
 /// Accepts one connection (non-blocking, close-on-exec). `Ok(None)` when the queue is empty.
 pub fn accept(fd: RawFd) -> io::Result<Option<Fd>> {
     loop {

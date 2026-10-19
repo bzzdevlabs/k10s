@@ -26,6 +26,8 @@ pub enum HostFn {
     KvGet,
     KvPut,
     KvDel,
+    KvAdd,
+    KvCas,
     Log,
     NowNs,
     TimeMs,
@@ -34,7 +36,7 @@ pub enum HostFn {
 }
 
 /// (name, parameter count, function), in `HostFn` order.
-pub(crate) const TABLE: [(&str, u8, HostFn); 17] = [
+pub(crate) const TABLE: [(&str, u8, HostFn); 19] = [
     ("input_len", 0, HostFn::InputLen),
     ("input_read", 3, HostFn::InputRead),
     ("req_path", 2, HostFn::ReqPath),
@@ -47,6 +49,8 @@ pub(crate) const TABLE: [(&str, u8, HostFn); 17] = [
     ("kv_get", 4, HostFn::KvGet),
     ("kv_put", 4, HostFn::KvPut),
     ("kv_del", 2, HostFn::KvDel),
+    ("kv_add", 3, HostFn::KvAdd),
+    ("kv_cas", 5, HostFn::KvCas),
     ("log", 2, HostFn::Log),
     ("now_ns", 0, HostFn::NowNs),
     ("time_ms", 0, HostFn::TimeMs),
@@ -72,6 +76,10 @@ pub const MAX_KEY: usize = 1024;
 pub const MAX_VALUE: usize = 1 << 20;
 const TRAP_BODY_LIMIT: Trap = Trap::Host(1);
 const TRAP_KV_LIMIT: Trap = Trap::Host(2);
+/// A KV write refused for lack of memory (the hosted node's per-service quota trap).
+const TRAP_KV_QUOTA: Trap = Trap::Host(3);
+/// `kv_add` on a value that is not an 8-byte integer.
+const TRAP_KV_NOT_INT: Trap = Trap::Host(4);
 const MAX_LOG_LINE: usize = 4096;
 
 /// `[ptr, ptr + len)` of instance memory, with the `mem.copy` range rule.
@@ -93,6 +101,13 @@ fn copy_out(mem: &mut [u8], src: &[u8], dst: i64, off: i64, n: i64) -> Result<i6
     let off = off as usize;
     mem[r].copy_from_slice(&src[off..off + n as usize]);
     Ok(n)
+}
+
+fn kv_trap(e: super::KvRefused) -> Trap {
+    match e {
+        super::KvRefused::NotInt => TRAP_KV_NOT_INT,
+        super::KvRefused::NoMemory => TRAP_KV_QUOTA,
+    }
 }
 
 fn rand64() -> u64 {
@@ -172,7 +187,7 @@ impl HostCalls for Level<'_> {
                     return Err(TRAP_KV_LIMIT);
                 }
                 if !super::kv_put(&self.svc.name, &mem[kr], &mem[vr]) {
-                    return Err(TRAP_KV_LIMIT);
+                    return Err(TRAP_KV_QUOTA);
                 }
                 Ok(0)
             }
@@ -182,6 +197,30 @@ impl HostCalls for Level<'_> {
                     return Err(TRAP_KV_LIMIT);
                 }
                 Ok(super::kv_del(&self.svc.name, &mem[kr]) as i64)
+            }
+            HostFn::KvAdd => {
+                let kr = range(mem, arg(0), arg(1))?;
+                if kr.len() > MAX_KEY {
+                    return Err(TRAP_KV_LIMIT);
+                }
+                super::kv_add(&self.svc.name, &mem[kr], arg(2)).map_err(kv_trap)
+            }
+            HostFn::KvCas => {
+                // buf = expected bytes (none if exp_len = -1: "absent") followed by the new bytes (none if
+                // new_len = -1: "delete").
+                let kr = range(mem, arg(0), arg(1))?;
+                let (exp_len, new_len) = (arg(3), arg(4));
+                if exp_len < -1 || new_len < -1 {
+                    return Err(Trap::MemOutOfBounds);
+                }
+                let (e, n) = (exp_len.max(0), new_len.max(0));
+                let br = range(mem, arg(2), e.checked_add(n).ok_or(Trap::MemOutOfBounds)?)?;
+                if kr.len() > MAX_KEY || e as usize > MAX_VALUE || n as usize > MAX_VALUE {
+                    return Err(TRAP_KV_LIMIT);
+                }
+                let (exp, new) = mem[br].split_at(e as usize);
+                let (exp, new) = ((exp_len >= 0).then_some(exp), (new_len >= 0).then_some(new));
+                super::kv_cas(&self.svc.name, &mem[kr], exp, new).map(i64::from).map_err(kv_trap)
             }
             HostFn::Log => {
                 let r = range(mem, arg(0), arg(1))?;

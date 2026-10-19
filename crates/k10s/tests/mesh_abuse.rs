@@ -107,3 +107,171 @@ fn hostile_nonutf8_call_path_does_not_crash_the_mesh() {
     wait_applied(&nodes, 2);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The node's peer-protocol (rpc) address, from its status.
+fn rpc_addr(n: &NodeProc) -> String {
+    let st = n.status();
+    let at = st.find("\"cluster\":{").expect("cluster mode");
+    let s = &st[at..];
+    let r = s.find("\"rpc\":\"").unwrap() + 7;
+    s[r..r + s[r..].find('"').unwrap()].to_string()
+}
+
+/// Peak resident set size (`VmHWM`) of a process, in KiB.
+fn peak_rss_kb(pid: i32) -> u64 {
+    let st = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+    let l = st.lines().find(|l| l.starts_with("VmHWM:")).unwrap();
+    l.split_whitespace().nth(1).unwrap().parse().unwrap()
+}
+
+/// A "peer" that sends requests over the peer protocol and never reads the answers. Each `GetManifest` is answered
+/// with the whole manifest (≈ 1 MB here, thanks to a 1 MB service config); the peer asks for 5 every 20 ms, so the
+/// node writes replies until the socket buffers are full, then its write buffer for the link grows. It must stop at
+/// its per-link cap (`LINK_HARD_CAP`, 80 MiB) and close the link instead of growing without bound (the peer asks for
+/// up to 1 GB); meanwhile forwarding between the real members keeps working.
+#[test]
+fn peer_that_never_reads_is_cut_off() {
+    use std::io::{Read, Write};
+    let (dir, nodes) = cluster("meshnoread", 2);
+    let big = echo_svc().replicas(1).config(&vec![b'x'; 1_000_000]);
+    deploy(&nodes[0].http, &[big]);
+    wait_applied(&nodes, 1);
+    echo_everywhere(&nodes);
+    let target = &nodes[1];
+    let s = std::net::TcpStream::connect(rpc_addr(target)).unwrap();
+    let mut w = s.try_clone().unwrap();
+    let writer = std::thread::spawn(move || {
+        let mut sent = 0u64;
+        while sent < 1000 {
+            let mut reqs = Vec::new();
+            for _ in 0..5 {
+                sent += 1;
+                k10_mesh::wire::Msg::GetManifest { version: 1 }.encode(sent, &mut reqs).unwrap();
+            }
+            if w.write_all(&reqs).is_err() {
+                break; // the node closed the link
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        sent
+    });
+    let probe = Probe::start(&nodes[0].http, "/echo", "hello", Duration::from_millis(5));
+    wait_for("link closed for overflow", Duration::from_secs(60), || {
+        num_after(&target.status(), "links_overflowed").unwrap_or(0) >= 1
+    });
+    let sent = writer.join().unwrap();
+    let lat = probe.stop();
+    // The attacker's connection is closed: after what the socket buffers held, EOF (or a reset).
+    let mut s = s;
+    s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    let mut buf = vec![0u8; 1 << 20];
+    let mut got = 0usize;
+    loop {
+        match s.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => got += n,
+        }
+        assert!(got < 200 << 20, "the node kept sending past its cap ({got} bytes)");
+    }
+    let peak_mb = peak_rss_kb(target.pid()) / 1024;
+    assert!(peak_mb < 400, "node peak RSS {peak_mb} MB: replies to a non-reading peer were not capped");
+    assert!(sent < 1000, "the link was never closed under the writer ({sent} requests sent)");
+    // The cluster is unharmed: forwarding works through both ingresses, and a new apply converges.
+    assert_eq!(lat.errors, 0, "echo through n1 during the attack on n2: {lat:?}");
+    assert!(target.healthy());
+    echo_everywhere(&nodes);
+    deploy(&nodes[0].http, &[echo_svc().replicas(1)]);
+    wait_applied(&nodes, 2);
+    echo_everywhere(&nodes);
+    eprintln!("non-reading peer: {sent} requests sent, {got} reply bytes reached it before the close; node peak RSS {peak_mb} MB; echo {lat}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// CPU time (user + system, clock ticks) of a process.
+fn cpu_ticks(pid: i32) -> u64 {
+    let st = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let rest = &st[st.rfind(')').unwrap() + 2..];
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    f[11].parse::<u64>().unwrap() + f[12].parse::<u64>().unwrap()
+}
+
+/// Out of file descriptors (`RLIMIT_NOFILE`): connections wait in the listeners' backlogs and `accept` fails with
+/// `EMFILE`. Neither the HTTP listener (shards) nor the peer listener (mesh thread) may busy-loop on their
+/// level-triggered readiness: they are paused with a back-off, the log line is rate-limited, and once descriptors
+/// are free again the waiting connections are served.
+#[test]
+fn fd_exhaustion_does_not_spin() {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let dir = tmpdir("emfile");
+    let log = dir.join("node.log");
+    let http_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let http = format!("127.0.0.1:{http_port}");
+    let mut cmd = Command::new(bin());
+    cmd.args(["node", "--data", dir.join("data").to_str().unwrap(), "--http", &http, "--shards", "1"])
+        .args(["--gossip", "127.0.0.1:0", "--rpc", "127.0.0.1:0"])
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&log).unwrap());
+    // SAFETY: setrlimit is async-signal-safe; nothing else runs between fork and exec.
+    unsafe {
+        cmd.pre_exec(|| {
+            let lim = libc::rlimit { rlim_cur: 64, rlim_max: 64 };
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &lim) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().unwrap();
+    struct Kill<'a>(&'a mut std::process::Child);
+    impl Drop for Kill<'_> {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let pid = child.id() as i32;
+    let _guard = Kill(&mut child);
+    wait_for("node up", Duration::from_secs(20), || {
+        http::request(&http, "GET", "/_k10s/health", b"", Duration::from_secs(2)).is_ok_and(|r| r.status == 200)
+    });
+    let st = http::request(&http, "GET", "/_k10s/status", b"", Duration::from_secs(5)).unwrap().text();
+    let rpc = {
+        let s = &st[st.find("\"cluster\":{").unwrap()..];
+        let r = s.find("\"rpc\":\"").unwrap() + 7;
+        s[r..r + s[r..].find('"').unwrap()].to_string()
+    };
+    // Exhaust the node's descriptors with idle HTTP connections, then leave more waiting on both listeners.
+    let fds = || std::fs::read_dir(format!("/proc/{pid}/fd")).map(|d| d.count()).unwrap_or(0);
+    let mut conns = Vec::new();
+    wait_for("node out of file descriptors", Duration::from_secs(20), || {
+        conns.push(std::net::TcpStream::connect(&http).unwrap());
+        std::thread::sleep(Duration::from_millis(2));
+        fds() >= 64 && conns.len() > 8
+    });
+    for _ in 0..8 {
+        conns.push(std::net::TcpStream::connect(&http).unwrap());
+        conns.push(std::net::TcpStream::connect(&rpc).unwrap());
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    let t0 = cpu_ticks(pid);
+    std::thread::sleep(Duration::from_secs(2));
+    let used = cpu_ticks(pid) - t0;
+    // A spinning listener burns a whole core (≈ 200 ticks in 2 s).
+    assert!(used < 40, "node used {used} CPU ticks in 2 s while out of file descriptors (spinning?)");
+    let text = std::fs::read_to_string(&log).unwrap();
+    let lines = text.lines().filter(|l| l.contains("accept:")).count();
+    assert!((1..=4).contains(&lines), "{lines} accept log lines (want a rate-limited few):\n{text}");
+    // Free the descriptors: the node accepts again and serves.
+    drop(conns);
+    wait_for("node serves again", Duration::from_secs(20), || {
+        http::request(&http, "GET", "/_k10s/health", b"", Duration::from_secs(2)).is_ok_and(|r| r.status == 200)
+    });
+    let st = http::request(&http, "GET", "/_k10s/status", b"", Duration::from_secs(5)).unwrap().text();
+    let http_pauses = section_num(&st, "http_stats", "accept_pauses").unwrap();
+    let mesh_pauses = num_after(&st[st.find("\"cluster\":{").unwrap()..], "accept_pauses").unwrap();
+    assert!(http_pauses >= 1 && mesh_pauses >= 1, "pauses: http {http_pauses}, mesh {mesh_pauses}");
+    eprintln!("out of fds: {used} CPU ticks in 2 s, {lines} log line(s), pauses: http {http_pauses}, mesh {mesh_pauses}");
+    drop(_guard);
+    let _ = std::fs::remove_dir_all(&dir);
+}

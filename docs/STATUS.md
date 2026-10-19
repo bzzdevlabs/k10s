@@ -50,7 +50,7 @@ everything is done.
 - Use separate cargo target dirs per concurrent agent (`target/node`, `target/chaos`, …) to avoid lock contention.
 - Never touch Docker containers/images not created by k10s scripts (the machine has the user's own).
 
-## Follow-ups found by the reliability campaign — RUNNING (follow-up agent: examples heap_reset, atomic KV, mesh limits, buffered-bytes budget)
+## Follow-ups found by the reliability campaign — DONE (heap_reset in examples, atomic kv_add/kv_cas, mesh read/write caps, accept backoff, --conn-buffer-max); still open: per-service memory reservation, chaos faulting the seed node, multi-hour soak
 - examples: add `heap_reset()` at the top of `handle` in chain/compute/nbody (per-request heap leak → trap every ~4k
   requests); counter/todo lose updates under concurrency → add atomic KV host functions (`kv_add`, `kv_cas`) in
   HOSTAPI + node + metal + Ten prelude, or document `max_instances = 1`.

@@ -106,6 +106,11 @@ pub struct NodeConfig {
     pub header_timeout: Duration,
     pub keepalive_timeout: Duration,
     pub max_conns: usize,
+    /// Node-wide cap on bytes buffered in HTTP connections: request bodies (reserved from the moment their head is
+    /// parsed until the response is produced) and response bytes the client has not read yet. A request body that
+    /// does not fit is refused with 503 (connection closed), and while the total is over the cap new requests are
+    /// refused with 503 too (admin requests excepted). 0 = automatic: [`default_conn_buffer_max`] of `mem_limit`.
+    pub conn_buffer_max: u64,
     pub pin_threads: bool,
     /// On shutdown, how long in-flight requests may take to finish.
     pub drain_timeout: Duration,
@@ -146,12 +151,19 @@ impl Default for NodeConfig {
             header_timeout: Duration::from_secs(10),
             keepalive_timeout: Duration::from_secs(60),
             max_conns: 100_000,
+            conn_buffer_max: 0,
             pin_threads: false,
             drain_timeout: Duration::from_secs(5),
             idle_spin: Duration::ZERO,
             reload_bundle: true,
         }
     }
+}
+
+/// Default node-wide connection buffer budget for a node whose instances may use `mem_limit` bytes: one eighth of
+/// it, at least 64 MiB (four maximum-size request bodies).
+pub fn default_conn_buffer_max(mem_limit: u64) -> u64 {
+    (mem_limit / 8).max(64 << 20)
 }
 
 pub fn hostname() -> String {
@@ -211,6 +223,10 @@ pub struct NodeShared {
     pub apply_in_flight: AtomicUsize,
     /// Round-robin shard choice for [`NodeShared::serve_local`].
     serve_rr: AtomicUsize,
+    /// Bytes currently charged to the connection buffer budget by all shards (see [`NodeConfig::conn_buffer_max`]).
+    pub conn_buffered: AtomicU64,
+    /// The effective budget (`conn_buffer_max`, or its automatic default).
+    pub conn_buffer_max: u64,
     /// Installed by the cluster layer (weak: the cluster owns the node, not the other way round).
     pub cluster: OnceLock<Weak<dyn ClusterHooks>>,
 }
@@ -505,6 +521,10 @@ impl Node {
         }
         let max_maps = sys::max_map_count();
         let cfg_max_fibers = cfg.max_fibers;
+        let conn_buffer_max = match cfg.conn_buffer_max {
+            0 => default_conn_buffer_max(cfg.mem_limit),
+            n => n,
+        };
         let shared = Arc::new(NodeShared {
             logs: Logs::new(cfg.log_lines, 256 << 10, cfg.log_stderr),
             cfg,
@@ -526,6 +546,8 @@ impl Node {
             apply_lock: Mutex::new(()),
             apply_in_flight: AtomicUsize::new(0),
             serve_rr: AtomicUsize::new(0),
+            conn_buffered: AtomicU64::new(0),
+            conn_buffer_max,
             cluster: OnceLock::new(),
         });
         let _ = shared.http_addr.set(addr);

@@ -111,6 +111,7 @@ fn advance(dt: f64) {
 }
 
 export fn handle() {
+    heap_reset();                       // query_int() reads paths of 1 KiB or more into the heap
     let n = query_int("n", 1000);
     if n < 0 || n > 50_000_000 {
         n = 1000;

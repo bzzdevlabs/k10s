@@ -1,7 +1,9 @@
 //! Durable key-value store (`kv_*` host functions): one namespace per service name, node-local.
 //!
 //! * **Memory**: each namespace is a `HashMap<key, value>` behind a mutex (held for microseconds: a lookup and a
-//!   copy, or an insert plus appending the encoded record to an in-memory `pending` buffer).
+//!   copy, or an insert plus appending the encoded record to an in-memory `pending` buffer). A namespace is one
+//!   object shared by every shard, so its operations are linearizable node-wide: `add` (`kv_add`) and `cas`
+//!   (`kv_cas`) are atomic read-modify-writes under that lock, logged as ordinary put/del records in lock order.
 //! * **Log**: `DATA/kv/<service>.log`, append-only records
 //!   `len:u32 | crc32:u32 | op:u8 (1 put, 2 del) | klen:u16 | key | value`, `len = 3 + klen + vlen`,
 //!   CRC over `op..value`. Replayed at start; a torn or corrupt tail is truncated at the last good record.
@@ -101,6 +103,15 @@ struct Inner {
     pending: Vec<u8>,
 }
 
+/// Why an atomic read-modify-write ([`KvNs::add`], [`KvNs::cas`]) stored nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KvError {
+    /// `add` on a value that is not exactly 8 bytes (trap `Host(4)`).
+    NotInt,
+    /// The write would push the namespace past its live-bytes quota (trap `Host(3)`).
+    Quota,
+}
+
 /// Wake-up signal of the flusher (shared by the store and its namespaces; no reference cycle).
 struct Signal {
     dirty: AtomicBool,
@@ -141,46 +152,115 @@ impl KvNs {
     /// live-bytes quota ([`KvConfig::max_bytes`]); the caller turns that into a trap.
     #[must_use]
     pub fn put(&self, key: &[u8], val: &[u8]) -> bool {
-        {
+        let ok = {
             let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            let add = rec_size(key.len(), val.len());
-            let old_contrib = g.map.get(key).map(|old| rec_size(key.len(), old.len())).unwrap_or(0);
-            let new_live = g.live_bytes - old_contrib + add;
-            if self.max_bytes != 0 && new_live > self.max_bytes {
-                return false; // quota exceeded: nothing is mutated
-            }
-            if self.durable {
-                encode_rec(&mut g.pending, OP_PUT, key, val);
-                g.log_bytes += add;
-            }
-            let inner = &mut *g;
-            inner.live_bytes = new_live;
-            match inner.map.get_mut(key) {
-                Some(old) => *old = val.into(), // keeps the key allocation
-                None => {
-                    inner.map.insert(key.into(), val.into());
-                }
-            }
-        }
-        if self.durable {
+            self.put_locked(&mut g, key, val)
+        };
+        if ok && self.durable {
             self.mark_dirty();
         }
-        true
+        ok
     }
 
     /// Returns whether the key existed.
     pub fn del(&self, key: &[u8]) -> bool {
-        {
+        let existed = {
             let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(old) = g.map.remove(key) else { return false };
-            g.live_bytes -= rec_size(key.len(), old.len());
-            if self.durable {
-                encode_rec(&mut g.pending, OP_DEL, key, &[]);
-                g.log_bytes += rec_size(key.len(), 0);
-            }
+            self.del_locked(&mut g, key)
+        };
+        if existed && self.durable {
+            self.mark_dirty();
         }
+        existed
+    }
+
+    /// Atomically adds `delta` (wrapping) to the value of `key` read as an 8-byte little-endian i64 (an absent key
+    /// counts as 0), stores the result and returns it (`kv_add`). `delta == 0` only reads: nothing is written and an
+    /// absent key stays absent. [`KvError::NotInt`] if the current value is not exactly 8 bytes, [`KvError::Quota`]
+    /// if creating the key would exceed the quota; nothing is stored in either case.
+    pub fn add(&self, key: &[u8], delta: i64) -> Result<i64, KvError> {
+        let new = {
+            let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let cur = match g.map.get(key) {
+                None => 0,
+                Some(v) => i64::from_le_bytes(<[u8; 8]>::try_from(&v[..]).map_err(|_| KvError::NotInt)?),
+            };
+            if delta == 0 {
+                return Ok(cur);
+            }
+            let new = cur.wrapping_add(delta);
+            if !self.put_locked(&mut g, key, &new.to_le_bytes()) {
+                return Err(KvError::Quota);
+            }
+            new
+        };
         if self.durable {
             self.mark_dirty();
+        }
+        Ok(new)
+    }
+
+    /// Compare-and-swap (`kv_cas`): if the current value of `key` equals `expected` (`None`: the key must be
+    /// absent), replaces it with `new` (`None`: deletes the key) and returns `Ok(true)`; otherwise changes nothing
+    /// and returns `Ok(false)`. [`KvError::Quota`] (nothing stored) if the new value would exceed the quota.
+    pub fn cas(&self, key: &[u8], expected: Option<&[u8]>, new: Option<&[u8]>) -> Result<bool, KvError> {
+        let wrote = {
+            let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let matches = match (g.map.get(key), expected) {
+                (None, None) => true,
+                (Some(cur), Some(exp)) => cur[..] == *exp,
+                _ => false,
+            };
+            if !matches {
+                return Ok(false);
+            }
+            match new {
+                Some(v) => {
+                    if !self.put_locked(&mut g, key, v) {
+                        return Err(KvError::Quota);
+                    }
+                    true
+                }
+                None => self.del_locked(&mut g, key),
+            }
+        };
+        if wrote && self.durable {
+            self.mark_dirty();
+        }
+        Ok(true)
+    }
+
+    /// `put` under the namespace lock: checks the quota, appends the log record, updates the map.
+    fn put_locked(&self, g: &mut Inner, key: &[u8], val: &[u8]) -> bool {
+        let add = rec_size(key.len(), val.len());
+        let old_contrib = g.map.get(key).map(|old| rec_size(key.len(), old.len())).unwrap_or(0);
+        let new_live = g.live_bytes - old_contrib + add;
+        if self.max_bytes != 0 && new_live > self.max_bytes {
+            return false; // quota exceeded: nothing is mutated
+        }
+        if self.durable {
+            encode_rec(&mut g.pending, OP_PUT, key, val);
+            g.log_bytes += add;
+        }
+        g.live_bytes = new_live;
+        match g.map.get_mut(key) {
+            // Same length (counters, fixed-size records): overwrite in place, no allocation.
+            Some(old) if old.len() == val.len() => old.copy_from_slice(val),
+            Some(old) => *old = val.into(), // keeps the key allocation
+            None => {
+                g.map.insert(key.into(), val.into());
+            }
+        }
+        true
+    }
+
+    /// `del` under the namespace lock. Returns whether the key existed (only then is a record logged).
+    fn del_locked(&self, g: &mut Inner, key: &[u8]) -> bool {
+        let Some(old) = g.map.remove(key) else { return false };
+        g.live_bytes -= rec_size(key.len(), old.len());
+        if self.durable {
+            encode_rec(&mut g.pending, OP_DEL, key, &[]);
+            g.log_bytes += rec_size(key.len(), 0);
         }
         true
     }
@@ -634,6 +714,106 @@ mod tests {
         let _ = a.put(b"k", b"v");
         assert_eq!(a.get(b"k"), Some(b"v".to_vec()));
         assert_eq!(a.sizes().1, 0);
+    }
+
+    /// `add` and `cas` semantics, their quota behaviour, and durability through the log (they are logged as plain
+    /// put/del records).
+    #[test]
+    fn add_and_cas() {
+        let d = tmpdir("atomic");
+        {
+            let s = KvStore::open(Some(&d), KvConfig::default()).unwrap();
+            let a = s.ns("a");
+            assert_eq!(a.add(b"n", 0), Ok(0));
+            assert_eq!(a.get(b"n"), None, "delta 0 only reads");
+            assert_eq!(a.add(b"n", 5), Ok(5));
+            assert_eq!(a.add(b"n", -7), Ok(-2));
+            assert_eq!(a.get(b"n"), Some((-2i64).to_le_bytes().to_vec()));
+            assert_eq!(a.add(b"n", i64::MAX), Ok(i64::MAX - 2));
+            assert_eq!(a.add(b"n", 3), Ok(i64::MIN), "wraps");
+            let _ = a.put(b"text", b"12");
+            assert_eq!(a.add(b"text", 1), Err(KvError::NotInt));
+            assert_eq!(a.add(b"text", 0), Err(KvError::NotInt));
+            assert_eq!(a.get(b"text"), Some(b"12".to_vec()), "unchanged");
+            // cas: create-if-absent, compare-and-swap, compare-and-delete.
+            assert_eq!(a.cas(b"k", None, Some(b"v1")), Ok(true));
+            assert_eq!(a.cas(b"k", None, Some(b"v2")), Ok(false), "exists");
+            assert_eq!(a.cas(b"k", Some(b"nope"), Some(b"v2")), Ok(false));
+            assert_eq!(a.get(b"k"), Some(b"v1".to_vec()));
+            assert_eq!(a.cas(b"k", Some(b"v1"), Some(b"v2")), Ok(true));
+            assert_eq!(a.cas(b"k", Some(b""), Some(b"v3")), Ok(false), "empty is not absent and not v2");
+            assert_eq!(a.cas(b"k", Some(b"v2"), Some(b"")), Ok(true));
+            assert_eq!(a.get(b"k"), Some(Vec::new()));
+            assert_eq!(a.cas(b"k", None, None), Ok(false), "present: absent expected");
+            assert_eq!(a.cas(b"k", Some(b""), None), Ok(true), "compare-and-delete");
+            assert_eq!(a.get(b"k"), None);
+            assert_eq!(a.cas(b"k", Some(b""), Some(b"x")), Ok(false), "absent: value expected");
+            assert_eq!(a.cas(b"k", None, None), Ok(true), "absent stays absent");
+            assert_eq!(a.cas(b"k2", None, Some(b"kept")), Ok(true));
+            s.shutdown();
+        }
+        let s = KvStore::open(Some(&d), KvConfig::default()).unwrap();
+        let a = s.ns("a");
+        assert_eq!(a.add(b"n", 0), Ok(i64::MIN));
+        assert_eq!(a.get(b"k"), None);
+        assert_eq!(a.get(b"k2"), Some(b"kept".to_vec()));
+        assert_eq!(a.get(b"text"), Some(b"12".to_vec()));
+        drop(s);
+        let _ = fs::remove_dir_all(&d);
+        // Quota: creating keys through add/cas is refused past the cap; overwrites of the same size are not.
+        let s = KvStore::open(None, KvConfig { max_bytes: 4096, ..KvConfig::default() }).unwrap();
+        let q = s.ns("q");
+        let mut created = 0;
+        while q.add(format!("c{created}").as_bytes(), 1).is_ok() {
+            created += 1;
+            assert!(created < 1000);
+        }
+        assert_eq!(q.add(format!("c{created}").as_bytes(), 1), Err(KvError::Quota));
+        assert_eq!(q.get(format!("c{created}").as_bytes()), None);
+        assert_eq!(q.add(b"c0", 1), Ok(2), "in-place update within quota");
+        assert_eq!(q.cas(b"new", None, Some(&[0u8; 100])), Err(KvError::Quota));
+        assert_eq!(q.get(b"new"), None);
+        assert_eq!(q.cas(b"c0", Some(&2i64.to_le_bytes()), None), Ok(true), "delete frees room");
+        assert_eq!(q.cas(b"new", None, Some(b"x")), Ok(true));
+    }
+
+    /// Many threads incrementing one counter and appending to one CAS-maintained list lose nothing.
+    #[test]
+    fn atomic_ops_under_contention() {
+        let s = KvStore::open(None, KvConfig::default()).unwrap();
+        let ns = s.ns("c");
+        let threads: Vec<_> = (0..8)
+            .map(|t| {
+                let ns = ns.clone();
+                std::thread::spawn(move || {
+                    for i in 0..2000i64 {
+                        ns.add(b"n", 1).unwrap();
+                        if i % 4 != 0 {
+                            continue;
+                        }
+                        // Append (t, i) to "list" with a CAS loop.
+                        loop {
+                            let cur = ns.get(b"list");
+                            let mut next = cur.clone().unwrap_or_default();
+                            next.extend_from_slice(&(t * 1_000_000 + i).to_le_bytes());
+                            if ns.cas(b"list", cur.as_deref(), Some(&next)).unwrap() {
+                                break;
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(ns.add(b"n", 0), Ok(16_000));
+        let list = ns.get(b"list").unwrap();
+        let mut ids: Vec<i64> = list.chunks(8).map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect();
+        assert_eq!(ids.len(), 4_000);
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 4_000);
     }
 
     /// The per-service live-bytes quota refuses writes past the cap (storing nothing), while overwrites and deletes

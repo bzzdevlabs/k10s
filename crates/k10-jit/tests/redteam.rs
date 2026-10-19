@@ -240,8 +240,8 @@ fn bulk_op_overflow() {
         for &dst in &dsts {
             for &n in &ns {
                 contain(&m, fill, &[dst, 0xAB, n], mlog);
-                contain(&m, copy, &[dst, (s / 3) as i64, n], mlog);
-                contain(&m, copy, &[(s / 3) as i64, dst, n], mlog);
+                contain(&m, copy, &[dst, s / 3, n], mlog);
+                contain(&m, copy, &[s / 3, dst, n], mlog);
             }
         }
     }

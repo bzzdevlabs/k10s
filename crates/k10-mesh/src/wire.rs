@@ -125,9 +125,9 @@ impl<'a> Msg<'a> {
     }
 
     /// Appends one complete frame to `out` (no intermediate allocation; reserve once, write once). Returns
-    /// `Err` without touching `out` when a field is too long for the wire (a `Call` service > 255 bytes or path
-    /// > 65535 bytes) or the whole frame would exceed 4 GiB — the caller fails that one request instead of the
-    /// process panicking on hostile input.
+    /// `Err` without touching `out` when a field is too long for the wire (a `Call` service over 255 bytes or a
+    /// path over 65535 bytes) or the whole frame would exceed 4 GiB — the caller fails that one request instead of
+    /// the process panicking on hostile input.
     pub fn encode(&self, request_id: u64, out: &mut Vec<u8>) -> Result<(), WireError> {
         if let Msg::Call { service, path, body, .. } = self {
             if service.len() > u8::MAX as usize {

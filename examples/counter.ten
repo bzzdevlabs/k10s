@@ -2,12 +2,22 @@
 //
 // Every request increments a durable counter and returns the new value followed by "\n". The Go version keeps
 // the counter in a file (COUNTER_FILE, pwrite without fsync); here it lives in the service's durable key-value
-// store under the key "counter", as decimal text. Instances are disposable: no state is kept in memory between
-// requests, so any replica on the node gives the same answer.
+// store under the key "count", as an 8-byte integer incremented with kv_add: one atomic host call, so concurrent
+// instances (up to max_instances, on every shard) never lose an update. Instances are disposable: no state is kept
+// in memory between requests, so any instance on the node gives the same answer.
+
+// Earlier versions of this example kept the counter as decimal text under "counter" (a read then a write, which
+// lost updates under concurrency). Fold such a value into "count" once: only the instance whose compare-and-delete
+// succeeds adds it, so it is never counted twice.
+export fn init() {
+    let old = kv_read("counter");
+    let n = last_len();
+    if old != null && kv_cas_bytes("counter", old, n, null, -1) == 1 {
+        kv_add_int("count", parse_int(old, n));
+    }
+}
 
 export fn handle() {
-    let n = kv_get_int("counter", 0) + 1;
-    kv_put_int("counter", n);
-    out_int(n);
+    out_int(kv_add_int("count", 1));
     out_str("\n");
 }

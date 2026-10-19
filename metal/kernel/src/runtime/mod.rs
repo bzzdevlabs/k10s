@@ -114,6 +114,46 @@ impl Node {
             None => false,
         }
     }
+    /// `kv_add`: atomic (under the node lock) add to an 8-byte little-endian integer value (absent = 0);
+    /// `delta == 0` only reads.
+    fn kv_add(&mut self, svc: &str, k: &[u8], delta: i64) -> Result<i64, KvRefused> {
+        let cur = match self.kv_get(svc, k) {
+            None => 0,
+            Some(v) => i64::from_le_bytes(<[u8; 8]>::try_from(v).map_err(|_| KvRefused::NotInt)?),
+        };
+        if delta == 0 {
+            return Ok(cur);
+        }
+        let new = cur.wrapping_add(delta);
+        if let Some(v) = self.kv.get_mut(svc).and_then(|ns| ns.get_mut(k)) {
+            v.copy_from_slice(&new.to_le_bytes()); // same size: in place
+        } else if !self.kv_put(svc, k, &new.to_le_bytes()) {
+            return Err(KvRefused::NoMemory);
+        }
+        Ok(new)
+    }
+    /// `kv_cas`: if the value equals `exp` (`None`: absent), store `new` (`None`: delete). Ok(false) on a mismatch.
+    fn kv_cas(&mut self, svc: &str, k: &[u8], exp: Option<&[u8]>, new: Option<&[u8]>) -> Result<bool, KvRefused> {
+        let matches = match (self.kv_get(svc, k), exp) {
+            (None, None) => true,
+            (Some(cur), Some(exp)) => cur == exp,
+            _ => false,
+        };
+        if !matches {
+            return Ok(false);
+        }
+        match new {
+            Some(v) => {
+                if !self.kv_put(svc, k, v) {
+                    return Err(KvRefused::NoMemory);
+                }
+            }
+            None => {
+                self.kv_del(svc, k);
+            }
+        }
+        Ok(true)
+    }
 
     fn log(&mut self, svc: &str, text: String) {
         let q = self.logs.entry(svc.to_string()).or_default();
@@ -1282,6 +1322,21 @@ pub fn kv_put(svc: &str, k: &[u8], v: &[u8]) -> bool {
 }
 pub fn kv_del(svc: &str, k: &[u8]) -> bool {
     NODE.lock().kv_del(svc, k)
+}
+pub fn kv_add(svc: &str, k: &[u8], delta: i64) -> Result<i64, KvRefused> {
+    NODE.lock().kv_add(svc, k, delta)
+}
+pub fn kv_cas(svc: &str, k: &[u8], exp: Option<&[u8]>, new: Option<&[u8]>) -> Result<bool, KvRefused> {
+    NODE.lock().kv_cas(svc, k, exp, new)
+}
+
+/// Why `kv_add` / `kv_cas` stored nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KvRefused {
+    /// `kv_add` on a value that is not 8 bytes (trap `Host(4)`).
+    NotInt,
+    /// The write would eat into the kernel heap reserve (trap `Host(3)`).
+    NoMemory,
 }
 
 // --- admin API -----------------------------------------------------------------------------------------------

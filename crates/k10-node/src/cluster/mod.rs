@@ -85,6 +85,12 @@ pub struct ClusterStats {
     pub served_for_peers: AtomicU64,
     pub not_here: AtomicU64,
     pub dial_failures: AtomicU64,
+    /// Calls not sent to a peer because its link held more than `LINK_SOFT_CAP` unsent bytes.
+    pub congested_skips: AtomicU64,
+    /// Links closed because a frame would have pushed them past `LINK_HARD_CAP` unsent bytes.
+    pub links_overflowed: AtomicU64,
+    /// Times the peer listener was paused after a failed `accept` (out of file descriptors).
+    pub accept_pauses: AtomicU64,
     pub peer_bytes_in: AtomicU64,
     pub peer_bytes_out: AtomicU64,
     pub fetches: AtomicU64,
@@ -101,6 +107,8 @@ pub struct LinkInfo {
     pub outstanding: u32,
     pub bytes_in: u64,
     pub bytes_out: u64,
+    /// Bytes queued on the link but not yet written to the socket.
+    pub unsent: u64,
 }
 
 /// What the mesh thread publishes for the admin API.
@@ -402,13 +410,14 @@ impl ClusterHooks for ClusterShared {
             .iter()
             .map(|l| {
                 format!(
-                    "{{\"peer\":{},\"dialed\":{},\"state\":\"{}\",\"outstanding\":{},\"bytes_in\":{},\"bytes_out\":{}}}",
+                    "{{\"peer\":{},\"dialed\":{},\"state\":\"{}\",\"outstanding\":{},\"bytes_in\":{},\"bytes_out\":{},\"unsent\":{}}}",
                     l.peer.map(|p| format!("\"{p}\"")).unwrap_or_else(|| "null".into()),
                     l.dialed,
                     l.state,
                     l.outstanding,
                     l.bytes_in,
-                    l.bytes_out
+                    l.bytes_out,
+                    l.unsent
                 )
             })
             .collect();
@@ -430,7 +439,8 @@ impl ClusterHooks for ClusterShared {
                 "\"stats\":{{\"gossip_packets_sent\":{},\"gossip_bytes_sent\":{},\"gossip_packets_received\":{},",
                 "\"gossip_bytes_received\":{},\"gossip_malformed\":{},\"forwarded\":{},\"forward_retries\":{},",
                 "\"forward_failed\":{},\"forward_local\":{},\"resent_unsent\":{},\"served_for_peers\":{},\"not_here\":{},",
-                "\"dial_failures\":{},\"peer_bytes_in\":{},\"peer_bytes_out\":{},\"pending_calls\":{},\"fetches\":{},",
+                "\"dial_failures\":{},\"congested_skips\":{},\"links_overflowed\":{},\"accept_pauses\":{},",
+                "\"peer_bytes_in\":{},\"peer_bytes_out\":{},\"pending_calls\":{},\"fetches\":{},",
                 "\"blobs_fetched\":{},\"blobs\":{},\"applies\":{},\"apply_errors\":{}}}}}"
             ),
             self.id,
@@ -461,6 +471,9 @@ impl ClusterHooks for ClusterShared {
             l(&s.served_for_peers),
             l(&s.not_here),
             l(&s.dial_failures),
+            l(&s.congested_skips),
+            l(&s.links_overflowed),
+            l(&s.accept_pauses),
             l(&s.peer_bytes_in),
             l(&s.peer_bytes_out),
             mv.pending_calls,

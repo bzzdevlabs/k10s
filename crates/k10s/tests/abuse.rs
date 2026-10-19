@@ -635,3 +635,93 @@ fn raw_exchange(addr: std::net::SocketAddr, req: &[u8]) -> String {
     }
     String::from_utf8_lossy(&buf).into_owned()
 }
+
+/// Reads one HTTP response (head + Content-Length body) from `s`: (status, head, body).
+fn read_response(s: &mut std::net::TcpStream) -> (u16, String, Vec<u8>) {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    let mut tmp = vec![0u8; 64 << 10];
+    let head_end = loop {
+        if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break p + 4;
+        }
+        let n = s.read(&mut tmp).expect("read response head");
+        assert!(n > 0, "connection closed before a response head ({} bytes)", buf.len());
+        buf.extend_from_slice(&tmp[..n]);
+    };
+    let head = String::from_utf8_lossy(&buf[..head_end]).into_owned();
+    let status: u16 = head[9..12].parse().unwrap();
+    let len: usize = head
+        .lines()
+        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap()))
+        .unwrap_or(0);
+    let mut body = buf[head_end..].to_vec();
+    while body.len() < len {
+        let n = s.read(&mut tmp).expect("read response body");
+        assert!(n > 0, "connection closed mid-body");
+        body.extend_from_slice(&tmp[..n]);
+    }
+    (status, head, body)
+}
+
+/// Node-wide connection buffer budget (`--conn-buffer-max`, here 1 MiB). A request body is reserved when its head
+/// arrives: one that does not fit gets 503 (and the connection is closed) without being read. Unsent response bytes
+/// (a client that does not read) count too: over the budget, new requests get 503 until they drain; admin requests
+/// still work. Everything returns to 0 afterwards.
+#[test]
+fn connection_buffer_budget() {
+    use std::io::Write;
+    use std::net::TcpStream;
+    let (dir, node) = single("bufbudget", 1, &["--conn-buffer-max", "1MiB"]);
+    deploy(&node.http, &[echo_svc()]);
+    let buffered = || section_num(&node.status(), "http_stats", "buffered_bytes").unwrap();
+    let refused = || section_num(&node.status(), "http_stats", "buffer_refused").unwrap();
+    assert_eq!(section_num(&node.status(), "http_stats", "buffer_max"), Some(1 << 20));
+    let addr: std::net::SocketAddr = node.http.parse().unwrap();
+    // A: an 800 kB body, sent slowly (only the head and 1000 bytes so far).
+    let mut a = TcpStream::connect(addr).unwrap();
+    a.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    a.write_all(b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 800000\r\n\r\n").unwrap();
+    a.write_all(&[b'a'; 1000]).unwrap();
+    wait_for("A's body reserved", Duration::from_secs(10), || buffered() >= 800_000);
+    // B: 400 kB more does not fit: 503 before the body is sent, connection closed.
+    let mut b = TcpStream::connect(addr).unwrap();
+    b.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    b.write_all(b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 400000\r\nExpect: 100-continue\r\n\r\n").unwrap();
+    let (st, head, _) = read_response(&mut b);
+    assert_eq!(st, 503, "{head}");
+    assert!(head.to_ascii_lowercase().contains("connection: close"), "{head}");
+    // Small requests still fit (the budget is not exceeded, only nearly full).
+    assert_eq!(get(&node.http, "/echo"), (200, "hello".into()));
+    let (st, body) = http::request(&node.http, "POST", "/echo", &[b'b'; 1000], Duration::from_secs(5)).map(|r| (r.status, r.body)).unwrap();
+    assert_eq!((st, body.len()), (200, 1000));
+    // A completes and gets its echo; then nothing is buffered any more and B's size fits.
+    a.write_all(&[b'a'; 799_000]).unwrap();
+    let (st, _, body) = read_response(&mut a);
+    assert_eq!((st, body.len()), (200, 800_000));
+    wait_for("budget released", Duration::from_secs(10), || buffered() == 0);
+    let r = http::request(&node.http, "POST", "/echo", &vec![b'c'; 400_000], Duration::from_secs(10)).unwrap();
+    assert_eq!((r.status, r.body.len()), (200, 400_000));
+    // D: a 15 MB echo whose response is never read. The body alone exceeds the budget but is admitted because
+    // nothing else is buffered; the unread part of the response (beyond what the socket buffers absorb) stays
+    // charged, so the node is over budget and sheds new requests.
+    let before = refused();
+    let mut d = TcpStream::connect(addr).unwrap();
+    d.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    let big = vec![b'd'; 15_000_000];
+    d.write_all(format!("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n", big.len()).as_bytes()).unwrap();
+    d.write_all(&big).unwrap();
+    wait_for("response residue charged", Duration::from_secs(20), || buffered() > 1 << 20);
+    assert_eq!(get(&node.http, "/echo").0, 503, "over budget: new requests are shed");
+    let e = http::request(&node.http, "POST", "/echo", b"x", Duration::from_secs(5)).unwrap();
+    assert_eq!(e.status, 503);
+    assert!(refused() >= before + 2);
+    assert!(node.healthy(), "admin requests are not shed");
+    // D reads its response: the residue drains and the node serves again.
+    let (st, _, body) = read_response(&mut d);
+    assert!(st == 200 && body == big, "D: {st}, {} bytes", body.len());
+    wait_for("residue released", Duration::from_secs(10), || buffered() == 0);
+    assert_eq!(get(&node.http, "/echo"), (200, "hello".into()));
+    drop((a, b, d));
+    let _ = std::fs::remove_dir_all(&dir);
+}

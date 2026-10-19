@@ -182,10 +182,18 @@ fn counter() {
     for i in 1..=5 {
         assert_eq!(ok(&h.get("counter", "/")), format!("{i}\n"));
     }
-    assert_eq!(h.kv("counter").unwrap().get(&b"counter"[..]).map(|v| v.as_slice()), Some(&b"5"[..]));
+    // An 8-byte little-endian integer, incremented with kv_add.
+    assert_eq!(h.kv("counter").unwrap().get(&b"count"[..]), Some(&5i64.to_le_bytes().to_vec()));
     // The state is durable, not in the instance: a new instance continues counting.
     h.restart("counter");
     assert_eq!(ok(&h.get("counter", "/")), "6\n");
+    // A counter left as decimal text by an earlier version is folded in once, when an instance starts.
+    let mut h = host_with(&[("counter", "counter.ten")]);
+    h.kv_set("counter", b"counter", b"41");
+    assert_eq!(ok(&h.get("counter", "/")), "42\n");
+    assert_eq!(h.kv("counter").unwrap().get(&b"counter"[..]), None);
+    h.restart("counter");
+    assert_eq!(ok(&h.get("counter", "/")), "43\n");
 }
 
 #[test]
@@ -224,10 +232,27 @@ fn todo() {
     assert_eq!(ok(&h.post("todo", "/", b"four")), r#"{"id":4,"title":"four"}"#);
     let r = h.post("todo", "/", &[b'x'; 5000]);
     assert_eq!((r.status, ok(&r).as_str()), (413, r#"{"error":"title too long"}"#));
+    let r = h.request("todo", PUT, "/1", &[b'x'; 5000]);
+    assert_eq!((r.status, ok(&r).as_str()), (413, r#"{"error":"title too long"}"#));
+    // Storage: the last id as an 8-byte integer, the index as packed i64s.
+    let kv = h.kv("todo").unwrap();
+    assert_eq!(kv.get(&b"last"[..]), Some(&4i64.to_le_bytes().to_vec()));
+    let index: Vec<u8> = [1i64, 3, 4].iter().flat_map(|i| i.to_le_bytes()).collect();
+    assert_eq!(kv.get(&b"index"[..]), Some(&index));
     // Many requests keep memory bounded (arena reset per request).
     for i in 0..200 {
         assert_eq!(h.get("todo", "/1").status, 200, "request {i}");
     }
+    // A list whose index names an item that does not exist (yet, or any more) skips it.
+    let mut index = h.kv("todo").unwrap().get(&b"index"[..]).unwrap().clone();
+    index.extend_from_slice(&99i64.to_le_bytes());
+    h.kv_set("todo", b"index", &index);
+    assert_eq!(ok(&h.get("todo", "/")), r#"[{"id":1,"title":"buy oat milk"},{"id":3,"title":"third"},{"id":4,"title":"four"}]"#);
+    // The next id left as decimal text by an earlier version is continued from.
+    let mut h = host_with(&[("todo", "todo.ten")]);
+    h.kv_set("todo", b"next", b"7");
+    assert_eq!(ok(&h.post("todo", "/", b"seven")), r#"{"id":7,"title":"seven"}"#);
+    assert_eq!(h.kv("todo").unwrap().get(&b"next"[..]), None);
     let _ = GET;
 }
 
@@ -353,6 +378,53 @@ fn sort() {
     assert_eq!(ok(&small.get("sort", "/?n=100")), sort_reference(100));
     let r = small.get("sort", "/?n=-1");
     assert_eq!(r.status, 400);
+}
+
+/// Every example keeps serving on one long-lived instance, with the memory size it is deployed with in
+/// examples/app.k10s. Per-request heap use must be reset (`heap_reset()` at the top of `handle`); otherwise the
+/// prelude's bump allocator runs out of the slot after a few thousand requests (`read_config()` in chain, a path
+/// of 1 KiB or more in `query_int()` → `read_path()`) and the instance traps `Unreachable`.
+#[test]
+fn examples_serve_20k_requests_on_one_instance() {
+    const N: usize = 20_000;
+    // Paths of 1 KiB or more are read into the heap by read_path() (shorter ones use a static buffer).
+    let long = |q: &str| format!("/?{q}&pad={}", "x".repeat(1100));
+    let deploy = |h: &mut TestHost, svc: &str, file: &str, mem_log2: u8, config: &[u8]| {
+        let cfg = ServiceConfig { mem_log2: Some(mem_log2), config: config.to_vec(), ..Default::default() };
+        h.add_with(svc, compile_example(file), cfg).unwrap();
+    };
+    let mut h = TestHost::new();
+    deploy(&mut h, "hello", "hello.ten", 16, b"");
+    deploy(&mut h, "echo", "echo.ten", 20, b"");
+    deploy(&mut h, "compute", "compute.ten", 16, b"");
+    deploy(&mut h, "chain", "chain.ten", 16, b"echo");
+    deploy(&mut h, "counter", "counter.ten", 16, b"");
+    deploy(&mut h, "todo", "todo.ten", 20, b"");
+    deploy(&mut h, "nbody", "nbody.ten", 16, b"");
+    deploy(&mut h, "sort", "sort.ten", 22, b"");
+    let compute1 = compute_expected(1);
+    let nbody1 = nbody_reference(1);
+    let sort10 = sort_reference(10);
+    for i in 0..N {
+        let short = i % 2 == 0;
+        let check = |r: Response, want: &str, what: &str| {
+            assert!(r.trap.is_none(), "{what}: request {i} trapped: {:?} ({})", r.trap, r.text());
+            assert_eq!(r.text(), want, "{what}: request {i}");
+        };
+        check(h.get("hello", "/"), "hello", "hello");
+        check(h.post("echo", "/", b"ping"), "ping", "echo");
+        check(h.get("compute", &if short { "/?n=1".to_string() } else { long("n=1") }), &compute1, "compute");
+        check(h.get("chain", "/"), "hello", "chain");
+        check(h.get("counter", "/"), &format!("{}\n", i + 1), "counter");
+        check(h.get("nbody", &if short { "/?n=1".to_string() } else { long("n=1") }), &nbody1, "nbody");
+        check(h.get("sort", &if short { "/?n=10".to_string() } else { long("n=10") }), &sort10, "sort");
+        // todo: create, read, delete (the index stays small).
+        let r = h.post("todo", "/", b"t");
+        assert!(r.trap.is_none() && r.status == 201, "todo create {i}: {:?} {}", r.trap, r.text());
+        let id = i + 1;
+        check(h.get("todo", &format!("/{id}")), &format!(r#"{{"id":{id},"title":"t"}}"#), "todo get");
+        check(h.request("todo", DELETE, &format!("/{id}"), b""), &format!(r#"{{"deleted":{id}}}"#), "todo delete");
+    }
 }
 
 #[test]

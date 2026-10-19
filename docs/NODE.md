@@ -98,7 +98,8 @@ docs/HOSTAPI.md, implemented once in `host.rs` (`HostCtx::dispatch(HostFn, args,
 - Imports must match a host function's name and parameter count; `results` may be 1 (the spec) or 0 (result
   discarded). Unknown names are rejected at apply time.
 - Trap codes: `Host(1)` response body over 16 MiB, `Host(2)` KV key > 1 KiB or value > 1 MiB, `Host(3)` KV
-  per-service quota exhausted, `Host(0x7FFF)` internal error (host panic).
+  per-service quota exhausted, `Host(4)` `kv_add` on a value that is not 8 bytes, `Host(0x7FFF)` internal error
+  (host panic).
 - `random`: per-invocation wyrand stream seeded from a per-shard generator (seeded by `getrandom`). `now_ns` is
   `CLOCK_MONOTONIC`, `time_ms` `CLOCK_REALTIME`.
 
@@ -121,6 +122,21 @@ status ≥ 0, −1 unknown service, −2 unavailable (crash backoff with nothing
   back-pressure), `Expect: 100-continue`, `HEAD`.
 - Limits: head 16 KiB / 100 headers (431), body 16 MiB (413; 256 MiB for `/_k10s/apply`), chunked bodies 411,
   other transfer codings 501, conflicting `Content-Length` 400, obsolete folding 400, versions ≠ 1.0/1.1 505.
+- **Node-wide buffer budget** (`--conn-buffer-max SIZE`, default max(`--mem`/8, 64 MiB); `NodeConfig::
+  conn_buffer_max`): one atomic counter shared by the shards charges every request body from the moment its head
+  is parsed until its response is produced (the body lives in the connection, then in the invocation), plus every
+  response byte the client has not read yet (what `writev` could not hand to the socket). A body that does not fit
+  is answered 503 with `connection: close` before it is read (and before `100 Continue`); a body always fits when
+  nothing at all is buffered, so one request of any allowed size works on an idle node. While the total is over the
+  budget (slow readers holding large responses), every new request without a body is answered 503 too, without
+  running, until they drain or time out (stalled writes: 30 s); admin requests without a body are never shed. Status:
+  `http_stats.buffered_bytes`, `buffer_max`, `buffer_refused`; metrics `k10s_http_buffered_bytes`,
+  `k10s_http_buffer_refused_total`.
+- **Out of file descriptors**: an `accept` that fails (`EMFILE`/`ENFILE`, or any other error) leaves the connection
+  in the backlog, and the level-triggered listener would wake the shard at once forever. The shard instead takes the
+  listener out of its epoll set for 10 ms, doubling up to 1 s while accepts keep failing (`sys::AcceptPause`); the
+  log line is rate-limited (one per 10 s, with a count of the suppressed ones); `http_stats.accept_pauses` counts
+  the pauses. The mesh thread does the same with the peer listener (`cluster.stats.accept_pauses`).
 - Timeouts (checked every 250 ms): a request head must complete within 10 s of its
   first byte (slowloris), a body within 10 s + 1 s per 64 KiB, idle keep-alive 60 s, stalled writes 30 s.
   At most `max_conns / shards` connections per shard.
@@ -149,7 +165,10 @@ status ≥ 0, −1 unknown service, −2 unavailable (crash backoff with nothing
 
 ## Storage
 - `kv_*`: per service name (survives redeployments), in-memory `HashMap` + append-only log `DATA/kv/<svc>.log`
-  (`len | crc32 | op | klen | key | value`), replayed at start; a torn/corrupt tail is truncated at the last good
+  (`len | crc32 | op | klen | key | value`), replayed at start. One namespace object (map + mutex) is shared by every
+  shard, so the calls are linearizable node-wide; `kv_add` and `kv_cas` read, compare and write under that lock and
+  are logged as ordinary put/del records in lock order (same durability as `kv_put`; an 8-byte same-size overwrite
+  is done in place); a torn/corrupt tail is truncated at the last good
   record. **Group commit**: `kv_put`/`kv_del` return once the record is buffered; the flusher batches for 2 ms, writes
   every dirty log and `fdatasync`s them. **Durability window**: an acknowledged write can be lost if the process or
   machine dies within ≈ 2 ms + write + fsync time. Compaction rewrites a log from the map when it exceeds 2× the live
@@ -189,7 +208,7 @@ scale|create|density MODE N|idle N`, and `examples/demo_modules` + `k10s node` +
 `jit.rs` implements `exec::Backend`/`exec::Code` with `k10_jit` (docs/JIT-ABI.md).
 - **Prepare** (apply thread): `k10_jit::compile(module)` → `CompiledModule` (W^X mapping, `Send + Sync`) shared by
   every instance and shard through `Arc<dyn Code>`, plus the module's host-function table: one `extern "C"` adapter
-  per resolved import (17 monomorphic adapters, one per host function). Unchanged modules are reused by code hash
+  per resolved import (19 monomorphic adapters, one per host function). Unchanged modules are reused by code hash
   across applies; a replaced module is unmapped when the last `Arc` drops, i.e. once the retired version's in-flight
   and queued requests are done and its instances destroyed (tests check the anonymous executable mappings in
   `/proc/self/maps` against the `"code"` counters).
@@ -296,7 +315,15 @@ send `Hello{member}` first. A node dials members with a larger id as soon as the
 first use; when both ends dialed at once, the connection dialed by the smaller id is kept and the other one is closed
 by its dialer once its requests are answered. Frames are appended to the link's write buffer and written once per
 mesh-loop iteration (batching; edge-triggered epoll, partial writes resume on `EPOLLOUT`). A failed dial (or one
-not connected within 1 s) backs the peer off for 200 ms, doubling up to 5 s. Links to a member declared Dead are
+not connected within 1 s) backs the peer off for 200 ms, doubling up to 5 s.
+**Bounded buffering**: a link is read 64 KiB at a time and the frames are decoded after every read (the decoder
+holds at most one partial frame), with at most 1 MiB read per link per mesh-loop iteration — a link with input
+left is read again on the next iteration, so a peer streaming frames cannot monopolize the thread. Toward a slow
+peer, the written prefix of a write buffer is dropped once it reaches 1 MiB, and a link holding more than 16 MiB of
+unsent bytes gets no new calls (the router skips that peer like a backed-off one: next candidate, else −2;
+`congested_skips`); a frame that would push it past 16 MiB + the maximum frame size (80 MiB: the peer stopped
+reading) is dropped and the link closed, which fails or re-routes its outstanding calls like any lost connection,
+and backs the peer off (`links_overflowed`). `/_k10s/status` reports each link's `unsent` bytes. Links to a member declared Dead are
 closed; links to a member that Left stay open until the leaver closes them (it still answers what it was sent).
 
 **Routing.** Shards hand invocations of `Remote` services (ingress requests and `call`s) to `MeshRouter::forward` →
@@ -324,9 +351,9 @@ thread stops.
 
 **Status.** `/_k10s/status` gains `"cluster"`: id, incarnation, addresses, leaving, desired (version, hash, origin),
 applied (version, hash), fetch in progress, last apply error, members (id, state, incarnation, gossip/rpc/http
-addresses, capacity), placement (service → node ids), links (peer, state, outstanding, bytes), counters (gossip
-packets/bytes, forwarded, retries, failed, local fallback, served for peers, not-here, dial failures, peer bytes,
-fetches, applies). Each service also reports its `rt` id and `placement` (`"local"` or node ids). `GET
+addresses, capacity), placement (service → node ids), links (peer, state, outstanding, bytes, unsent), counters
+(gossip packets/bytes, forwarded, retries, failed, local fallback, served for peers, not-here, dial failures,
+congested skips, links overflowed, accept pauses, peer bytes, fetches, applies). Each service also reports its `rt` id and `placement` (`"local"` or node ids). `GET
 /_k10s/cluster` renders the same as text; `k10s status` prints it in cluster mode (`--json` for the JSON).
 
 **Tests** (`crates/k10s/tests/cluster.rs`, real `k10s node` processes on ephemeral localhost ports, `--probe-ms 100`):
@@ -339,6 +366,10 @@ runtime; re-applies under load on 5 nodes (0 failed requests) and two concurrent
 everywhere); the origin of a desired state crashes and a node joining later fetches it from the other members.
 Unit tests: store (persist/reload/corruption/gc/pinning, node id), ranking vs `place`; node test:
 `apply_cluster` ordering and placement-only updates. `cargo test -p k10s --test cluster` takes ≈ 2–4 s.
+`crates/k10s/tests/mesh_abuse.rs`: a hostile non-UTF-8 call path; a fake peer that requests ≈ 1 GB of replies and
+never reads (the link is closed at the cap, peak RSS stays < 100 MB, forwarding unaffected); a node started with
+`RLIMIT_NOFILE = 64` whose HTTP and peer listeners both hit `EMFILE` (≈ 0 CPU while out of descriptors, two log
+lines, both serve again afterwards).
 
 ### Cluster measurements (release, localhost, i7-7820HQ 4C/8T; other agents compiling: load 3.5–12, so numbers are noisy)
 | what | result |
@@ -369,7 +400,8 @@ Reproduce: `cargo test --release -p k10s --test cluster -- --ignored --nocapture
   Forwarding costs six thread hand-offs (see measurements). Non-UTF-8 call paths are converted lossily on the wire.
   Peer links have no application-level keepalive (gossip detects dead peers).
 - KV is node-local with an asynchronous durability window (no fsync-before-ack mode yet); compaction serializes the
-  whole map under its lock (pauses `kv_*` calls on that service for the copy).
+  whole map under its lock (pauses `kv_*` calls on that service for the copy). `kv_add`/`kv_cas` are atomic on one
+  node only: in cluster mode each replica's node has its own namespace.
 - A host function that blocks (none does today except brief KV mutexes) would block its shard.
 - CPU accounting uses wall time while a fiber runs (an OS-level preemption of the shard thread is charged to the
   invocation); the budget is enforced with ≈ one-slice precision.

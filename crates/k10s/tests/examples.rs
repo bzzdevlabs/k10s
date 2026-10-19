@@ -120,3 +120,105 @@ fn examples_on_a_node() {
     node.sigterm();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Applies a manifest file to the node at `addr` with the CLI.
+fn apply(addr: &str, manifest: &std::path::Path) {
+    let out = Command::new(env!("CARGO_BIN_EXE_k10s")).args(["apply", manifest.to_str().unwrap(), "--node", addr]).output().unwrap();
+    assert!(out.status.success(), "{} {}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+}
+
+/// `counter` and `todo` under concurrency: 64 keep-alive clients on a 4-shard node (up to 64 instances of each
+/// service, running in parallel on every shard). Every increment is counted exactly once (kv_add), every created
+/// item gets its own id (kv_add) and the index loses no insertion or removal (kv_cas loops).
+#[test]
+fn atomic_kv_under_concurrency() {
+    const CLIENTS: usize = 64;
+    const INCS: usize = 100;
+    const ITEMS: usize = 16;
+    let dir = tmpdir("atomic");
+    let addr = format!("127.0.0.1:{}", free_port());
+    let child = Command::new(env!("CARGO_BIN_EXE_k10s"))
+        .args(["node", "--http", &addr, "--data", dir.join("data").to_str().unwrap(), "--shards", "4"])
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let node = Proc(child);
+    wait_http(&addr, "/_k10s/health");
+    let d = common::examples_dir();
+    let manifest = dir.join("atomic.k10s");
+    std::fs::write(
+        &manifest,
+        format!(
+            "service counter {{ code = \"{}\" memory = 64KiB }}\nservice todo {{ code = \"{}\" memory = 1MiB }}\n",
+            d.join("counter.ten").display(),
+            d.join("todo.ten").display()
+        ),
+    )
+    .unwrap();
+    apply(&addr, &manifest);
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(CLIENTS));
+    let threads: Vec<_> = (0..CLIENTS)
+        .map(|t| {
+            let (addr, barrier) = (addr.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                let mut c = http::Client::connect(&addr, Duration::from_secs(30)).unwrap();
+                barrier.wait();
+                let mut seen = Vec::with_capacity(INCS);
+                for _ in 0..INCS {
+                    let r = c.request("GET", "/counter", b"").unwrap();
+                    assert_eq!(r.status, 200, "{}", r.text());
+                    seen.push(r.text().trim_end().parse::<i64>().unwrap());
+                }
+                // Create items, delete every other one.
+                let mut kept = Vec::new();
+                for i in 0..ITEMS {
+                    let r = c.request("POST", "/todo", format!("t{t}-{i}").as_bytes()).unwrap();
+                    assert_eq!(r.status, 201, "{}", r.text());
+                    let txt = r.text();
+                    let id: i64 = txt["{\"id\":".len()..txt.find(',').unwrap()].parse().unwrap();
+                    if i % 2 == 0 {
+                        let r = c.request("DELETE", &format!("/todo/{id}"), b"").unwrap();
+                        assert_eq!(r.status, 200, "{}", r.text());
+                    } else {
+                        kept.push(id);
+                    }
+                }
+                (seen, kept)
+            })
+        })
+        .collect();
+    let mut counts = Vec::new();
+    let mut kept = Vec::new();
+    for th in threads {
+        let (s, k) = th.join().unwrap();
+        counts.extend(s);
+        kept.extend(k);
+    }
+    counts.sort_unstable();
+    let want: Vec<i64> = (1..=(CLIENTS * INCS) as i64).collect();
+    assert!(counts == want, "every increment answered a distinct value 1..={}", CLIENTS * INCS);
+    let r = http::request(&addr, "GET", "/counter", b"", Duration::from_secs(5)).unwrap();
+    assert_eq!(r.text(), format!("{}\n", CLIENTS * INCS + 1));
+    // Distinct ids, and the index holds exactly the items not deleted.
+    kept.sort_unstable();
+    let n = kept.len();
+    kept.dedup();
+    assert_eq!(kept.len(), n, "todo ids are unique");
+    let list = http::request(&addr, "GET", "/todo", b"", Duration::from_secs(5)).unwrap().text();
+    let mut listed: Vec<i64> =
+        list.split("{\"id\":").skip(1).map(|s| s[..s.find(',').unwrap()].parse().unwrap()).collect();
+    assert_eq!(listed.len(), CLIENTS * ITEMS / 2, "{list}");
+    listed.sort_unstable();
+    assert_eq!(listed, kept);
+    // The service's instances really ran concurrently (otherwise this test proves nothing).
+    let st = http::request(&addr, "GET", "/_k10s/status", b"", Duration::from_secs(5)).unwrap().text();
+    let at = st.find("\"name\":\"counter\"").unwrap();
+    let peak: u64 = {
+        let s = &st[at..];
+        let p = s.find("\"peak\":").unwrap() + 7;
+        s[p..].chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap()
+    };
+    assert!(peak >= 2, "counter ran on {peak} instance(s) at most: {st}");
+    node.sigterm();
+    let _ = std::fs::remove_dir_all(&dir);
+}

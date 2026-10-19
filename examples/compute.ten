@@ -112,6 +112,7 @@ fn sha256(p: *u8, n: i64, out: *u8) {
 }
 
 export fn handle() {
+    heap_reset();                       // query_int() reads paths of 1 KiB or more into the heap
     let n = query_int("n", 0);
     if n <= 0 || n > 100_000_000 {
         n = 1000;

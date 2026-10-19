@@ -19,6 +19,8 @@ import fn call_resp_read(dst: *u8, off: i64, n: i64) -> i64;
 import fn kv_get(key: *u8, key_len: i64, dst: *u8, max: i64) -> i64;
 import fn kv_put(key: *u8, key_len: i64, val: *u8, val_len: i64) -> i64;
 import fn kv_del(key: *u8, key_len: i64) -> i64;
+import fn kv_add(key: *u8, key_len: i64, delta: i64) -> i64;
+import fn kv_cas(key: *u8, key_len: i64, buf: *u8, exp_len: i64, new_len: i64) -> i64;
 import fn log(msg: *u8, len: i64) -> i64;
 import fn now_ns() -> i64;
 import fn time_ms() -> i64;
@@ -575,6 +577,32 @@ fn kv_put_int(key: str, v: i64) { kv_put(key.ptr, key.len, __fmt, itoa(v, __fmt)
 
 // Deletes `key`; returns 1 if it existed.
 fn kv_delete(key: str) -> i64 { return kv_del(key.ptr, key.len); }
+
+// Atomically adds `delta` (wrapping) to the 8-byte little-endian integer stored under `key` (an absent key counts as
+// 0) and returns the new value; kv_add_int(key, 0) only reads it. Concurrent instances never lose an update. Traps
+// (`Host(4)`) if the key holds anything other than 8 bytes, e.g. the decimal text written by kv_put_int.
+fn kv_add_int(key: str, delta: i64) -> i64 { return kv_add(key.ptr, key.len, delta); }
+
+// Atomically replaces the value of `key` with new[0..new_len] if it currently equals exp[0..exp_len]; returns 1 if it
+// did, 0 if the value differed (nothing changed: re-read and retry). exp_len = -1: only if the key is absent;
+// new_len = -1: delete the key instead. Uses a temporary heap copy unless `new` directly follows the expected bytes
+// (the layout kv_cas itself takes).
+fn kv_cas_bytes(key: str, exp: *u8, exp_len: i64, new: *u8, new_len: i64) -> i64 {
+    let e = max(exp_len, 0);
+    let n = max(new_len, 0);
+    if n == 0 || new == exp + e {
+        return kv_cas(key.ptr, key.len, exp, exp_len, new_len);
+    }
+    if e == 0 {
+        return kv_cas(key.ptr, key.len, new, exp_len, new_len);
+    }
+    let buf = alloc(e + n);
+    memcpy(buf, exp, e);
+    memcpy(buf + e, new, n);
+    let r = kv_cas(key.ptr, key.len, buf, exp_len, new_len);
+    free(buf);
+    return r;
+}
 
 // Calls service `name` (or "name/path") with body req[0..n]; returns its status (>= 0) or a negative error
 // (CALL_UNKNOWN, CALL_UNAVAILABLE, CALL_TIMEOUT, CALL_TRAPPED).

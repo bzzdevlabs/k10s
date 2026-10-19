@@ -9,6 +9,13 @@
 //! per loop iteration (batching); a link that fails to connect puts its peer in a short backoff (200 ms, doubling
 //! up to 5 s) during which the router avoids it.
 //!
+//! **Bounded buffering.** Reads decode frames after every `read` (the decoder holds at most one partial frame) and
+//! take at most [`READ_BUDGET`] bytes per link per loop iteration (a link with more pending input is read again on
+//! the next iteration, so one fast sender cannot starve the others). Toward a slow peer, a link holding more than
+//! [`LINK_SOFT_CAP`] unsent bytes gets no new calls (the router treats the peer like a backed-off one: next
+//! candidate, else −2); a frame that would push it past [`LINK_HARD_CAP`] (a peer that stopped reading) closes the
+//! link and backs the peer off. Accept failures (`EMFILE`) pause the listener ([`sys::AcceptPause`]).
+//!
 //! ## Routing (shard → `MeshMsg::Forward`)
 //! Candidates, in order: the service's placed replicas that are Alive (least outstanding requests on the link,
 //! round-robin on ties); then the service's rendezvous ranking over all live members (the nodes that take the service
@@ -61,6 +68,17 @@ const BACKOFF_MAX_MS: u64 = 5_000;
 /// Extra peers tried beyond the placed replicas.
 const MAX_EXTRA_ATTEMPTS: usize = 3;
 const VIEW_EVERY_NS: u64 = 250_000_000;
+/// Bytes read from one link per loop iteration (then the link is read again on the next iteration).
+const READ_BUDGET: usize = 1 << 20;
+/// Unsent bytes beyond which a link gets no new calls (the peer is avoided like a backed-off one).
+const LINK_SOFT_CAP: usize = 16 << 20;
+/// Unsent bytes a link may hold at most: a frame that would exceed it closes the link (the peer stopped reading).
+/// Leaves room for one maximum-size frame queued below the soft cap (a blob or a 16 MiB call).
+const LINK_HARD_CAP: usize = LINK_SOFT_CAP + DEFAULT_MAX_FRAME;
+/// The written prefix of a write buffer is dropped once it is this large (and at least half the buffer), so a
+/// peer that reads slowly but steadily does not make the buffer grow with bytes already sent.
+const WBUF_COMPACT: usize = 1 << 20;
+
 /// A dial that has not connected after this long fails (its unsent requests go to the next candidate). Without
 /// it, a peer that drops packets (powered off, partitioned) would hold them until their deadline.
 const CONNECT_TIMEOUT_NS: u64 = 1_000_000_000;
@@ -90,6 +108,24 @@ struct Link {
     outstanding: u32,
     bytes_in: u64,
     bytes_out: u64,
+    /// Scheduled for closing (a frame overflowed [`LINK_HARD_CAP`]).
+    doomed: bool,
+}
+
+impl Link {
+    /// Bytes queued but not yet written to the socket.
+    fn unsent(&self) -> usize {
+        self.wbuf.len() - self.wpos
+    }
+}
+
+/// Why [`Mesh::queue`] did not queue a frame.
+#[derive(Debug, PartialEq, Eq)]
+enum QueueError {
+    /// A field is over the wire limits (nothing was written).
+    Encode,
+    /// The link would exceed [`LINK_HARD_CAP`]: it is being closed.
+    Overflow,
 }
 
 /// An invocation forwarded to a peer, waiting for its `CallResult`.
@@ -190,6 +226,11 @@ pub(crate) struct Mesh {
     last_view: u64,
     view_dirty: bool,
     stopping: bool,
+    /// Links that used up their read budget with input left (edge-triggered: no new event would come for it).
+    read_again: Vec<(u32, u32)>,
+    /// Links to close at the next safe point (write buffer overflow).
+    doomed: Vec<(u32, u32)>,
+    accept_pause: sys::AcceptPause,
 }
 
 impl Mesh {
@@ -227,6 +268,9 @@ impl Mesh {
             last_view: 0,
             view_dirty: true,
             stopping: false,
+            read_again: Vec::new(),
+            doomed: Vec::new(),
+            accept_pause: sys::AcceptPause::default(),
         })
     }
 
@@ -254,9 +298,19 @@ impl Mesh {
             if self.stopping {
                 break;
             }
+            self.close_doomed();
             self.flush_dirty();
             let now = mono_ns();
+            if self.accept_pause.resume_due(now) {
+                let _ = self.epoll.add(self.listener.raw(), sys::EPOLLIN, TOK_LISTEN);
+            }
             let mut timeout_ns = VIEW_EVERY_NS.saturating_sub(now.saturating_sub(self.last_view));
+            if self.accept_pause.until != 0 {
+                timeout_ns = timeout_ns.min(self.accept_pause.until.saturating_sub(now));
+            }
+            if !self.read_again.is_empty() {
+                timeout_ns = 0;
+            }
             let gd = self.udp.next_deadline();
             let now_ms = self.now_ms();
             timeout_ns = timeout_ns.min(gd.saturating_sub(now_ms).saturating_mul(1_000_000));
@@ -313,6 +367,13 @@ impl Mesh {
                     _ => {}
                 }
             }
+            // Links whose read budget ran out last time (fairness: after this iteration's events).
+            for (li, gen) in std::mem::take(&mut self.read_again) {
+                if self.link_live(li, gen) {
+                    self.read_link(li);
+                }
+            }
+            self.close_doomed();
             let now_ms = self.now_ms();
             if now_ms >= self.udp.next_deadline() {
                 self.udp.on_tick(now_ms);
@@ -701,8 +762,10 @@ impl Mesh {
                     let deadline_ms = (c.deadline.saturating_sub(now) / 1_000_000).clamp(1, u32::MAX as u64) as u32;
                     let method = c.req.method.clamp(0, 4) as u8;
                     let call = Msg::Call { service: &c.service, path: &c.req.path, body: &c.req.body, deadline_ms, method };
-                    let Some(start) = self.queue(li, &call, id) else {
-                        return self.fail_call(c, CALL_UNAVAILABLE, "call could not be framed");
+                    let start = match self.queue(li, &call, id) {
+                        Ok(start) => start,
+                        Err(QueueError::Encode) => return self.fail_call(c, CALL_UNAVAILABLE, "call could not be framed"),
+                        Err(QueueError::Overflow) => continue, // never sent: next candidate
                     };
                     let l = self.links[li as usize].as_mut().unwrap();
                     l.outstanding += 1;
@@ -735,6 +798,10 @@ impl Mesh {
             if id == self.me || c.tried.contains(&id) || self.backed_off(id, now) {
                 continue;
             }
+            if self.congested(id) {
+                self.cs.stats.congested_skips.fetch_add(1, Relaxed);
+                continue;
+            }
             let Some(state) = self.member_state(id) else { continue };
             let out = self.primary.get(&id).and_then(|&li| self.links[li as usize].as_ref()).map_or(0, |l| l.outstanding);
             let key = (state == MemberState::Suspect, out, (i + self.rr) % n);
@@ -759,6 +826,10 @@ impl Mesh {
                         continue;
                     }
                     if self.member_state(id) == Some(MemberState::Alive) && !self.backed_off(id, now) {
+                        if self.congested(id) {
+                            self.cs.stats.congested_skips.fetch_add(1, Relaxed);
+                            continue;
+                        }
                         return Pick::Peer(id);
                     }
                 }
@@ -829,22 +900,57 @@ impl Mesh {
     }
 
     /// Appends a frame to a link's write buffer (written at the end of the loop iteration). Returns the frame's
-    /// offset in the link's byte stream, or `None` if the message could not be framed (oversize field): `encode`
-    /// writes nothing in that case, so the stream stays intact.
-    fn queue(&mut self, li: u32, m: &Msg<'_>, id: u64) -> Option<u64> {
+    /// offset in the link's byte stream. [`QueueError::Encode`]: a field is over the wire limits (`encode` writes
+    /// nothing then, so the stream stays intact). [`QueueError::Overflow`]: the frame would push the link past
+    /// [`LINK_HARD_CAP`] unsent bytes — the peer is not reading: the frame is dropped and the link is closed at the
+    /// next safe point (`close_doomed`), which fails or re-routes what is outstanding on it.
+    fn queue(&mut self, li: u32, m: &Msg<'_>, id: u64) -> Result<u64, QueueError> {
         let l = self.links[li as usize].as_mut().unwrap();
+        if l.doomed {
+            return Err(QueueError::Overflow);
+        }
         let start = l.queued;
         let before = l.wbuf.len();
         if let Err(e) = m.encode(id, &mut l.wbuf) {
             eprintln!("k10s: mesh: dropping un-encodable frame: {e}");
-            return None;
+            return Err(QueueError::Encode);
+        }
+        if l.unsent() > LINK_HARD_CAP {
+            l.wbuf.truncate(before);
+            l.doomed = true;
+            self.doomed.push((li, l.gen));
+            self.cs.stats.links_overflowed.fetch_add(1, Relaxed);
+            eprintln!("k10s: mesh: link to {} holds over {} MiB unsent: closing it", fmt_peer(l.peer), LINK_HARD_CAP >> 20);
+            return Err(QueueError::Overflow);
         }
         l.queued += (l.wbuf.len() - before) as u64;
         if !l.dirty {
             l.dirty = true;
             self.dirty.push(li);
         }
-        Some(start)
+        Ok(start)
+    }
+
+    /// Closes the links whose write buffer overflowed, backing their peer off (calls already written on them fail
+    /// with −2, the others go to the next candidate).
+    fn close_doomed(&mut self) {
+        for (li, gen) in std::mem::take(&mut self.doomed) {
+            if self.link_live(li, gen) {
+                let peer = self.links[li as usize].as_ref().unwrap().peer;
+                self.close_link(li, false, false);
+                if let Some(p) = peer {
+                    self.note_dial_failure(p);
+                }
+            }
+        }
+    }
+
+    /// The peer's link holds more than [`LINK_SOFT_CAP`] unsent bytes: send it no new calls for now.
+    fn congested(&self, peer: NodeId) -> bool {
+        self.primary
+            .get(&peer)
+            .and_then(|&li| self.links[li as usize].as_ref())
+            .is_some_and(|l| l.doomed || l.unsent() > LINK_SOFT_CAP)
     }
 
     fn add_link(&mut self, fd: Fd, peer: Option<NodeId>, dialed: bool) -> io::Result<u32> {
@@ -881,6 +987,7 @@ impl Mesh {
             outstanding: 0,
             bytes_in: 0,
             bytes_out: 0,
+            doomed: false,
         });
         let me = self.udp.gossip().local().clone();
         let _ = self.queue(li, &Msg::Hello { member: me }, 0);
@@ -929,11 +1036,17 @@ impl Mesh {
         loop {
             match sys::accept(self.listener.raw()) {
                 Ok(Some(fd)) => {
+                    self.accept_pause.succeeded();
                     let _ = self.add_link(fd, None, false);
                 }
                 Ok(None) => return,
                 Err(e) => {
-                    eprintln!("k10s: mesh: accept: {e}");
+                    // EMFILE/ENFILE (or any other failure) leaves the connection in the backlog and the
+                    // level-triggered listener readable: take it out of the epoll set for a while instead of
+                    // spinning (and logging) on every loop iteration.
+                    self.accept_pause.failed(mono_ns(), "mesh", &e);
+                    self.epoll.del(self.listener.raw());
+                    self.cs.stats.accept_pauses.fetch_add(1, Relaxed);
                     return;
                 }
             }
@@ -998,6 +1111,10 @@ impl Mesh {
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     l.writable = false;
+                    if l.wpos >= WBUF_COMPACT && 2 * l.wpos >= l.wbuf.len() {
+                        l.wbuf.drain(..l.wpos);
+                        l.wpos = 0;
+                    }
                     return true;
                 }
                 Err(_) => {
@@ -1014,58 +1131,67 @@ impl Mesh {
         true
     }
 
+    /// Reads from a link and handles every complete frame after each `read` (the decoder never holds more than
+    /// one partial frame plus one read). At most [`READ_BUDGET`] bytes per call: if input may remain, the link is
+    /// queued in `read_again` (edge-triggered epoll will not report the bytes already in the socket again).
     fn read_link(&mut self, li: u32) {
+        let Some(gen) = self.links[li as usize].as_ref().map(|l| l.gen) else { return };
+        let mut budget = READ_BUDGET;
         let mut frames: Vec<(u64, In)> = Vec::new();
-        let mut closed = false;
-        {
-            let l = self.links[li as usize].as_mut().unwrap();
-            loop {
+        loop {
+            let mut closed = false;
+            let mut more = false;
+            {
+                let l = self.links[li as usize].as_mut().unwrap();
                 match sys::read(l.fd.raw(), &mut self.rbuf) {
-                    Ok(0) => {
-                        closed = true;
-                        break;
-                    }
+                    Ok(0) => closed = true,
                     Ok(n) => {
                         l.bytes_in += n as u64;
                         self.cs.stats.peer_bytes_in.fetch_add(n as u64, Relaxed);
                         l.dec.feed(&self.rbuf[..n]);
-                        if n < self.rbuf.len() {
-                            break; // drained: a new edge comes with new data
-                        }
+                        budget = budget.saturating_sub(n);
+                        // A short read drained the socket: a new edge comes with new data.
+                        more = n == self.rbuf.len();
                     }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                    Err(_) => {
-                        closed = true;
-                        break;
-                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(_) => closed = true,
                 }
-            }
-            loop {
-                match l.dec.next() {
-                    Ok(Some(f)) => match f.msg() {
-                        Ok(m) => frames.push((f.request_id, In::from(m))),
+                loop {
+                    match l.dec.next() {
+                        Ok(Some(f)) => match f.msg() {
+                            Ok(m) => frames.push((f.request_id, In::from(m))),
+                            Err(_) => {
+                                closed = true;
+                                break;
+                            }
+                        },
+                        Ok(None) => break,
                         Err(_) => {
                             closed = true;
                             break;
                         }
-                    },
-                    Ok(None) => break,
-                    Err(_) => {
-                        closed = true;
-                        break;
                     }
                 }
             }
-        }
-        let gen = self.links[li as usize].as_ref().unwrap().gen;
-        for (id, m) in frames {
+            for (id, m) in frames.drain(..) {
+                if !self.link_live(li, gen) {
+                    return;
+                }
+                self.on_frame(li, id, m);
+            }
             if !self.link_live(li, gen) {
                 return;
             }
-            self.on_frame(li, id, m);
-        }
-        if closed && self.link_live(li, gen) {
-            self.close_link(li, true, false);
+            if closed {
+                return self.close_link(li, true, false);
+            }
+            if !more {
+                return;
+            }
+            if budget == 0 {
+                self.read_again.push((li, gen));
+                return;
+            }
         }
     }
 
@@ -1187,6 +1313,7 @@ impl Mesh {
                 outstanding: l.outstanding,
                 bytes_in: l.bytes_in,
                 bytes_out: l.bytes_out,
+                unsent: l.unsent() as u64,
             })
             .collect();
         let v = MeshView {
@@ -1204,4 +1331,8 @@ impl Mesh {
         };
         *self.cs.mesh_view.lock().unwrap_or_else(|e| e.into_inner()) = v;
     }
+}
+
+fn fmt_peer(p: Option<NodeId>) -> String {
+    p.map(|p| p.to_string()).unwrap_or_else(|| "an unidentified peer".into())
 }

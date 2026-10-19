@@ -162,6 +162,10 @@ pub struct ShardStats {
     pub conns_accepted: AtomicU64,
     pub conns_rejected: AtomicU64,
     pub conns_open: AtomicU64,
+    /// Times the listener was taken out of the epoll set because `accept` failed (out of file descriptors).
+    pub accept_pauses: AtomicU64,
+    /// Requests answered 503 because the node's connection buffer budget was exhausted.
+    pub budget_refused: AtomicU64,
     pub conn_timeouts: AtomicU64,
     pub invocations: AtomicU64,
     pub instances_created: AtomicU64,
@@ -395,6 +399,38 @@ struct Conn {
     sent_continue: bool,
     /// Bytes of `rbuf` already known not to contain the end of the request head.
     head_scanned: usize,
+    /// Charged to the node's connection buffer budget: the current request's body (from its head until the
+    /// response is produced) and the response bytes not yet written.
+    reserved: u64,
+    wcharged: u64,
+}
+
+/// Reserves `n` bytes of the node-wide connection buffer budget ([`crate::NodeConfig::conn_buffer_max`]). Always
+/// succeeds when nothing at all is buffered, so one request of any allowed size fits on an idle node.
+fn budget_reserve(node: &NodeShared, n: u64) -> bool {
+    let b = &node.conn_buffered;
+    let mut cur = b.load(Relaxed);
+    loop {
+        if cur != 0 && cur.saturating_add(n) > node.conn_buffer_max {
+            return false;
+        }
+        match b.compare_exchange_weak(cur, cur + n, Relaxed, Relaxed) {
+            Ok(_) => return true,
+            Err(v) => cur = v,
+        }
+    }
+}
+
+/// Charges the connection's unsent response bytes (instead of what was charged for them before) and releases
+/// `release` more bytes (the request body reservation, once the request is answered).
+fn budget_recharge(node: &NodeShared, c: &mut Conn, release: u64) {
+    let unsent = (c.wbuf.len() - c.wpos) as u64;
+    let old = std::mem::replace(&mut c.wcharged, unsent) + release;
+    if unsent > old {
+        node.conn_buffered.fetch_add(unsent - old, Relaxed);
+    } else if old > unsent {
+        node.conn_buffered.fetch_sub(old - unsent, Relaxed);
+    }
 }
 
 enum ReadResult {
@@ -439,6 +475,8 @@ pub(crate) struct Shard {
     stopping: bool,
     draining: bool,
     max_conns: usize,
+    /// Set while the listener is out of the epoll set after a failed `accept` (see [`sys::AcceptPause`]).
+    accept_pause: sys::AcceptPause,
 }
 
 // ------------------------------------------------------------------------------------------------------------------
@@ -673,6 +711,7 @@ impl Shard {
             stopping: false,
             draining: false,
             max_conns,
+            accept_pause: sys::AcceptPause::default(),
             node,
         })
     }
@@ -700,11 +739,17 @@ impl Shard {
             }
             let now = mono_ns();
             self.process_timers(now);
+            if self.accept_pause.resume_due(now) {
+                if let Some(l) = &self.listener {
+                    let _ = self.epoll.add(l.raw(), sys::EPOLLIN, TOK_LISTENER);
+                }
+            }
             let mut timeout = if !self.runq.is_empty() || !self.yielded.is_empty() || !self.conn_ready.is_empty() {
                 0
             } else {
                 let next = self.timers.peek().map(|Reverse((d, _))| *d).unwrap_or(u64::MAX);
                 let next = next.min(self.last_maint + MAINT_NS);
+                let next = if self.accept_pause.until != 0 { next.min(self.accept_pause.until) } else { next };
                 (next.saturating_sub(now).div_ceil(1_000_000)).min(1000) as i32
             };
             if busy {
@@ -1581,6 +1626,7 @@ impl Shard {
         for _ in 0..256 {
             match sys::accept(l) {
                 Ok(Some(fd)) => {
+                    self.accept_pause.succeeded();
                     if self.open_conns >= self.max_conns || self.stopping || self.draining {
                         bump(&self.me.stats.conns_rejected, 1);
                         drop(fd);
@@ -1616,6 +1662,8 @@ impl Shard {
                         body_deadline: 0,
                         sent_continue: false,
                         head_scanned: 0,
+                        reserved: 0,
+                        wcharged: 0,
                     });
                     self.open_conns += 1;
                     bump(&self.me.stats.conns_accepted, 1);
@@ -1624,9 +1672,13 @@ impl Shard {
                 }
                 Ok(None) => break,
                 Err(e) => {
-                    if e.raw_os_error() != Some(libc::EMFILE) && e.raw_os_error() != Some(libc::ENFILE) {
-                        eprintln!("k10s: shard {}: accept: {e}", self.idx);
-                    }
+                    // EMFILE/ENFILE (or any other failure) leaves the connection in the backlog, so the
+                    // level-triggered listener stays readable: take it out of the epoll set for a while instead of
+                    // spinning (and logging) on every loop iteration.
+                    let now = mono_ns();
+                    self.accept_pause.failed(now, &format!("shard {}", self.idx), &e);
+                    self.epoll.del(l);
+                    bump(&self.me.stats.accept_pauses, 1);
                     break;
                 }
             }
@@ -1639,6 +1691,9 @@ impl Shard {
 
     fn close_conn(&mut self, idx: u32) {
         if let Some(c) = self.conns.get_mut(idx as usize).and_then(|c| c.take()) {
+            if c.reserved + c.wcharged != 0 {
+                self.node.conn_buffered.fetch_sub(c.reserved + c.wcharged, Relaxed);
+            }
             self.epoll.del(c.fd.raw());
             drop(c);
             self.free_conns.push(idx);
@@ -1674,7 +1729,10 @@ impl Shard {
                     c.wpos += n;
                     c.last_io = mono_ns();
                 }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return true,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    budget_recharge(&self.node, c, 0);
+                    return true;
+                }
                 Err(_) => {
                     self.close_conn(idx);
                     return false;
@@ -1683,6 +1741,7 @@ impl Shard {
         }
         c.wbuf.clear();
         c.wpos = 0;
+        budget_recharge(&self.node, c, 0);
         if c.wbuf.capacity() > 64 << 10 {
             c.wbuf = Vec::new();
         }
@@ -1769,6 +1828,16 @@ impl Shard {
                     } else {
                         match http::parse_head(&c.rbuf, &lim) {
                             Parse::Complete(h) => {
+                                // The body is buffered until the response is produced: reserve it in the node-wide
+                                // budget first (before reading it, before `100 Continue`).
+                                if h.content_length > 0 {
+                                    if !budget_reserve(&self.node, h.content_length as u64) {
+                                        bump(&self.me.stats.budget_refused, 1);
+                                        self.conn_error(idx, 503, "node connection buffers full, retry later");
+                                        return;
+                                    }
+                                    c.reserved = h.content_length as u64;
+                                }
                                 if c.rbuf.len() >= h.head_len + h.content_length {
                                     self.conn_request(idx, h);
                                     return;
@@ -1880,6 +1949,12 @@ impl Shard {
             }
             return;
         }
+        if h.content_length == 0 && self.node.conn_buffered.load(Relaxed) > self.node.conn_buffer_max {
+            // Over the connection buffer budget (responses waiting for slow readers): shed new work until it drains.
+            bump(&self.me.stats.budget_refused, 1);
+            self.respond(idx, gen, 503, b"node connection buffers full, retry later\n", Some("text/plain"));
+            return;
+        }
         let (name, suffix) = split_target(&h.target);
         let req = Request { method: h.method.code(), path: suffix.as_bytes().to_vec(), body };
         let deadline = mono_ns() + self.node.cfg.request_timeout.as_nanos() as u64;
@@ -1948,6 +2023,9 @@ impl Shard {
         }
         let flushed = c.wpos == c.wbuf.len();
         let closing = matches!(c.state, CState::Closing);
+        // Answered: the body reservation ends, unsent response bytes are charged instead.
+        let release = std::mem::take(&mut c.reserved);
+        budget_recharge(&self.node, c, release);
         self.head_buf = head;
         if closed || (closing && flushed) {
             self.close_conn(idx);
