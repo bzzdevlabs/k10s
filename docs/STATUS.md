@@ -1,7 +1,13 @@
 # k10s — project status and resume guide
 
+PROJECT STATE: IN PROGRESS
+
 Last updated: 2026-10-19. This file is the single place to learn where the project stands and what comes next; it is
 kept current so work can resume in a fresh session.
+
+Keep-alive: the desktop scheduled task `k10s-session-watchdog` (17 and 47 past each hour) wakes the build session
+(`local_96d994a5-1881-4af5-9a73-ee7953fae801`) when it has been idle for 25+ minutes, e.g. after a usage limit. It
+disables itself once the first line above reads `PROJECT STATE: COMPLETE` — set that only when everything is done.
 
 ## Built and verified (on `main`)
 | Component | Where | State |
