@@ -1,0 +1,11 @@
+# Every example service as one deployment: `k10s apply examples/app.k10s --node 127.0.0.1:8080`
+# `code` paths are relative to this file; `.ten` sources are compiled by the CLI.
+
+service hello   { code = "hello.ten"   memory = 64KiB }
+service echo    { code = "echo.ten"    memory = 1MiB  replicas = 2 }
+service compute { code = "compute.ten" memory = 64KiB cpu_ms = 60000 }
+service chain   { code = "chain.ten"   memory = 64KiB config = "echo" }
+service counter { code = "counter.ten" memory = 64KiB }
+service todo    { code = "todo.ten"    memory = 1MiB }
+service nbody   { code = "nbody.ten"   memory = 64KiB cpu_ms = 60000 }
+service sort    { code = "sort.ten"    memory = 4MiB  cpu_ms = 60000 }

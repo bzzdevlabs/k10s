@@ -1,0 +1,7 @@
+k10s
+Copyright 2026 The k10s Authors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The bare-metal kernel in metal/ depends on smoltcp (https://github.com/smoltcp-rs/smoltcp),
+licensed under the BSD Zero Clause License (0BSD).
