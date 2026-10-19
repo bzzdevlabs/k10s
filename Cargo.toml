@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+k10-ir = { path = "crates/k10-ir" }
+k10-lang = { path = "crates/k10-lang" }
+k10-jit = { path = "crates/k10-jit" }
+k10-mesh = { path = "crates/k10-mesh" }
+k10-node = { path = "crates/k10-node" }
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = 1
+
+[profile.bench]
+inherits = "release"

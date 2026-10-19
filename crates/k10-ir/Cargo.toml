@@ -1,0 +1,9 @@
+[package]
+name = "k10-ir"
+description = "TIR: types, codec, validator, reference interpreter"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["std"]
+std = []

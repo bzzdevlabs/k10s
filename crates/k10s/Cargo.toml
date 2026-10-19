@@ -1,0 +1,11 @@
+[package]
+name = "k10s"
+description = "k10s CLI and node daemon"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "k10s"
+path = "src/main.rs"
+
+[dependencies]

@@ -1,0 +1,6 @@
+[package]
+name = "k10-jit"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

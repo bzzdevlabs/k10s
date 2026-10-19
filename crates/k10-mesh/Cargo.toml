@@ -1,0 +1,6 @@
+[package]
+name = "k10-mesh"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
