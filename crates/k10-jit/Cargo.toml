@@ -1,6 +1,25 @@
 [package]
 name = "k10-jit"
+description = "TIR -> x86-64 single-pass compiler (codegen: no_std + alloc; executable memory and invoke: std)"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = ["std"]
+# Executable memory (mmap, W^X), `compile` / `CompiledModule`, `K10_JIT_DUMP`. Without it the crate is
+# `no_std + alloc`: it produces position-independent code blobs that the caller loads into its own memory.
+std = ["dep:libc", "k10-ir/std"]
+
 [dependencies]
+# Path dependency (not `workspace = true`) so that `default-features = false` is honoured for no_std builds.
+k10-ir = { path = "../k10-ir", default-features = false }
+libc = { workspace = true, optional = true }
+
+[dev-dependencies]
+k10-ir = { path = "../k10-ir", features = ["gen"] }
+libc.workspace = true
+
+[[bench]]
+name = "jit"
+harness = false
+required-features = ["std"]

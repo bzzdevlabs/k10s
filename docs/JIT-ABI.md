@@ -41,8 +41,9 @@ impl CompiledModule {                       // Send + Sync; code mapped read+exe
     pub fn code_bytes(&self) -> usize;
 }
 ```
-`invoke` runs on the **current** native stack. It saves callee-saved registers and `rsp` into `ctx.jit_private`, so
-a trap anywhere in JIT code returns from `invoke` with `Err(trap)`. Only JIT frames lie between `invoke` and a trap
+`invoke` runs on the **current** native stack. It saves callee-saved registers on its own frame and that frame's
+`rsp` in `ctx.jit_private[0]` (restoring the previous value on exit, so nested `invoke`s on the same `VmCtx` from a
+host function work), so a trap anywhere in JIT code returns from `invoke` with `Err(trap)`. Only JIT frames lie between `invoke` and a trap
 point: host functions and the interrupt hook *return* (with `trap_request` / a non-zero code) and the JIT raises the
 trap afterwards. The runtime may switch stacks (coroutines) inside a host function or inside the interrupt hook;
 JIT code is agnostic to that.
