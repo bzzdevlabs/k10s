@@ -2,8 +2,9 @@
 
 One `k10s node` process per machine. It replaces kubelet + containerd + shims + kube-proxy + CNI + CoreDNS +
 sidecars, and (together with its peers) the whole control plane. Implemented in `crates/k10-node` (library) and
-`crates/k10s` (binary). This document describes the runtime as built (single-node); cluster mode plugs into the
-points listed at the end.
+`crates/k10s` (binary). This document describes the runtime as built: the single-node core first, then cluster mode
+(`crates/k10-node/src/cluster/`), which adds gossip membership, desired state spread by gossip, deterministic
+placement and peer links on top of it.
 
 ## Threads
 - **Shards** (`--shards`, default = available parallelism): one OS thread each, shared-nothing on the hot path. A
@@ -15,7 +16,9 @@ points listed at the end.
   Parks after 100 idle ticks; shards unpark it when they resume a fiber.
 - **KV flusher**: group commit for the KV logs (sleeps when nothing is dirty).
 - **Apply helper**: `POST /_k10s/apply` prepares modules on a short-lived thread so the shard keeps serving.
-- **Mesh thread** (cluster mode, later): gossip, peer links, placement; publishes service tables like `apply` does.
+- **Mesh thread** (cluster mode): gossip socket, peer listener and links, remote routing, desired-state fetching.
+- **Applier** (cluster mode): persists fetched desired states and installs placements through the same path as
+  `apply` (`NodeShared::apply_cluster`).
 
 ## Memory
 - **Slots**: instance memory = `S = 2^k` + a 4096-byte tail page (TIR needs 8 tail bytes), carved out of 1 GiB
@@ -185,18 +188,130 @@ Implement `exec::Backend`/`exec::Code` (`NodeConfig::backend` selects it):
   switch coroutines and returns `Err(Interrupted)` when the CPU budget is exhausted).
 - The ticker writes `stack_limit` concurrently: Rust code must access the `VmCtx` through raw pointers.
 
-## Cluster mode (plug-in points)
-Gossip membership → `place(manifest, members)` → the mesh thread calls
-`NodeShared::apply_with(bundle, persist, &|spec| placement)`: services hosted elsewhere get
-`Placement::Remote { nodes }` (a placement change counts as a service change), and the table is swapped through the
-same path as `apply` (blobs fetched from peers by hash). The node is started with
-`Node::start_with_router(cfg, router)`; shards hand requests for remote services to
-`router::RemoteRouter::forward(service, nodes, req, deadline, Completion)` and the router answers from any thread
-with `Completion::complete(status, body)` (delivered to the origin shard's inbox; deadlines/timeouts unchanged).
-`--rpc/--gossip/--join` are accepted and reported as not supported yet.
+## Cluster mode
+No control plane: membership and failure detection are SWIM gossip (`k10_mesh::Gossip`, UDP), the desired state (a
+manifest + content-addressed code blobs) spreads by gossip, and placement is the pure function
+`k10_mesh::place(manifest, live members)` that every node evaluates on its own. Self-healing falls out of membership
+changes. Code: `cluster/mod.rs` (config, applier, operator apply, status), `cluster/mesh.rs` (mesh thread),
+`cluster/router.rs` (inbox, `RemoteRouter`), `cluster/store.rs` (blobs, manifest, node id).
+
+**Start-up.** `k10s node` runs in cluster mode when any of `--gossip ADDR` (UDP, default `0.0.0.0:7946`), `--rpc ADDR`
+(TCP, default `0.0.0.0:7947`), `--join HOST:PORT[,…]` (gossip addresses of members) or `--advertise HOST` is given.
+`ClusterSetup::bind` (sockets, store, id) → `Node::start_with_router(cfg, setup.router())` → `setup.start(node)`.
+- Identity: a random `NodeId` persisted in `DATA/node-id`; the incarnation starts at the wall clock in ms, so a
+  restarted node (same id) refutes the Dead/Left records of its previous life.
+- The member advertises its gossip, rpc and http addresses (IP: `--advertise`, else the bind IP, else — wildcard bind —
+  the source address of the default route, else 127.0.0.1) and its capacity: `mem_bytes = --mem`, `cores = --shards`.
+- Tuning: `--probe-ms N` (gossip protocol period, default 200; probe timeout = 0.4 N), `--suspicion-mult N` (default 4),
+  `--leave-grace-ms N` (default 1000), `--idle-spin-us` also applies to the mesh thread.
+- The stored desired state (`DATA/manifest.k10m` + `DATA/blobs/`) is applied at start (placed over this node alone)
+  and announced with `set_desired`: the highest version in the cluster wins, so a whole-cluster restart converges
+  on the newest one. `DATA/bundle.k10b` (single-node mode) is not used.
+
+**Desired state.** `POST /_k10s/apply` (`k10s apply`) works on any node: decode, version = highest known + 1 (stored,
+applied or announced by gossip) when the bundle says 0 (an explicit version must be higher; the same version and
+hash is a no-op, anything else 409), blobs into the store, **apply locally first** (this validates every module:
+an invalid bundle is refused with 422 and never announced), persist (tmp + fsync + rename), then
+`Gossip::set_desired(version, hash)`. A node learning a newer `DesiredState{version, hash, origin}` fetches the manifest
+(`GetManifest`) and the blobs it lacks (`GetBlob`, pipelined) over the peer protocol — from the origin first, then the
+other live members in random order (next one on a missing blob, a hash mismatch, a lost connection or 10 s without
+progress; all failed → retry after 1 s) — checks `sha256` of everything, keeps it in the store, then the applier
+persists (no fsync: a torn file fails its hash at load and is fetched again) and applies it. Versions are ordered by
+`(version, hash)` like gossip's desired-state pointer: two operators applying concurrently may pick the same version;
+the larger hash wins on every node. Blobs no longer referenced by the current manifest are deleted (except blobs
+younger than 60 s and those of the manifest being fetched, which are pinned).
+
+**Placement.** On every desired-state change and on every change of the live member set (ids + capacity; Alive and
+Suspect count, like in `place`), batched in a 50 ms window (`ClusterConfig::debounce`; bounds the delay, not
+extended by later events), the applier computes `place(manifest, live members)` and calls
+`NodeShared::apply_cluster(bundle, placement)`: services placed on this node get `Placement::Local`, the others
+`Placement::Remote { nodes }` (sorted). A service whose spec and placement did not change keeps its `ServiceRt` (warm
+instances, counters: the `rt` id in `/_k10s/status` stays the same); a placement change replaces it like an update
+(in-flight requests finish on the old one). Re-applying the same manifest with a new placement only replaces the
+services whose placement changed. With each placement the applier also computes, per service, the rendezvous
+ranking of all live members (`place` with `replicas = members`): where the service goes if its hosts fail — the
+router's fallback order. Remote-placed services keep their prepared code (any node can run any service) but keep no
+warm instance (idle reclaim down to 0).
+
+**Peer links** (`k10_mesh::wire` framing, TCP_NODELAY). One persistent connection per peer pair, multiplexed by
+request id (each side picks ids for its own requests; requests and responses are told apart by kind). Both sides
+send `Hello{member}` first. A node dials members with a larger id as soon as they come up, and any member lazily on
+first use; when both ends dialed at once, the connection dialed by the smaller id is kept and the other one is closed
+by its dialer once its requests are answered. Frames are appended to the link's write buffer and written once per
+mesh-loop iteration (batching; edge-triggered epoll, partial writes resume on `EPOLLOUT`). A failed dial (or one
+not connected within 1 s) backs the peer off for 200 ms, doubling up to 5 s. Links to a member declared Dead are
+closed; links to a member that Left stay open until the leaver closes them (it still answers what it was sent).
+
+**Routing.** Shards hand invocations of `Remote` services (ingress requests and `call`s) to `MeshRouter::forward` →
+mesh inbox. Candidates: (1) placed replicas that are Alive and not backed off — fewest outstanding requests on the
+link, round-robin on ties; (2) the service's rendezvous ranking (Alive members, at most `replicas + 3` attempts in
+total); if this node comes up in the ranking it runs the service itself (`NodeShared::serve_local`); (3) Suspect
+replicas. `Call` frames carry the remaining deadline in ms; the method travels as a one-byte prefix of the path
+(`0x10 + req_method`; the wire `Call` has no method field). The peer runs the call locally whatever its own
+placement says — a request takes at most one hop — and answers `CallResult` (or `NOT_HERE` = −100, a peer-protocol
+status that never reaches services, if the service is unknown there or the node is leaving).
+**Retry semantics (at most once):** a request goes to the next candidate only when it is known not to have run — its
+bytes never reached the socket (connect failure or timeout, connection lost before they were written; tracked with
+the link's byte offsets) or the peer answered `NOT_HERE`. A request already written to a connection that breaks, or
+outstanding on a peer that gossip declares Dead, fails with −2 (HTTP 503). Deadlines: the origin shard enforces its
+own (−3); the router drops its record 100 ms later.
+
+**Failover.** A crashed process (SIGKILL) resets its connections: requests in flight on them fail, the peer is backed
+off, and new requests go straight to the next node of the ranking (which is where `place` moves the service once
+gossip declares the node dead). A hung node (SIGSTOP; same as a machine that stops answering) is avoided as soon as
+gossip suspects it (≈ one probe period + timeout); requests stuck on it fail when it is declared Dead.
+
+**Graceful leave** (SIGTERM): gossip `Left` (16 direct sends + re-gossip), local re-placement without this node (its
+own ingress forwards everything), `leave_grace` while peers converge (they stop sending new requests), then peers'
+new calls are answered `NOT_HERE` (they retry elsewhere), `Node::shutdown` drains in-flight requests, and the mesh
+thread stops.
+
+**Status.** `/_k10s/status` gains `"cluster"`: id, incarnation, addresses, leaving, desired (version, hash, origin),
+applied (version, hash), fetch in progress, last apply error, members (id, state, incarnation, gossip/rpc/http
+addresses, capacity), placement (service → node ids), links (peer, state, outstanding, bytes), counters (gossip
+packets/bytes, forwarded, retries, failed, local fallback, served for peers, not-here, dial failures, peer bytes,
+fetches, applies). Each service also reports its `rt` id and `placement` (`"local"` or node ids). `GET
+/_k10s/cluster` renders the same as text; `k10s status` prints it in cluster mode (`--json` for the JSON).
+
+**Tests** (`crates/k10s/tests/cluster.rs`, real `k10s node` processes on ephemeral localhost ports, `--probe-ms 100`):
+join + convergence, apply on one node → every node applies and serves every service through its own ingress (local
+or forwarded, methods preserved), `call` across nodes, 3 replicas on 3 distinct nodes, same placement everywhere,
+`k10s status`; SIGKILL of the host of a single-replica service → served again, declared dead, re-placed; apply
+while it is down, restart with the same data directory → same id, higher incarnation, catches up; graceful leave
+and a join under load (4 → 3 → 4 nodes): 0 failed requests, services whose placement did not change keep their
+runtime; re-applies under load on 5 nodes (0 failed requests) and two concurrent applies on two nodes (one winner
+everywhere); the origin of a desired state crashes and a node joining later fetches it from the other members.
+Unit tests: store (persist/reload/corruption/gc/pinning, node id), ranking vs `place`, method tags; node test:
+`apply_cluster` ordering and placement-only updates. `cargo test -p k10s --test cluster` takes ≈ 2–4 s.
+
+### Cluster measurements (release, localhost, i7-7820HQ 4C/8T; other agents compiling: load 3.5–12, so numbers are noisy)
+| what | result |
+|---|---|
+| membership convergence (spawn N processes one by one, until all see N live) | 3: 50–70 ms, 5: 130–180 ms, 20: 290–500 ms |
+| apply → every node serving the new version (median / max of 5, two runs; 1 shard per node, default gossip) | 3 nodes: 9–17 / 17–29 ms, 5: 25–34 / 64–88 ms, 20: 146–190 / 214–284 ms (≈ +10 ms until every status reports it) |
+| re-apply under load (5 nodes, 10 conns over all ingresses, 4 versions + 2 concurrent applies) | 0 failed of ≈ 30–37k requests; every node serving the new version 12–35 ms after apply |
+| graceful leave + join under load (4 → 3 → 4 nodes) | 0 failed of ≈ 28–41k requests |
+| SIGKILL of the host (replicas = 1), probe every 10 ms through another node, default gossip (200 ms, ×4) | first success 7–8 ms after the kill, 0 failed probes; declared dead after 1.0–1.1 s (re-placed ≈ 50 ms later); closed-loop load (8 conns): 7 failed = the requests in flight |
+| same, tight gossip (`--probe-ms 50 --suspicion-mult 2`) | first success 5–13 ms; declared dead after 180–220 ms; 8 failed under load (in flight) |
+| SIGSTOP (hung node, no reset), default / tight gossip | first success 270–315 / 57–103 ms (once suspected); 100 % of new probes OK after 260–300 / 47–90 ms; requests stuck on the node fail when it is declared dead (1.1 s / 0.2 s) |
+| `call` latency, c=1 (2 shards per node): ingress → caller → callee same node / other node | p50 50 / 118 µs (17k / 7.8k rps); with `--idle-spin-us 50`: 26 / 109 µs |
+| ingress forwarding, echo via the hosting node / via another node | c=1: p50 34 / 124 µs (25k / 6.7k rps); c=16: 90k / 36k rps (p50 149 / 294 µs); c=64: 91k / 65k rps (p50 516 / 652 µs) |
+| idle 5-node cluster (2 shards each), no services / 20 services × 2 replicas | RSS 2.6–4.7 / 2.8–4.9 MiB per node; CPU ≈ 0.1 % of a core; gossip ≈ 300–350 B/s out and in per node |
+
+A forwarded request crosses six thread hand-offs (shard → mesh → peer mesh → peer shard → peer mesh → mesh → shard),
+each an eventfd/epoll wake-up on a busy machine: that, not the network or the framing, is most of the ≈ 70–90 µs.
+Reproduce: `cargo test --release -p k10s --test cluster -- --ignored --nocapture --test-threads 1 measure_`
+(`K10S_SPIN_US=50` for the spin variant; needs `bench/bin/loadgen`).
 
 ## Known limitations
-- Single node only; no TLS; no chunked request bodies; responses always use `Content-Length`.
+- No TLS; no chunked request bodies; responses always use `Content-Length`.
+- Cluster: no authentication or encryption on gossip (UDP) or peer links (TCP): run on a trusted network. KV is
+  node-local (replicas of a service, and a service that moves, see different data). No consensus: two concurrent
+  applies resolve by `(version, hash)`, the loser's change is dropped silently; an operator apply on a node that has
+  not yet learned the cluster's latest version can likewise lose. A service unplaced for lack of memory, or whose
+  hosts are all down, is run by the next node of its ranking (or this node) regardless of `--mem` headroom planning.
+  Forwarding costs six thread hand-offs (see measurements). Non-UTF-8 call paths are converted lossily on the wire.
+  Peer links have no application-level keepalive (gossip detects dead peers).
 - KV is node-local with an asynchronous durability window (no fsync-before-ack mode yet); compaction serializes the
   whole map under its lock (pauses `kv_*` calls on that service for the copy).
 - A host function that blocks (none does today except brief KV mutexes) would block its shard.

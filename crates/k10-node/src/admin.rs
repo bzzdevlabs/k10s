@@ -1,5 +1,5 @@
 //! Admin API under `/_k10s/`: `GET status` (JSON), `GET metrics` (Prometheus text), `GET logs/<svc>`,
-//! `POST apply` (body = encoded `k10_mesh::Bundle`), `GET health`.
+//! `POST apply` (body = encoded `k10_mesh::Bundle`), `GET health`, `GET cluster` (text, cluster mode).
 
 use crate::http::Method;
 use crate::node::{short_hash, NodeShared};
@@ -27,6 +27,10 @@ pub fn handle(node: &Arc<NodeShared>, method: Method, target: &str, body: Vec<u8
         (Method::Get | Method::Head, "status") => respond(200, "application/json", status_json(node)),
         (Method::Get | Method::Head, "metrics") => respond(200, "text/plain; version=0.0.4", metrics(node)),
         (Method::Get | Method::Head, "health") => respond(200, "text/plain", "ok\n"),
+        (Method::Get | Method::Head, "cluster") => match node.cluster_hooks() {
+            Some(c) => respond(200, "text/plain; charset=utf-8", c.status_text()),
+            None => respond(404, "text/plain", "not in cluster mode\n"),
+        },
         (Method::Post | Method::Put, "apply") => AdminOut::Apply(body),
         (Method::Get | Method::Head, p) if p.starts_with("logs/") => {
             let svc = &p[5..];
@@ -36,7 +40,7 @@ pub fn handle(node: &Arc<NodeShared>, method: Method, target: &str, body: Vec<u8
                 None => respond(404, "text/plain", format!("unknown service `{svc}`\n")),
             }
         }
-        (_, "status" | "metrics" | "health" | "apply") => respond(405, "text/plain", "method not allowed\n"),
+        (_, "status" | "metrics" | "health" | "apply" | "cluster") => respond(405, "text/plain", "method not allowed\n"),
         (_, p) if p.starts_with("logs/") => respond(405, "text/plain", "method not allowed\n"),
         _ => respond(404, "text/plain", "unknown admin endpoint\n"),
     }
@@ -44,6 +48,13 @@ pub fn handle(node: &Arc<NodeShared>, method: Method, target: &str, body: Vec<u8
 
 /// Decodes and applies a bundle; returns the HTTP status and JSON body.
 pub fn apply_bytes(node: &NodeShared, bytes: &[u8]) -> (u16, Vec<u8>) {
+    if let Some(c) = node.cluster_hooks() {
+        let (st, body) = c.apply(bytes);
+        if st != 200 {
+            node.counters.apply_errors.fetch_add(1, Relaxed);
+        }
+        return (st, body);
+    }
     let r = Bundle::decode(bytes).map_err(|e| (400, format!("invalid bundle: {e}"))).and_then(|b| {
         node.apply(b, true).map_err(|e| (if e.starts_with("stale") { 409 } else { 422 }, e))
     });
@@ -83,13 +94,21 @@ fn svc_json(s: &ServiceRt, now: u64) -> String {
     };
     format!(
         concat!(
-            "{{\"name\":{},\"code\":\"{}\",\"memory\":{},\"max_instances\":{},\"cpu_ms\":{},\"fresh\":{},",
+            "{{\"name\":{},\"rt\":{},\"placement\":{},\"code\":\"{}\",\"memory\":{},\"max_instances\":{},\"cpu_ms\":{},\"fresh\":{},",
             "\"instances\":{{\"live\":{},\"idle\":{},\"peak\":{}}},\"queue\":{},\"snapshot\":{},",
             "\"requests\":{},\"ok\":{},\"errors\":{},\"traps\":{},\"interrupted\":{},\"created\":{},\"destroyed\":{},",
             "\"reclaimed\":{},\"queued\":{},\"cpu_ms_total\":{:.3},\"init_ms_total\":{:.3},\"backoff_ms\":{},",
             "\"consecutive_traps\":{},\"kv_keys\":{},\"retired\":{}}}"
         ),
         json_str(s.name()),
+        s.id,
+        match &s.placement {
+            crate::service::Placement::Local => "\"local\"".to_string(),
+            crate::service::Placement::Remote { nodes } => {
+                let ids: Vec<String> = nodes.iter().map(|n| format!("\"{n}\"")).collect();
+                format!("[{}]", ids.join(","))
+            }
+        },
         short_hash(&s.spec.code_hash),
         s.spec.mem_bytes(),
         s.spec.max_instances,
@@ -159,7 +178,7 @@ pub fn status_json(node: &NodeShared) -> String {
             "\"queued_served\":{},\"cross_shard_replies\":{}}},",
             "\"kv\":{{\"namespaces\":{},\"keys\":{},\"live_bytes\":{},\"log_bytes\":{},\"flushes\":{},\"compactions\":{},",
             "\"errors\":{}}},",
-            "\"applies\":{},\"apply_errors\":{},\"per_shard\":[{}]}}"
+            "\"applies\":{},\"apply_errors\":{},\"per_shard\":[{}]{}}}"
         ),
         json_str(&node.cfg.name),
         env!("CARGO_PKG_VERSION"),
@@ -208,6 +227,7 @@ pub fn status_json(node: &NodeShared) -> String {
         node.counters.applies.load(Relaxed),
         node.counters.apply_errors.load(Relaxed),
         per_shard.join(","),
+        node.cluster_hooks().map(|c| format!(",\"cluster\":{}", c.status_json())).unwrap_or_default(),
     )
 }
 

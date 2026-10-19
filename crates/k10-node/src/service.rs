@@ -18,8 +18,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering::*};
 use std::sync::{Arc, Mutex, OnceLock};
 
-/// Where a service runs. Single-node mode: always `Local`. The cluster layer will fill `Remote` for services placed
-/// on other nodes (requests are then handed to the [`crate::router::RemoteRouter`]).
+/// Where a service runs. Single-node mode: always `Local`. The cluster layer fills `Remote` for services placed on
+/// other nodes (requests are then handed to the [`crate::router::RemoteRouter`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Placement {
     Local,

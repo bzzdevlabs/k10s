@@ -651,3 +651,47 @@ fn remote_placement_goes_through_the_router() {
     assert_eq!((r.status, r.text().as_str()), (203, "far@1:/y"));
     node.shutdown();
 }
+
+/// Cluster-mode apply: `(version, hash)` ordering like gossip's desired-state pointer, and placement-only updates that
+/// replace exactly the services whose placement changed.
+#[test]
+fn apply_cluster_orders_by_version_and_hash_and_updates_placement_only() {
+    use k10_node::service::Placement;
+    let node = start(config(1));
+    let sh = node.shared();
+    let rt = |name: &str| sh.current_table().get(name).map(|s| s.id).unwrap();
+    let mk = |version: u64, greeting: &str| {
+        let mut b = bundle(vec![svc("a", &demo::echo()), svc("b", &demo::config_echo()).config(greeting)]);
+        b.manifest.version = version;
+        b
+    };
+    let local = |_: &k10_mesh::ServiceSpec| Placement::Local;
+    assert!(sh.apply_cluster(mk(0, "x"), &local).is_err(), "cluster applies carry a version");
+    let r = sh.apply_cluster(mk(3, "x"), &local).unwrap();
+    assert_eq!(r.added, vec!["a", "b"]);
+    let (a0, b0) = (rt("a"), rt("b"));
+    // Same manifest, same placement: nothing replaced.
+    let r = sh.apply_cluster(mk(3, "x"), &local).unwrap();
+    assert!(r.updated.is_empty() && r.added.is_empty());
+    assert_eq!((rt("a"), rt("b")), (a0, b0));
+    // Same manifest, `b` moves away: only `b` is replaced, and it is routed through the (default) router.
+    let far = |s: &k10_mesh::ServiceSpec| {
+        if s.name == "b" { Placement::Remote { nodes: vec![k10_mesh::NodeId(9)] } } else { Placement::Local }
+    };
+    let r = sh.apply_cluster(mk(3, "x"), &far).unwrap();
+    assert_eq!(r.updated, vec!["b"]);
+    assert_eq!(rt("a"), a0);
+    assert_ne!(rt("b"), b0);
+    assert_eq!(get(&node, "/b").status, 503, "single-node router: remote services are unavailable");
+    assert_eq!(get(&node, "/a").text(), "hello\n");
+    // Lower version: stale. Same version, another manifest: the larger hash wins.
+    assert!(sh.apply_cluster(mk(2, "x"), &far).unwrap_err().starts_with("stale"));
+    let (p, q) = (mk(4, "p"), mk(4, "q"));
+    let (lo, hi) = if p.manifest.hash() < q.manifest.hash() { (p, q) } else { (q, p) };
+    let hi_cfg = String::from_utf8(hi.manifest.services[1].config.clone()).unwrap();
+    sh.apply_cluster(lo.clone(), &local).unwrap();
+    sh.apply_cluster(hi, &local).unwrap();
+    assert!(sh.apply_cluster(lo, &local).unwrap_err().starts_with("stale"));
+    assert_eq!(get(&node, "/b").text(), hi_cfg);
+    node.shutdown();
+}

@@ -1,9 +1,9 @@
 //! Hook for invocations of services that are not hosted on this node (cluster mode).
 //!
-//! The cluster layer (mesh thread + peer links, a later task) will mark such services
-//! [`Placement::Remote`](crate::service::Placement) in the service table and install a [`RemoteRouter`]; shards hand
-//! it the request together with a [`Completion`], which the router fires exactly once from any thread when the peer
-//! answers (or the call fails). Until then [`NoRemote`] answers "unavailable".
+//! The cluster layer ([`crate::cluster`]) marks such services [`Placement::Remote`](crate::service::Placement) in the
+//! service table and installs a [`RemoteRouter`] (`cluster::router::MeshRouter`); shards hand it the request together
+//! with a [`Completion`], which the router fires exactly once from any thread when the peer answers (or the call
+//! fails). Single-node mode uses [`NoRemote`], which answers "unavailable".
 
 use crate::host::{Request, CALL_UNAVAILABLE};
 use crate::shard::{CallResult, Msg, ReplyTo, ShardShared};

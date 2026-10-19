@@ -124,6 +124,9 @@ impl<T> OneShot<T> {
     }
 }
 
+/// Completion callback of [`Msg::Serve`] (called exactly once with the result, on the shard thread).
+pub type ServeDone = Box<dyn FnOnce(CallResult) + Send>;
+
 /// Messages to a shard's inbox.
 pub enum Msg {
     Stop,
@@ -138,6 +141,9 @@ pub enum Msg {
     Reply { token: u64, res: CallResult },
     /// Programmatic invocation.
     Invoke { service: String, req: Request, reply: Arc<OneShot<CallResult>> },
+    /// Invocation that runs here whatever the service's placement (cluster mode: calls forwarded by peers, local
+    /// fallback of the router). `deadline` is absolute (monotonic ns).
+    Serve { service: String, req: Request, deadline: u64, done: ServeDone },
     /// Completion of an asynchronous admin request (apply).
     AdminDone { conn: u32, gen: u32, status: u16, body: Vec<u8> },
     Prewarm { service: String, n: usize, reply: Arc<OneShot<usize>> },
@@ -340,6 +346,7 @@ enum Waiter {
     External(Arc<OneShot<CallResult>>),
     Count(Arc<Countdown>),
     Bench(Box<BenchState>),
+    Callback(ServeDone),
 }
 
 struct Pending {
@@ -789,6 +796,14 @@ impl Shard {
                         reply.set(res);
                     }
                 }
+                Msg::Serve { service, req, deadline, done } => {
+                    if self.table.get(&service).is_none() {
+                        done(CallResult::error(CALL_UNKNOWN, format!("unknown service `{service}`")));
+                    } else {
+                        // Cannot fail after the lookup above (only an unknown service fails immediately).
+                        let _ = self.submit_to(service.as_bytes(), req, Waiter::Callback(done), deadline, 1, true);
+                    }
+                }
                 Msg::AdminDone { conn, gen, status, body } => {
                     self.respond(conn, gen, status, &body, Some("application/json"));
                 }
@@ -1058,6 +1073,19 @@ impl Shard {
     /// Looks a service up, registers the waiter and dispatches. Immediate failures are returned (the waiter is not
     /// registered then).
     fn submit(&mut self, name: &[u8], req: Request, waiter: Waiter, deadline: u64, depth: u8) -> Result<(), CallResult> {
+        self.submit_to(name, req, waiter, deadline, depth, false)
+    }
+
+    /// [`Shard::submit`]; `force_local` runs the service here even if it is placed on other nodes.
+    fn submit_to(
+        &mut self,
+        name: &[u8],
+        req: Request,
+        waiter: Waiter,
+        deadline: u64,
+        depth: u8,
+        force_local: bool,
+    ) -> Result<(), CallResult> {
         let svc = std::str::from_utf8(name).ok().and_then(|n| self.table.get(n)).map(|a| a as *const Arc<ServiceRt>);
         let Some(svc) = svc else {
             return Err(CallResult::error(CALL_UNKNOWN, format!("unknown service `{}`", String::from_utf8_lossy(name))));
@@ -1067,7 +1095,7 @@ impl Shard {
         let svc: &Arc<ServiceRt> = unsafe { &*svc };
         let token = self.register(waiter, deadline);
         let reply = ReplyTo { shard: self.idx as u16, token };
-        if let Placement::Remote { nodes } = &svc.placement {
+        if let (Placement::Remote { nodes }, false) = (&svc.placement, force_local) {
             let done = Completion { shard: self.me.clone(), reply };
             self.node.router.forward(svc.name(), nodes, req, deadline, done);
             return Ok(());
@@ -1326,6 +1354,7 @@ impl Shard {
             }
             Waiter::Conn { idx, gen } => self.respond_result(idx, gen, res),
             Waiter::External(one) => one.set(res),
+            Waiter::Callback(f) => f(res),
             Waiter::Count(c) => {
                 if res.status >= 0 {
                     c.ok.fetch_add(1, Relaxed);
@@ -1414,6 +1443,7 @@ impl Shard {
         for id in ids {
             let (svc, cand) = {
                 let l = &self.local[&id];
+                // Services placed on other nodes only run here as a fallback: keep no warm instance.
                 let cand: Vec<u32> = l
                     .idle
                     .iter()
@@ -1422,6 +1452,7 @@ impl Shard {
                     .collect();
                 (l.svc.clone(), cand)
             };
+            let keep = if matches!(svc.placement, Placement::Remote { .. }) { 0 } else { keep };
             for ii in cand {
                 if !svc.release_above(keep) {
                     break;

@@ -6,7 +6,7 @@ use crate::kv::{KvConfig, KvStore};
 use crate::logs::Logs;
 use crate::router::{NoRemote, RemoteRouter};
 use crate::service::{prepare_blob, Placement, ServiceRt, ServiceTable};
-use crate::shard::{self, CallResult, Msg, OneShot, ShardShared};
+use crate::shard::{self, CallResult, Msg, OneShot, ServeDone, ShardShared};
 use crate::slot::MemStats;
 use crate::sys;
 use k10_mesh::{sha256::to_hex, Bundle};
@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::*};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::*};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -82,6 +82,9 @@ pub struct NodeConfig {
     /// After doing work, a shard polls (instead of blocking in `epoll_wait`) for this long: trades idle CPU for
     /// cross-shard latency (no eventfd wake-ups between busy shards). 0 = off.
     pub idle_spin: Duration,
+    /// Re-apply `DATA/bundle.k10b` at start (single-node mode). Cluster mode keeps its own store
+    /// (`DATA/manifest.k10m` + `DATA/blobs/`) and turns this off.
+    pub reload_bundle: bool,
 }
 
 impl Default for NodeConfig {
@@ -116,6 +119,7 @@ impl Default for NodeConfig {
             pin_threads: false,
             drain_timeout: Duration::from_secs(5),
             idle_spin: Duration::ZERO,
+            reload_bundle: true,
         }
     }
 }
@@ -129,6 +133,27 @@ pub fn hostname() -> String {
 pub struct NodeCounters {
     pub applies: AtomicU64,
     pub apply_errors: AtomicU64,
+}
+
+/// What the cluster layer (`crate::cluster`) plugs into the admin API.
+pub trait ClusterHooks: Send + Sync {
+    /// `POST /_k10s/apply` in cluster mode: returns the HTTP status and JSON body.
+    fn apply(&self, bundle: &[u8]) -> (u16, Vec<u8>);
+    /// JSON object reported under `"cluster"` in `/_k10s/status`.
+    fn status_json(&self) -> String;
+    /// Human-readable cluster view (`GET /_k10s/cluster`, `k10s status`).
+    fn status_text(&self) -> String;
+}
+
+/// How `apply` orders versions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ApplyMode {
+    /// Operator apply on a single node: version 0 = current + 1; a lower version, or the same version with another
+    /// hash, is stale.
+    Operator,
+    /// Desired state decided by gossip: `(version, hash)` ordered like `k10_mesh::DesiredState` (the larger hash wins
+    /// a version tie); the same manifest may be re-applied with a new placement.
+    Cluster,
 }
 
 /// State shared by every thread of a node.
@@ -151,6 +176,10 @@ pub struct NodeShared {
     /// Max instances with a snapshot mapped (VMA budget, from `vm.max_map_count`).
     pub snapshot_map_budget: u64,
     apply_lock: Mutex<()>,
+    /// Round-robin shard choice for [`NodeShared::serve_local`].
+    serve_rr: AtomicUsize,
+    /// Installed by the cluster layer (weak: the cluster owns the node, not the other way round).
+    pub cluster: OnceLock<Weak<dyn ClusterHooks>>,
 }
 
 impl NodeShared {
@@ -179,23 +208,78 @@ impl NodeShared {
     /// node's [`RemoteRouter`]). A placement change counts as a service change.
     pub fn apply_with(
         &self,
+        bundle: Bundle,
+        persist: bool,
+        placement: &dyn Fn(&k10_mesh::ServiceSpec) -> Placement,
+    ) -> Result<ApplyReport, String> {
+        self.apply_inner(bundle, persist, placement, ApplyMode::Operator)
+    }
+
+    /// Cluster mode: installs the desired state decided by gossip (`version` must be set). Versions are ordered by
+    /// `(version, hash)` like `k10_mesh::DesiredState`; re-applying the current manifest with another placement
+    /// only replaces the services whose placement changed (the others keep running untouched).
+    pub fn apply_cluster(
+        &self,
+        bundle: Bundle,
+        placement: &dyn Fn(&k10_mesh::ServiceSpec) -> Placement,
+    ) -> Result<ApplyReport, String> {
+        self.apply_inner(bundle, false, placement, ApplyMode::Cluster)
+    }
+
+    /// Runs one invocation of `service` on this node regardless of its placement (cluster mode: calls forwarded by
+    /// peers, and the router's local fallback). `done` gets the result exactly once (status −1 if the service is
+    /// unknown here); if the node stops first, `done` is dropped without being called.
+    pub fn serve_local(&self, service: String, req: crate::host::Request, deadline: u64, done: ServeDone) {
+        let i = self.serve_rr.fetch_add(1, Relaxed) % self.shards.len();
+        self.shards[i].send(Msg::Serve { service, req, deadline, done });
+    }
+
+    pub fn cluster_hooks(&self) -> Option<Arc<dyn ClusterHooks>> {
+        self.cluster.get().and_then(|w| w.upgrade())
+    }
+
+    fn apply_inner(
+        &self,
         mut bundle: Bundle,
         persist: bool,
         placement: &dyn Fn(&k10_mesh::ServiceSpec) -> Placement,
+        mode: ApplyMode,
     ) -> Result<ApplyReport, String> {
         let _g = self.apply_lock.lock().unwrap_or_else(|e| e.into_inner());
         let cur = self.current_table();
         bundle.manifest.validate()?;
         let requested = bundle.manifest.version;
-        if requested == 0 {
-            bundle.manifest.version = cur.version + 1;
-        } else if requested < cur.version || (requested == cur.version && bundle.manifest.hash() != cur.manifest_hash)
-        {
-            return Err(format!("stale manifest version {requested} (node is at {})", cur.version));
+        match mode {
+            ApplyMode::Operator => {
+                if requested == 0 {
+                    bundle.manifest.version = cur.version + 1;
+                } else if requested < cur.version
+                    || (requested == cur.version && bundle.manifest.hash() != cur.manifest_hash)
+                {
+                    return Err(format!("stale manifest version {requested} (node is at {})", cur.version));
+                }
+            }
+            ApplyMode::Cluster => {
+                if requested == 0 {
+                    return Err("cluster apply needs an explicit manifest version".into());
+                }
+                if (requested, bundle.manifest.hash()) < (cur.version, cur.manifest_hash) {
+                    return Err(format!("stale manifest version {requested} (node is at {})", cur.version));
+                }
+            }
         }
         let hash = bundle.manifest.hash();
+        let places: Vec<Placement> = bundle.manifest.services.iter().map(placement).collect();
         if bundle.manifest.version == cur.version && hash == cur.manifest_hash {
-            return Ok(ApplyReport { version: cur.version, unchanged: cur.by_name.keys().cloned().collect(), ..Default::default() });
+            let same = bundle
+                .manifest
+                .services
+                .iter()
+                .zip(&places)
+                .all(|(spec, p)| cur.get(&spec.name).is_some_and(|o| o.spec == *spec && o.placement == *p));
+            if same {
+                return Ok(ApplyReport { version: cur.version, unchanged: cur.by_name.keys().cloned().collect(), ..Default::default() });
+            }
         }
         // Prepared code by code hash (reuse what is already deployed).
         let mut code_cache: HashMap<[u8; 32], Arc<ServiceRt>> = HashMap::new();
@@ -205,8 +289,7 @@ impl NodeShared {
         let mut report = ApplyReport { version: bundle.manifest.version, ..Default::default() };
         let mut by_name = HashMap::new();
         let mut fresh_prepared: HashMap<[u8; 32], crate::service::Prepared> = HashMap::new();
-        for spec in &bundle.manifest.services {
-            let place = placement(spec);
+        for (spec, place) in bundle.manifest.services.iter().zip(places) {
             if let Some(old) = cur.get(&spec.name) {
                 if old.spec == *spec && old.placement == place {
                     by_name.insert(spec.name.clone(), old.clone());
@@ -399,10 +482,12 @@ impl Node {
             // 2 VMAs per mapped snapshot; keep room for fiber stacks (2 VMAs each) and everything else.
             snapshot_map_budget: max_maps.saturating_sub(2 * (shards_n * cfg_max_fibers) as u64 + 8192) / 2,
             apply_lock: Mutex::new(()),
+            serve_rr: AtomicUsize::new(0),
+            cluster: OnceLock::new(),
         });
         let _ = shared.http_addr.set(addr);
         // Reload the last applied bundle.
-        if let Some(p) = shared.persist_path() {
+        if let Some(p) = shared.persist_path().filter(|_| shared.cfg.reload_bundle) {
             if let Ok(bytes) = std::fs::read(&p) {
                 match Bundle::decode(&bytes).map_err(|e| e.to_string()).and_then(|b| shared.apply(b, false)) {
                     Ok(r) => eprintln!("k10s: reloaded bundle version {} ({} services)", r.version, r.unchanged.len() + r.added.len()),

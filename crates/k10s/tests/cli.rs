@@ -34,7 +34,7 @@ fn node_apply_status_logs_and_restart() {
     let addr = format!("127.0.0.1:{port}");
     let spawn = || {
         Command::new(bin)
-            .args(["node", "--http", &addr, "--data", data.to_str().unwrap(), "--shards", "2", "--gossip", "127.0.0.1:7946"])
+            .args(["node", "--http", &addr, "--data", data.to_str().unwrap(), "--shards", "2"])
             .stderr(Stdio::piped())
             .spawn()
             .unwrap()
@@ -68,9 +68,10 @@ fn node_apply_status_logs_and_restart() {
     unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
     let st = child.wait().unwrap();
     assert!(st.success(), "{st:?}");
+    // Single-node mode: no cluster view.
     let mut err = String::new();
     std::io::Read::read_to_string(child.stderr.as_mut().unwrap(), &mut err).unwrap();
-    assert!(err.contains("cluster mode is not supported yet"), "{err}");
+    assert!(!err.contains("cluster node"), "{err}");
     let mut child = spawn();
     wait_up();
     assert_eq!(http::request(&addr, "GET", "/kv/k", b"", Duration::from_secs(5)).unwrap().text(), "v");

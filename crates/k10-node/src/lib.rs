@@ -9,10 +9,11 @@
 //! Extension points for later work:
 //! * JIT backend: implement [`exec::Backend`] / [`exec::Code`] (see `exec.rs` docs), dispatch host calls through
 //!   [`host::HostCtx::dispatch`], preemption through [`host::HostCtx::interrupt`].
-//! * Cluster mode: fill [`service::Placement::Remote`] in the service table and install a
-//!   [`router::RemoteRouter`]; the mesh thread publishes tables through the same path as `apply`.
+//! * Cluster mode ([`cluster`]): gossip membership, desired state spread by gossip, deterministic placement, peer
+//!   links; services placed elsewhere are [`service::Placement::Remote`] and go through a [`router::RemoteRouter`].
 
 pub mod admin;
+pub mod cluster;
 pub mod coro;
 pub mod demo;
 pub mod exec;

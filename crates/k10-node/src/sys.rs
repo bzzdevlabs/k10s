@@ -414,6 +414,52 @@ pub fn tcp_listen_reuseport(addr: &std::net::SocketAddr, backlog: i32) -> io::Re
     Ok(fd)
 }
 
+/// A non-blocking TCP listener with `SO_REUSEADDR` only (one owner: the cluster peer listener).
+pub fn tcp_listen(addr: &std::net::SocketAddr, backlog: i32) -> io::Result<Fd> {
+    let fam = if addr.is_ipv4() { libc::AF_INET } else { libc::AF_INET6 };
+    // SAFETY: plain syscall.
+    let fd = Fd(cvt(unsafe { libc::socket(fam, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0) })?);
+    setsockopt_int(fd.0, libc::SOL_SOCKET, libc::SO_REUSEADDR, 1)?;
+    let (ss, len) = sockaddr_from(addr);
+    // SAFETY: ss/len describe a valid socket address.
+    cvt(unsafe { libc::bind(fd.0, &ss as *const _ as *const libc::sockaddr, len) })?;
+    // SAFETY: plain syscall.
+    cvt(unsafe { libc::listen(fd.0, backlog) })?;
+    Ok(fd)
+}
+
+/// Starts a non-blocking TCP connect (`TCP_NODELAY`). Completion is signalled by writability; check it with
+/// [`socket_error`].
+pub fn tcp_connect(addr: &std::net::SocketAddr) -> io::Result<Fd> {
+    let fam = if addr.is_ipv4() { libc::AF_INET } else { libc::AF_INET6 };
+    // SAFETY: plain syscall.
+    let fd = Fd(cvt(unsafe { libc::socket(fam, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0) })?);
+    let _ = setsockopt_int(fd.0, libc::IPPROTO_TCP, libc::TCP_NODELAY, 1);
+    let (ss, len) = sockaddr_from(addr);
+    // SAFETY: ss/len describe a valid socket address.
+    let r = unsafe { libc::connect(fd.0, &ss as *const _ as *const libc::sockaddr, len) };
+    if r < 0 {
+        let e = io::Error::last_os_error();
+        if e.raw_os_error() != Some(libc::EINPROGRESS) {
+            return Err(e);
+        }
+    }
+    Ok(fd)
+}
+
+/// The pending error of a socket (`SO_ERROR`), e.g. the outcome of a non-blocking connect.
+pub fn socket_error(fd: RawFd) -> io::Result<()> {
+    let mut v: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: valid pointers to an int and its length.
+    cvt(unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_ERROR, &mut v as *mut _ as *mut libc::c_void, &mut len) })?;
+    if v == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(v))
+    }
+}
+
 /// The local address a socket is bound to.
 pub fn local_addr(fd: RawFd) -> io::Result<std::net::SocketAddr> {
     // SAFETY: zeroed sockaddr_storage is valid; getsockname writes at most `len` bytes.
