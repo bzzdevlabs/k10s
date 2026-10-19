@@ -1,6 +1,12 @@
 [package]
 name = "k10-mesh"
+description = "Sans-IO SWIM membership gossip, manifests, deterministic placement, wire codecs"
 version.workspace = true
 edition.workspace = true
+
+[features]
+default = ["std"]
+# `std` adds the UDP driver, the thread runner and the deterministic simulator.
+std = []
 
 [dependencies]
