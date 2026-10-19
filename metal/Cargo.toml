@@ -1,0 +1,30 @@
+# k10-metal: the k10s node runtime as its own bare-metal kernel.
+#
+# This is deliberately a separate workspace from the main one (whose members glob is `crates/*`): the kernel builds
+# for `x86_64-unknown-none` with its own rustflags (see .cargo/config.toml) and has its own target dir (metal/target).
+[workspace]
+resolver = "2"
+members = ["kernel", "mkbundle", "tools/linux-guest"]
+# A plain `cargo build` builds the host tool only (the kernel needs --target x86_64-unknown-none, the Linux
+# comparison guest --target x86_64-unknown-linux-musl; see build.sh and tools/linux-compare.sh).
+default-members = ["mkbundle"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+k10-ir = { path = "../crates/k10-ir", default-features = false }
+k10-mesh = { path = "../crates/k10-mesh", default-features = false }
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = false

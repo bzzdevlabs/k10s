@@ -1,0 +1,23 @@
+[package]
+name = "k10-metal"
+description = "k10s node runtime as a bare-metal x86-64 kernel (PVH boot, virtio-net, TIR interpreter)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "k10-metal"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+k10-ir.workspace = true
+k10-mesh.workspace = true
+# TCP/IP: the one external dependency (see metal/README.md for why).
+smoltcp = { version = "0.14", default-features = false, features = [
+    "alloc",
+    "medium-ethernet",
+    "proto-ipv4",
+    "socket-tcp",
+] }

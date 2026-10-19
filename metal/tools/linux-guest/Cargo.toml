@@ -1,0 +1,9 @@
+[package]
+name = "linux-guest"
+description = "Comparison baseline: static /init for a Linux guest (prints ready + powers off, or serves HTTP)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+libc = "0.2"
