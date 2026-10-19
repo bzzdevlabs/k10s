@@ -1,6 +1,9 @@
 // loadgen: minimal HTTP/1.1 load generator (stdlib only, raw net.Conn).
 // Closed loop (-conns N) or open loop (-rate R, latency measured from the
 // intended send time, so queueing delay is included: no coordinated omission).
+// Open loop also reports latency_us_jc: the same, minus the loadgen's own
+// time.Sleep wake-up lateness when the sender was idle (see the worker loop),
+// and wakeup_late_us (that lateness), since Go timers can wake up to ~1 ms late.
 package main
 
 import (
@@ -224,6 +227,8 @@ func (c *client) do() errKind {
 
 type result struct {
 	h    hist
+	hjc  hist // open loop only: jitter-corrected latency (see below)
+	late hist // open loop only: how late time.Sleep woke the sender (loadgen-side scheduling delay)
 	errs map[errKind]uint64
 }
 
@@ -276,23 +281,34 @@ func main() {
 			c := &client{addr: *addr, req: reqBytes, timeout: *timeout}
 			defer c.close()
 			for {
-				var intended time.Time
+				var intended, start time.Time
+				var late time.Duration
 				if interval > 0 {
 					intended = t0.Add(time.Duration(seq.Add(1)-1) * interval)
 					if !intended.Before(end) {
 						return
 					}
+					// Jitter-corrected start: when this sender was idle and slept until the intended time, a late
+					// wake-up is the loadgen's own scheduling delay, so the corrected latency starts at the actual
+					// wake-up; when it was behind schedule (its connection was busy: the system under test is slow),
+					// it starts at the intended time, so queueing stays charged (no coordinated omission).
 					if d := time.Until(intended); d > 0 {
 						time.Sleep(d)
+						start = time.Now()
+						late = start.Sub(intended)
+					} else {
+						start = intended
 					}
 				} else {
 					intended = time.Now()
+					start = intended
 					if !intended.Before(end) {
 						return
 					}
 				}
 				k := c.do()
-				lat := time.Since(intended)
+				now := time.Now()
+				lat := now.Sub(intended)
 				if intended.Before(measureStart) {
 					continue
 				}
@@ -305,6 +321,10 @@ func main() {
 					continue
 				}
 				r.h.add(uint64(lat / time.Microsecond))
+				if interval > 0 {
+					r.hjc.add(uint64(now.Sub(start) / time.Microsecond))
+					r.late.add(uint64(late / time.Microsecond))
+				}
 			}
 		}()
 	}
@@ -315,11 +335,13 @@ func main() {
 	cpuU1, cpuS1 := cpuTime()
 	wall := time.Since(measureStart).Seconds()
 
-	var h hist
+	var h, hjc, hlate hist
 	errs := map[string]uint64{}
 	var nerr uint64
 	for _, r := range res {
 		h.merge(&r.h)
+		hjc.merge(&r.hjc)
+		hlate.merge(&r.late)
 		for k, v := range r.errs {
 			errs[string(k)] += v
 			nerr += v
@@ -330,9 +352,13 @@ func main() {
 		"mode": map[bool]string{true: "open", false: "closed"}[*rate > 0], "conns": *conns,
 		"target_rps": *rate, "duration_s": dur.Seconds(), "warmup_s": warm.Seconds(),
 		"requests": h.n, "errors": nerr, "errors_by_kind": errs,
-		"rps": float64(h.n) / wall,
-		"latency_us": map[string]uint64{"p50": h.q(50), "p90": h.q(90), "p99": h.q(99), "p99.9": h.q(99.9), "max": h.max},
+		"rps":           float64(h.n) / wall,
+		"latency_us":    map[string]uint64{"p50": h.q(50), "p90": h.q(90), "p99": h.q(99), "p99.9": h.q(99.9), "max": h.max},
 		"loadgen_cpu_s": map[string]float64{"user": cpuU1 - cpuU0, "sys": cpuS1 - cpuS0, "total": cpuU1 - cpuU0 + cpuS1 - cpuS0},
+	}
+	if *rate > 0 {
+		out["latency_us_jc"] = map[string]uint64{"p50": hjc.q(50), "p90": hjc.q(90), "p99": hjc.q(99), "p99.9": hjc.q(99.9), "max": hjc.max}
+		out["wakeup_late_us"] = map[string]uint64{"p50": hlate.q(50), "p99": hlate.q(99), "max": hlate.max}
 	}
 	_ = sort.Ints
 	enc := json.NewEncoder(os.Stdout)

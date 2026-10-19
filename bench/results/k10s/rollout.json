@@ -1,0 +1,357 @@
+{
+ "experiment": "rollout",
+ "env": {
+  "date": "2026-10-19T20:29:44+0200",
+  "host_kernel": "6.1.0-53-amd64",
+  "host_cpu": "Intel(R) Core(TM) i7-7820HQ CPU @ 2.90GHz",
+  "host_threads": 8,
+  "host_mem_gib": 62.7,
+  "loadavg": [
+   5.17,
+   4.73,
+   6.99
+  ],
+  "k10s_binary": "/home/qgerard/dev/k10s/bench/.cache/k10s/bin/k10s",
+  "k10s_binary_bytes": 11455728,
+  "k10s_build": {
+   "source": "/home/qgerard/dev/k10s/target/node/release/k10s",
+   "source_mtime": "2026-10-19T17:56:23+0200",
+   "copied_at": "2026-10-19T19:23:30+0200",
+   "git_rev": "d4e67f3",
+   "crates_dirty_at_copy": false,
+   "sha256": "2f87b7d18e2bab90",
+   "crates_rs_files_newer_than_binary": 0
+  },
+  "note": "k10s node processes on the host kernel (not inside the Docker Desktop VM used by the kind baseline)",
+  "shards_single": 8,
+  "shards_cluster_node": 2,
+  "cgroup_scopes": true,
+  "chain_module": "bench chain.ten"
+ },
+ "runs": [
+  {
+   "probes": 597,
+   "failed_after_event": 0,
+   "outage_window_ms": 0,
+   "apply_cmd_ms": 8.406438981182873,
+   "new_version_everywhere_ms": 15.322134015150368,
+   "per_addr_ms": {
+    "127.0.0.1:28080": 10.24263899307698
+   },
+   "old_version_gone_ms": 15.98250400274992,
+   "not_switched": [],
+   "apply_ok": true,
+   "load": {
+    "requests": 11000,
+    "errors": 0,
+    "errors_by_kind": {},
+    "p99_us": 1432,
+    "max_us": 8151
+   },
+   "mode": "single-8",
+   "update": "v1->v2",
+   "replicas": 1,
+   "loadavg_start": 3.17,
+   "loadavg_end": 3.39,
+   "noisy": true
+  },
+  {
+   "probes": 597,
+   "failed_after_event": 0,
+   "outage_window_ms": 0,
+   "apply_cmd_ms": 9.122573013883084,
+   "new_version_everywhere_ms": 15.834694029763341,
+   "per_addr_ms": {
+    "127.0.0.1:28080": 10.739099001511931
+   },
+   "old_version_gone_ms": 16.41755399759859,
+   "not_switched": [],
+   "apply_ok": true,
+   "load": {
+    "requests": 11000,
+    "errors": 0,
+    "errors_by_kind": {},
+    "p99_us": 1448,
+    "max_us": 15849
+   },
+   "mode": "single-8",
+   "update": "v2->v1",
+   "replicas": 1,
+   "loadavg_start": 3.39,
+   "loadavg_end": 3.02,
+   "noisy": true
+  },
+  {
+   "probes": 597,
+   "failed_after_event": 0,
+   "outage_window_ms": 0,
+   "apply_cmd_ms": 18.714172998443246,
+   "new_version_everywhere_ms": 25.43672698084265,
+   "per_addr_ms": {
+    "127.0.0.1:28080": 20.347985031548887
+   },
+   "old_version_gone_ms": 26.031796995084733,
+   "not_switched": [],
+   "apply_ok": true,
+   "load": {
+    "requests": 11000,
+    "errors": 0,
+    "errors_by_kind": {},
+    "p99_us": 1448,
+    "max_us": 6701
+   },
+   "mode": "single-8",
+   "update": "v1->v2",
+   "replicas": 1,
+   "loadavg_start": 3.1,
+   "loadavg_end": 2.93,
+   "noisy": true
+  },
+  {
+   "probes": 597,
+   "failed_after_event": 0,
+   "outage_window_ms": 0,
+   "apply_cmd_ms": 17.353667004499584,
+   "new_version_everywhere_ms": 23.96571502322331,
+   "per_addr_ms": {
+    "127.0.0.1:28080": 18.90043105231598
+   },
+   "old_version_gone_ms": 24.53554404200986,
+   "not_switched": [],
+   "apply_ok": true,
+   "load": {
+    "requests": 11000,
+    "errors": 0,
+    "errors_by_kind": {},
+    "p99_us": 1432,
+    "max_us": 3181
+   },
+   "mode": "single-8",
+   "update": "v2->v1",
+   "replicas": 1,
+   "loadavg_start": 2.7,
+   "loadavg_end": 2.74,
+   "noisy": true
+  },
+  {
+   "probes": 597,
+   "failed_after_event": 0,
+   "outage_window_ms": 0,
+   "apply_cmd_ms": 14.728996029589325,
+   "new_version_everywhere_ms": 22.438549029175192,
+   "per_addr_ms": {
+    "127.0.0.1:28080": 17.34499301528558
+   },
+   "old_version_gone_ms": 23.050776042509824,
+   "not_switched": [],
+   "apply_ok": true,
+   "load": {
+    "requests": 11000,
+    "errors": 0,
+    "errors_by_kind": {},
+    "p99_us": 1464,
+    "max_us": 10720
+   },
+   "mode": "single-8",
+   "update": "v1->v2",
+   "replicas": 1,
+   "loadavg_start": 2.68,
+   "loadavg_end": 2.59,
+   "noisy": true
+  },
+  {
+   "probes": 597,
+   "failed_after_event": 0,
+   "outage_window_ms": 0,
+   "apply_cmd_ms": 17.456967965699732,
+   "new_version_everywhere_ms": 24.0036670002155,
+   "per_addr_ms": {
+    "127.0.0.1:28080": 18.943357979878783
+   },
+   "old_version_gone_ms": 24.50748800765723,
+   "not_switched": [],
+   "apply_ok": true,
+   "load": {
+    "requests": 11000,
+    "errors": 0,
+    "errors_by_kind": {},
+    "p99_us": 1464,
+    "max_us": 6872
+   },
+   "mode": "single-8",
+   "update": "v2->v1",
+   "replicas": 1,
+   "loadavg_start": 2.59,
+   "loadavg_end": 2.93,
+   "noisy": true
+  },
+  {
+   "probes": 596,
+   "failed_after_event": 0,
+   "outage_window_ms": 0,
+   "apply_cmd_ms": 9.403191972523928,
+   "new_version_everywhere_ms": 17.52840296830982,
+   "per_addr_ms": {
+    "127.0.0.1:28181": 11.950893967878073,
+    "127.0.0.1:28182": 12.188396009150892,
+    "127.0.0.1:28183": 12.45615998050198
+   },
+   "old_version_gone_ms": 19.462435971945524,
+   "not_switched": [],
+   "apply_ok": true,
+   "load": {
+    "requests": 11000,
+    "errors": 0,
+    "errors_by_kind": {},
+    "p99_us": 2864,
+    "max_us": 13285
+   },
+   "mode": "cluster-3",
+   "update": "v1->v2",
+   "replicas": 10,
+   "loadavg_start": 3.49,
+   "loadavg_end": 3.34,
+   "noisy": true
+  },
+  {
+   "probes": 598,
+   "failed_after_event": 0,
+   "outage_window_ms": 0,
+   "apply_cmd_ms": 14.657708001323044,
+   "new_version_everywhere_ms": 22.18370500486344,
+   "per_addr_ms": {
+    "127.0.0.1:28181": 16.589078994002193,
+    "127.0.0.1:28182": 16.863027994986624,
+    "127.0.0.1:28183": 17.08409801358357
+   },
+   "old_version_gone_ms": 23.796560999471694,
+   "not_switched": [],
+   "apply_ok": true,
+   "load": {
+    "requests": 11000,
+    "errors": 0,
+    "errors_by_kind": {},
+    "p99_us": 1432,
+    "max_us": 16819
+   },
+   "mode": "cluster-3",
+   "update": "v2->v1",
+   "replicas": 10,
+   "loadavg_start": 3.34,
+   "loadavg_end": 3.04,
+   "noisy": true
+  },
+  {
+   "probes": 598,
+   "failed_after_event": 0,
+   "outage_window_ms": 0,
+   "apply_cmd_ms": 17.627959023229778,
+   "new_version_everywhere_ms": 24.71505501307547,
+   "per_addr_ms": {
+    "127.0.0.1:28181": 19.259122025687248,
+    "127.0.0.1:28182": 19.429544976446778,
+    "127.0.0.1:28183": 19.652121991384774
+   },
+   "old_version_gone_ms": 26.268147979862988,
+   "not_switched": [],
+   "apply_ok": true,
+   "load": {
+    "requests": 11000,
+    "errors": 0,
+    "errors_by_kind": {},
+    "p99_us": 1432,
+    "max_us": 4115
+   },
+   "mode": "cluster-3",
+   "update": "v1->v2",
+   "replicas": 10,
+   "loadavg_start": 3.04,
+   "loadavg_end": 4.11,
+   "noisy": true
+  },
+  {
+   "probes": 597,
+   "failed_after_event": 0,
+   "outage_window_ms": 0,
+   "apply_cmd_ms": 9.431220008991659,
+   "new_version_everywhere_ms": 16.99974900111556,
+   "per_addr_ms": {
+    "127.0.0.1:28181": 11.508015973959118,
+    "127.0.0.1:28182": 11.714570980984718,
+    "127.0.0.1:28183": 11.917355004698038
+   },
+   "old_version_gone_ms": 18.401748966425657,
+   "not_switched": [],
+   "apply_ok": true,
+   "load": {
+    "requests": 11000,
+    "errors": 0,
+    "errors_by_kind": {},
+    "p99_us": 1432,
+    "max_us": 4921
+   },
+   "mode": "cluster-3",
+   "update": "v2->v1",
+   "replicas": 10,
+   "loadavg_start": 4.11,
+   "loadavg_end": 4.8,
+   "noisy": true
+  },
+  {
+   "probes": 597,
+   "failed_after_event": 0,
+   "outage_window_ms": 0,
+   "apply_cmd_ms": 15.893357980530709,
+   "new_version_everywhere_ms": 23.145993996877223,
+   "per_addr_ms": {
+    "127.0.0.1:28181": 17.59762701112777,
+    "127.0.0.1:28182": 17.816228966694325,
+    "127.0.0.1:28183": 18.050409969873726
+   },
+   "old_version_gone_ms": 24.54156498424709,
+   "not_switched": [],
+   "apply_ok": true,
+   "load": {
+    "requests": 11000,
+    "errors": 0,
+    "errors_by_kind": {},
+    "p99_us": 1432,
+    "max_us": 12271
+   },
+   "mode": "cluster-3",
+   "update": "v1->v2",
+   "replicas": 10,
+   "loadavg_start": 4.8,
+   "loadavg_end": 5.1,
+   "noisy": true
+  },
+  {
+   "probes": 597,
+   "failed_after_event": 0,
+   "outage_window_ms": 0,
+   "apply_cmd_ms": 14.59821395110339,
+   "new_version_everywhere_ms": 22.12949696695432,
+   "per_addr_ms": {
+    "127.0.0.1:28181": 16.622244962491095,
+    "127.0.0.1:28182": 16.811452980618924,
+    "127.0.0.1:28183": 17.066703003365546
+   },
+   "old_version_gone_ms": 23.671245959121734,
+   "not_switched": [],
+   "apply_ok": true,
+   "load": {
+    "requests": 11000,
+    "errors": 0,
+    "errors_by_kind": {},
+    "p99_us": 1464,
+    "max_us": 14618
+   },
+   "mode": "cluster-3",
+   "update": "v2->v1",
+   "replicas": 10,
+   "loadavg_start": 5.01,
+   "loadavg_end": 5.18,
+   "noisy": true
+  }
+ ]
+}

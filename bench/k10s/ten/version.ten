@@ -1,0 +1,15 @@
+// version.ten — echo that answers "hello <config>" (e.g. "hello v2").
+//
+// Benchmark helper only (bench/k10s/rollout.sh): the manifest's `config` is the version tag, so a rolling update is
+// a re-apply with a new config (a changed spec replaces the service) and every response says which version served it.
+
+buffer cfg: [u8; 64];
+
+export fn handle() {
+    let n = config(cfg, 64);
+    out_str("hello");
+    if n > 0 {
+        out_str(" ");
+        out(cfg, min(n, 64));
+    }
+}

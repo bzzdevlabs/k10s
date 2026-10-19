@@ -1,0 +1,100 @@
+{
+ "experiment": "sizes",
+ "env": {
+  "date": "2026-10-19T20:29:51+0200",
+  "host_kernel": "6.1.0-53-amd64",
+  "host_cpu": "Intel(R) Core(TM) i7-7820HQ CPU @ 2.90GHz",
+  "host_threads": 8,
+  "host_mem_gib": 62.7,
+  "loadavg": [
+   5.31,
+   4.77,
+   6.99
+  ],
+  "k10s_binary": "/home/qgerard/dev/k10s/bench/.cache/k10s/bin/k10s",
+  "k10s_binary_bytes": 11455728,
+  "k10s_build": {
+   "source": "/home/qgerard/dev/k10s/target/node/release/k10s",
+   "source_mtime": "2026-10-19T17:56:23+0200",
+   "copied_at": "2026-10-19T19:23:30+0200",
+   "git_rev": "d4e67f3",
+   "crates_dirty_at_copy": false,
+   "sha256": "2f87b7d18e2bab90",
+   "crates_rs_files_newer_than_binary": 0
+  },
+  "note": "k10s node processes on the host kernel (not inside the Docker Desktop VM used by the kind baseline)",
+  "shards_single": 8,
+  "shards_cluster_node": 2,
+  "cgroup_scopes": true,
+  "chain_module": "bench chain.ten"
+ },
+ "runs": [
+  {
+   "modules_k10_bytes": {
+    "hello": 52,
+    "echo": 157,
+    "chain": 641,
+    "compute": 2282,
+    "counter": 723
+   },
+   "sources_ten_bytes": {
+    "hello": 343,
+    "echo": 731,
+    "chain": 1303,
+    "compute": 4217,
+    "counter": 1167
+   },
+   "jit_code": {
+    "hello": {
+     "modules": 1,
+     "code_bytes": 288,
+     "exec_bytes": 4096,
+     "prepared": 1,
+     "prepare_ms_total": 0.036
+    },
+    "echo": {
+     "modules": 1,
+     "code_bytes": 520,
+     "exec_bytes": 4096,
+     "prepared": 2,
+     "prepare_ms_total": 0.062
+    },
+    "chain": {
+     "modules": 1,
+     "code_bytes": 1976,
+     "exec_bytes": 4096,
+     "prepared": 3,
+     "prepare_ms_total": 0.115
+    },
+    "compute": {
+     "modules": 1,
+     "code_bytes": 5376,
+     "exec_bytes": 8192,
+     "prepared": 4,
+     "prepare_ms_total": 0.229
+    },
+    "counter": {
+     "modules": 1,
+     "code_bytes": 2272,
+     "exec_bytes": 4096,
+     "prepared": 5,
+     "prepare_ms_total": 0.332
+    }
+   },
+   "k10s_binary_bytes": 11455728,
+   "k10s_binary_stripped_bytes": 1661576,
+   "k10s_binary_dynamic_deps": [
+    "\tlinux-vdso.so.1 (0x00007ffe3f177000)",
+    "\tlibgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007f5e0d009000)",
+    "\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f5e0ce27000)",
+    "\t/lib64/ld-linux-x86-64.so.2 (0x00007f5e0d1dc000)",
+    ""
+   ],
+   "data_dir_after_refs_bytes": 6026,
+   "data_dir_files": {
+    "bundle.k10b": 4034,
+    "kv/counter.log": 1992
+   }
+  }
+ ]
+}

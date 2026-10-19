@@ -11,6 +11,7 @@
 
 use crate::codec::{put_u64, put_varint, DecodeError, Reader};
 use crate::sha256::sha256;
+use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -464,6 +465,7 @@ fn parse_memory(lx: &mut Lexer<'_>, word: &str, line: u32) -> Result<u8, ParseEr
 pub fn parse_text(src: &str) -> Result<Vec<ServiceDecl>, ParseError> {
     let mut lx = Lexer::new(src);
     let mut out: Vec<ServiceDecl> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
     while let Some((tok, line)) = lx.next()? {
         match tok {
             Tok::Semi => continue,
@@ -479,7 +481,7 @@ pub fn parse_text(src: &str) -> Result<Vec<ServiceDecl>, ParseError> {
         if !valid_name(&name) {
             return err(line, format!("invalid service name `{name}` (want [a-z0-9-], 1..=63 chars)"));
         }
-        if out.iter().any(|d| d.name == name) {
+        if !seen.insert(name.clone()) {
             return err(line, format!("duplicate service `{name}`"));
         }
         match lx.next()? {

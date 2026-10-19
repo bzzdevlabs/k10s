@@ -1,0 +1,11 @@
+// crash.ten — echo that traps (unreachable) when the request path contains `?trap=1`, else answers "hello".
+//
+// Benchmark helper only (bench/k10s/failover.sh): the k10s analogue of deleting a pod is an instance that traps —
+// the request fails (HTTP 500), the runtime destroys the instance and creates a new one on the next request.
+
+export fn handle() {
+    if query_int("trap", 0) == 1 {
+        unreachable();
+    }
+    out_str("hello");
+}

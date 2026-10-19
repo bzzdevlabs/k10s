@@ -1,0 +1,37 @@
+// bench/k10s/ten/chain.ten — examples/chain.ten with ONE change for the benchmark: `heap_reset()` at the start of
+// `handle`. The example calls read_config() (a heap allocation) on every request and never frees it, so with
+// `memory = 64KiB` every instance runs out of heap after ~4000 requests and traps (Unreachable from alloc): the request
+// fails with HTTP 500 and the instance is replaced (measured: 48-50 traps per 200k requests, with both backends).
+// The Go chain has no such leak; the benchmark measures the platform, so it runs this fixed copy. Reported upstream.
+//
+// chain.ten — Ten version of bench/workloads/chain (Go).
+//
+// Every request calls the backend service with an empty body and returns the backend's response body, like
+// chain/main.go does with an HTTP GET to BACKEND_URL. The backend is the service named by this service's
+// config bytes (the manifest's equivalent of BACKEND_URL), or `echo` by default; echo.ten answers "hello".
+// Errors map like the Go version: a failed call or a non-200 backend status answers 502 with a short message.
+// No HTTP client, no DNS, no connection pool: `call` is a host function (a function call on the same node).
+
+export fn handle() {
+    heap_reset();
+    let backend: str = "echo";
+    if config(null, 0) > 0 {
+        backend = str(read_config(), last_len());
+    }
+    let st = call_svc(backend, null, 0);
+    if st < 0 {
+        status(502);
+        out_str("backend error ");
+        out_int(st);
+        out_str("\n");
+        return;
+    }
+    if st != 200 {
+        status(502);
+        out_str("backend status ");
+        out_int(st);
+        out_str("\n");
+        return;
+    }
+    out_call_resp();
+}

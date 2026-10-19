@@ -1,0 +1,23 @@
+// hold.ten — echo that stays busy for `config` milliseconds (decimal, default 0) before answering "hello".
+//
+// Benchmark helper only (bench/k10s/overhead.sh): echo.ten never suspends, so a shard reuses one warm instance for
+// every request and a single service never has more live instances than shards. Spinning on now_ns() makes the
+// invocation long enough to be preempted (2 ms slices), so N concurrent requests force N live instances of one
+// service — the closest analogue of "N replicas of echo". Static buffers only: per-instance memory is the same
+// order as echo's (a few pages).
+
+buffer cfg: [u8; 32];
+
+export fn handle() {
+    let n = config(cfg, 32);
+    let ms = 0;
+    if n > 0 {
+        ms = parse_int(cfg, min(n, 32));
+    }
+    if ms > 0 {
+        let until = now_ns() + ms * 1_000_000;
+        while now_ns() < until {
+        }
+    }
+    out_str("hello");
+}

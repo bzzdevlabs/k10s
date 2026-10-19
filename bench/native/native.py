@@ -2,6 +2,11 @@
 """Bare-process baseline. Usage:
   native.py scale   <echo-binary> <outfile> [repeats]   N=1,10,50,100 copies on consecutive ports: start time, RSS/PSS per process
   native.py latency <bindir> <outfile> [repeats]        loadgen vs one echo (and chain->echo) instance, 1/16/64 conns
+  native.py latency-open <bindir> <outfile> [repeats]   open loop (-rate) at OPEN_RATES_<target>, OPEN_CONNS (64) conns
+Targets: LAT_TARGETS (default "echo chain"; also "compute" = /?n=1000 and "compute-purego" = the same Go service built
+with -tags purego, i.e. without Go's hand-written SHA-256 assembly). Every run also records the CPU time of the server
+process(es) over the measured window (server_cpu_us_per_req, from /proc/<pid>/stat), the CPU used by everything else on the
+host in that window (other_cpu_cores = host busy - servers - loadgen; noisy if > NOISY_CPU, 0.5) and the 1-min load average.
 """
 import json, os, signal, socket, statistics, subprocess, sys, time, platform
 
@@ -77,30 +82,86 @@ def scale(binary, outfile, repeats):
             stop(procs); time.sleep(1)
     json.dump({"experiment": "native_scale", "env": env(), "runs": runs}, open(outfile, "w"), indent=1)
 
-def latency(bindir, outfile, repeats):
+TARGET_PATH = {"echo": "/", "chain": "/", "compute": "/?n=1000", "compute-purego": "/?n=1000"}
+NOISY_CPU = float(os.environ.get("NOISY_CPU", "0.5"))   # cores used by other processes during the measured window
+
+def host_busy():
+    f = [int(x) for x in open("/proc/stat").readline().split()[1:]]
+    return sum(f[:8]) - f[3] - f[4]
+
+def loadavg1():
+    return float(open("/proc/loadavg").read().split()[0])
+
+def start_servers(bindir, targets):
+    """returns {target: (port, [pids of the processes serving it])}, [Popen]"""
+    procs, out = [], {}
+    pe = BASE_PORT
+    def spawn(binary, port, extra=None):
+        p = subprocess.Popen([f"{bindir}/{binary}"], env={**os.environ, "PORT": str(port), **(extra or {})})
+        procs.append(p)
+        t = time.time()
+        while not get(port, 0.3):
+            assert time.time() - t < 20, "server did not start"; time.sleep(0.1)
+        return p
+    echo = None
+    if "echo" in targets or "chain" in targets:
+        echo = spawn("echo", pe); out["echo"] = (pe, [echo.pid])
+    if "chain" in targets:
+        ch = spawn("chain", pe + 1, {"BACKEND_URL": f"http://127.0.0.1:{pe}/"}); out["chain"] = (pe + 1, [ch.pid, echo.pid])
+    if "compute" in targets:
+        c = spawn("compute", pe + 2); out["compute"] = (pe + 2, [c.pid])
+    if "compute-purego" in targets:
+        c = spawn("compute-purego", pe + 3); out["compute-purego"] = (pe + 3, [c.pid])
+    return out, procs
+
+def run_loadgen(bindir, port, path, pids, label, args, warm):
+    l0 = loadavg1()
+    lg = subprocess.Popen([f"{bindir}/loadgen", "-addr", f"127.0.0.1:{port}", "-path", path, "-label", label] + args,
+                          stdout=subprocess.PIPE, text=True)
+    time.sleep(float(warm))
+    c0 = sum(cpu_ticks(p) for p in pids); h0 = host_busy(); t0 = time.monotonic()
+    out, _ = lg.communicate()
+    c1 = sum(cpu_ticks(p) for p in pids); h1 = host_busy(); t1 = time.monotonic()
+    j = json.loads(out)
+    cpu_s = (c1 - c0) / 100.0
+    l1 = loadavg1()
+    w = t1 - t0
+    busy = (h1 - h0) / os.sysconf("SC_CLK_TCK") / w
+    other = busy - cpu_s / w - j["loadgen_cpu_s"]["total"] / j["duration_s"]
+    j.update({"server_cpu_s": cpu_s, "server_cpu_window_s": w, "server_cpu_cores": cpu_s / w,
+              "server_cpu_us_per_req": (cpu_s / w * j["duration_s"] * 1e6 / j["requests"]) if j["requests"] else None,
+              "host_busy_cores": busy, "other_cpu_cores": other,
+              "loadavg_start": l0, "loadavg_end": l1, "noisy": other > NOISY_CPU})
+    return j
+
+def latency(bindir, outfile, repeats, open_loop=False):
     dur = os.environ.get("LAT_DURATION", "20"); warm = os.environ.get("LAT_WARMUP", "3")
     conns = os.environ.get("LAT_CONNS", "1 16 64").split()
-    pe, pc = BASE_PORT, BASE_PORT + 1
-    echo = subprocess.Popen([f"{bindir}/echo"], env={**os.environ, "PORT": str(pe)})
-    chain = subprocess.Popen([f"{bindir}/chain"], env={**os.environ, "PORT": str(pc), "BACKEND_URL": f"http://127.0.0.1:{pe}/"})
-    for p in (pe, pc):
-        t = time.time()
-        while not get(p, 0.3):
-            assert time.time() - t < 20, "server did not start"; time.sleep(0.1)
+    targets = os.environ.get("LAT_TARGETS", "echo chain").split()
+    srv, procs = start_servers(bindir, targets)
     runs = []
     try:
-        for target, port in (("echo", pe), ("chain", pc)):
-            for c in conns:
+        for target in targets:
+            port, pids = srv[target]
+            if open_loop:
+                plan = [(os.environ.get("OPEN_CONNS", "64"), r) for r in os.environ.get(f"OPEN_RATES_{target.replace('-', '_')}",
+                        "500 2000" if target.startswith("compute") else "5000 20000").split()]
+            else:
+                plan = [(c, None) for c in conns]
+            for c, rate in plan:
                 for r in range(repeats):
-                    o = subprocess.run([f"{bindir}/loadgen", "-addr", f"127.0.0.1:{port}", "-conns", c, "-duration", dur + "s", "-warmup", warm + "s",
-                                        "-label", f"native/{target}"], capture_output=True, text=True)
-                    j = json.loads(o.stdout); j.update({"target": target, "repeat": r + 1, "place": "host"}); runs.append(j)
-                    print(f"native/{target} c={c} rep={r+1} rps={j['rps']:.0f} p50={j['latency_us']['p50']} p99={j['latency_us']['p99']} err={j['errors']}", file=sys.stderr)
+                    args = ["-conns", c, "-duration", dur + "s", "-warmup", warm + "s"] + (["-rate", rate] if rate else [])
+                    j = run_loadgen(bindir, port, TARGET_PATH[target], pids, f"native/{target}", args, warm)
+                    j.update({"target": target, "repeat": r + 1, "place": "host"}); runs.append(j)
+                    print(f"native/{target} c={c} rate={rate or '-'} rep={r+1} rps={j['rps']:.0f} p50={j['latency_us']['p50']} p99={j['latency_us']['p99']} err={j['errors']} server_cpu={j['server_cpu_cores']:.2f} cores {j['server_cpu_us_per_req'] or -1:.1f} us/req other={j['other_cpu_cores']:.2f} cores load={j['loadavg_end']}", file=sys.stderr)
     finally:
-        stop([echo, chain])
-    json.dump({"experiment": "native_latency", "env": env(), "runs": runs}, open(outfile, "w"), indent=1)
+        stop(procs)
+    json.dump({"experiment": "native_latency_open" if open_loop else "native_latency", "env": env(), "runs": runs}, open(outfile, "w"), indent=1)
+
+def latency_open(bindir, outfile, repeats):
+    latency(bindir, outfile, repeats, open_loop=True)
 
 if __name__ == "__main__":
     cmd, a, out = sys.argv[1:4]
     rep = int(sys.argv[4]) if len(sys.argv) > 4 else int(os.environ.get("REPEATS", "3"))
-    {"scale": scale, "latency": latency}[cmd](a, out, rep)
+    {"scale": scale, "latency": latency, "latency-open": latency_open}[cmd](a, out, rep)

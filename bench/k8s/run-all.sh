@@ -2,6 +2,7 @@
 # Full k8s baseline: single-node suite, then the 3-node suite (idle + worker failure). ~1 h. Idempotent: results are overwritten,
 # clusters are recreated (RECREATE=1) and deleted at the end (KEEP_CLUSTER=1 to keep).
 #   SKIP_THREE=1 skips the 3-node part   REPEATS=3 (cheap measurements)   QUICK=1 shortens windows (smoke test only)
+#   LAT_TARGETS="echo chain compute" adds compute to latency.sh; OPEN_LOOP=1 adds latency-open.sh (open loop)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; cd "$HERE"
 export REPEATS="${REPEATS:-3}"
@@ -13,6 +14,8 @@ export RECREATE=1
 export VARIANT=single
 ./create-cluster.sh; ./load-images.sh
 ./idle.sh; ./pods.sh; ./first-response.sh; ./latency.sh; ./failover.sh; ./rollout.sh; ./sizes.sh
+# optional (bench/run-final.sh sets it): open-loop runs -> latency-open.json; LAT_TARGETS="echo chain compute" adds compute
+if [ "${OPEN_LOOP:-0}" = 1 ]; then ./latency-open.sh; fi
 ./delete-cluster.sh
 if [ "${SKIP_THREE:-0}" != 1 ]; then
   export VARIANT=three
