@@ -30,6 +30,7 @@ name = "k10-node"
 version = "0.1.0"
 dependencies = [
  "k10-ir",
+ "k10-jit",
  "k10-mesh",
  "libc",
 ]
@@ -39,6 +40,7 @@ name = "k10s"
 version = "0.1.0"
 dependencies = [
  "k10-ir",
+ "k10-lang",
  "k10-mesh",
  "k10-node",
  "libc",

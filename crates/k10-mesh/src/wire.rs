@@ -14,12 +14,13 @@
 //! | 4    | GetBlob       | hash:[32] |
 //! | 5    | Blob          | hash:[32] bytes |
 //! | 6    | BlobMissing   | hash:[32] |
-//! | 7    | Call          | deadline_ms:u32 service_len:u8 service path_len:u16 path body |
+//! | 7    | Call          | deadline_ms:u32 method:u8 service_len:u8 service path_len:u16 path body |
 //! | 8    | CallResult    | status:i32 body |
 //! | 9    | Ping          | — |
 //! | 10   | Pong          | — |
 //!
-//! `deadline_ms` is the caller's remaining time budget, relative (clocks are not synchronized).
+//! `deadline_ms` is the caller's remaining time budget, relative (clocks are not synchronized). `method` is the
+//! host API's `req_method` code (0 GET, 1 POST, 2 PUT, 3 DELETE, 4 other); it is carried as is.
 
 use crate::codec::{put_u16, put_u32, put_u64, DecodeError, Reader};
 use crate::member::Member;
@@ -28,8 +29,12 @@ use core::fmt;
 
 /// Bytes before the payload: len + kind + request_id.
 pub const HEADER_LEN: usize = 13;
-/// Default cap on `len` (a 16 MiB call body plus headers fits comfortably).
-pub const DEFAULT_MAX_FRAME: usize = 32 << 20;
+/// Default cap on `len`: a `Blob` frame of the largest code blob a bundle may hold
+/// ([`crate::bundle::MAX_BLOB_BYTES`]) plus its hash and header, with room to spare; a 16 MiB call body plus
+/// headers fits too.
+pub const DEFAULT_MAX_FRAME: usize = crate::bundle::MAX_BLOB_BYTES + 4096;
+
+const _: () = assert!(DEFAULT_MAX_FRAME >= 9 + 32 + crate::bundle::MAX_BLOB_BYTES && DEFAULT_MAX_FRAME >= (16 << 20) + 9 + 8 + 255 + 65535);
 
 pub const KIND_HELLO: u8 = 1;
 pub const KIND_GET_MANIFEST: u8 = 2;
@@ -52,7 +57,8 @@ pub enum Msg<'a> {
     GetBlob { hash: [u8; 32] },
     Blob { hash: [u8; 32], bytes: &'a [u8] },
     BlobMissing { hash: [u8; 32] },
-    Call { service: &'a str, path: &'a str, body: &'a [u8], deadline_ms: u32 },
+    /// `method`: `req_method` code (0 GET, 1 POST, 2 PUT, 3 DELETE, 4 other).
+    Call { service: &'a str, path: &'a str, body: &'a [u8], deadline_ms: u32, method: u8 },
     CallResult { status: i32, body: &'a [u8] },
     Ping,
     Pong,
@@ -132,9 +138,10 @@ impl<'a> Msg<'a> {
                 out.extend_from_slice(hash);
                 out.extend_from_slice(bytes);
             }
-            Msg::Call { service, path, body, deadline_ms } => {
+            Msg::Call { service, path, body, deadline_ms, method } => {
                 assert!(service.len() <= u8::MAX as usize && path.len() <= u16::MAX as usize, "service/path too long");
                 put_u32(out, *deadline_ms);
+                out.push(*method);
                 out.push(service.len() as u8);
                 out.extend_from_slice(service.as_bytes());
                 put_u16(out, path.len() as u16);
@@ -156,7 +163,7 @@ impl<'a> Msg<'a> {
             Msg::Hello { .. } => 64,
             Msg::Manifest { bytes } => bytes.len(),
             Msg::Blob { bytes, .. } => 32 + bytes.len(),
-            Msg::Call { service, path, body, .. } => 7 + service.len() + path.len() + body.len(),
+            Msg::Call { service, path, body, .. } => 8 + service.len() + path.len() + body.len(),
             Msg::CallResult { body, .. } => 4 + body.len(),
             _ => 32,
         }
@@ -174,11 +181,12 @@ impl<'a> Msg<'a> {
             KIND_BLOB_MISSING => Msg::BlobMissing { hash: r.array()? },
             KIND_CALL => {
                 let deadline_ms = r.u32()?;
+                let method = r.u8()?;
                 let n = r.u8()? as usize;
                 let service = core::str::from_utf8(r.bytes(n)?).map_err(|_| WireError::Malformed("service name"))?;
                 let n = r.u16()? as usize;
                 let path = core::str::from_utf8(r.bytes(n)?).map_err(|_| WireError::Malformed("call path"))?;
-                Msg::Call { service, path, body: r.rest(), deadline_ms }
+                Msg::Call { service, path, body: r.rest(), deadline_ms, method }
             }
             KIND_CALL_RESULT => Msg::CallResult { status: r.i32()?, body: r.rest() },
             KIND_PING => Msg::Ping,
@@ -326,8 +334,9 @@ mod tests {
             Msg::GetBlob { hash: [3; 32] },
             Msg::Blob { hash: [4; 32], bytes: &[1, 2, 3, 4, 5] },
             Msg::BlobMissing { hash: [5; 32] },
-            Msg::Call { service: "echo", path: "/hello?x=1", body: b"payload", deadline_ms: 250 },
-            Msg::Call { service: "e", path: "", body: b"", deadline_ms: 0 },
+            Msg::Call { service: "echo", path: "/hello?x=1", body: b"payload", deadline_ms: 250, method: 0 },
+            Msg::Call { service: "e", path: "", body: b"", deadline_ms: 0, method: 1 },
+            Msg::Call { service: "todo", path: "/7", body: b"title", deadline_ms: u32::MAX, method: 3 },
             Msg::CallResult { status: -3, body: b"" },
             Msg::CallResult { status: 200, body: b"ok" },
             Msg::Ping,
@@ -389,9 +398,10 @@ mod tests {
         assert_eq!(d.next(), Err(WireError::UnknownKind(99)));
         // payload errors are per-frame and do not poison the stream
         assert!(Msg::decode(KIND_GET_BLOB, &[1, 2]).is_err());
-        assert!(Msg::decode(KIND_CALL, &[0, 0, 0, 0, 5, b'a']).is_err());
+        assert!(Msg::decode(KIND_CALL, &[0, 0, 0, 0, 1, 5, b'a']).is_err());
+        assert!(Msg::decode(KIND_CALL, &[0, 0, 0, 0]).is_err(), "method missing");
         assert!(Msg::decode(KIND_PING, &[0]).is_err());
-        assert!(Msg::decode(KIND_CALL, &[0, 0, 0, 0, 1, 0xff, 0, 0]).is_err());
+        assert!(Msg::decode(KIND_CALL, &[0, 0, 0, 0, 1, 1, 0xff, 0, 0]).is_err());
         // random garbage never panics
         let mut rng = Rng::new(7);
         for _ in 0..2000 {
@@ -406,6 +416,34 @@ mod tests {
                 let _ = Msg::decode(k, &bytes);
             }
         }
+    }
+
+    #[test]
+    fn call_layout_and_method() {
+        let mut f = Vec::new();
+        Msg::Call { service: "ab", path: "/p", body: b"xyz", deadline_ms: 0x0102_0304, method: 2 }.encode(9, &mut f);
+        assert_eq!(&f[HEADER_LEN..], &[4, 3, 2, 1, 2, 2, b'a', b'b', 2, 0, b'/', b'p', b'x', b'y', b'z']);
+        match Msg::decode(KIND_CALL, &f[HEADER_LEN..]).unwrap() {
+            Msg::Call { service, path, body, deadline_ms, method } => {
+                assert_eq!((service, path, body, deadline_ms, method), ("ab", "/p", &b"xyz"[..], 0x0102_0304, 2));
+            }
+            m => panic!("{m:?}"),
+        }
+    }
+
+    #[test]
+    fn default_cap_admits_the_largest_blob() {
+        let blob = vec![7u8; crate::bundle::MAX_BLOB_BYTES];
+        let mut f = Vec::new();
+        Msg::Blob { hash: [1; 32], bytes: &blob }.encode(3, &mut f);
+        let mut d = FrameDecoder::default();
+        d.feed(&f);
+        let fr = d.next().unwrap().unwrap();
+        assert_eq!(fr.payload.len(), 32 + blob.len());
+        // One byte over the cap is refused.
+        let mut d = FrameDecoder::default();
+        d.feed(&(DEFAULT_MAX_FRAME as u32 + 1).to_le_bytes());
+        assert!(matches!(d.next(), Err(WireError::FrameTooLarge { .. })));
     }
 
     #[test]

@@ -608,11 +608,18 @@ unsafe fn run_job(f: *mut Fiber, job: &Job) -> Outcome {
 /// The fiber must not be running an invocation (its scratch is not borrowed).
 unsafe fn reset_scratch(f: *mut Fiber) {
     let sc = &mut *(*f).scratch.get();
-    let (lo, hi) = (sc.stack_lo, sc.stack_hi);
+    let (lo, hi, published, running) = (sc.stack_lo, sc.stack_hi, sc.published(), sc.running());
     *sc = Scratch::new(&(*f).preempt);
+    sc.bind(published, running);
     sc.stack_lo = lo;
     sc.stack_hi = hi;
+    // Back to the fiber's own word (a JIT invocation re-points it at its `VmCtx`).
+    (*f).preempt_word = &(*f).preempt;
 }
+
+/// Native stack kept committed when a fiber's stack is trimmed after a deep run (the fiber is then suspended at
+/// the end of its job loop, a few hundred bytes below the top).
+const STACK_KEEP: usize = 64 << 10;
 
 // ------------------------------------------------------------------------------------------------------------------
 // Scheduler
@@ -891,10 +898,13 @@ impl Shard {
             node: &*self.node,
             shard: self.idx,
         }));
-        // SAFETY: `f` was just allocated; fix up self-references now that its address is stable.
+        // SAFETY: `f` was just allocated; fix up self-references now that its address is stable. The shard's
+        // `running_word` outlives the fiber (`ShardShared` is shared with the node).
         unsafe {
             (*f).preempt_word = &(*f).preempt;
-            *(*f).scratch.get() = Scratch::new(&(*f).preempt);
+            let sc = &mut *(*f).scratch.get();
+            *sc = Scratch::new(&(*f).preempt);
+            sc.bind(ptr::addr_of_mut!((*f).preempt_word), &self.me.running_word);
         }
         self.fibers.push(f);
         self.me.stats.fibers.store(self.fibers.len() as u64, Relaxed);
@@ -999,6 +1009,15 @@ impl Shard {
                 self.instance_done(job.inst_idx);
             }
             Outcome::Trap(t) | Outcome::InitTrap(t) => {
+                if t == Trap::StackOverflow {
+                    // JIT frames live on the fiber stack: give back what the runaway recursion committed.
+                    // SAFETY: the fiber is suspended at the end of its job loop, far above `STACK_KEEP`.
+                    unsafe {
+                        if let Some(c) = &(*f).coro {
+                            c.stack().trim(STACK_KEEP);
+                        }
+                    }
+                }
                 let now = mono_ns();
                 bump(&svc.st(self.idx).traps, 1);
                 bump(&svc.st(self.idx).errors, 1);

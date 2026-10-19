@@ -7,6 +7,8 @@
 //! The `#[ignore]`d `measure_*` tests print the numbers of docs/NODE.md (run them with `--release -- --ignored
 //! --nocapture --test-threads 1`).
 
+mod common;
+
 use k10_node::demo;
 use k10_node::http::{self, Client};
 use std::collections::BTreeMap;
@@ -408,6 +410,42 @@ fn three_nodes_join_apply_route_and_call() {
     for n in &nodes {
         assert!(n.log().contains("fetched desired state") || n.log().contains("announced"), "{}", n.log());
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The Ten examples (compiled by `k10s apply`) on 3 nodes: every service answers through every node's ingress
+/// (locally or forwarded, methods and bodies preserved), `chain` → `echo` works wherever the two are placed, and the
+/// single-replica `todo` / `counter` keep one state whatever the ingress.
+#[test]
+fn ten_examples_on_three_nodes() {
+    let (dir, nodes) = start_cluster("examples", 3, &Opts::default());
+    let out = apply(&dir, &nodes[0], &common::examples_manifest());
+    assert!(out.contains("\"version\":1"), "{out}");
+    wait_applied(&nodes, 1, Duration::from_secs(30));
+    let places: Vec<_> = nodes.iter().map(|n| placement(&n.status())).collect();
+    assert!(places.iter().all(|p| *p == places[0]), "placements differ: {places:?}");
+    let mut hosts: Vec<&String> = places[0].values().flatten().collect();
+    hosts.sort();
+    hosts.dedup();
+    assert!(hosts.len() >= 2, "8 services on one node out of 3: {:?}", places[0]);
+    for n in &nodes {
+        common::check_stateless(&n.http);
+    }
+    let mut last = 0;
+    for n in &nodes {
+        let id = common::check_todo(&n.http);
+        assert!(id > last, "one todo store: ids {last} then {id}");
+        last = id;
+    }
+    let mut want = 1;
+    for _ in 0..2 {
+        for n in &nodes {
+            assert_eq!(common::counter_next(&n.http), want, "via {}", n.name);
+            want += 1;
+        }
+    }
+    let forwarded: i64 = nodes.iter().map(|n| cluster_num(&n.status(), "served_for_peers").unwrap()).sum();
+    assert!(forwarded > 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

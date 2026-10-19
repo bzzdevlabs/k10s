@@ -1,6 +1,7 @@
 //! Node startup/shutdown, shared state, `apply` and persistence of the applied bundle.
 
 use crate::exec::{Backend, InterpBackend};
+use crate::jit::JitBackend;
 use crate::http::{self, Limits};
 use crate::kv::{KvConfig, KvStore};
 use crate::logs::Logs;
@@ -28,9 +29,36 @@ pub enum SnapshotPolicy {
     All,
 }
 
+/// Which executor runs service code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackendKind {
+    /// `k10-jit` machine code (the default).
+    Jit,
+    /// The `k10_ir` reference interpreter.
     Interp,
+}
+
+impl BackendKind {
+    pub fn parse(s: &str) -> Option<BackendKind> {
+        match s {
+            "jit" => Some(BackendKind::Jit),
+            "interp" => Some(BackendKind::Interp),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            BackendKind::Jit => "jit",
+            BackendKind::Interp => "interp",
+        }
+    }
+
+    /// The default backend: `K10S_BACKEND` (`jit` | `interp`) if set and valid, else [`BackendKind::Jit`]. The test
+    /// suites run against both backends through this variable (`K10S_BACKEND=interp cargo test`).
+    pub fn from_env() -> BackendKind {
+        std::env::var("K10S_BACKEND").ok().and_then(|v| BackendKind::parse(v.trim())).unwrap_or(BackendKind::Jit)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -41,6 +69,7 @@ pub struct NodeConfig {
     /// Persistent state (KV logs, last applied bundle). `None` = memory only.
     pub data_dir: Option<PathBuf>,
     pub shards: usize,
+    /// Default: [`BackendKind::from_env`] (JIT unless `K10S_BACKEND=interp`).
     pub backend: BackendKind,
     /// Cap on the address space handed to instance slots (sum of `S + 4096` over live instances).
     pub mem_limit: u64,
@@ -62,7 +91,8 @@ pub struct NodeConfig {
     pub max_calls_per_invocation: u32,
     /// Max concurrently running invocations (coroutines) per shard; more wait in a backlog.
     pub max_fibers: usize,
-    /// Usable coroutine stack size.
+    /// Usable coroutine stack size (`MAP_NORESERVE`: only touched pages cost memory). JIT frames live on it: the
+    /// recursion budget of JIT code is `stack_size - jit::HOST_RESERVE` (minus the runtime's own frames).
     pub stack_size: usize,
     pub snapshots: SnapshotPolicy,
     /// Snapshots at least this large are mapped copy-on-write (shared pages, one `mmap` per instance, 2 VMAs);
@@ -94,7 +124,7 @@ impl Default for NodeConfig {
             http: "127.0.0.1:8080".parse().unwrap(),
             data_dir: None,
             shards: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
-            backend: BackendKind::Interp,
+            backend: BackendKind::from_env(),
             mem_limit: sys::phys_mem_bytes(),
             time_slice: Duration::from_millis(2),
             tick: Duration::from_millis(1),
@@ -106,7 +136,7 @@ impl Default for NodeConfig {
             max_call_depth: 32,
             max_calls_per_invocation: 10_000,
             max_fibers: 1024,
-            stack_size: 256 << 10,
+            stack_size: 1 << 20,
             snapshots: SnapshotPolicy::Fresh,
             snapshot_map_min: 64 << 10,
             kv: KvConfig::default(),
@@ -441,6 +471,15 @@ impl Node {
         sys::ignore_sigpipe();
         let shards_n = cfg.shards.max(1);
         let backend: Arc<dyn Backend> = match cfg.backend {
+            BackendKind::Jit => {
+                if cfg.stack_size < 2 * crate::jit::HOST_RESERVE {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("stack_size must be at least {} KiB with the JIT backend", (2 * crate::jit::HOST_RESERVE) >> 10),
+                    ));
+                }
+                Arc::new(JitBackend::new())
+            }
             BackendKind::Interp => Arc::new(InterpBackend::default()),
         };
         if let Some(d) = &cfg.data_dir {

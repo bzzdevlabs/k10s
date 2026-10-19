@@ -150,6 +150,7 @@ pub fn status_json(node: &NodeShared) -> String {
     let services: Vec<String> = names.iter().map(|n| svc_json(&table.by_name[*n], now)).collect();
     let m = &node.mem;
     let kv = node.kv.stats();
+    let code = node.backend.stats();
     let per_shard: Vec<String> = node
         .shards
         .iter()
@@ -167,6 +168,7 @@ pub fn status_json(node: &NodeShared) -> String {
     format!(
         concat!(
             "{{\"node\":{},\"version\":\"{}\",\"backend\":\"{}\",\"shards\":{},\"uptime_s\":{:.3},\"http\":\"{}\",",
+            "\"code\":{{\"modules\":{},\"code_bytes\":{},\"exec_bytes\":{},\"prepared\":{},\"prepare_ms_total\":{:.3}}},",
             "\"manifest\":{{\"version\":{},\"hash\":\"{}\"}},",
             "\"services\":[{}],",
             "\"memory\":{{\"rss_bytes\":{},\"slots_used\":{},\"slot_bytes\":{},\"reserved_bytes\":{},",
@@ -186,6 +188,11 @@ pub fn status_json(node: &NodeShared) -> String {
         node.shards.len(),
         (now - node.started_ns) as f64 / 1e9,
         node.http_addr.get().map(|a| a.to_string()).unwrap_or_default(),
+        code.modules,
+        code.code_bytes,
+        code.exec_bytes,
+        code.prepared,
+        code.prepare_ns as f64 / 1e6,
         table.version,
         k10_mesh::sha256::to_hex(&table.manifest_hash),
         services.join(","),
@@ -286,6 +293,9 @@ pub fn metrics(node: &NodeShared) -> String {
     gauge(&mut o, "k10s_slot_bytes", "gauge", "Address space of slots in use", node.mem.slot_bytes_used.load(Relaxed));
     gauge(&mut o, "k10s_rss_bytes", "gauge", "Resident set size of the node process", sys::rss_bytes());
     gauge(&mut o, "k10s_manifest_version", "gauge", "Applied manifest version", table.version);
+    let code = node.backend.stats();
+    gauge(&mut o, "k10s_code_modules", "gauge", "Prepared modules alive", code.modules);
+    gauge(&mut o, "k10s_code_exec_bytes", "gauge", "Executable memory of prepared modules", code.exec_bytes);
     let kv = node.kv.stats();
     gauge(&mut o, "k10s_kv_keys", "gauge", "Keys in the KV store", kv.keys as u64);
     gauge(&mut o, "k10s_kv_log_bytes", "gauge", "Size of the KV logs", kv.log_bytes);

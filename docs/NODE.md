@@ -48,7 +48,7 @@ placement and peer links on top of it.
     snapshots for `fresh` services only, map only large snapshots.
 
 ## Execution
-- **Fibers**: an invocation runs on a pooled coroutine (256 KiB `MAP_NORESERVE` stack + guard page; idle instances
+- **Fibers**: an invocation runs on a pooled coroutine (1 MiB `MAP_NORESERVE` stack + guard page; idle instances
   own no stack). The context switch is a naked function: push rbx/rbp/r12–r15, swap `rsp`, pop (21 ns resume+suspend
   round trip). MXCSR/x87 control words are not switched (nothing running on fibers changes them). A fiber runs jobs
   in a loop; it suspends with a *syscall*: `Done`, `Yield` (preempted) or `Call`. Panics in host code are caught per
@@ -80,8 +80,11 @@ placement and peer links on top of it.
   requests fail fast.
 - **Executors** (`exec.rs`): `Backend::prepare(module, info, imports) -> Arc<dyn Code>` (once per module, shared by
   every instance on every shard); `Code::invoke(scratch, mem, mem_log2, host_ctx, func)` runs on the current
-  (fiber) stack. The interpreter backend wraps `k10_ir::Interp` (`safepoint_interval = 16`, `max_call_depth`
-  10 000, 1 Mi value slots). See "JIT backend" below.
+  (fiber) stack. Two backends: the JIT (`k10-jit` machine code, the default; see "JIT backend" below) and the
+  reference interpreter (`k10_ir::Interp`, `safepoint_interval = 16`, `max_call_depth` 10 000, 1 Mi value slots).
+  `NodeConfig::backend` / `k10s node --backend jit|interp` select one; the default is `K10S_BACKEND` if set, else jit
+  (the test suites run against both: `K10S_BACKEND=interp cargo test`). `/_k10s/status` reports `"backend"` and
+  `"code"` (prepared modules alive, code bytes, executable bytes mapped, modules prepared and time spent).
 
 ## Host API
 docs/HOSTAPI.md, implemented once in `host.rs` (`HostCtx::dispatch(HostFn, args, mem)`); the interpreter adapter is
@@ -139,6 +142,10 @@ status ≥ 0, −1 unknown service, −2 unavailable (crash backoff with nothing
 - Versions: manifest `version = 0` means "current + 1" (what `k10s apply` sends); a lower version is rejected (409),
   the same version with the same hash is a no-op. Errors: 400 (bad bundle), 422 (invalid module/manifest).
 - The applied bundle is written to `DATA/bundle.k10b` (tmp + fsync + rename + dir fsync) and re-applied at start.
+- CLI: `k10s apply MANIFEST` compiles `code = "x.ten"` sources with `k10-lang` (rendered diagnostics and exit code 1
+  on errors, nothing is sent) and sends precompiled `.k10` blobs as they are. `k10s build FILE.ten [-o FILE.k10]`
+  compiles only. `k10s run FILE.ten [--path /p?q=1] [--method M] [--body STR|@FILE] [--backend jit|interp]` runs one
+  request in-process (a one-shard node on a loopback port, memory-only KV, service logs on stderr): the dev loop.
 
 ## Storage
 - `kv_*`: per service name (survives redeployments), in-memory `HashMap` + append-only log `DATA/kv/<svc>.log`
@@ -175,18 +182,65 @@ over loopback HTTP) 5.6k / 21k / 26k rps, 6.9 MiB RSS per process. HTTP numbers 
 (~2.5 cores) and the shared machine. Reproduce: `cargo run --release -p k10-node --example measure -- prims|invoke|
 scale|create|density MODE N|idle N`, and `examples/demo_modules` + `k10s node` + `bench/bin/loadgen`.
 
-## JIT backend (plug-in points)
-Implement `exec::Backend`/`exec::Code` (`NodeConfig::backend` selects it):
-- `prepare` = `k10_jit::compile(module)` (+ a per-module `host_fns` table: one `extern "C" fn(*mut VmCtx, a0..a4)`
-  adapter per import, each calling `HostCtx::dispatch(HostFn, args, mem)` with `user` = `*mut HostCtx` and
-  `mem` = `[mem_base, mem_base + S + 8)`; a trap result goes to `VmCtx.trap_request`).
-- `invoke` builds the fiber's `VmCtx` in `Scratch::jit` (stable address for the fiber's lifetime), sets
-  `real_stack_limit = Scratch::stack_lo + HOST_RESERVE` (use `NodeConfig::stack_size` ≥ 1 MiB for JIT frames), calls
-  `Scratch::set_preempt_word(&vmctx.stack_limit)` so the ticker's store lands where JIT safepoints look (the shard
-  publishes the word at every resume; the first slice of a fiber's first JIT invocation may still be polled through
-  the own word), and the interrupt adapter restores `stack_limit` then calls `HostCtx::interrupt()` (which may
-  switch coroutines and returns `Err(Interrupted)` when the CPU budget is exhausted).
-- The ticker writes `stack_limit` concurrently: Rust code must access the `VmCtx` through raw pointers.
+## JIT backend
+`jit.rs` implements `exec::Backend`/`exec::Code` with `k10_jit` (docs/JIT-ABI.md).
+- **Prepare** (apply thread): `k10_jit::compile(module)` → `CompiledModule` (W^X mapping, `Send + Sync`) shared by
+  every instance and shard through `Arc<dyn Code>`, plus the module's host-function table: one `extern "C"` adapter
+  per resolved import (17 monomorphic adapters, one per host function). Unchanged modules are reused by code hash
+  across applies; a replaced module is unmapped when the last `Arc` drops, i.e. once the retired version's in-flight
+  and queued requests are done and its instances destroyed (tests check the anonymous executable mappings in
+  `/proc/self/maps` against the `"code"` counters).
+- **Invoke**: the `VmCtx` lives in the fiber's `Scratch::jit` (128 bytes, stable for the fiber's lifetime) and is
+  re-initialized field by field through raw pointers at every invocation (`stack_limit` with an atomic store, since
+  the ticker may write it concurrently): `mem_base`/`mem_mask` = the slot (`S + 8` bytes addressable; slots have a
+  4 KiB tail), `trap_request = 0`, `user` = a per-invocation record (the `HostCtx` and the memory range) on the
+  invoking frame.
+- **Stacks**: JIT frames use the fiber's native stack. `real_stack_limit = Scratch::stack_lo + HOST_RESERVE`
+  (128 KiB): the safepoint at every function entry guarantees that a host function or the interrupt hook entered from
+  the deepest JIT frame still has ≥ 128 KiB, so runaway recursion traps `StackOverflow` and never reaches the guard
+  page (tested with host calls and preemption at every depth down to the limit). With the default 1 MiB stacks a small
+  function recurses 20–30k deep (TIR requires ≥ 1000). After a `StackOverflow` trap the fiber's stack is trimmed back
+  to 64 KiB (`madvise`).
+- **Host calls**: each adapter rebuilds the memory slice from the invocation record and calls the same
+  `HostCtx::dispatch` as the interpreter; `Err(trap)` becomes `VmCtx.trap_request` (the JIT raises it when the
+  adapter returns). Panics are caught in the adapter (they must not unwind through JIT frames), stashed, and re-raised
+  after `invoke` returns, so they surface as internal errors exactly like interpreter panics. `call` and the
+  interrupt hook may switch coroutines with JIT frames on the suspended stack (allowed by the ABI).
+- **Preemption**: the shard publishes a per-fiber preemption word to the ticker at every resume; a JIT invocation
+  points it at `VmCtx.stack_limit` (`Scratch::set_preempt_word`, which also re-publishes it immediately for the running
+  slice). The ticker's `usize::MAX` store makes the next safepoint (function entry or loop back-edge) call the
+  interrupt adapter, which restores `stack_limit` and runs `HostCtx::interrupt`: the same CPU-budget check
+  (`Interrupted`) and yield as the interpreter path. A store that lands just after a restore costs one spurious
+  yield; one lost to a re-initialization is re-sent at the next tick.
+- JIT assumptions the runtime honours: `S ≥ 2^max(12, min_mem_log2)` (checked at apply, re-checked by `invoke`),
+  `trap_request = 0` at entry, MXCSR/x87 control and the direction flag at their SysV defaults (nothing on fibers
+  changes them; coroutine switches do not touch them). Code is compiled for the node's own CPU (`CpuFeatures::detect`),
+  so every cluster member compiles the blobs it fetches itself.
+
+### JIT measurements (release, i7-7820HQ 4C/8T, 8 shards; other agents running: load 3–8, numbers are noisy)
+loadgen (bench/bin/loadgen, closed loop, 10 s after 2 s warm-up) against `k10s node --backend jit|interp` with the
+Ten examples, and the Go reference workloads (bench/bin/{echo,compute}) as plain processes on the same machine.
+rps at c = 1 / 16 / 64 (p50 at c = 1):
+
+| workload | JIT | interp | Go process |
+|---|---|---|---|
+| echo GET | 28.6k (30 µs) / 112k / 158k | 21.1k (42 µs) / 108k / 166k | 17.8k (51 µs) / 80k / 104k |
+| compute `?n=1000` | 1.03k (0.92 ms) / 3.6k / 3.9k | 51 (16.8 ms) / 210 / 193 | 2.9k (0.34 ms) / 12.7k / 13.5k |
+| compute `?n=100000` | 10.3 (94 ms) / 39 / 38 | 0.54 (1.74 s) / 1.85 / 1.37 ¹ | 41.9 (23 ms) / 161 / 159 |
+| nbody `?n=1000` | 2.07k (0.44 ms) / 9.6k / 9.4k | 340 (2.5 ms) / 1.58k / 1.36k | — |
+
+¹ 12 requests hit the 30 s request deadline at c = 64. compute is byte-identical to the Go service; Go's SHA-256 is
+hand-written assembly, Ten's is portable code on 64-bit words (the JIT is 18× the interpreter, ≈ 4× slower than Go).
+
+| what | result |
+|---|---|
+| apply → all 8 examples serving (fresh node; `k10s apply` process included; median of 7) | precompiled `.k10`: 5.1 ms (interp 4.9); `.ten` compiled by the CLI: 8.2 ms (interp 7.9); JIT compilation of the 8 modules: 0.7–0.8 ms in total |
+| JIT compile time / machine code / executable mapping per module | hello 19 µs / 288 B / 4 KiB, echo 35 µs / 520 B / 4 KiB, chain 48 µs / 1.9 KiB / 4 KiB, counter 56 µs / 2.2 KiB / 4 KiB, compute 151 µs / 5.3 KiB / 8 KiB, sort 113 µs / 5.6 KiB / 8 KiB, todo 176 µs / 7.4 KiB / 8 KiB, nbody 134 µs / 8.4 KiB / 12 KiB (TIR: 52 B … 2.7 KiB) |
+| instance creation (JIT / interp): empty module / data + 4 KiB `init()` / snapshot copied | 1.5 / 4.1 / 3.6 µs vs 1.2 / 4.4 / 3.5 µs |
+| invocation through the scheduler (JIT / interp): empty `handle` / echo / same-shard `call` | 265 / 308 / 394 ns vs 251 / 356 / 469 ns |
+| recursion depth of a one-line recursive function, 1 MiB fiber stacks | 20–30k frames (interpreter: 10 000) |
+Reproduce: `K10S_BACKEND=jit|interp cargo run --release -p k10-node --example measure -- create|invoke`, and loadgen
+against `k10s node --backend …` with the examples applied.
 
 ## Cluster mode
 No control plane: membership and failure detection are SWIM gossip (`k10_mesh::Gossip`, UDP), the desired state (a
@@ -246,8 +300,7 @@ closed; links to a member that Left stay open until the leaver closes them (it s
 mesh inbox. Candidates: (1) placed replicas that are Alive and not backed off — fewest outstanding requests on the
 link, round-robin on ties; (2) the service's rendezvous ranking (Alive members, at most `replicas + 3` attempts in
 total); if this node comes up in the ranking it runs the service itself (`NodeShared::serve_local`); (3) Suspect
-replicas. `Call` frames carry the remaining deadline in ms; the method travels as a one-byte prefix of the path
-(`0x10 + req_method`; the wire `Call` has no method field). The peer runs the call locally whatever its own
+replicas. `Call` frames carry the remaining deadline in ms and the request method (`req_method` code). The peer runs the call locally whatever its own
 placement says — a request takes at most one hop — and answers `CallResult` (or `NOT_HERE` = −100, a peer-protocol
 status that never reaches services, if the service is unknown there or the node is leaving).
 **Retry semantics (at most once):** a request goes to the next candidate only when it is known not to have run — its
@@ -281,7 +334,7 @@ while it is down, restart with the same data directory → same id, higher incar
 and a join under load (4 → 3 → 4 nodes): 0 failed requests, services whose placement did not change keep their
 runtime; re-applies under load on 5 nodes (0 failed requests) and two concurrent applies on two nodes (one winner
 everywhere); the origin of a desired state crashes and a node joining later fetches it from the other members.
-Unit tests: store (persist/reload/corruption/gc/pinning, node id), ranking vs `place`, method tags; node test:
+Unit tests: store (persist/reload/corruption/gc/pinning, node id), ranking vs `place`; node test:
 `apply_cluster` ordering and placement-only updates. `cargo test -p k10s --test cluster` takes ≈ 2–4 s.
 
 ### Cluster measurements (release, localhost, i7-7820HQ 4C/8T; other agents compiling: load 3.5–12, so numbers are noisy)
@@ -317,7 +370,9 @@ Reproduce: `cargo test --release -p k10s --test cluster -- --ignored --nocapture
 - A host function that blocks (none does today except brief KV mutexes) would block its shard.
 - CPU accounting uses wall time while a fiber runs (an OS-level preemption of the shard thread is charged to the
   invocation); the budget is enforced with ≈ one-slice precision.
-- Coroutine stacks are 256 KiB with a guard page: a runaway *native* recursion in host code would SIGSEGV the process
-  (TIR recursion is bounded by the executor).
+- Coroutine stacks are 1 MiB (`MAP_NORESERVE`) with a guard page: a runaway *native* recursion in host code would
+  SIGSEGV the process (TIR recursion is bounded by the executors: JIT frames by the stack limit, the interpreter by its
+  own stacks). Stack pages a deep (but not overflowing) JIT recursion touched stay committed until the fiber's stack
+  is trimmed (after a `StackOverflow` trap) or released (idle fibers beyond 64 per shard): up to 1 MiB per busy fiber.
 - `k10_ir::InterpStack` cannot be shrunk; a fiber's interpreter buffers are dropped only after a `StackOverflow`
   trap or when the fiber's stack is trimmed.

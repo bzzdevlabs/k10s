@@ -15,24 +15,6 @@ use std::sync::{Arc, Mutex};
 /// not caught up with the desired state yet — or the node is leaving). Never surfaces to services.
 pub const STATUS_NOT_HERE: i32 = -100;
 
-/// `Call` frames have no method field: the node prefixes the path with one byte `0x10 + req_method code`
-/// (untagged paths are POST). Paths of ingress requests and calls never start with a control character.
-const METHOD_TAG: u8 = 0x10;
-
-pub fn tag_path(method: i64, path: &[u8]) -> String {
-    let mut s = String::with_capacity(path.len() + 1);
-    s.push((METHOD_TAG + method.clamp(0, 4) as u8) as char);
-    s.push_str(&String::from_utf8_lossy(path));
-    s
-}
-
-pub fn untag_path(path: &str) -> (i64, &str) {
-    match path.as_bytes().first() {
-        Some(&b) if (METHOD_TAG..=METHOD_TAG + 4).contains(&b) => ((b - METHOD_TAG) as i64, &path[1..]),
-        _ => (1, path),
-    }
-}
-
 /// Work for the mesh thread.
 pub(crate) enum MeshMsg {
     /// A shard hands over an invocation of a service placed elsewhere.
@@ -136,21 +118,5 @@ impl Drop for PeerReply {
                 body: b"node stopping".to_vec(),
             });
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn method_tags_roundtrip() {
-        for m in 0..=4i64 {
-            let t = tag_path(m, b"/a?x=1");
-            assert_eq!(untag_path(&t), (m, "/a?x=1"));
-        }
-        assert_eq!(untag_path("/plain"), (1, "/plain"));
-        assert_eq!(untag_path(""), (1, ""));
-        assert_eq!(untag_path(&tag_path(0, b"")), (0, ""));
     }
 }

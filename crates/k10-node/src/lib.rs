@@ -6,9 +6,9 @@
 //! commit gives services durable state.
 //!
 //! Entry points: [`Node::start`] with a [`NodeConfig`], then [`Node::apply`] (or `POST /_k10s/apply`).
-//! Extension points for later work:
-//! * JIT backend: implement [`exec::Backend`] / [`exec::Code`] (see `exec.rs` docs), dispatch host calls through
-//!   [`host::HostCtx::dispatch`], preemption through [`host::HostCtx::interrupt`].
+//! Executors ([`exec::Backend`]): the JIT ([`jit::JitBackend`], `k10-jit` machine code, default) and the reference
+//! interpreter ([`exec::InterpBackend`]); both dispatch host calls through [`host::HostCtx::dispatch`] and preempt
+//! through [`host::HostCtx::interrupt`]. `NodeConfig::backend` selects one (default: `K10S_BACKEND`, else JIT).
 //! * Cluster mode ([`cluster`]): gossip membership, desired state spread by gossip, deterministic placement, peer
 //!   links; services placed elsewhere are [`service::Placement::Remote`] and go through a [`router::RemoteRouter`].
 
@@ -19,6 +19,7 @@ pub mod demo;
 pub mod exec;
 pub mod host;
 pub mod http;
+pub mod jit;
 pub mod kv;
 pub mod logs;
 pub mod node;

@@ -84,9 +84,9 @@ addr    = 4 ip[4] port:u16 | 6 ip[16] port:u16;  raddr = 0 port:u16 (same IP as 
 
 `frame = len:u32 LE | kind:u8 | request_id:u64 LE | payload`, with `len = 9 + payload`.
 Messages: Hello{member}, GetManifest{version}/Manifest{bytes}, GetBlob{hash}/Blob{hash,bytes}/BlobMissing{hash},
-Call{service,path,body,deadline_ms}/CallResult{status,body}, Ping/Pong. Payload layouts are documented in
+Call{service,path,body,deadline_ms,method}/CallResult{status,body}, Ping/Pong. Payload layouts are documented in
 `src/wire.rs`. `FrameDecoder` takes partial input (`feed`, or `spare`/`commit` to read in place) and caps the
-frame size. Errors are sticky, and the decoder never allocates from a claimed length. `encode_header` allows
+frame size (default: the largest bundle blob plus headers). Errors are sticky, and the decoder never allocates from a claimed length. `encode_header` allows
 vectored writes of large blobs.
 
 ## Manifest

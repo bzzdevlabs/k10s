@@ -31,7 +31,7 @@
 //! one after a failure, a hash mismatch or 10 s without progress) — verified (`sha256`), kept in the store, and handed
 //! to the applier thread, which persists and applies it.
 
-use super::router::{tag_path, untag_path, MeshInbox, MeshMsg, PeerReply, STATUS_NOT_HERE};
+use super::router::{MeshInbox, MeshMsg, PeerReply, STATUS_NOT_HERE};
 use super::store::Stored;
 use super::{ClusterShared, LinkInfo, MeshView};
 use crate::host::{Request, CALL_TIMEOUT, CALL_UNAVAILABLE};
@@ -54,8 +54,6 @@ const TOK_INBOX: u64 = 3;
 const TOK_LINK: u64 = 1 << 63;
 
 const READ_CHUNK: usize = 64 << 10;
-/// A blob frame: blob + hash + header, with room to spare.
-const MAX_FRAME: usize = k10_mesh::bundle::MAX_BLOB_BYTES + 4096;
 /// Pending calls are dropped this long after their deadline (the shard has answered −3 by then).
 const DEADLINE_GRACE_NS: u64 = 100_000_000;
 const BACKOFF_MIN_MS: u64 = 200;
@@ -134,7 +132,7 @@ enum In {
     GetBlob([u8; 32]),
     Blob([u8; 32], Vec<u8>),
     BlobMissing,
-    Call { service: String, path: String, body: Vec<u8>, deadline_ms: u32 },
+    Call { service: String, path: String, body: Vec<u8>, deadline_ms: u32, method: u8 },
     CallResult { status: i32, body: Vec<u8> },
     Ping,
     Pong,
@@ -149,9 +147,13 @@ impl In {
             Msg::GetBlob { hash } => In::GetBlob(hash),
             Msg::Blob { hash, bytes } => In::Blob(hash, bytes.to_vec()),
             Msg::BlobMissing { .. } => In::BlobMissing,
-            Msg::Call { service, path, body, deadline_ms } => {
-                In::Call { service: service.to_string(), path: path.to_string(), body: body.to_vec(), deadline_ms }
-            }
+            Msg::Call { service, path, body, deadline_ms, method } => In::Call {
+                service: service.to_string(),
+                path: path.to_string(),
+                body: body.to_vec(),
+                deadline_ms,
+                method,
+            },
             Msg::CallResult { status, body } => In::CallResult { status, body: body.to_vec() },
             Msg::Ping => In::Ping,
             Msg::Pong => In::Pong,
@@ -693,8 +695,10 @@ impl Mesh {
                     let id = self.new_id();
                     let now = mono_ns();
                     let deadline_ms = (c.deadline.saturating_sub(now) / 1_000_000).clamp(1, u32::MAX as u64) as u32;
-                    let path = tag_path(c.req.method, &c.req.path);
-                    let start = self.queue(li, &Msg::Call { service: &c.service, path: &path, body: &c.req.body, deadline_ms }, id);
+                    let path = String::from_utf8_lossy(&c.req.path);
+                    let method = c.req.method.clamp(0, 4) as u8;
+                    let call = Msg::Call { service: &c.service, path: &path, body: &c.req.body, deadline_ms, method };
+                    let start = self.queue(li, &call, id);
                     let l = self.links[li as usize].as_mut().unwrap();
                     l.outstanding += 1;
                     c.link = li;
@@ -793,14 +797,12 @@ impl Mesh {
     }
 
     /// Serves a call forwarded by a peer.
-    fn serve_call(&mut self, li: u32, id: u64, service: String, path: String, body: Vec<u8>, deadline_ms: u32) {
+    fn serve_call(&mut self, li: u32, id: u64, service: String, req: Request, deadline_ms: u32) {
         if !self.cs.serving() {
             self.queue(li, &Msg::CallResult { status: STATUS_NOT_HERE, body: b"node leaving" }, id);
             return;
         }
         self.cs.stats.served_for_peers.fetch_add(1, Relaxed);
-        let (method, path) = untag_path(&path);
-        let req = Request { method, path: path.as_bytes().to_vec(), body };
         let deadline = mono_ns() + deadline_ms.max(1) as u64 * 1_000_000;
         let gen = self.links[li as usize].as_ref().unwrap().gen;
         let guard = PeerReply { inbox: self.inbox.clone(), link: li, gen, id, sent: false };
@@ -860,7 +862,7 @@ impl Mesh {
             since: mono_ns(),
             hello_rx: false,
             retiring: false,
-            dec: FrameDecoder::new(MAX_FRAME),
+            dec: FrameDecoder::default(),
             wbuf: Vec::new(),
             wpos: 0,
             queued: 0,
@@ -1075,7 +1077,9 @@ impl Mesh {
                 }
             },
             m @ (In::Manifest(_) | In::Blob(..) | In::BlobMissing) => self.on_fetch_reply(id, m),
-            In::Call { service, path, body, deadline_ms } => self.serve_call(li, id, service, path, body, deadline_ms),
+            In::Call { service, path, body, deadline_ms, method } => {
+                self.serve_call(li, id, service, Request { method: method.min(4) as i64, path: path.into_bytes(), body }, deadline_ms)
+            }
             In::CallResult { status, body } => self.on_call_result(id, status, body),
             In::Ping => {
                 self.queue(li, &Msg::Pong, id);

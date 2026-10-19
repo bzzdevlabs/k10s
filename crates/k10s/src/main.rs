@@ -1,39 +1,49 @@
 //! `k10s` — the single CLI/daemon binary.
 //!
 //! ```text
-//! k10s node   [--http ADDR] [--data DIR] [--shards N] [--backend interp] [--name NAME] [--mem SIZE]
+//! k10s node   [--http ADDR] [--data DIR] [--shards N] [--backend jit|interp] [--name NAME] [--mem SIZE]
 //!             [--snapshots fresh|all] [--idle-timeout SECS] [--idle-spin-us N] [--log-stderr] [--pin]
 //!             cluster mode (any of): [--gossip ADDR] [--rpc ADDR] [--join HOST:PORT[,…]] [--advertise HOST]
 //!             tuning: [--probe-ms N] [--suspicion-mult N] [--leave-grace-ms N]
 //! k10s apply  FILE.k10s [--node HOST:PORT]
+//! k10s build  FILE.ten [-o FILE.k10]
+//! k10s run    FILE.ten|FILE.k10 [--path /p?q=1] [--method GET|POST|PUT|DELETE] [--body STR|@FILE]
+//!             [--backend jit|interp] [--memory SIZE] [--config STR] [--cpu-ms N]
 //! k10s status [--node HOST:PORT] [--json]
 //! k10s logs   SERVICE [--node HOST:PORT]
 //! ```
-//! Argument parsing is hand-written (no dependencies beyond the workspace).
+//! Argument parsing is hand-written (no dependencies beyond the workspace). The default backend is `K10S_BACKEND`
+//! (`jit` | `interp`) if set, else the JIT.
 
 use k10_mesh::manifest::parse_text;
 use k10_mesh::sha256::sha256;
-use k10_mesh::{Bundle, Manifest};
+use k10_mesh::{Bundle, Manifest, ServiceSpec};
 use k10_node::cluster::{ClusterConfig, ClusterSetup};
 use k10_node::http;
 use k10_node::{BackendKind, Node, NodeConfig, SnapshotPolicy};
+use std::io::Write;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const USAGE: &str = "usage:
-  k10s node   [--http ADDR] [--data DIR] [--shards N] [--backend interp] [--name NAME] [--mem SIZE]
+  k10s node   [--http ADDR] [--data DIR] [--shards N] [--backend jit|interp] [--name NAME] [--mem SIZE]
               [--snapshots fresh|all] [--idle-timeout SECS] [--idle-spin-us N] [--log-stderr] [--pin]
               cluster mode (any of these flags turns it on):
               [--gossip ADDR] (UDP, default 0.0.0.0:7946)  [--rpc ADDR] (TCP, default 0.0.0.0:7947)
               [--join HOST:PORT,...] (gossip addresses of members)  [--advertise HOST] (IP given to peers)
               [--probe-ms N] (gossip probe period, 200)  [--suspicion-mult N] (4)  [--leave-grace-ms N] (1000)
-  k10s apply  FILE.k10s [--node HOST:PORT]
+  k10s apply  FILE.k10s [--node HOST:PORT]        (code = \"x.ten\" sources are compiled, \"x.k10\" sent as is)
+  k10s build  FILE.ten [-o FILE.k10]              (compile Ten to TIR)
+  k10s run    FILE.ten|FILE.k10 [--path /p?q=1] [--method GET|POST|PUT|DELETE] [--body STR|@FILE]
+              [--backend jit|interp] [--memory SIZE] [--config STR] [--cpu-ms N]
+              (runs one request in-process, no node needed: body on stdout, status and logs on stderr)
   k10s status [--node HOST:PORT] [--json]
   k10s logs   SERVICE [--node HOST:PORT]
 
-The default node address is 127.0.0.1:8080. In a cluster, `apply` and HTTP requests work on any node.";
+The default node address is 127.0.0.1:8080. In a cluster, `apply` and HTTP requests work on any node.
+The default backend is $K10S_BACKEND (jit|interp) if set, else jit.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -45,6 +55,8 @@ fn main() -> ExitCode {
     let r = match cmd.as_str() {
         "node" => cmd_node(rest),
         "apply" => cmd_apply(rest),
+        "build" => cmd_build(rest),
+        "run" => cmd_run(rest),
         "status" => cmd_status(rest),
         "logs" => cmd_logs(rest),
         "help" | "--help" | "-h" => {
@@ -75,7 +87,9 @@ impl Args {
         let mut i = 0;
         while i < args.len() {
             let a = &args[i];
-            if let Some(f) = a.strip_prefix("--") {
+            // `-o VALUE` (single-letter short flags take a value).
+            let short = a.strip_prefix('-').filter(|f| f.len() == 1 && f != &"-");
+            if let Some(f) = a.strip_prefix("--").or(short) {
                 if let Some((k, v)) = f.split_once('=') {
                     flags.push((k.to_string(), Some(v.to_string())));
                 } else if booleans.contains(&f) {
@@ -145,11 +159,7 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
     if let Some(n) = a.get("shards") {
         cfg.shards = n.parse().ok().filter(|n: &usize| (1..=1024).contains(n)).ok_or("invalid --shards")?;
     }
-    match a.get("backend").unwrap_or("interp") {
-        "interp" => cfg.backend = BackendKind::Interp,
-        "jit" => return Err("--backend jit: the JIT backend (k10-jit) is not available yet; use --backend interp".into()),
-        b => return Err(format!("unknown backend `{b}` (interp)")),
-    }
+    cfg.backend = backend_flag(&a)?;
     if let Some(n) = a.get("name") {
         cfg.name = n.to_string();
     }
@@ -176,6 +186,7 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
     // SAFETY: plain libc calls on a properly initialized sigset_t.
     unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) };
     let shards = cfg.shards;
+    let backend = cfg.backend;
     let data = cfg.data_dir.clone();
     let (node, cluster) = match cluster_cfg {
         None => (Node::start(cfg).map_err(|e| format!("cannot start node: {e}"))?, None),
@@ -189,10 +200,11 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
         }
     };
     eprintln!(
-        "k10s: node `{}` listening on http://{} ({} shards, backend interp, data {})",
+        "k10s: node `{}` listening on http://{} ({} shards, backend {}, data {})",
         node.shared().cfg.name,
         node.http_addr(),
         shards,
+        backend.name(),
         data.map(|d| d.display().to_string()).unwrap_or_else(|| "none (memory only)".into())
     );
     let mut sig: libc::c_int = 0;
@@ -289,13 +301,24 @@ fn signal_set() -> libc::sigset_t {
     }
 }
 
-/// Turns a manifest `code = "…"` entry into a TIR blob.
+/// `--backend jit|interp`, else [`BackendKind::from_env`].
+fn backend_flag(a: &Args) -> Result<BackendKind, String> {
+    match a.get("backend") {
+        None => match std::env::var("K10S_BACKEND") {
+            Ok(v) if BackendKind::parse(v.trim()).is_none() => Err(format!("K10S_BACKEND=`{v}`: unknown backend (jit|interp)")),
+            _ => Ok(BackendKind::from_env()),
+        },
+        Some(b) => BackendKind::parse(b).ok_or_else(|| format!("unknown backend `{b}` (jit|interp)")),
+    }
+}
+
+/// Turns a manifest `code = "…"` entry (or a `run` argument) into a TIR blob.
 ///
-/// * `*.k10` — precompiled TIR, checked locally (decode + validate) for early errors.
-/// * `*.ten` — Ten sources: HOOK for the Ten compiler (`k10-lang`), not available yet.
+/// * `*.ten` — Ten sources, compiled with `k10-lang` (diagnostics are printed to stderr).
+/// * anything else — precompiled TIR (`*.k10`), checked locally (decode + validate) for early errors.
 fn load_code(path: &Path) -> Result<Vec<u8>, String> {
     match path.extension().and_then(|e| e.to_str()) {
-        Some("ten") => compile_ten(path),
+        Some("ten") => compile_ten(path).map(|m| k10_ir::encode(&m)),
         _ => {
             let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
             let m = k10_ir::decode(&bytes).map_err(|e| format!("{}: not a TIR module: {e}", path.display()))?;
@@ -305,13 +328,136 @@ fn load_code(path: &Path) -> Result<Vec<u8>, String> {
     }
 }
 
-/// HOOK: compile a Ten source file to a TIR blob with `k10-lang` once it exists (`k10_lang::compile(src) ->
-/// Result<k10_ir::Module, _>`, then `k10_ir::encode`).
-fn compile_ten(path: &Path) -> Result<Vec<u8>, String> {
-    Err(format!(
-        "{}: compiling Ten sources needs the Ten compiler (k10-lang), which is not wired in yet; precompile to .k10",
-        path.display()
-    ))
+/// Compiles a Ten file (and its includes). On errors the rendered diagnostics go to stderr and the error is a
+/// one-line summary.
+fn compile_ten(path: &Path) -> Result<k10_ir::Module, String> {
+    let mut sources = k10_lang::Sources::new();
+    k10_lang::compile_file_with_sources(path, &mut sources).map_err(|diags| {
+        eprint!("{}", k10_lang::render_diagnostics(&diags, &sources));
+        let n = diags.len();
+        format!("could not compile `{}` ({n} error{})", path.display(), if n == 1 { "" } else { "s" })
+    })
+}
+
+fn cmd_build(args: &[String]) -> Result<(), String> {
+    let a = Args::parse(args, &[])?;
+    a.check_known(&["o", "output"])?;
+    let [file] = a.positional.as_slice() else { return Err("usage: k10s build FILE.ten [-o FILE.k10]".into()) };
+    let path = Path::new(file);
+    let out = match a.get("o").or(a.get("output")) {
+        Some(o) => PathBuf::from(o),
+        None => path.with_extension("k10"),
+    };
+    if out == path {
+        return Err(format!("refusing to overwrite the source `{file}` (use -o)"));
+    }
+    let m = compile_ten(path)?;
+    let bytes = k10_ir::encode(&m);
+    std::fs::write(&out, &bytes).map_err(|e| format!("{}: {e}", out.display()))?;
+    let exports: Vec<&str> = m.exports.iter().map(|e| e.name.as_str()).collect();
+    let imports: Vec<&str> = m.imports.iter().map(|i| i.name.as_str()).collect();
+    eprintln!(
+        "k10s: wrote {} ({} bytes: {} functions, exports [{}], imports [{}], min memory {})",
+        out.display(),
+        bytes.len(),
+        m.funcs.len(),
+        exports.join(", "),
+        imports.join(", "),
+        human_size(1u64 << m.min_mem_log2)
+    );
+    Ok(())
+}
+
+fn human_size(n: u64) -> String {
+    match n {
+        n if n >= 1 << 30 && n % (1 << 30) == 0 => format!("{}GiB", n >> 30),
+        n if n >= 1 << 20 && n % (1 << 20) == 0 => format!("{}MiB", n >> 20),
+        n if n >= 1 << 10 && n % (1 << 10) == 0 => format!("{}KiB", n >> 10),
+        n => format!("{n}B"),
+    }
+}
+
+/// `k10s run`: one request against a module, in-process (a one-shard node on a loopback ephemeral port, memory-only
+/// KV, service logs echoed to stderr). The response body goes to stdout; the status line to stderr. Fails (exit 1)
+/// when the invocation trapped or could not run.
+fn cmd_run(args: &[String]) -> Result<(), String> {
+    let a = Args::parse(args, &[])?;
+    a.check_known(&["path", "method", "body", "backend", "memory", "config", "cpu-ms"])?;
+    let usage = "usage: k10s run FILE.ten|FILE.k10 [--path /p?q=1] [--method GET|POST|PUT|DELETE] [--body STR|@FILE] \
+                 [--backend jit|interp] [--memory SIZE] [--config STR] [--cpu-ms N]";
+    let [file] = a.positional.as_slice() else { return Err(usage.into()) };
+    let blob = load_code(Path::new(file))?;
+    let m = k10_ir::decode(&blob).map_err(|e| format!("{file}: {e}"))?;
+    let method = match a.get("method").unwrap_or("GET").to_ascii_uppercase().as_str() {
+        "GET" => http::Method::Get,
+        "POST" => http::Method::Post,
+        "PUT" => http::Method::Put,
+        "DELETE" => http::Method::Delete,
+        "HEAD" => http::Method::Head,
+        _ => http::Method::Other,
+    };
+    let body = match a.get("body") {
+        None => Vec::new(),
+        Some(b) => match b.strip_prefix('@') {
+            Some(f) => std::fs::read(f).map_err(|e| format!("--body @{f}: {e}"))?,
+            None => b.as_bytes().to_vec(),
+        },
+    };
+    let path = a.get("path").unwrap_or("");
+    if !path.is_empty() && !path.starts_with('/') && !path.starts_with('?') {
+        return Err(format!("--path `{path}` must start with `/` or `?` (it is what follows /<service> in a URL)"));
+    }
+    let mem_log2 = match a.get("memory") {
+        Some(s) => {
+            let n = parse_size(s)?;
+            if !n.is_power_of_two() {
+                return Err(format!("--memory {s}: must be a power of two"));
+            }
+            n.trailing_zeros() as u8
+        }
+        None => m.min_mem_log2.max(20),
+    };
+    let cpu_ms = match a.get("cpu-ms") {
+        Some(v) => v.parse().ok().filter(|&n: &u32| n >= 1).ok_or("invalid --cpu-ms")?,
+        None => 60_000,
+    };
+    let spec = ServiceSpec {
+        name: "run".into(),
+        code_hash: sha256(&blob),
+        replicas: 1,
+        mem_log2,
+        max_instances: 1,
+        cpu_ms,
+        fresh: false,
+        config: a.get("config").unwrap_or("").as_bytes().to_vec(),
+    };
+    let cfg = NodeConfig {
+        http: "127.0.0.1:0".parse().unwrap(),
+        shards: 1,
+        backend: backend_flag(&a)?,
+        data_dir: None,
+        log_stderr: true,
+        request_timeout: Duration::from_millis(cpu_ms as u64 + 30_000),
+        ..NodeConfig::default()
+    };
+    let node = Node::start(cfg).map_err(|e| format!("cannot start the runtime: {e}"))?;
+    let r = node.apply(Bundle::new(Manifest { version: 0, services: vec![spec] }, vec![blob]));
+    if let Err(e) = r {
+        node.shutdown();
+        return Err(format!("{file}: {e}"));
+    }
+    let t = Instant::now();
+    let res = node.invoke(0, "run", method, path, body);
+    let took = t.elapsed();
+    node.shutdown();
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(&res.body);
+    let _ = out.flush();
+    eprintln!("k10s: HTTP {} ({} bytes, {:.3} ms)", res.http_status(), res.body.len(), took.as_secs_f64() * 1e3);
+    match res.error {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 fn node_addr(a: &Args) -> String {
