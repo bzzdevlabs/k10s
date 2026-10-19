@@ -1,0 +1,8 @@
+// hello.ten — the smallest k10s service: answers "hello" to every request.
+//
+// Maps to the GET path of bench/workloads/echo (Go), which also answers "hello"; useful as the baseline for
+// per-instance overhead, cold start and request latency (the whole module is one 5-instruction function).
+
+export fn handle() {
+    out_str("hello");
+}

@@ -1,0 +1,114 @@
+// sort.ten — memory-heavy compute service: sorts N pseudo-random 64-bit integers.
+//
+// GET /?n=N (default 100000) fills an array of N integers from xorshift64* (seed 42), sorts it with a bottom-up
+// merge sort (insertion-sorted runs of 16, then merges through a second N-element buffer), checks the order and
+// answers "n=N checksum=C\n", where C = sum of a[i] * (i + 1) over the sorted array (wrapping, signed decimal).
+//
+// Memory: 16 * N bytes of heap (1.6 MB for the default), so deploy it with a memory of at least 2^21 bytes
+// (2^25 for N = 1M); when the instance memory is too small it answers 507. Every request starts with
+// heap_reset(), so the heap is a per-request arena. There is no Go counterpart in bench/workloads/; it stresses
+// loads/stores, pointer arithmetic and the allocator rather than the CPU's arithmetic units.
+
+const RUN = 16;
+
+// Sorts a[lo..hi] in place (insertion sort).
+fn insertion_sort(a: *i64, lo: i64, hi: i64) {
+    for i in lo + 1..hi {
+        let v = a[i];
+        let j = i;
+        while j > lo && a[j - 1] > v {
+            a[j] = a[j - 1];
+            j -= 1;
+        }
+        a[j] = v;
+    }
+}
+
+// Merges the sorted runs src[lo..mid] and src[mid..hi] into dst[lo..hi].
+fn merge(src: *i64, dst: *i64, lo: i64, mid: i64, hi: i64) {
+    let i = lo;
+    let j = mid;
+    let k = lo;
+    while i < mid && j < hi {
+        let x = src[i];
+        let y = src[j];
+        if y < x {
+            dst[k] = y;
+            j += 1;
+        } else {
+            dst[k] = x;
+            i += 1;
+        }
+        k += 1;
+    }
+    memcpy(dst + k, src + i, (mid - i) * 8);
+    k += mid - i;
+    memcpy(dst + k, src + j, (hi - j) * 8);
+}
+
+// Sorts a[0..n] using tmp[0..n] as scratch; returns the buffer holding the result (a or tmp).
+fn merge_sort(a: *i64, tmp: *i64, n: i64) -> *i64 {
+    let lo = 0;
+    while lo < n {
+        insertion_sort(a, lo, min(lo + RUN, n));
+        lo += RUN;
+    }
+    let src = a;
+    let dst = tmp;
+    let width = RUN;
+    while width < n {
+        let lo = 0;
+        while lo < n {
+            let mid = min(lo + width, n);
+            let hi = min(lo + 2 * width, n);
+            merge(src, dst, lo, mid, hi);
+            lo += 2 * width;
+        }
+        let t = src;
+        src = dst;
+        dst = t;
+        width *= 2;
+    }
+    return src;
+}
+
+export fn handle() {
+    heap_reset();
+    let n = query_int("n", 100000);
+    if n < 0 || n > 100_000_000 {
+        status(400);
+        out_str("n must be in 0..=100000000\n");
+        return;
+    }
+    let a = try_alloc(n * 8) as *i64;
+    let tmp = try_alloc(n * 8) as *i64;
+    if a == null || tmp == null {
+        status(507);
+        out_str("not enough memory for n=");
+        out_int(n);
+        out_str("\n");
+        return;
+    }
+    let x = 42;
+    for i in 0..n {
+        x ^= x >>> 12;
+        x ^= x << 25;
+        x ^= x >>> 27;
+        a[i] = x * 0x2545F4914F6CDD1D;
+    }
+    let s = merge_sort(a, tmp, n);
+    let sum = 0;
+    for i in 0..n {
+        if i > 0 && s[i - 1] > s[i] {
+            status(500);
+            out_str("not sorted\n");
+            return;
+        }
+        sum += s[i] * (i + 1);
+    }
+    out_str("n=");
+    out_int(n);
+    out_str(" checksum=");
+    out_int(sum);
+    out_str("\n");
+}

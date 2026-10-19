@@ -1,0 +1,30 @@
+// chain.ten — Ten version of bench/workloads/chain (Go).
+//
+// Every request calls the backend service with an empty body and returns the backend's response body, like
+// chain/main.go does with an HTTP GET to BACKEND_URL. The backend is the service named by this service's
+// config bytes (the manifest's equivalent of BACKEND_URL), or `echo` by default; echo.ten answers "hello".
+// Errors map like the Go version: a failed call or a non-200 backend status answers 502 with a short message.
+// No HTTP client, no DNS, no connection pool: `call` is a host function (a function call on the same node).
+
+export fn handle() {
+    let backend: str = "echo";
+    if config(null, 0) > 0 {
+        backend = str(read_config(), last_len());
+    }
+    let st = call_svc(backend, null, 0);
+    if st < 0 {
+        status(502);
+        out_str("backend error ");
+        out_int(st);
+        out_str("\n");
+        return;
+    }
+    if st != 200 {
+        status(502);
+        out_str("backend status ");
+        out_int(st);
+        out_str("\n");
+        return;
+    }
+    out_call_resp();
+}

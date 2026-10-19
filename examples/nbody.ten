@@ -1,0 +1,127 @@
+// nbody.ten — f64-heavy compute service: the n-body simulation of the Computer Language Benchmarks Game.
+//
+// GET /?n=N (default 1000, 0..=50_000_000) models the orbits of the Jovian planets with a simple symplectic
+// integrator: N steps of dt = 0.01. It answers the total energy before and after, with 9 decimals, one per line
+// (n = 1000 → "-0.169075164\n-0.169087605\n", the benchmark's reference output).
+//
+// There is no Go counterpart in bench/workloads/: it complements compute.ten (integer/bit operations, SHA-256)
+// with floating point, struct field accesses (folded into load/store offsets) and sqrt.
+
+struct Body {
+    x: f64,
+    y: f64,
+    z: f64,
+    vx: f64,
+    vy: f64,
+    vz: f64,
+    mass: f64,
+}
+
+const N_BODIES = 5;
+const PI = 3.141592653589793;
+const SOLAR_MASS = 4.0 * PI * PI;
+const DAYS_PER_YEAR = 365.24;
+
+buffer bodies: [Body; N_BODIES];
+
+fn set_body(i: i64, x: f64, y: f64, z: f64, vx: f64, vy: f64, vz: f64, mass: f64) {
+    let b = bodies + i;
+    b.x = x;
+    b.y = y;
+    b.z = z;
+    b.vx = vx * DAYS_PER_YEAR;
+    b.vy = vy * DAYS_PER_YEAR;
+    b.vz = vz * DAYS_PER_YEAR;
+    b.mass = mass * SOLAR_MASS;
+}
+
+fn init_bodies() {
+    // sun
+    set_body(0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0);
+    // jupiter
+    set_body(1, 4.84143144246472090e+00, -1.16032004402742839e+00, -1.03622044471123109e-01,
+        1.66007664274403694e-03, 7.69901118419740425e-03, -6.90460016972063023e-05, 9.54791938424326609e-04);
+    // saturn
+    set_body(2, 8.34336671824457987e+00, 4.12479856412430479e+00, -4.03523417114321381e-01,
+        -2.76742510726862411e-03, 4.99852801234917238e-03, 2.30417297573763929e-05, 2.85885980666130812e-04);
+    // uranus
+    set_body(3, 1.28943695621391310e+01, -1.51111514016986312e+01, -2.23307578892655734e-01,
+        2.96460137564761618e-03, 2.37847173959480950e-03, -2.96589568540237556e-05, 4.36624404335156298e-05);
+    // neptune
+    set_body(4, 1.53796971148509165e+01, -2.59193146099879641e+01, 1.79258772950371181e-01,
+        2.68067772490389322e-03, 1.62824170038242295e-03, -9.51592254519715870e-05, 5.15138902046611451e-05);
+}
+
+fn offset_momentum() {
+    let px = 0.0;
+    let py = 0.0;
+    let pz = 0.0;
+    for i in 0..N_BODIES {
+        let b = bodies + i;
+        px += b.vx * b.mass;
+        py += b.vy * b.mass;
+        pz += b.vz * b.mass;
+    }
+    bodies.vx = -px / SOLAR_MASS;
+    bodies.vy = -py / SOLAR_MASS;
+    bodies.vz = -pz / SOLAR_MASS;
+}
+
+fn energy() -> f64 {
+    let e = 0.0;
+    for i in 0..N_BODIES {
+        let b = bodies + i;
+        e += 0.5 * b.mass * (b.vx * b.vx + b.vy * b.vy + b.vz * b.vz);
+        for j in i + 1..N_BODIES {
+            let b2 = bodies + j;
+            let dx = b.x - b2.x;
+            let dy = b.y - b2.y;
+            let dz = b.z - b2.z;
+            let distance = sqrt(dx * dx + dy * dy + dz * dz);
+            e -= (b.mass * b2.mass) / distance;
+        }
+    }
+    return e;
+}
+
+fn advance(dt: f64) {
+    for i in 0..N_BODIES {
+        let b = bodies + i;
+        for j in i + 1..N_BODIES {
+            let b2 = bodies + j;
+            let dx = b.x - b2.x;
+            let dy = b.y - b2.y;
+            let dz = b.z - b2.z;
+            let distance = sqrt(dx * dx + dy * dy + dz * dz);
+            let mag = dt / (distance * distance * distance);
+            b.vx -= dx * b2.mass * mag;
+            b.vy -= dy * b2.mass * mag;
+            b.vz -= dz * b2.mass * mag;
+            b2.vx += dx * b.mass * mag;
+            b2.vy += dy * b.mass * mag;
+            b2.vz += dz * b.mass * mag;
+        }
+    }
+    for i in 0..N_BODIES {
+        let b = bodies + i;
+        b.x += dt * b.vx;
+        b.y += dt * b.vy;
+        b.z += dt * b.vz;
+    }
+}
+
+export fn handle() {
+    let n = query_int("n", 1000);
+    if n < 0 || n > 50_000_000 {
+        n = 1000;
+    }
+    init_bodies();
+    offset_momentum();
+    out_f64(energy(), 9);
+    out_str("\n");
+    for step in 0..n {
+        advance(0.01);
+    }
+    out_f64(energy(), 9);
+    out_str("\n");
+}

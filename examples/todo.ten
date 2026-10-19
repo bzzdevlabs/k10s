@@ -1,0 +1,153 @@
+// todo.ten — a small REST-style to-do list API over the durable key-value store, answering JSON.
+//
+//   GET    /        → 200 [{"id":1,"title":"..."},...]   (creation order)
+//   POST   /        → 201 {"id":N,"title":"..."}         the request body is the title (plain text, ≤ 4 KiB)
+//   GET    /<id>    → 200 {"id":N,"title":"..."}         or 404 {"error":"not found"}
+//   PUT    /<id>    → 200 {"id":N,"title":"..."}         the body is the new title; 404 if absent
+//   DELETE /<id>    → 200 {"deleted":N}                  or 404
+//   otherwise       → 400 {"error":"bad id"} / 405 {"error":"method not allowed"}
+//
+// Storage (this service's KV namespace): "next" = next id (decimal text), "index" = ids of the live items as
+// packed little-endian i64s, "item/<id>" = the title. There is no Go counterpart in bench/workloads/: it exercises
+// the KV host API, path parsing, `str` values and JSON output. The heap is a per-request arena (heap_reset).
+
+buffer key: [u8; 32];
+
+// Writes "item/<id>" into `key`; returns its length.
+fn item_key(id: i64) -> i64 {
+    let n = copy_str(key, "item/");
+    return n + itoa(id, key + n);
+}
+
+fn out_item(id: i64, title: *u8, n: i64) {
+    out_str("{\"id\":");
+    out_int(id);
+    out_str(",\"title\":");
+    out_json_str(title, n);
+    out_str("}");
+}
+
+fn error(code: i64, msg: str) {
+    status(code);
+    out_str("{\"error\":");
+    out_json_str(msg.ptr, msg.len);
+    out_str("}");
+}
+
+fn list() {
+    let idx = kv_read("index") as *i64;
+    let count = last_len() / 8;
+    out_str("[");
+    for i in 0..count {
+        let id = idx[i];
+        let title = kv_read(str(key, item_key(id)));
+        if i > 0 {
+            out_str(",");
+        }
+        out_item(id, title, last_len());
+    }
+    out_str("]");
+}
+
+fn create() {
+    if input_len() > 4096 {
+        error(413, "title too long");
+        return;
+    }
+    let title = read_body();
+    let n = last_len();
+    let id = kv_get_int("next", 1);
+    kv_put_int("next", id + 1);
+    kv_write(str(key, item_key(id)), title, n);
+    let idx = kv_read("index");
+    let len = last_len();
+    let grown = alloc(len + 8);
+    memcpy(grown, idx, len);
+    *((grown + len) as *i64) = id;
+    kv_write("index", grown, len + 8);
+    status(201);
+    out_item(id, title, n);
+}
+
+fn get(id: i64) {
+    let title = kv_read(str(key, item_key(id)));
+    if title == null {
+        error(404, "not found");
+        return;
+    }
+    out_item(id, title, last_len());
+}
+
+fn update(id: i64) {
+    let k = item_key(id);
+    if kv_get(key, k, null, 0) < 0 {
+        error(404, "not found");
+        return;
+    }
+    let title = read_body();
+    let n = last_len();
+    kv_write(str(key, k), title, n);
+    out_item(id, title, n);
+}
+
+fn remove(id: i64) {
+    if kv_delete(str(key, item_key(id))) == 0 {
+        error(404, "not found");
+        return;
+    }
+    let idx = kv_read("index") as *i64;
+    let count = last_len() / 8;
+    let kept = 0;
+    for i in 0..count {
+        if idx[i] != id {
+            idx[kept] = idx[i];
+            kept += 1;
+        }
+    }
+    kv_write("index", idx, kept * 8);
+    out_str("{\"deleted\":");
+    out_int(id);
+    out_str("}");
+}
+
+export fn handle() {
+    heap_reset();
+    let p = read_path();
+    let n = last_len();
+    let q = find_byte(p, n, '?');
+    if q >= 0 {
+        n = q;
+    }
+    let s = 0;
+    while s < n && p[s] == '/' {
+        s += 1;
+    }
+    while n > s && p[n - 1] == '/' {
+        n -= 1;
+    }
+    let m = req_method();
+    if s == n {
+        if m == GET {
+            list();
+        } else if m == POST {
+            create();
+        } else {
+            error(405, "method not allowed");
+        }
+        return;
+    }
+    if !is_int(p + s, n - s) {
+        error(400, "bad id");
+        return;
+    }
+    let id = parse_int(p + s, n - s);
+    if m == GET {
+        get(id);
+    } else if m == PUT {
+        update(id);
+    } else if m == DELETE {
+        remove(id);
+    } else {
+        error(405, "method not allowed");
+    }
+}

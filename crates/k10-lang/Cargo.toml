@@ -1,6 +1,13 @@
 [package]
 name = "k10-lang"
+description = "Ten: the k10s workload language compiler (source -> TIR) and its standard prelude"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# In-memory implementation of the host API (docs/HOSTAPI.md) on top of the k10-ir interpreter, for tests of
+# Ten programs in this and other crates (`k10_lang::testhost`).
+testhost = []
+
 [dependencies]
+k10-ir = { workspace = true }

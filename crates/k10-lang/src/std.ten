@@ -1,0 +1,607 @@
+// std.ten — the Ten standard prelude.
+//
+// Always compiled in; anything a program does not use (functions, host imports, globals, buffers) is dropped.
+// User definitions shadow prelude names (the prelude itself keeps using its own definitions).
+// Names starting with `__` are internal.
+
+// ------------------------------------------------------------------------------------------------------------
+// Host API (docs/HOSTAPI.md). Every host function returns one i64.
+
+import fn input_len() -> i64;
+import fn input_read(dst: *u8, off: i64, n: i64) -> i64;
+import fn req_path(dst: *u8, max: i64) -> i64;
+import fn req_method() -> i64;
+import fn output_write(src: *u8, n: i64) -> i64;
+import fn output_status(code: i64) -> i64;
+import fn call(name: *u8, name_len: i64, req: *u8, req_len: i64) -> i64;
+import fn call_resp_len() -> i64;
+import fn call_resp_read(dst: *u8, off: i64, n: i64) -> i64;
+import fn kv_get(key: *u8, key_len: i64, dst: *u8, max: i64) -> i64;
+import fn kv_put(key: *u8, key_len: i64, val: *u8, val_len: i64) -> i64;
+import fn kv_del(key: *u8, key_len: i64) -> i64;
+import fn log(msg: *u8, len: i64) -> i64;
+import fn now_ns() -> i64;
+import fn time_ms() -> i64;
+import fn random() -> i64;
+import fn config(dst: *u8, max: i64) -> i64;
+
+// req_method() values.
+const GET = 0;
+const POST = 1;
+const PUT = 2;
+const DELETE = 3;
+const OTHER_METHOD = 4;
+
+// Negative results of call().
+const CALL_UNKNOWN = -1;
+const CALL_UNAVAILABLE = -2;
+const CALL_TIMEOUT = -3;
+const CALL_TRAPPED = -4;
+
+const I64_MAX = 0x7FFF_FFFF_FFFF_FFFF;
+const I64_MIN = 0x8000_0000_0000_0000;
+
+// ------------------------------------------------------------------------------------------------------------
+// Small helpers
+
+fn min(a: i64, b: i64) -> i64 { return select(a < b, a, b); }
+fn max(a: i64, b: i64) -> i64 { return select(a > b, a, b); }
+fn abs(a: i64) -> i64 { return select(a < 0, 0 - a, a); }
+fn fmin(a: f64, b: f64) -> f64 { return select(a < b, a, b); }
+fn fmax(a: f64, b: f64) -> f64 { return select(a > b, a, b); }
+// Rounds `x` up to a multiple of `a` (a power of two).
+fn align_up(x: i64, a: i64) -> i64 { return (x + a - 1) & (0 - a); }
+
+// ------------------------------------------------------------------------------------------------------------
+// Allocator: power-of-two blocks (16 B .. 2^40 B) carved from the heap by a bump pointer, with one free list per
+// size class. Each block starts with an 8-byte header holding its class; payloads are 8-byte aligned.
+// `heap_reset()` frees everything at once (per-request arenas: call it at the start of `handle`).
+
+global __heap_top: i64 = 0;          // bump pointer; 0 until the first allocation (then __heap_base)
+buffer __free_lists: [i64; 41];      // head block address of each class (0 = empty)
+global __last_len: i64 = 0;          // length of the last buffer returned by read_body/read_path/kv_read/...
+
+// Returns `n` bytes (not zeroed), or null if the instance memory is exhausted.
+fn try_alloc(n: i64) -> *u8 {
+    if ugt(n, 1 << 39) {
+        return null;
+    }
+    let c = 4;
+    if n > 8 {
+        c = 64 - clz(n + 7);            // smallest c with 2^c >= n + 8
+    }
+    let b = __free_lists[c];
+    if b != 0 {
+        __free_lists[c] = (b as *i64)[1];
+        return (b + 8) as *u8;
+    }
+    let top = __heap_top;
+    if top == 0 {
+        top = __heap_base;
+    }
+    let size = 1 << c;
+    if ult(memsize() - top, size) {
+        return null;
+    }
+    *(top as *i64) = c;
+    __heap_top = top + size;
+    return (top + 8) as *u8;
+}
+
+// Returns `n` bytes (not zeroed); traps (`unreachable`) if the instance memory is exhausted.
+fn alloc(n: i64) -> *u8 {
+    let p = try_alloc(n);
+    if p == null {
+        unreachable();
+    }
+    return p;
+}
+
+// Returns `n` zeroed bytes; traps if the memory is exhausted.
+fn zalloc(n: i64) -> *u8 {
+    let p = alloc(n);
+    memset(p, 0, n);
+    return p;
+}
+
+// Releases a block returned by alloc/zalloc/try_alloc (null is ignored).
+fn free(p: *u8) {
+    if p == null {
+        return;
+    }
+    let b = (p as i64) - 8;
+    let c = *(b as *i64);
+    (b as *i64)[1] = __free_lists[c];
+    __free_lists[c] = b;
+}
+
+// Frees every allocation at once.
+fn heap_reset() {
+    __heap_top = __heap_base;
+    memset(__free_lists, 0, sizeof(__free_lists));
+}
+
+// Bytes of heap currently carved out by the bump pointer.
+fn heap_used() -> i64 {
+    if __heap_top == 0 {
+        return 0;
+    }
+    return __heap_top - __heap_base;
+}
+
+// Length of the buffer returned by the last read_body / read_path / kv_read / call_read / read_config.
+fn last_len() -> i64 { return __last_len; }
+
+// ------------------------------------------------------------------------------------------------------------
+// Bytes and strings
+
+data __HEX = "0123456789abcdef";
+
+// 1 if the n bytes at a and b are equal.
+fn mem_eq(a: *u8, b: *u8, n: i64) -> i64 {
+    let i = 0;
+    while i + 8 <= n {
+        if *((a + i) as *i64) != *((b + i) as *i64) {
+            return 0;
+        }
+        i += 8;
+    }
+    while i < n {
+        if a[i] != b[i] {
+            return 0;
+        }
+        i += 1;
+    }
+    return 1;
+}
+
+// Index of the first byte equal to `b` in p[0..n], or -1.
+fn find_byte(p: *u8, n: i64, b: i64) -> i64 {
+    for i in 0..n {
+        if p[i] == b {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// Length of a NUL-terminated string.
+fn strlen(p: *u8) -> i64 {
+    let n = 0;
+    while p[n] != 0 {
+        n += 1;
+    }
+    return n;
+}
+
+// 1 if p[0..n] equals `s`.
+fn str_eq(p: *u8, n: i64, s: str) -> i64 {
+    return n == s.len && mem_eq(p, s.ptr, n);
+}
+
+// 1 if p[0..n] starts with `s`.
+fn starts_with(p: *u8, n: i64, s: str) -> i64 {
+    return n >= s.len && mem_eq(p, s.ptr, s.len);
+}
+
+// Copies `s` to dst; returns its length.
+fn copy_str(dst: *u8, s: str) -> i64 {
+    memcpy(dst, s.ptr, s.len);
+    return s.len;
+}
+
+fn is_digit(c: i64) -> i64 { return ule(c - '0', 9); }
+fn is_space(c: i64) -> i64 { return c == ' ' || c == '\n' || c == '\r' || c == '\t'; }
+
+// FNV-1a 64-bit hash of p[0..n].
+fn fnv1a(p: *u8, n: i64) -> i64 {
+    let h = 0xcbf29ce484222325;
+    for i in 0..n {
+        h = (h ^ p[i]) * 0x100000001b3;
+    }
+    return h;
+}
+
+// ------------------------------------------------------------------------------------------------------------
+// Parsing and formatting
+
+// Parses an optional sign and the leading decimal digits of p[0..n] (stops at the first non-digit; wraps on
+// overflow). Returns 0 if there are no digits.
+fn parse_int(p: *u8, n: i64) -> i64 {
+    let i = 0;
+    let neg = 0;
+    if n > 0 && (p[0] == '-' || p[0] == '+') {
+        neg = p[0] == '-';
+        i = 1;
+    }
+    let v = 0;
+    while i < n {
+        let d = p[i] - '0';
+        if ugt(d, 9) {
+            break;
+        }
+        v = v * 10 + d;
+        i += 1;
+    }
+    if neg {
+        return 0 - v;
+    }
+    return v;
+}
+
+// 1 if p[0..n] is exactly an optionally signed decimal integer that fits in i64 (like Go's strconv.Atoi).
+fn is_int(p: *u8, n: i64) -> i64 {
+    let i = 0;
+    let neg = 0;
+    if n > 0 && (p[0] == '-' || p[0] == '+') {
+        neg = p[0] == '-';
+        i = 1;
+    }
+    if i >= n {
+        return 0;
+    }
+    let limit = I64_MAX + neg;          // 2^63 - 1, or 2^63 for negative numbers (unsigned)
+    let v = 0;
+    while i < n {
+        let d = p[i] - '0';
+        if ugt(d, 9) {
+            return 0;
+        }
+        if ugt(v, udiv(limit - d, 10)) {
+            return 0;
+        }
+        v = v * 10 + d;
+        i += 1;
+    }
+    return 1;
+}
+
+// Writes the unsigned decimal form of u to dst (at most 20 bytes); returns its length.
+fn utoa(u: i64, dst: *u8) -> i64 {
+    let n = 1;
+    let t = u;
+    while uge(t, 10) {
+        t = udiv(t, 10);
+        n += 1;
+    }
+    let i = n;
+    loop {
+        i -= 1;
+        dst[i] = '0' + urem(u, 10);
+        u = udiv(u, 10);
+        if i == 0 {
+            break;
+        }
+    }
+    return n;
+}
+
+// Writes the decimal form of v to dst (at most 20 bytes); returns its length.
+fn itoa(v: i64, dst: *u8) -> i64 {
+    if v < 0 {
+        dst[0] = '-';
+        return 1 + utoa(0 - v, dst + 1);
+    }
+    return utoa(v, dst);
+}
+
+// Writes v as lowercase hexadecimal without leading zeros (at most 16 bytes); returns its length.
+fn fmt_hex(v: i64, dst: *u8) -> i64 {
+    let n = 1;
+    if v != 0 {
+        n = (67 - clz(v)) >> 2;
+    }
+    for i in 0..n {
+        dst[n - 1 - i] = __HEX[(v >>> (i * 4)) & 15];
+    }
+    return n;
+}
+
+// Writes the n bytes at p as 2n lowercase hex digits; returns 2n.
+fn hex_bytes(p: *u8, n: i64, dst: *u8) -> i64 {
+    for i in 0..n {
+        let b = p[i];
+        dst[2 * i] = __HEX[b >> 4];
+        dst[2 * i + 1] = __HEX[b & 15];
+    }
+    return 2 * n;
+}
+
+// Writes x with `prec` (0..=17) digits after the decimal point (rounded half away from zero, accurate to about
+// 15 significant digits); "nan", "inf", "-inf"; magnitudes >= 1e18 use exponent notation ("1.50e+20").
+// dst needs at most 64 bytes. Returns the length.
+fn fmt_f64(x: f64, prec: i64, dst: *u8) -> i64 {
+    let n = 0;
+    if x != x {
+        return copy_str(dst, "nan");
+    }
+    if to_bits(x) < 0 {
+        dst[0] = '-';
+        n = 1;
+        x = 0.0 - x;
+    }
+    if x > 1.7976931348623157e308 {
+        return n + copy_str(dst + n, "inf");
+    }
+    prec = max(0, min(prec, 17));
+    let e = 0;
+    if x >= 1e18 {
+        while x >= 10.0 {
+            x = x / 10.0;
+            e += 1;
+        }
+    }
+    let scale = 1;
+    for i in 0..prec {
+        scale *= 10;
+    }
+    let ip = x as i64;
+    let f = ((x - ip as f64) * (scale as f64) + 0.5) as i64;
+    if f >= scale {
+        ip += 1;
+        f -= scale;
+    }
+    n += utoa(ip, dst + n);
+    if prec > 0 {
+        dst[n] = '.';
+        n += 1;
+        let k = prec;
+        while k > 0 {
+            k -= 1;
+            dst[n + k] = '0' + f % 10;
+            f /= 10;
+        }
+        n += prec;
+    }
+    if e > 0 {
+        n += copy_str(dst + n, "e+");
+        if e < 10 {
+            dst[n] = '0';
+            n += 1;
+        }
+        n += utoa(e, dst + n);
+    }
+    return n;
+}
+
+// ------------------------------------------------------------------------------------------------------------
+// Output
+
+buffer __fmt: [u8; 128];
+
+// Appends p[0..n] to the response body.
+fn out(p: *u8, n: i64) { output_write(p, n); }
+// Appends a string (`out_str("hello\n")`, `out_str(DATA_ITEM)`, `out_str(str(p, n))`).
+fn out_str(s: str) { output_write(s.ptr, s.len); }
+// Appends one byte.
+fn out_byte(c: i64) {
+    __fmt[0] = c;
+    output_write(__fmt, 1);
+}
+// Appends v in decimal.
+fn out_int(v: i64) { output_write(__fmt, itoa(v, __fmt)); }
+// Appends v in lowercase hexadecimal (no prefix, no leading zeros).
+fn out_hex(v: i64) { output_write(__fmt, fmt_hex(v, __fmt)); }
+// Appends p[0..n] as lowercase hex digits.
+fn out_hex_bytes(p: *u8, n: i64) {
+    let i = 0;
+    while i < n {
+        let k = min(n - i, 64);
+        hex_bytes(p + i, k, __fmt);
+        output_write(__fmt, 2 * k);
+        i += k;
+    }
+}
+// Appends x with `prec` digits after the decimal point (see fmt_f64).
+fn out_f64(x: f64, prec: i64) { output_write(__fmt, fmt_f64(x, prec, __fmt)); }
+// Appends p[0..n] as a JSON string literal (with quotes and escapes).
+fn out_json_str(p: *u8, n: i64) {
+    out_byte('"');
+    let start = 0;
+    for i in 0..n {
+        let c = p[i];
+        if c == '"' || c == '\\' || c < 0x20 {
+            output_write(p + start, i - start);
+            start = i + 1;
+            if c == '"' {
+                out_str("\\\"");
+            } else if c == '\\' {
+                out_str("\\\\");
+            } else if c == '\n' {
+                out_str("\\n");
+            } else if c == '\t' {
+                out_str("\\t");
+            } else if c == '\r' {
+                out_str("\\r");
+            } else {
+                out_str("\\u00");
+                out_byte(__HEX[c >> 4]);
+                out_byte(__HEX[c & 15]);
+            }
+        }
+    }
+    output_write(p + start, n - start);
+    out_byte('"');
+}
+// Sets the response status code (default 200).
+fn status(code: i64) { output_status(code); }
+
+// ------------------------------------------------------------------------------------------------------------
+// Input
+
+buffer __io: [u8; 4096];
+buffer __path: [u8; 1024];
+
+// Reads the whole request body into the heap (NUL-terminated); its length is last_len() (= input_len()).
+fn read_body() -> *u8 {
+    let n = input_len();
+    let p = alloc(n + 1);
+    input_read(p, 0, n);
+    p[n] = 0;
+    __last_len = n;
+    return p;
+}
+
+// Copies the request body to the response body (in 4 KiB chunks, no heap use).
+fn out_body() {
+    let off = 0;
+    loop {
+        let n = input_read(__io, off, 4096);
+        if n <= 0 {
+            break;
+        }
+        output_write(__io, n);
+        off += n;
+    }
+}
+
+// Reads the request path suffix *including* the `?query` part (NUL-terminated); its length is last_len().
+// Paths up to 1023 bytes use a static buffer, longer ones the heap.
+fn read_path() -> *u8 {
+    let n = req_path(__path, 1023);
+    let p = __path as *u8;
+    if n > 1023 {
+        p = alloc(n + 1);
+        req_path(p, n);
+    }
+    p[n] = 0;
+    __last_len = n;
+    return p;
+}
+
+global __qlen: i64 = 0;
+
+// Finds query parameter `name` in path[0..n] (the part after `?`, pairs separated by `&`). Returns the offset of
+// its value in `path` (the value is __qlen bytes long, not URL-decoded), or -1 if absent.
+fn query_find(path: *u8, n: i64, name: str) -> i64 {
+    let q = find_byte(path, n, '?');
+    if q < 0 {
+        return -1;
+    }
+    let i = q + 1;
+    while i <= n {
+        let len = find_byte(path + i, n - i, '&');
+        if len < 0 {
+            len = n - i;
+        }
+        let eq = find_byte(path + i, len, '=');
+        let klen = select(eq < 0, len, eq);
+        if klen == name.len && mem_eq(path + i, name.ptr, klen) {
+            if eq < 0 {
+                __qlen = 0;
+                return i + len;
+            }
+            __qlen = len - eq - 1;
+            return i + eq + 1;
+        }
+        i += len + 1;
+    }
+    return -1;
+}
+
+// Value of query parameter `name` (`?n=123`) as an integer, or `default` if it is absent or not exactly an
+// integer (Go strconv.Atoi rules).
+fn query_int(name: str, default: i64) -> i64 {
+    let p = read_path();
+    let off = query_find(p, __last_len, name);
+    if off < 0 || !is_int(p + off, __qlen) {
+        return default;
+    }
+    return parse_int(p + off, __qlen);
+}
+
+// Copies the value of query parameter `name` to dst (at most max bytes); returns its full length, or -1 if absent.
+fn query_str(name: str, dst: *u8, max: i64) -> i64 {
+    let p = read_path();
+    let off = query_find(p, __last_len, name);
+    if off < 0 {
+        return -1;
+    }
+    memcpy(dst, p + off, min(__qlen, max));
+    return __qlen;
+}
+
+// Reads the service configuration (from the manifest) into the heap (NUL-terminated); length in last_len().
+fn read_config() -> *u8 {
+    let n = config(null, 0);
+    let p = alloc(n + 1);
+    config(p, n);
+    p[n] = 0;
+    __last_len = n;
+    return p;
+}
+
+// ------------------------------------------------------------------------------------------------------------
+// Key-value store and service calls
+
+// Reads the value of `key` into the heap (NUL-terminated) and returns it, or null if absent; length in last_len().
+fn kv_read(key: str) -> *u8 {
+    let n = kv_get(key.ptr, key.len, null, 0);
+    if n < 0 {
+        __last_len = 0;
+        return null;
+    }
+    let p = alloc(n + 1);
+    kv_get(key.ptr, key.len, p, n);
+    p[n] = 0;
+    __last_len = n;
+    return p;
+}
+
+// Stores p[0..n] under `key`.
+fn kv_write(key: str, p: *u8, n: i64) { kv_put(key.ptr, key.len, p, n); }
+
+// Value of `key` parsed as a decimal integer (surrounding whitespace ignored), or `default` if absent or invalid.
+fn kv_get_int(key: str, default: i64) -> i64 {
+    let n = kv_get(key.ptr, key.len, __fmt, 64);
+    if n < 0 || n > 64 {
+        return default;
+    }
+    let s = 0;
+    while s < n && is_space(__fmt[s]) {
+        s += 1;
+    }
+    while n > s && is_space(__fmt[n - 1]) {
+        n -= 1;
+    }
+    if !is_int(__fmt + s, n - s) {
+        return default;
+    }
+    return parse_int(__fmt + s, n - s);
+}
+
+// Stores v under `key` as decimal text.
+fn kv_put_int(key: str, v: i64) { kv_put(key.ptr, key.len, __fmt, itoa(v, __fmt)); }
+
+// Deletes `key`; returns 1 if it existed.
+fn kv_delete(key: str) -> i64 { return kv_del(key.ptr, key.len); }
+
+// Calls service `name` (or "name/path") with body req[0..n]; returns its status (>= 0) or a negative error
+// (CALL_UNKNOWN, CALL_UNAVAILABLE, CALL_TIMEOUT, CALL_TRAPPED).
+fn call_svc(name: str, req: *u8, n: i64) -> i64 { return call(name.ptr, name.len, req, n); }
+
+// Reads the last call's response body into the heap (NUL-terminated); length in last_len().
+fn call_read() -> *u8 {
+    let n = call_resp_len();
+    let p = alloc(n + 1);
+    call_resp_read(p, 0, n);
+    p[n] = 0;
+    __last_len = n;
+    return p;
+}
+
+// Copies the last call's response body to the response body (in 4 KiB chunks, no heap use).
+fn out_call_resp() {
+    let off = 0;
+    loop {
+        let n = call_resp_read(__io, off, 4096);
+        if n <= 0 {
+            break;
+        }
+        output_write(__io, n);
+        off += n;
+    }
+}
+
+// Appends a line to the service log.
+fn log_str(s: str) { log(s.ptr, s.len); }

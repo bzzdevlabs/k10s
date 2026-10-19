@@ -1,0 +1,13 @@
+// counter.ten — Ten version of bench/workloads/counter (Go).
+//
+// Every request increments a durable counter and returns the new value followed by "\n". The Go version keeps
+// the counter in a file (COUNTER_FILE, pwrite without fsync); here it lives in the service's durable key-value
+// store under the key "counter", as decimal text. Instances are disposable: no state is kept in memory between
+// requests, so any replica on the node gives the same answer.
+
+export fn handle() {
+    let n = kv_get_int("counter", 0) + 1;
+    kv_put_int("counter", n);
+    out_int(n);
+    out_str("\n");
+}

@@ -1,0 +1,17 @@
+// echo.ten — Ten version of bench/workloads/echo (Go).
+//
+//   GET (or any method other than POST) → "hello"
+//   POST                                → echoes the request body
+//
+// Same behaviour as echo/main.go, with one deliberate difference: a POST with an *empty* body also answers
+// "hello". Service-to-service calls are always POSTs (docs/HOSTAPI.md), so this is what lets chain.ten call echo
+// with no payload and get "hello" back, exactly like the Go chain → echo GET.
+// The body is streamed through a 4 KiB static buffer (`out_body`), so echoing does not touch the heap.
+
+export fn handle() {
+    if req_method() == POST && input_len() > 0 {
+        out_body();
+    } else {
+        out_str("hello");
+    }
+}
