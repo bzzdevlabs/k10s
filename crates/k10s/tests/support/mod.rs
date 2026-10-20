@@ -211,11 +211,27 @@ pub struct Svc {
     pub fresh: bool,
     pub replicas: u32,
     pub config: Vec<u8>,
+    pub calls: Vec<String>,
 }
 
 impl Svc {
     pub fn new(name: &str, code: Vec<u8>) -> Svc {
-        Svc { name: name.into(), code, mem_log2: 16, max_instances: 64, cpu_ms: 1000, fresh: false, replicas: 1, config: vec![] }
+        Svc {
+            name: name.into(),
+            code,
+            mem_log2: 16,
+            max_instances: 64,
+            cpu_ms: 1000,
+            fresh: false,
+            replicas: 1,
+            config: vec![],
+            calls: vec![],
+        }
+    }
+    /// The services this one may `call` (manifest allowlist).
+    pub fn calls(mut self, names: &[&str]) -> Svc {
+        self.calls = k10_mesh::manifest::canonical_calls(names);
+        self
     }
     pub fn mem(mut self, log2: u8) -> Svc {
         self.mem_log2 = log2;
@@ -255,6 +271,7 @@ pub fn bundle(version: u64, svcs: &[Svc]) -> Bundle {
             cpu_ms: s.cpu_ms,
             fresh: s.fresh,
             config: s.config.clone(),
+            calls: s.calls.clone(),
         })
         .collect();
     services.sort_by(|a, b| a.name.cmp(&b.name));

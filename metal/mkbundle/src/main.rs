@@ -430,6 +430,7 @@ fn main() {
             cpu_ms: d.2,
             fresh: d.3,
             config: d.4.clone(),
+            calls: Vec::new(),
         });
     };
     if let Some((name, count)) = &replicate {

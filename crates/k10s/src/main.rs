@@ -438,6 +438,8 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         cpu_ms,
         fresh: false,
         config: a.get("config").unwrap_or("").as_bytes().to_vec(),
+        // The only service: there is nothing it could be granted to call.
+        calls: Vec::new(),
     };
     let cfg = NodeConfig {
         http: "127.0.0.1:0".parse().unwrap(),
