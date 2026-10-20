@@ -181,11 +181,15 @@ status ≥ 0, −1 unknown service, −2 unavailable (crash backoff with nothing
   is done in place); a torn/corrupt tail is truncated at the last good
   record. **Group commit**: `kv_put`/`kv_del` return once the record is buffered; the flusher batches for 2 ms, writes
   every dirty log and `fdatasync`s them. **Durability window**: an acknowledged write can be lost if the process or
-  machine dies within ≈ 2 ms + write + fsync time. Compaction rewrites a log from the map when it exceeds 2× the live
-  size (and 1 MiB). Without `--data` the store is memory-only. **Per-service quota**: a `kv_put` that would push a
-  namespace past its live-bytes quota (default 256 MiB, `--kv-max`, 0 = unlimited) traps `Host(3)` and stores nothing,
-  so one service cannot fill the node's memory/disk (it bounds live bytes; the log is then bounded at ~2× that by
-  compaction). Deleting entries frees room.
+  machine dies within ≈ 2 ms + write + fsync time; a restart recovers a prefix of the writes in the order they were
+  made (appends and compactions go through one lock), never an older value over a newer one. A failed append is
+  truncated back and retried with the next flush. Compaction rewrites a log from the map when it exceeds 2× the live
+  size (and 1 MiB): `<svc>.log.tmp`, fsync, rename over the log, fsync of the directory (a new log's directory entry
+  is fsynced too); a failed compaction leaves the log as it was and is retried once the log has grown by another
+  live size (at least 1 MiB). Without `--data` the store is memory-only. **Per-service quota**: a `kv_put` that
+  would push a namespace past its live-bytes quota (default 256 MiB, `--kv-max`, 0 = unlimited) traps `Host(3)` and
+  stores nothing, so one service cannot fill the node's memory/disk (it bounds live bytes; the log is then bounded at
+  ~2× that by compaction). Deleting entries frees room.
 - `log`: per-service ring (1000 lines / 256 KiB, lines ≤ 4 KiB), optionally echoed to stderr (`--log-stderr`).
 
 ## Shutdown

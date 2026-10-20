@@ -1,0 +1,198 @@
+---
+// One address space carved into power-of-two slots; one slot's layout; the address mask.
+const slots = [
+	{ w: 34, s: 'a', n: 'hello' },
+	{ w: 34, s: 'a', n: 'hello' },
+	{ w: 92, s: 'b', n: 'echo' },
+	{ w: 92, s: 'c', n: 'todo', zoom: true },
+	{ w: 34, s: 'd', n: 'counter' },
+	{ w: 34, s: 'b', n: 'chain' },
+	{ w: 150, s: 'd', n: 'sort' },
+	{ w: 34, s: 'free', n: '' },
+	{ w: 34, s: 'free', n: '' },
+];
+let x = 20;
+const placed = slots.map((s) => {
+	const r = { ...s, x };
+	x += s.w + 4;
+	return r;
+});
+const zoom = placed.find((s) => s.zoom)!;
+const parts = [
+	{ w: 44, n: '0–16', c: 'null', d: 'null' },
+	{ w: 72, n: 'globals', c: 'p1' },
+	{ w: 84, n: 'data', c: 'p1' },
+	{ w: 84, n: 'strings', c: 'p1' },
+	{ w: 92, n: 'buffers', c: 'p2' },
+	{ w: 256, n: 'heap →', c: 'heap' },
+	{ w: 68, n: 'tail', c: 'tail' },
+];
+let px = 20;
+const laid = parts.map((p) => {
+	const r = { ...p, x: px };
+	px += p.w;
+	return r;
+});
+---
+
+<figure class="k-figure not-content">
+	<svg viewBox="0 0 740 318" role="img" aria-labelledby="slot-t">
+		<title id="slot-t">Instances share one address space; every access is masked into its own slot</title>
+		<text x="20" y="20" class="cap">ONE ADDRESS SPACE · ONE OS THREAD PER CORE</text>
+		{
+			placed.map((s) => (
+				<g>
+					<rect x={s.x} y="30" width={s.w} height="38" rx="5" class:list={['slot', s.s]} />
+					{s.w > 40 && (
+						<text x={s.x + s.w / 2} y="54" class="sn">
+							{s.n}
+						</text>
+					)}
+				</g>
+			))
+		}
+		<text x={x + 4} y="54" class="dim">…</text>
+		<path d={`M${zoom.x} 70 L20 118 M${zoom.x + zoom.w} 70 L720 118`} class="zoom" />
+		<text x="20" y="112" class="cap halo">ONE SLOT: S = 2^k BYTES (THE MEMORY LIMIT) + A 4 KiB TAIL PAGE</text>
+		{
+			laid.map((p) => (
+				<g>
+					<rect x={p.x} y="120" width={p.w} height="44" class:list={['part', p.c]} />
+					<text x={p.x + p.w / 2} y="147" class="pn">
+						{p.n}
+					</text>
+				</g>
+			))
+		}
+		<rect x="20" y="120" width="700" height="44" rx="6" class="outline" />
+		<text x="20" y="182" class="ax">0</text>
+		<text x={laid[5].x} y="182" class="ax">__heap_base</text>
+		<text x={laid[6].x} y="182" class="ax end">S = memsize()</text>
+		<g transform="translate(20 206)">
+			<rect width="700" height="96" rx="8" class="box" />
+			<text x="18" y="30" class="mono">
+				<tspan class="kw">load</tspan> [<tspan class="hl">base</tspan> + ((addr + off) <tspan class="hl">&amp; (S − 1)</tspan>)]
+			</text>
+			<text x="18" y="56" class="note">
+				One <tspan class="mono-s">and</tspan> per access, as data flow, not a branch: no bounds checks, no guard pages, no
+				page tables,
+			</text>
+			<text x="18" y="76" class="note">
+				and it still holds on mispredicted (speculative) paths. Any address lands inside the instance's own slot.
+			</text>
+		</g>
+	</svg>
+	<figcaption>An instance is a slot plus a pointer to machine code shared by every instance of its module.</figcaption>
+</figure>
+
+<style>
+	svg {
+		width: 100%;
+		height: auto;
+		font-family: var(--sl-font);
+	}
+	.cap {
+		font: 600 9.5px var(--sl-font-mono);
+		letter-spacing: 0.08em;
+		fill: var(--k-ink-dim);
+	}
+	.halo {
+		paint-order: stroke;
+		stroke: var(--sl-color-bg);
+		stroke-width: 5px;
+		stroke-linejoin: round;
+	}
+	.slot {
+		stroke-width: 1.2;
+	}
+	.slot.a {
+		fill: color-mix(in srgb, var(--k-teal) 30%, var(--k-surface));
+		stroke: var(--k-teal);
+	}
+	.slot.b {
+		fill: color-mix(in srgb, var(--k-indigo) 30%, var(--k-surface));
+		stroke: var(--k-indigo);
+	}
+	.slot.c {
+		fill: color-mix(in srgb, var(--k-amber) 34%, var(--k-surface));
+		stroke: var(--k-amber);
+		stroke-width: 2;
+	}
+	.slot.d {
+		fill: color-mix(in srgb, var(--k-rose) 24%, var(--k-surface));
+		stroke: var(--k-rose);
+	}
+	.slot.free {
+		fill: none;
+		stroke: var(--k-line);
+		stroke-dasharray: 4 3;
+	}
+	.sn,
+	.pn {
+		font: 600 11px var(--sl-font-mono);
+		fill: var(--k-ink);
+		text-anchor: middle;
+	}
+	.dim {
+		fill: var(--k-ink-dim);
+		font-size: 16px;
+	}
+	.zoom {
+		fill: none;
+		stroke: var(--k-amber);
+		stroke-dasharray: 3 3;
+		opacity: 0.8;
+	}
+	.part {
+		stroke: var(--k-surface);
+		stroke-width: 1;
+	}
+	.part.null {
+		fill: color-mix(in srgb, var(--k-rose) 30%, var(--k-surface-2));
+	}
+	.part.p1 {
+		fill: color-mix(in srgb, var(--k-amber) 26%, var(--k-surface-2));
+	}
+	.part.p2 {
+		fill: color-mix(in srgb, var(--k-amber) 16%, var(--k-surface-2));
+	}
+	.part.heap {
+		fill: color-mix(in srgb, var(--k-amber) 7%, var(--k-surface-2));
+	}
+	.part.tail {
+		fill: var(--k-surface-2);
+	}
+	.outline {
+		fill: none;
+		stroke: var(--k-amber);
+		stroke-width: 1.5;
+	}
+	.ax {
+		font: 10px var(--sl-font-mono);
+		fill: var(--k-ink-dim);
+	}
+	.ax.end {
+		text-anchor: start;
+	}
+	.box {
+		fill: var(--k-surface);
+		stroke: var(--k-line);
+	}
+	.mono {
+		font: 600 14px var(--sl-font-mono);
+		fill: var(--k-ink);
+	}
+	.mono-s {
+		font-family: var(--sl-font-mono);
+	}
+	.kw {
+		fill: var(--k-indigo);
+	}
+	.hl {
+		fill: var(--k-teal);
+	}
+	.note {
+		font-size: 11.5px;
+		fill: var(--k-ink-dim);
+	}
+</style>

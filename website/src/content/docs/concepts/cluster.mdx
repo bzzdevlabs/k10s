@@ -1,0 +1,83 @@
+---
+title: Cluster without a control plane
+description: Gossip membership, desired state by gossip, placement as a pure function, one-hop routing and self-healing.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import ClusterDiagram from '~/components/ClusterDiagram.astro';
+import PlacementDemo from '~/components/PlacementDemo.astro';
+
+Kubernetes keeps desired state and placement in a central database (etcd) and drives agents with reconcilers.
+That needs consensus, watches and a scheduler. k10s needs none of them: placement is a **pure function** of
+facts every node already has.
+
+<ClusterDiagram />
+
+## Membership: SWIM gossip
+
+Nodes run SWIM-style gossip over UDP: every probe period (`--probe-ms`, 200 ms) each node probes one member
+directly and, if it does not answer, through others. A member that stays silent becomes *suspect*, then *dead*
+(`--suspicion-mult`, 4). Cost: a constant number of messages per node per period, whatever the cluster size.
+
+Each node advertises its addresses and its capacity (memory and cores). A node keeps a random id in its data
+directory, and every restart starts at a higher **incarnation**, so it refutes the death notices of its previous
+life and rejoins cleanly. It also remembers up to 16 live peers, so it can rejoin even when its seeds are gone.
+
+## Desired state: one small versioned document
+
+The desired state is a manifest plus code blobs addressed by SHA-256. `apply` works on any node:
+
+1. The node decodes the bundle, gives it version *highest known + 1*, and **applies it locally first**. That
+   validates every module, so an invalid bundle is refused (422) and never announced.
+2. It persists the bundle and announces `(version, hash)` by gossip.
+3. Every other node fetches the manifest and the blobs it lacks from the origin, or from any other member,
+   checks their hashes, persists and applies them.
+
+The highest version wins everywhere. Two operators applying at the same moment may pick the same version: the
+larger hash wins, on every node.
+
+## Placement: a pure function
+
+```text
+place(manifest, live members) → service → [nodes]
+```
+
+The function is capacity-aware weighted **rendezvous hashing**: every (node, service) pair gets a score, and each
+service takes the `replicas` best-scoring live nodes that have room for its memory reservation. Every node
+evaluates it on the same inputs, so all of them agree, with no scheduler, no leader and nothing to watch.
+
+When membership changes, a node is only replaced where it was placed: other services keep their placement, and
+their warm instances. Try it:
+
+<PlacementDemo />
+
+Changes are batched in a 50 ms window, then each node installs its share through the same path as `apply`:
+services placed here run locally, the others are routed to their nodes.
+
+## Routing: at most one hop
+
+A request for a service placed elsewhere is forwarded over the peer link to one of its replicas: the one with the
+fewest outstanding requests among those alive. The peer runs it whatever its own view says, so a request takes at
+most one hop.
+
+- **Peer links:** one persistent TCP connection per pair of nodes, multiplexed by request id, authenticated and
+  encrypted with the cluster key. Frames are batched, buffers are bounded, and a slow peer cannot stall the mesh.
+- **At most once:** a request is retried on the next candidate only when it is known not to have run (it never
+  reached the socket, or the peer answered *not here*). Anything else fails with 503 rather than run twice.
+- **Fallback order:** for every service, nodes also compute the full rendezvous ranking: where it goes if its hosts
+  fail. Requests follow it immediately, before gossip has even declared a node dead.
+
+## Self-healing
+
+| Event | What happens |
+|---|---|
+| node crashes | connections reset, requests in flight on them fail, new ones go to the next ranked node; once declared dead, survivors re-place its services |
+| node hangs | avoided as soon as gossip suspects it (about one probe period); replaced elsewhere in 1.1 s in the benchmark |
+| graceful leave (SIGTERM) | announces `Left`, forwards its own ingress traffic, drains, exits: 0 failed requests |
+| node restarts | same id, higher incarnation, catches up on the latest desired state |
+| whole cluster restarts | each node re-applies its stored state; the newest version spreads by gossip |
+
+<Aside type="note" title="What still needs consensus">
+	Placement and membership do not. Strongly consistent singletons, leases and replicated storage do: they are on
+	the [roadmap](/k10s/project/roadmap/). Today the key-value store is node-local.
+</Aside>

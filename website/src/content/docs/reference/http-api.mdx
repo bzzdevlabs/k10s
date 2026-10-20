@@ -1,0 +1,59 @@
+---
+title: HTTP API
+description: How the ingress routes requests, the admin endpoints under /_k10s/, error mapping and protocol limits.
+---
+
+## Routing
+
+Every node answers HTTP/1.1 on `--http`. A request for `/<service>/<rest>` goes to the service, wherever it is
+placed; the service sees `/<rest>` with the query string as its path (`/echo/a?x=1` → `/a?x=1`, `/echo` → empty).
+Unknown services answer 404.
+
+| Service outcome | HTTP status |
+|---|---|
+| the status the service set (default 200) | as set (values outside 100–599 become 500) |
+| trap, or CPU budget exceeded | 500 |
+| unavailable (crash backoff, queue full, no memory) | 503 |
+| deadline (30 s for ingress requests) | 504 |
+
+## Admin endpoints
+
+| Endpoint | Access | |
+|---|---|---|
+| `GET /_k10s/health` | open | `ok` while the node serves |
+| `GET /_k10s/metrics` | open | Prometheus text ([Observability](/k10s/guides/observability/)) |
+| `GET /_k10s/status` | admin | JSON status of the node, its services and, in cluster mode, the cluster |
+| `GET /_k10s/cluster` | admin | the cluster status as text |
+| `GET /_k10s/logs/<service>` | admin | recent log lines of a service |
+| `POST /_k10s/apply` | admin | deploy a bundle (`k10s apply` builds it) |
+
+**Admin access:** with `--admin-token-file`, requests need `Authorization: Bearer <token>` (401 otherwise).
+Without a token, only loopback peers are served, and not when a `Forwarded` or `X-Forwarded-For` header shows a
+local proxy relaying someone else (403). The decision is made on the request head, before any body is read.
+
+**Apply responses:** 200 with a report (`version`, `added`, `updated`, `removed`, `unchanged`, `warnings`; in a
+cluster also `hash` and `cluster`), 400 for a malformed bundle, 409 for a stale version, 422 for an invalid module
+or manifest or reservations that do not fit.
+
+## Protocol
+
+- Keep-alive (HTTP/1.1 default; HTTP/1.0 with `Connection: keep-alive`), pipelining one request at a time per
+  connection, `Expect: 100-continue`, `HEAD`.
+- Responses are written with one `writev`; idle keep-alive connections hold a few hundred bytes.
+
+| Limit | Value | Status |
+|---|---|---|
+| request head | 16 KiB, 100 headers | 431 |
+| request body | 16 MiB (256 MiB for `apply`) | 413 |
+| chunked request bodies | not supported | 411 |
+| other transfer codings | | 501 |
+| conflicting `Content-Length`, obsolete line folding | | 400 |
+| HTTP versions other than 1.0 and 1.1 | | 505 |
+| node-wide buffered bytes (`--conn-buffer-max`) | | 503 |
+
+| Timeout | Value |
+|---|---|
+| request head complete | 10 s from its first byte |
+| request body | 10 s + 1 s per 64 KiB |
+| idle keep-alive | 60 s |
+| stalled response write | 30 s |

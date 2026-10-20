@@ -1,0 +1,79 @@
+---
+title: Instances and scaling
+description: What an instance is, when it is created and destroyed, how memory is reserved, and why scale-to-zero is the default.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Lifecycle from '~/components/Lifecycle.astro';
+
+An **instance** is a memory slot (the service's whole state) plus a pointer to machine code shared by every instance
+of the same module. It handles one request at a time, like an actor; a node runs many instances in parallel.
+
+| | Kubernetes pod | k10s instance |
+|---|---|---|
+| What it is | pause container, process, libc, runtime, image | a slot of `2^memory` bytes |
+| Memory (echo, N = 100) | 11.0 MiB | 10.2 KiB |
+| Start | about a second | 1.2–12 µs |
+| Idle cost | a resident process | the pages it touched; none when reclaimed |
+
+<Lifecycle />
+
+## Created on demand
+
+A request for a service takes an idle instance on its shard (last in, first out) or creates one when the service
+is below `max_instances` (default 64) and memory allows. Creation runs inside the request's fiber:
+
+1. take a free slot (a free list or a bump pointer: no syscall),
+2. copy the module's data segments, or map a copy-on-write snapshot,
+3. run the optional `init()` export, with the full host API and its own CPU budget.
+
+Idle instances own no stack. After `--idle-timeout` (30 s) idle instances are destroyed while more than one
+instance of the service is alive on the node: services scale down to one warm instance, and the slot returns to the
+pool.
+
+## Fresh services and snapshots
+
+A service with `fresh = true` starts every request from the same memory: its state after `init()` is snapshotted
+into a sparse memfd, and after each request the slot is reset with one `madvise`. Requests cannot see each other's
+data, at the cost of one reset per request.
+
+Other services start each instance from data segments plus `init()`. `k10s node --snapshots all` makes every
+service start from a snapshot instead, so `init()` runs once per service version (its side effects, `random()` and
+clock values are then shared by all instances, which is why it is opt-in).
+
+| Instance creation | Time |
+|---|---|
+| empty module | 1.2 µs |
+| data + 4 KiB `init` | 5.0 µs |
+| snapshot copied | 3.1 µs |
+| snapshot mapped (shares read-only pages) | 12 µs, 0.46 KB of RSS per instance |
+
+## Traps and backoff
+
+Any trap (an out-of-range bulk copy, `unreachable()`, a division by zero, a stack overflow, a CPU budget overrun,
+a host-function limit) fails the request with HTTP 500, is written to the service log, and **destroys** the
+instance: its memory may be inconsistent. A new one is created on demand.
+
+After three consecutive traps, instance creation for that service version is refused for 100 ms, doubling up to
+30 s; one success resets it. While nothing is alive, the service answers 503 at once instead of queuing.
+
+## Memory reservations
+
+`--mem` (default: physical RAM) caps the address space handed to live instances.
+
+- Every service placed on the node **reserves one instance** (`2^memory + 4 KiB`). Burst instances share the rest,
+  so a busy service can exhaust the shared pool but never another service's reservation.
+- An `apply` whose reservations exceed `--mem` is refused with 422 before any code is prepared.
+- Placement in a cluster charges the same footprint per replica, so nodes are never over-committed by design.
+
+<Aside type="note">
+	Snapshots, prepared code, the key-value store (`--kv-max`, per service) and connection buffers
+	(`--conn-buffer-max`) are bounded separately from `--mem`.
+</Aside>
+
+## CPU
+
+Each shard gives fresh work priority, then **one** 2 ms slice to the oldest preempted invocation, so a request
+arriving behind busy loops waits at most one slice. In a test, 341 echo requests were served with at most 10 ms
+latency while three infinite loops shared the same single shard. The `cpu_ms` budget of a request (default 1000)
+is enforced at safepoints, to within one slice.

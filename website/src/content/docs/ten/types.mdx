@@ -1,0 +1,88 @@
+---
+title: Lexical rules and types
+description: Comments, literals, value and storage types, pointers, str, and the explicit casts Ten allows.
+---
+
+## Lexical rules
+
+- **Comments:** `// …` and `/* … */`. Block comments nest.
+- **Identifiers:** `[A-Za-z_][A-Za-z0-9_]*`.
+- **Keywords:** `fn export import const global data buffer struct include let if else while loop for in break
+  continue return as null true false sizeof offsetof countof`.
+- **Integers** are 64-bit patterns: `42`, `0x2A`, `0b101`, `0o17`, `1_000`. Literals up to `2^64 - 1` wrap to
+  `i64`, so `0xFFFF_FFFF_FFFF_FFFF == -1`.
+- **Characters** `'a'`, `'\n'`, `'\x41'` are byte values of type `i64`. Escapes: `\n \t \r \0 \\ \' \" \xNN`.
+- **Booleans:** `true` and `false` are `1` and `0`.
+- **Floats** (`f64`): `1.5`, `2e9`, `3.0e-4`. A digit is required after `.`, so `0..n` lexes as a range.
+- **Strings** `"…"` take the same escapes and keep any UTF-8 as bytes. No NUL terminator is added.
+
+## Value types
+
+Locals, parameters, results, globals and expression values have one of these types:
+
+| Type | Notes |
+|---|---|
+| `i64` | the integer type; arithmetic wraps (two's complement) |
+| `f64` | IEEE-754 double |
+| `*T` | an `i64` address at runtime, typed by its pointee |
+| `str` | a `(ptr, len)` pair; parameters and locals only |
+
+## Storage types
+
+Pointees, struct fields and array elements may also use the small integer types: `u8 i8 u16 i16 u32 i32 i64
+f64`, pointers, structs and arrays `[T; N]`.
+
+- Loading a small integer **widens** it to `i64`, zero- or sign-extended by its type. Storing **truncates**.
+- A place of array type decays to a pointer to its first element.
+- Structs use C layout with natural alignment:
+
+```ten
+struct Point { x: f64, y: f64, tag: u8, name: [u8; 8], next: *Point }
+```
+
+Struct *values* do not exist: a struct is reached through a pointer or a place (`p.field`, `p[i].field`,
+`(*p).field`). `let q = p[i];` on a struct pointer is an error (write `p + i`), and so is whole-struct assignment
+(use `memcpy`).
+
+## Pointers
+
+- `p + n`, `n + p` and `p - n` move by `n * sizeof(T)`; `p - q` (same `T`) is the element difference.
+- Pointer comparisons are unsigned.
+- Any `*T` converts implicitly to `*u8`, the "bytes" pointer, and `null` converts to any pointer type. Every other
+  conversion is explicit.
+- Indexing `p[i]` has no bounds check: TIR masks every address into the instance's memory.
+
+## `str`
+
+A `str` is a byte pointer and a length, occupying two values: `s.ptr: *u8`, `s.len: i64`. It is produced by a
+string literal or a byte `data` item where a `str` is expected, by another `str` variable, or by `str(ptr, len)`.
+
+```ten
+let s: str = "abc";
+out_str(s);
+out_str(str(buf, n));
+```
+
+A `str` can be passed to `str` parameters (it becomes two TIR parameters), stored in `str` locals and reassigned.
+It cannot be returned, stored in memory or used in arithmetic. A string literal used where a pointer is expected
+has type `*u8` and points to an interned static copy.
+
+## Conversions
+
+There are **no implicit numeric conversions**. Mixing `i64` and `f64` is an error, and an integer literal where an
+`f64` is expected is an error with a hint (`2.0`).
+
+| Cast | Meaning |
+|---|---|
+| `x as f64`, `f as i64` | `f64 → i64` truncates toward zero, saturating; NaN gives 0 |
+| `x as *T`, `p as i64` | between integers and pointers |
+| `p as *U` | between pointer types |
+| `x as u8` | `x & 0xFF`, as an `i64` |
+| `x as i8` | sign-extend the low byte; likewise `u16 i16 u32 i32` |
+
+Floats can be cast to small integer types (through `i64`).
+
+## Conditions
+
+`if`, `while`, `&&`, `||`, `!` and `select` accept `i64` or pointers (non-zero is true), never `f64`.
+Comparisons yield `0` or `1`.

@@ -1,0 +1,117 @@
+---
+title: CLI
+description: Every k10s command and flag.
+---
+
+One binary does everything: `k10s node` is the daemon, the other commands are the CLI. The default node address is
+`127.0.0.1:8080`; in a cluster, `apply` and HTTP requests work on any node.
+
+## k10s node
+
+Runs a node.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--http ADDR` | `127.0.0.1:8080` | HTTP ingress (services and, unless `--admin`, the admin API) |
+| `--data DIR` | none | state directory: bundle, key-value logs, cluster state. Without it, everything is in memory |
+| `--name NAME` | hostname | node name in status |
+| `--shards N` | available parallelism | shard threads |
+| `--backend jit\|interp` | `$K10S_BACKEND`, else `jit` | execution engine |
+| `--mem SIZE` | physical RAM | memory for live instances |
+| `--kv-max SIZE` | `256MiB` | key-value live bytes per service; `0` = unlimited |
+| `--conn-buffer-max SIZE` | `max(--mem/8, 64MiB)` | bytes buffered in HTTP connections, node-wide |
+| `--snapshots fresh\|all` | `fresh` | which services start instances from a snapshot |
+| `--idle-timeout SECS` | `30` | idle instances older than this are reclaimed |
+| `--idle-spin-us N` | `0` | poll briefly after activity instead of sleeping (lower cross-shard latency) |
+| `--log-stderr` | off | echo service logs to stderr |
+| `--pin` | off | pin shards to cores |
+| `--timer-res-us N` | `100` | guest clock resolution; `0` = full (trusted tenants only) |
+| `--jit-indirect jump\|lfence\|retpoline` | `jump` | Spectre v2 hardening of JIT indirect branches |
+| `--sandbox on\|log\|off` | `on`, or `$K10S_SANDBOX` | process sandbox (Landlock + seccomp) |
+| `--user USER[:GROUP]` | | started as root: switch to USER once the listeners are bound |
+
+**Admin API** (`/_k10s/`; `health` and `metrics` are always open):
+
+| Flag | Meaning |
+|---|---|
+| `--admin-token-file FILE` | require this bearer token; without it, only loopback clients may use the admin API |
+| `--admin ADDR` | serve the admin API on its own listener; the ingress then serves only `/_k10s/health` |
+
+**Cluster mode** (any of these flags turns it on):
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--gossip ADDR` | `0.0.0.0:7946` | gossip, UDP |
+| `--rpc ADDR` | `0.0.0.0:7947` | peer links, TCP |
+| `--join HOST:PORT,…` | | gossip addresses of members |
+| `--advertise HOST` | bind IP, else default route | IP given to peers |
+| `--cluster-key-file FILE` | required | the cluster key (`k10s keygen`), the same on every node |
+| `--insecure-unauthenticated-cluster` | | no authentication: isolated test networks only |
+| `--gossip-max-skew SECS` | `300` | clock skew allowed on gossip; `0` = off |
+| `--probe-ms N` | `200` | gossip probe period |
+| `--suspicion-mult N` | `4` | suspicion timeout multiplier |
+| `--leave-grace-ms N` | `1000` | time given to peers to converge on a graceful leave |
+
+## k10s apply
+
+```bash
+k10s apply FILE.k10s [--node HOST:PORT]
+```
+
+Compiles `code = "x.ten"` sources, sends `x.k10` modules as they are, and deploys the manifest as the new desired
+state. Prints the apply report as JSON. See [Manifests](/k10s/guides/manifests/).
+
+## k10s build
+
+```bash
+k10s build FILE.ten [-o FILE.k10]
+```
+
+Compiles Ten to a TIR module.
+
+## k10s run
+
+```bash
+k10s run FILE.ten|FILE.k10 [--path /p?q=1] [--method GET|POST|PUT|DELETE] [--body STR|@FILE]
+         [--backend jit|interp] [--memory SIZE] [--config STR] [--cpu-ms N]
+```
+
+Runs one request in-process, with no node: the body goes to stdout, the status and logs to stderr. The key-value
+store is in memory.
+
+## k10s status
+
+```bash
+k10s status [--node HOST:PORT] [--json]
+```
+
+JSON for a single node; members, placement and links as text in cluster mode (`--json` for JSON).
+
+## k10s logs
+
+```bash
+k10s logs SERVICE [--node HOST:PORT]
+```
+
+The service's recent log lines.
+
+## k10s keygen
+
+```bash
+k10s keygen [-o FILE]
+```
+
+32 random bytes as hex: a cluster key or an admin token. `FILE` is created with mode 0600 and never overwritten.
+
+## k10s version
+
+`k10s version`, `--version` or `-V`: `k10s 0.1.0+1a2b3c4` for a release, `k10s 0.1.1-dev.45+1a2b3c4` for a
+development build.
+
+## Environment
+
+| Variable | Used by |
+|---|---|
+| `K10S_ADMIN_TOKEN_FILE`, `K10S_ADMIN_TOKEN` | `apply`, `status`, `logs` when `--admin-token-file` is not given |
+| `K10S_BACKEND` | default backend of `node` and `run` |
+| `K10S_SANDBOX` | default of `--sandbox` |

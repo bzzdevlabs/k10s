@@ -1,0 +1,91 @@
+---
+title: Editor support
+description: The Ten & k10s extension for VS Code - highlighting, live diagnostics from the real compiler, file and folder icons.
+---
+
+import { Steps } from '@astrojs/starlight/components';
+import Editor from '~/components/Editor.astro';
+
+The **Ten & k10s** extension for VS Code covers Ten sources (`.ten`) and k10s manifests (`.k10s`). Its diagnostics
+come from the real k10s front ends compiled to WebAssembly, so the editor reports exactly what `k10s build` and
+`k10s apply` would, with no k10s install needed.
+
+<Editor
+	file="demo.ten"
+	tree={`k10s/
+  examples/
+    app.k10s
+    demo.ten *
+    echo.ten`}
+	code={`export fn handle() -> i64 {
+    let total = 41;
+    return totl + 1;
+}`}
+	diag={{ line: 3, col: 12, len: 4, message: 'cannot find `totl` in this scope', help: 'did you mean `total`?' }}
+	caption="Ten: unknown names with a suggestion, as you type."
+/>
+
+<Editor
+	file="app.k10s"
+	lang="k10s"
+	tree={`k10s/
+  examples/
+    app.k10s *
+    chain.ten
+    echo.ten`}
+	code={`service echo  { code = "echo.ten"  memory = 1MiB }
+service chain { code = "chain.ten" calls = ["ecoh"] }`}
+	diag={{
+		line: 2,
+		col: 1,
+		len: 53,
+		message: 'service `chain` calls `ecoh`, which is not declared in this manifest',
+	}}
+	caption="Manifests: the apply parser checks keys, sizes, calls targets and every service's code file."
+/>
+
+## Features
+
+- **Syntax highlighting** for both languages: nested block comments, escapes, numeric literals, builtins, types,
+  manifest keys and memory units.
+- **Diagnostics as you type**:
+  - Ten: syntax errors (several per run), unknown names with "did you mean", type mismatches with conversion hints,
+    arity, missing returns, includes. Errors inside an included file are shown on that file, and unsaved editor
+    contents are used for included files.
+  - Manifests: keys, values, memory sizes and `calls` targets, plus each service's `code` file: it must exist, a
+    `.ten` file must compile, and a `.k10` file must be a valid TIR module.
+- **File icons** for `.ten` (the Ten logo) and `.k10s`, and **folder icons** for folders named `k10s`, `.k10s` and
+  `ten` with the Material Icon Theme.
+- Comment toggling, bracket matching, auto-closing pairs and indentation.
+
+## Install
+
+<Steps>
+
+1. Download `k10s-ten-<version>.vsix` from a `vscode-v*` [release](https://github.com/bzzdevlabs/k10s/releases), or
+   build it (Rust with the `wasm32-unknown-unknown` target, Node.js 18+):
+
+   ```bash
+   editors/vscode/build.sh
+   ```
+
+2. Install it:
+
+   ```bash
+   code --install-extension k10s-ten-0.1.0.vsix
+   ```
+
+</Steps>
+
+## Settings
+
+| Setting | Default | |
+|---|---|---|
+| `ten.validate` | `true` | check Ten files as you type |
+| `k10s.validate` | `true` | check manifests and their services' `code` files as you type |
+
+## Other editors
+
+The TextMate grammars in
+[editors/vscode/syntaxes](https://github.com/bzzdevlabs/k10s/tree/main/editors/vscode/syntaxes) work in any editor
+that reads them; this site highlights Ten and manifests with the same files.

@@ -1,0 +1,92 @@
+:root {
+	--sl-font: 'Inter Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
+	--sl-font-mono: 'JetBrains Mono Variable', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+
+	--k-teal: #26a69a;
+	--k-indigo: #7986cb;
+	--k-amber: #f5b14c;
+	--k-rose: #ef6f7b;
+
+	/* Surfaces shared by diagrams; redefined per theme below. */
+	--k-surface: #121820;
+	--k-surface-2: #18212b;
+	--k-line: #2a3644;
+	--k-ink: #e6edf3;
+	--k-ink-dim: #8b9bab;
+	--k-kube: #5b8def;
+}
+
+:root[data-theme='dark'] {
+	--sl-color-accent-low: #0b3330;
+	--sl-color-accent: #26a69a;
+	--sl-color-accent-high: #a7ece4;
+	--sl-color-white: #ffffff;
+	--sl-color-gray-1: #e6edf3;
+	--sl-color-gray-2: #c3ced9;
+	--sl-color-gray-3: #8b9bab;
+	--sl-color-gray-4: #556373;
+	--sl-color-gray-5: #2c3845;
+	--sl-color-gray-6: #18212b;
+	--sl-color-black: #0d1218;
+}
+
+:root[data-theme='light'] {
+	--sl-color-accent-low: #c8eee9;
+	--sl-color-accent: #00796b;
+	--sl-color-accent-high: #00433b;
+	--sl-color-white: #0d1218;
+	--sl-color-gray-1: #18212b;
+	--sl-color-gray-2: #2c3845;
+	--sl-color-gray-3: #4f5d6c;
+	--sl-color-gray-4: #7d8b99;
+	--sl-color-gray-5: #c4ced8;
+	--sl-color-gray-6: #edf1f5;
+	--sl-color-gray-7: #f7f9fb;
+	--sl-color-black: #ffffff;
+
+	--k-surface: #ffffff;
+	--k-surface-2: #f3f6f9;
+	--k-line: #d5dde5;
+	--k-ink: #18212b;
+	--k-ink-dim: #5d6b7a;
+	--k-teal: #00897b;
+	--k-indigo: #5562b0;
+	--k-amber: #b9770e;
+	--k-rose: #c9424f;
+	--k-kube: #326ce5;
+}
+
+.sl-markdown-content :is(h2, h3) {
+	letter-spacing: -0.01em;
+}
+
+/* Splash page */
+[data-has-hero] .hero {
+	padding-block: clamp(2.5rem, 6vw, 5rem) 2rem;
+}
+[data-has-hero] .hero h1 {
+	letter-spacing: -0.03em;
+	background: linear-gradient(120deg, var(--sl-color-white) 30%, var(--sl-color-accent) 100%);
+	-webkit-background-clip: text;
+	background-clip: text;
+	color: transparent;
+}
+[data-has-hero] .hero > img,
+[data-has-hero] .hero > .hero-html {
+	filter: drop-shadow(0 0 3rem color-mix(in srgb, var(--sl-color-accent) 45%, transparent));
+}
+
+/* Shared figure frame used by drawn renderings */
+.k-figure {
+	margin-block: 1.5rem;
+}
+.k-figure figcaption {
+	margin-top: 0.6rem;
+	font-size: var(--sl-text-sm);
+	color: var(--sl-color-gray-3);
+	text-align: center;
+}
+
+.k-num {
+	font-variant-numeric: tabular-nums;
+}
