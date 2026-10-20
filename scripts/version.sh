@@ -1,12 +1,8 @@
 #!/usr/bin/env bash
-# k10s version (SemVer), the single source of truth. X.Y.Z = [workspace.package] version, same in metal/Cargo.toml.
-#   stable X.Y.Z (HEAD tagged vX.Y.Z); dev X.Y.Z-dev.N (N = commit count; next patch while vX.Y.Z exists)
-#   build metadata +<sha7>[.dirty]; without git: the .k10s-version stamp, else X.Y.Z-dev.0+unknown
-# usage: version.sh [--dev|--stable] [--strict] [OUTPUT...]   (one line per OUTPUT, default --version)
-#   --version 0.1.1-dev.45  --full 0.1.1-dev.45+1a2b3c4  --tag v0.1.1-dev.45  --build 1a2b3c4[.dirty]  --sha 1a2b3c4
-#   --number 45  --base 0.1.0  --channel stable|dev  --env K10S_*=... lines  --watch rerun-if-changed paths  --check
-#   --dev: dev even on the stable tag; --stable: require tag vX.Y.Z and a clean tree; --strict: no git/shallow = error
-# K10S_BUILD_VERSION (may carry +metadata) and K10S_BUILD_COMMIT override the computation.
+# k10s SemVer, the single source of truth: X.Y.Z from [workspace.package] (Cargo.toml = metal/Cargo.toml);
+# stable on tag vX.Y.Z, else X.Y.Z-dev.N (N = commit count; next patch once vX.Y.Z exists); +<sha7>[.dirty].
+# usage: version.sh [--dev|--stable] [--strict] [--version|--full|--base|--env|--watch|--check]...
+# --stable: HEAD tagged, clean tree; --strict: fail without git/full history. K10S_BUILD_VERSION/_COMMIT override.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -23,7 +19,7 @@ for a in "$@"; do
     --dev) mode=dev ;;
     --stable) mode=stable ;;
     --strict) strict=1 ;;
-    --version | --full | --tag | --build | --sha | --number | --base | --channel | --env | --watch | --check) outs+=("$a") ;;
+    --version | --full | --base | --env | --watch | --check) outs+=("$a") ;;
     -h | --help)
         sed -n '2,/^set -euo/{/^set -euo/d;s/^# \{0,1\}//;p}' "${BASH_SOURCE[0]}"
         exit 0
@@ -62,7 +58,6 @@ else
     source=none
 fi
 
-number=
 case $source in
 env | stamp)
     if [[ $source == stamp ]]; then
@@ -74,7 +69,6 @@ env | stamp)
     build=${K10S_BUILD_COMMIT:-}
     if [[ -z $build && $K10S_BUILD_VERSION == *+* ]]; then build=${K10S_BUILD_VERSION#*+}; fi
     build=${build:-unknown}
-    if [[ $version =~ -dev\.([0-9]+)$ ]]; then number=${BASH_REMATCH[1]}; fi
     ;;
 git)
     if [[ $(g rev-parse --is-shallow-repository) == true ]]; then
@@ -99,7 +93,6 @@ none)
     ((!strict)) || die "no git repository at $ROOT and no K10S_BUILD_VERSION: cannot tell the version"
     version=$base-dev.0
     build=unknown
-    number=0
     ;;
 esac
 [[ $version == *-* ]] && channel=dev || channel=stable
@@ -114,14 +107,10 @@ watch() {
         if [[ -e $p ]]; then echo "$p"; fi
     done
     [[ $source == git ]] || return 0
-    # HEAD, its reflog (commits, checkouts), branch ref, tags; --git-path also resolves worktree paths.
+    # HEAD, its reflog, the branch and the tags (--git-path resolves worktrees).
     for p in HEAD logs/HEAD packed-refs refs/tags $(g symbolic-ref -q HEAD || true); do
         p=$(g rev-parse --git-path "$p")
         [[ $p == /* ]] || p=$ROOT/$p
-        if [[ -e $p ]]; then echo "$p"; fi
-    done
-    # Sources and lock files, for `.dirty` (cargo scans directories).
-    for p in "$ROOT"/crates/*/src "$ROOT"/metal/*/src "$ROOT/Cargo.lock" "$ROOT/metal/Cargo.lock"; do
         if [[ -e $p ]]; then echo "$p"; fi
     done
 }
@@ -130,12 +119,7 @@ for o in "${outs[@]}"; do
     case $o in
     --version) echo "$version" ;;
     --full) echo "$version+$build" ;;
-    --tag) echo "v$version" ;;
-    --build) echo "$build" ;;
-    --sha) echo "${build%.dirty}" ;;
-    --number) echo "$number" ;;
     --base) echo "$base" ;;
-    --channel) echo "$channel" ;;
     --env)
         echo "K10S_BUILD_VERSION=$version"
         echo "K10S_BUILD_COMMIT=$build"

@@ -221,14 +221,6 @@ fn shard_sum(node: &NodeShared, f: impl Fn(&crate::shard::ShardStats) -> &std::s
     node.shards.iter().map(|s| f(&s.stats).load(Relaxed)).sum()
 }
 
-/// Version in `GET /_k10s/status`: set by the binary (scripts/version.sh), else this crate's version.
-static BUILD_VERSION: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-
-/// Sets the version reported by `GET /_k10s/status` (first call wins).
-pub fn set_build_version(version: &'static str) {
-    let _ = BUILD_VERSION.set(version);
-}
-
 pub fn status_json(node: &NodeShared) -> String {
     let now = sys::mono_ns();
     let table = node.current_table();
@@ -254,7 +246,7 @@ pub fn status_json(node: &NodeShared) -> String {
         .collect();
     format!(
         concat!(
-            "{{\"node\":{},\"version\":\"{}\",\"backend\":\"{}\",\"shards\":{},\"uptime_s\":{:.3},\"http\":\"{}\",",
+            "{{\"node\":{},\"version\":{},\"backend\":\"{}\",\"shards\":{},\"uptime_s\":{:.3},\"http\":\"{}\",",
             "\"code\":{{\"modules\":{},\"code_bytes\":{},\"exec_bytes\":{},\"prepared\":{},\"prepare_ms_total\":{:.3}}},",
             "\"manifest\":{{\"version\":{},\"hash\":\"{}\"}},",
             "\"services\":[{}],",
@@ -272,7 +264,7 @@ pub fn status_json(node: &NodeShared) -> String {
             "\"applies\":{},\"apply_errors\":{},\"per_shard\":[{}]{}}}"
         ),
         json_str(&node.cfg.name),
-        BUILD_VERSION.get().copied().unwrap_or(env!("CARGO_PKG_VERSION")),
+        json_str(&node.cfg.version),
         node.backend.name(),
         node.shards.len(),
         (now - node.started_ns) as f64 / 1e9,

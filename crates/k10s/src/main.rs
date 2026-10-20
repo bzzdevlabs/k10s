@@ -277,6 +277,7 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
         cfg.idle_spin = Duration::from_micros(s.parse().map_err(|_| "invalid --idle-spin-us")?);
     }
     cfg.log_stderr = a.has("log-stderr");
+    cfg.version = VERSION.into();
     cfg.pin_threads = a.has("pin");
     if let Some(s) = a.get("timer-res-us") {
         cfg.timer_res = Duration::from_micros(s.parse().map_err(|_| "invalid --timer-res-us")?);
@@ -286,7 +287,6 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
             k10_node::IndirectBranch::parse(s).ok_or_else(|| format!("invalid --jit-indirect `{s}` (jump|lfence|retpoline)"))?;
     }
     let cluster_cfg = cluster_config(&a)?;
-    k10_node::admin::set_build_version(VERSION);
     // Block SIGINT/SIGTERM in every thread (inherited by the threads the node spawns) and wait for them here.
     let set = signal_set();
     // SAFETY: plain libc calls on a properly initialized sigset_t.
