@@ -129,7 +129,7 @@ impl ServiceRt {
             kv,
             log,
             placement: Placement::Local,
-            mem_res: Reservation::new(0, 0),
+            mem_res: Reservation::new(0),
             snapshot: OnceLock::new(),
             live: AtomicU32::new(0),
             peak: AtomicU32::new(0),
@@ -160,8 +160,8 @@ impl ServiceRt {
         self.spec.cpu_ms as u64 * 1_000_000
     }
 
-    /// Reserves capacity for one more instance (node-wide `max_instances`, crash backoff).
-    pub fn try_reserve(&self, now: u64) -> Result<(), NoInstance> {
+    /// Counts one more live instance (node-wide `max_instances`, crash backoff).
+    pub fn try_add_live(&self, now: u64) -> Result<(), NoInstance> {
         if self.retired.load(Acquire) {
             return Err(NoInstance::Retired);
         }
@@ -184,8 +184,8 @@ impl ServiceRt {
         }
     }
 
-    /// Like [`ServiceRt::try_reserve`] but ignores retirement (used to drain the queue of a retired version).
-    pub fn try_reserve_draining(&self, now: u64) -> bool {
+    /// [`ServiceRt::try_add_live`] ignoring retirement (drains the queue of a retired version).
+    pub fn try_add_live_draining(&self, now: u64) -> bool {
         if now < self.backoff_until.load(Relaxed) {
             return false;
         }
@@ -199,12 +199,13 @@ impl ServiceRt {
         false
     }
 
-    pub fn release(&self) {
-        self.live.fetch_sub(1, AcqRel);
+    /// SeqCst: pairs with `push_waiter` then a `live` check (a queued request never waits on no instance).
+    pub fn sub_live(&self) {
+        self.live.fetch_sub(1, SeqCst);
     }
 
-    /// Releases one instance only if more than `keep` would remain (idle reclaim keeps a warm instance).
-    pub fn release_above(&self, keep: u32) -> bool {
+    /// Uncounts one instance only if more than `keep` remain (idle reclaim keeps a warm instance).
+    pub fn sub_live_above(&self, keep: u32) -> bool {
         let mut cur = self.live.load(Relaxed);
         while cur > keep {
             match self.live.compare_exchange_weak(cur, cur - 1, AcqRel, Relaxed) {

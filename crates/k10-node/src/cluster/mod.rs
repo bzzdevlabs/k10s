@@ -620,7 +620,7 @@ impl ClusterHooks for ClusterShared {
     }
 }
 
-fn human_bytes(b: u64) -> String {
+pub(crate) fn human_bytes(b: u64) -> String {
     const U: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut v = b as f64;
     let mut i = 0;

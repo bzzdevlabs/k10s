@@ -865,15 +865,105 @@ fn over_committed_apply_is_rejected() {
     assert_eq!(mem_stat(&s, "mem_reserved") as u64, 15 * inst_bytes(16));
     assert_eq!(get(&node, "/s14").text(), "hello\n");
     assert_eq!(get(&node, "/s15").status, 404);
-    // Cluster mode never refuses: what does not fit runs unreserved, from the (here empty) shared pool.
+    // Cluster mode never refuses: everything is installed over-committed (one instance each, no burst).
     let mut b = many(16);
     b.manifest.version = 7;
     node.shared().apply_cluster(b, &|_| k10_node::service::Placement::Local).unwrap();
     let s = status(&node);
-    assert_eq!(mem_stat(&s, "mem_reserved") as u64, 15 * inst_bytes(16));
-    assert_eq!(svc_stat(&s, "s15", "mem_reserved"), 0);
-    assert_eq!(get(&node, "/s14").text(), "hello\n");
-    assert_eq!(get(&node, "/s15").status, 503);
+    assert_eq!(mem_stat(&s, "mem_reserved") as u64, 16 * inst_bytes(16));
+    assert_eq!(mem_stat(&s, "mem_overcommit") as u64, 16 * inst_bytes(16) - (1 << 20));
+    for i in 0..16 {
+        assert_eq!(get(&node, &format!("/s{i}")).text(), "hello\n");
+    }
+    node.shutdown();
+}
+
+/// A persisted bundle that no longer fits (smaller `--mem`) is reloaded over-committed and reported, not dropped;
+/// an unreadable one is reported in status and metrics.
+#[test]
+fn reload_that_does_not_fit_runs_degraded_and_reload_errors_are_visible() {
+    let dir = tmpdir("reload-degraded");
+    let cfg = |mem: u64| k10_node::NodeConfig { data_dir: Some(dir.clone()), mem_limit: mem, ..config(1) };
+    let many = bundle((0..16).map(|i| svc(&format!("s{i}"), &demo::echo())).collect());
+    {
+        let node = start(cfg(64 << 20));
+        node.apply(many).unwrap();
+        node.shutdown();
+    }
+    let node = start(cfg(1 << 20));
+    let s = status(&node);
+    assert_eq!(mem_stat(&s, "mem_overcommit") as u64, 16 * inst_bytes(16) - (1 << 20), "{s}");
+    assert!(s.contains("\"reload_error\":null"), "{s}");
+    for i in 0..16 {
+        assert_eq!(get(&node, &format!("/s{i}")).text(), "hello\n");
+    }
+    let m = k10_node::admin::metrics(node.shared());
+    assert!(m.contains(&format!("k10s_memory_overcommit_bytes {}", 16 * inst_bytes(16) - (1 << 20))), "{m}");
+    // A fitting apply ends the degraded state.
+    node.apply(bundle((0..8).map(|i| svc(&format!("s{i}"), &demo::echo())).collect())).unwrap();
+    assert_eq!(mem_stat(&status(&node), "mem_overcommit"), 0);
+    node.shutdown();
+    std::fs::write(dir.join("bundle.k10b"), b"garbage").unwrap();
+    let node = start(cfg(1 << 20));
+    let s = status(&node);
+    assert!(s.contains("\"reload_error\":\"invalid"), "{s}");
+    assert!(k10_node::admin::metrics(node.shared()).contains("k10s_reload_failed 1"));
+    node.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A request queued for memory never waits on nothing: when the last instance goes and no memory is left for a
+/// replacement, its waiters fail at once (503), not at their deadline.
+#[test]
+fn waiters_fail_fast_when_the_last_instance_goes_without_memory() {
+    use k10_node::service::Placement;
+    let (hog, s_bytes) = (inst_bytes(20), inst_bytes(16));
+    // The hog's reservation, 2 hog bursts and one instance of `s` (placed elsewhere: no reservation).
+    let node = start(k10_node::NodeConfig { mem_limit: 3 * hog + s_bytes, ..config(2) });
+    let sh = node.shared().clone();
+    let mk = |v: u64, with_e: bool| {
+        let mut svcs = vec![svc("hog", &demo::burn()).config("1500").mem(20).cpu(10_000), svc("s", &demo::burn()).cpu(10_000)];
+        if with_e {
+            svcs.push(svc("e", &demo::echo()));
+        }
+        let mut b = bundle(svcs);
+        b.manifest.version = v;
+        b
+    };
+    let place = |s: &k10_mesh::ServiceSpec| {
+        if s.name == "s" { Placement::Remote { nodes: vec![k10_mesh::NodeId(9)] } } else { Placement::Local }
+    };
+    sh.apply_cluster(mk(1, false), &place).unwrap();
+    let serve = |body: &str| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let req = k10_node::host::Request { method: 0, path: Vec::new(), body: body.as_bytes().to_vec() };
+        let deadline = k10_node::sys::mono_ns() + 30_000_000_000;
+        sh.serve_local("s".into(), req, deadline, Box::new(move |r| tx.send((r.status, Instant::now())).unwrap()));
+        rx
+    };
+    let wait = |what: &str, f: &dyn Fn(&str) -> bool| {
+        let t = Instant::now();
+        while !f(&status(&node)) {
+            assert!(t.elapsed() < Duration::from_secs(10), "{what}: {}", status(&node));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    std::thread::scope(|sc| {
+        let hogs = sc.spawn(|| concurrent_gets(&node, "/hog", 3));
+        wait("hog holds its reservation and 2 bursts", &|s| svc_stat(s, "hog", "live") == 3);
+        let x1 = serve("400");
+        wait("s holds the last of the pool", &|s| svc_stat(s, "s", "live") == 1);
+        let x2 = serve("10");
+        wait("x2 queued for memory", &|s| svc_stat(s, "s", "queue") == 1);
+        // A new reservation over-commits the node: `s`'s burst instance goes when x1 ends, with no replacement.
+        sh.apply_cluster(mk(2, true), &place).unwrap();
+        let (st1, t1) = x1.recv().unwrap();
+        let (st2, t2) = x2.recv_timeout(Duration::from_secs(5)).expect("the waiter failed at once, not at its deadline");
+        assert_eq!((st1, st2), (200, -2));
+        assert!(t2.duration_since(t1) < Duration::from_secs(1));
+        assert!(hogs.join().unwrap().iter().all(|(st, _)| *st == 200));
+    });
+    assert_eq!(get(&node, "/e").text(), "hello\n");
     node.shutdown();
 }
 
