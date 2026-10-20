@@ -17,6 +17,7 @@
 //!   and R proven < n (unsigned) on the straight-line path by `cmp R,n`+`jae` (or `cmp R,n-1`+`ja`), a branchless
 //!   clamp `cmp R,n`+`cmovae R,S` (or n-1/`cmova`) with S a known constant < n (`mov`/`xor`), `cmp R,n`+`sbb M,M`+
 //!   `and R,M`, or `and R,imm` with imm < n; the proven bound must equal n (Spectre clamps match these shapes).
+//!
 //! Trusted, not covered: the prelude (checked identical for every module), the bulk-memory helpers, host functions.
 
 use super::Insn;
@@ -699,7 +700,7 @@ pub fn verify_function(
                         (Some(Base::Rip), None, _) => {
                             let t = i.comment_target.ok_or_else(|| f.err(i, "rip operand without target"))?;
                             let h0 = lay.helper_table as u64;
-                            if !(t >= h0 && t < h0 + 8 * lay.num_helpers as u64 && (t - h0) % 8 == 0) {
+                            if !(t >= h0 && t < h0 + 8 * lay.num_helpers as u64 && (t - h0).is_multiple_of(8)) {
                                 return Err(f.err(i, "indirect call through memory other than the helper table"));
                             }
                             f.stats.helper_calls += 1;

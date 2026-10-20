@@ -505,11 +505,11 @@ pub struct Sys {
 }
 
 const fn allow(nr: libc::c_long, name: &'static str) -> Sys {
-    Sys { nr: nr as i64, name, rule: Rule::Allow }
+    Sys { nr, name, rule: Rule::Allow }
 }
 
 const fn sys(nr: libc::c_long, name: &'static str, rule: Rule) -> Sys {
-    Sys { nr: nr as i64, name, rule }
+    Sys { nr, name, rule }
 }
 
 const PROT_WRITE: u32 = libc::PROT_WRITE as u32;
@@ -1039,7 +1039,7 @@ mod tests {
             (libc::SYS_open_by_handle_at, "open_by_handle_at"),
             (libc::SYS_landlock_create_ruleset, "landlock_create_ruleset"),
         ] {
-            assert!(!nrs.contains(&(nr as i64)), "{name} must not be allowed");
+            assert!(!nrs.contains(&nr), "{name} must not be allowed");
         }
     }
 
@@ -1100,8 +1100,8 @@ mod tests {
             assert_eq!(r(libc::SYS_prctl, [libc::PR_SET_NAME as u64, 0, 0, 0, 0, 0]), RET_ALLOW);
             assert_eq!(r(libc::SYS_prctl, [libc::PR_SET_SECCOMP as u64, 0, 0, 0, 0, 0]), RET_ERRNO | libc::EPERM as u32);
             assert_eq!(r(libc::SYS_prctl, [libc::PR_SET_DUMPABLE as u64, 1, 0, 0, 0, 0]), RET_ERRNO | libc::EPERM as u32);
-            assert_eq!(r(libc::SYS_ioctl, [3, libc::FIONBIO as u64, 0, 0, 0, 0]), RET_ALLOW);
-            assert_eq!(r(libc::SYS_ioctl, [0, libc::TIOCSTI as u64, 0, 0, 0, 0]), RET_ERRNO | libc::ENOTTY as u32);
+            assert_eq!(r(libc::SYS_ioctl, [3, libc::FIONBIO, 0, 0, 0, 0]), RET_ALLOW);
+            assert_eq!(r(libc::SYS_ioctl, [0, libc::TIOCSTI, 0, 0, 0, 0]), RET_ERRNO | libc::ENOTTY as u32);
             assert_eq!(r(libc::SYS_sched_setaffinity, z), RET_ALLOW);
             assert_eq!(r(libc::SYS_sched_setaffinity, [1, 0, 0, 0, 0, 0]), RET_ERRNO | libc::EPERM as u32);
             assert_eq!(r(libc::SYS_prlimit64, [0, 3, 0, 0x1000, 0, 0]), RET_ALLOW);
