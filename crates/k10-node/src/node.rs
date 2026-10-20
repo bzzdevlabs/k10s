@@ -8,7 +8,7 @@ use crate::logs::Logs;
 use crate::router::{NoRemote, RemoteRouter};
 use crate::service::{prepare_blob, Placement, ServiceRt, ServiceTable};
 use crate::shard::{self, CallResult, Msg, OneShot, ServeDone, ShardShared};
-use crate::slot::MemStats;
+use crate::slot::{MemBudget, MemStats, Reservation};
 use crate::sys;
 use k10_mesh::{sha256::to_hex, Bundle};
 use std::collections::HashMap;
@@ -218,6 +218,8 @@ pub struct NodeShared {
     pub table_version: AtomicU64,
     pub shards: Vec<Arc<ShardShared>>,
     pub mem: Arc<MemStats>,
+    /// `--mem` with per-service reservations: what instance creation may use.
+    pub budget: MemBudget,
     pub kv: KvStore,
     pub logs: Logs,
     pub router: Arc<dyn RemoteRouter>,
@@ -351,6 +353,7 @@ impl NodeShared {
         }
         let mut report = ApplyReport { version: bundle.manifest.version, ..Default::default() };
         let mut by_name = HashMap::new();
+        let mut new_rts: Vec<Arc<ServiceRt>> = Vec::new();
         let mut fresh_prepared: HashMap<[u8; 32], crate::service::Prepared> = HashMap::new();
         for (spec, place) in bundle.manifest.services.iter().zip(places) {
             if let Some(old) = cur.get(&spec.name) {
@@ -389,18 +392,50 @@ impl NodeShared {
                 self.cfg.snapshots == SnapshotPolicy::All,
             );
             svc.min_mem_log2 = min_mem;
+            // Placed here: reserve one instance; elsewhere: fallback runs use the shared pool.
+            let units = u32::from(place == Placement::Local);
+            svc.mem_res = Reservation::new(units, svc.instance_bytes());
             svc.placement = place;
             if cur.get(&spec.name).is_some() {
                 report.updated.push(spec.name.clone());
             } else {
                 report.added.push(spec.name.clone());
             }
-            by_name.insert(spec.name.clone(), Arc::new(svc));
+            let svc = Arc::new(svc);
+            new_rts.push(svc.clone());
+            by_name.insert(spec.name.clone(), svc);
         }
         for name in cur.by_name.keys() {
             if !by_name.contains_key(name) {
                 report.removed.push(name.clone());
             }
+        }
+        // The new table's reservations must fit in `--mem`.
+        let limit = self.budget.limit();
+        let need: u64 = by_name.values().map(|s| s.mem_res.units() as u64 * s.mem_res.unit_bytes()).sum();
+        let mut install: Vec<&Arc<ServiceRt>> = new_rts.iter().collect();
+        if need > limit {
+            let n = by_name.values().filter(|s| s.mem_res.units() > 0).count();
+            let msg = format!(
+                "memory reservations do not fit: {n} service(s) placed on this node reserve {} (one instance each: \
+                 2^memory + 4 KiB) but the node's budget (--mem) is {}; lower `memory`, remove services or raise --mem",
+                human(need),
+                human(limit)
+            );
+            if mode == ApplyMode::Operator {
+                return Err(msg);
+            }
+            // Cluster: placement already charges reservations, so only disagreeing inputs get here; never refuse
+            // the desired state, reserve in name order while it fits.
+            let mut left = limit.saturating_sub(by_name.values().map(|s| s.mem_res.bytes()).sum::<u64>());
+            install.sort_by(|a, b| a.name().cmp(b.name()));
+            install.retain(|s| {
+                let b = s.mem_res.units() as u64 * s.mem_res.unit_bytes();
+                let fits = b <= left;
+                left -= if fits { b } else { 0 };
+                fits
+            });
+            eprintln!("k10s: {msg}; {} service(s) run without a reservation", new_rts.len() - install.len());
         }
         let table = Arc::new(ServiceTable {
             version: bundle.manifest.version,
@@ -413,7 +448,10 @@ impl NodeShared {
                 persist_bundle(&p, &bundle).map_err(|e| format!("cannot persist bundle: {e}"))?;
             }
         }
-        // Publish, then retire what was replaced (shards re-route requests that race with retirement).
+        // Reserve, publish, then retire and release what was replaced (live instances keep their bytes until freed).
+        for s in install {
+            self.budget.install(&s.mem_res);
+        }
         {
             let mut g = self.table.write().unwrap_or_else(|e| e.into_inner());
             *g = table.clone();
@@ -422,6 +460,7 @@ impl NodeShared {
         for (name, old) in &cur.by_name {
             if !table.get(name).is_some_and(|n| Arc::ptr_eq(n, old)) {
                 old.retired.store(true, SeqCst);
+                self.budget.release(&old.mem_res);
             }
         }
         for s in &self.shards {
@@ -548,6 +587,7 @@ impl Node {
             0 => default_conn_buffer_max(cfg.mem_limit),
             n => n,
         };
+        let budget = MemBudget::new(cfg.mem_limit);
         let shared = Arc::new(NodeShared {
             logs: Logs::new(cfg.log_lines, 256 << 10, cfg.log_stderr),
             cfg,
@@ -556,6 +596,7 @@ impl Node {
             table_version: AtomicU64::new(1),
             shards: shard_shared,
             mem: Arc::new(MemStats::default()),
+            budget,
             kv,
             router,
             stop: AtomicBool::new(false),
@@ -694,6 +735,21 @@ impl Node {
 impl Drop for Node {
     fn drop(&mut self) {
         self.stop_inner();
+    }
+}
+
+/// `12.0 MiB (…)` for messages.
+fn human(b: u64) -> String {
+    const U: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let (mut v, mut i) = (b as f64, 0);
+    while v >= 1024.0 && i < U.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{b} B")
+    } else {
+        format!("{v:.1} {} ({b} bytes)", U[i])
     }
 }
 

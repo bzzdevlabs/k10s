@@ -77,7 +77,9 @@ addr    = 4 ip[4] port:u16 | 6 ip[16] port:u16;  raddr = 0 port:u16 (same IP as 
   about +1, +2, +4 … s until it reaches the normal interval. A datagram from a sender we have never heard of
   triggers a sync with it (at most one per second). Remote "dead" records only make us *suspect*, which leaves
   room for refutation. From time to time a sync goes to a recently dead member or to an unreachable seed, which
-  heals partitions.
+  heals partitions. Dead records of members a node never knew (it joined or restarted after they died) are kept
+  aside for these reconnects only (at most 256, `dead_retain_ms`, never re-shared), so a member that comes back at
+  its address is found even when every member that saw it die has restarted since.
 - **Leave.** `Left` is sent to 16 random members, which re-gossip it.
 - **Desired-state pointer.** `(version, hash, origin)`: the highest version wins, and ties go to the larger
   hash.

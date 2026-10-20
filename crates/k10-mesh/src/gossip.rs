@@ -18,8 +18,9 @@
 //!   anything gossip missed, merges partitions and bootstraps joiners (at a doubling interval right after a
 //!   join, and towards any sender we have never heard of); occasionally it targets a recently dead member or a
 //!   seed, which heals partitions;
-//! * dead members are kept `dead_retain_ms` (so syncs spread the news), then compacted to `(id, incarnation)`
-//!   tombstones kept `tombstone_ttl_ms` so stale gossip cannot resurrect them.
+//! * dead members are kept `dead_retain_ms` (so syncs spread the news; members that learn of them later only use
+//!   them for reconnects), then compacted to `(id, incarnation)` tombstones kept `tombstone_ttl_ms` so stale gossip
+//!   cannot resurrect them.
 
 use crate::codec::{put_u32, put_u64, DecodeError, Reader, Res, Rng};
 use crate::member::{get_addr, put_addr, Addr, Member, MemberState, NodeId};
@@ -46,6 +47,8 @@ const GC_INTERVAL_MS: u64 = 1000;
 const MAX_HINTS: usize = 256;
 const MAX_CONFIRMATIONS: u32 = 3;
 const SMALLEST_ITEM: usize = 17;
+/// Dead members learned from syncs (never known alive here) kept for reconnects.
+const MAX_LOST: usize = 256;
 
 /// Tunables. Defaults target a LAN / datacenter.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -389,6 +392,8 @@ pub struct Gossip {
     members: BTreeMap<NodeId, Entry>,
     live: usize,
     tombstones: BTreeMap<NodeId, (u64, u64)>,
+    /// Dead members we never knew alive: (gossip address, until), re-contacted like our own dead ones.
+    lost: BTreeMap<NodeId, (Addr, u64)>,
     probe_order: Vec<NodeId>,
     probe_pos: usize,
     probe: Option<Probe>,
@@ -434,6 +439,7 @@ impl Gossip {
             members,
             live: 1,
             tombstones: BTreeMap::new(),
+            lost: BTreeMap::new(),
             probe_order: Vec::new(),
             probe_pos: 0,
             probe: None,
@@ -842,12 +848,13 @@ impl Gossip {
         // Reconnect: sometimes sync with a recently dead member; if it is alive on the other side of a healed
         // partition, both sides learn they were wrong and refute.
         if self.rng.below(4) == 0 {
-            let dead: Vec<(NodeId, Addr)> = self
+            let mut dead: Vec<(NodeId, Addr)> = self
                 .members
                 .values()
                 .filter(|e| e.m.state == MemberState::Dead)
                 .map(|e| (e.m.id, e.m.gossip))
                 .collect();
+            dead.extend(self.lost.iter().filter(|(id, _)| !self.members.contains_key(id)).map(|(id, (a, _))| (*id, *a)));
             if !dead.is_empty() {
                 let (id, addr) = dead[self.rng.below(dead.len())];
                 self.send_sync(addr, Some(id), true, out);
@@ -874,6 +881,7 @@ impl Gossip {
             self.members.remove(&id);
             self.add_tombstone(id, inc, now);
         }
+        self.lost.retain(|_, (_, until)| *until > now);
         let ttl = self.cfg.tombstone_ttl_ms;
         self.tombstones.retain(|_, (_, at)| at.saturating_add(ttl) > now);
         self.trim_tombstones();
@@ -936,6 +944,12 @@ impl Gossip {
                 let id = rec.id;
                 if let AliveRes::Rejected(inc) = self.on_alive(rec, id == sender, now, out) {
                     self.add_hint(from, Item::Suspect { id, inc, from: self.me });
+                }
+            }
+            MemberState::Dead if !self.members.contains_key(&rec.id) => {
+                // Died before we knew it: re-contact its address now and then too (never re-shared, so it expires).
+                if self.lost.len() < MAX_LOST {
+                    self.lost.entry(rec.id).or_insert((rec.gossip, now.saturating_add(self.cfg.dead_retain_ms)));
                 }
             }
             MemberState::Suspect | MemberState::Dead => {
@@ -1382,6 +1396,51 @@ mod tests {
         assert_eq!(b.desired().map(|d| (d.version, d.origin)), Some((5, NodeId(1001))));
         assert!(events_b.iter().any(|e| matches!(e, Event::MemberUp(m) if m.id == NodeId(1001))));
         assert!(events_b.iter().any(|e| matches!(e, Event::DesiredState(_))));
+    }
+
+    /// Delivers packets between `gs` (gossip address `node(i+1)`) for `ms` of simulated time, dropping those of `down`.
+    fn run(gs: &mut [Gossip], down: &[usize], now: &mut u64, ms: u64, seen: &mut Vec<(usize, Addr)>) {
+        let addr = |i: usize| node(i as u64 + 1).gossip;
+        let mut q: Vec<(usize, Addr, Vec<u8>)> = Vec::new();
+        for _ in 0..ms / 10 {
+            *now += 10;
+            let mut next = Vec::new();
+            for (from, to, p) in q.drain(..) {
+                seen.push((from, to));
+                let Some(j) = (0..gs.len()).find(|&j| addr(j) == to && !down.contains(&j)) else { continue };
+                let out = gs[j].on_packet(addr(from), &p, *now);
+                next.extend(out.packets.into_iter().map(|(t, p)| (j, t, p)));
+            }
+            for (j, g) in gs.iter_mut().enumerate().filter(|(j, _)| !down.contains(j)) {
+                next.extend(g.tick(*now).packets.into_iter().map(|(t, p)| (j, t, p)));
+            }
+            q = next;
+        }
+    }
+
+    #[test]
+    fn later_joiners_reconnect_to_members_that_died_before() {
+        let cfg = Config { probe_interval_ms: 100, probe_timeout_ms: 40, sync_interval_ms: 1000, ..Config::default() };
+        let mut gs: Vec<Gossip> = (1..=3).map(|i| Gossip::new(node(i), cfg.clone(), i)).collect();
+        let (mut now, mut seen) = (0, Vec::new());
+        let _ = gs[1].join(&[node(1).gossip], now);
+        run(&mut gs, &[2], &mut now, 2000, &mut seen);
+        assert_eq!(gs[0].num_live(), 2);
+        // Node 2 dies; node 1 declares it dead, then node 3 joins through node 1 only.
+        run(&mut gs, &[1, 2], &mut now, 0, &mut seen);
+        run(&mut gs, &[1], &mut now, 5000, &mut seen);
+        assert_eq!(gs[0].member(NodeId(1002)).map(|m| m.state), Some(MemberState::Dead));
+        let _ = gs[2].join(&[node(1).gossip], now);
+        run(&mut gs, &[1], &mut now, 3000, &mut seen);
+        assert_eq!(gs[2].num_live(), 2);
+        assert!(gs[2].member(NodeId(1002)).is_none(), "not re-shared as a member");
+        // The joiner, too, re-contacts the dead member's address now and then, and finds it when it is back.
+        seen.clear();
+        run(&mut gs, &[0, 1], &mut now, 60_000, &mut seen);
+        assert!(seen.iter().any(|&(from, to)| from == 2 && to == node(2).gossip), "no reconnect sync from the joiner");
+        gs[1] = Gossip::new(Member { incarnation: 99, ..node(2) }, cfg.clone(), 7);
+        run(&mut gs, &[0], &mut now, 30_000, &mut seen);
+        assert_eq!((gs[1].num_live(), gs[2].num_live()), (2, 2), "the restarted member was found");
     }
 
     #[test]

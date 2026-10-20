@@ -1,5 +1,6 @@
 //! Cluster-mode persistence: the content-addressed blob store (`DATA/blobs/<sha256 hex>`), the desired manifest this
-//! node holds (`DATA/manifest.k10m`, canonical encoding) and the node identity (`DATA/node-id`).
+//! node holds (`DATA/manifest.k10m`, canonical encoding), the node identity (`DATA/node-id`) and the members last
+//! seen alive (`DATA/peers`).
 //!
 //! Blobs live in memory (they are small: compiled TIR modules) and on disk; a blob file is verified against its name
 //! when loaded, so a torn write is detected and the blob is fetched again from a peer. The manifest is written with
@@ -9,6 +10,7 @@ use k10_mesh::sha256::{from_hex, sha256, to_hex};
 use k10_mesh::{Bundle, Manifest, NodeId};
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -203,7 +205,24 @@ impl Store {
             }
         }
     }
+
+    /// Gossip addresses of the members last seen alive (`DATA/peers`), contacted at restart besides `--join`.
+    pub fn load_peers(&self) -> Vec<SocketAddr> {
+        let Some(dir) = &self.dir else { return Vec::new() };
+        let Ok(s) = std::fs::read_to_string(dir.join("peers")) else { return Vec::new() };
+        s.lines().filter_map(|l| l.trim().parse().ok()).take(MAX_PEERS).collect()
+    }
+
+    /// Replaces `DATA/peers` (no fsync: a lost update only leaves a stale hint).
+    pub fn save_peers(&self, peers: &[SocketAddr]) -> io::Result<()> {
+        let Some(dir) = &self.dir else { return Ok(()) };
+        let text: String = peers.iter().take(MAX_PEERS).map(|p| format!("{p}\n")).collect();
+        write_atomic(&dir.join("peers"), text.as_bytes(), false)
+    }
 }
+
+/// Members remembered in `DATA/peers`.
+pub const MAX_PEERS: usize = 16;
 
 fn write_atomic(path: &Path, bytes: &[u8], sync: bool) -> io::Result<()> {
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
@@ -294,6 +313,14 @@ mod tests {
         let id = node_id(Some(&dir)).unwrap();
         assert_eq!(node_id(Some(&dir)).unwrap(), id);
         assert_ne!(node_id(None).unwrap(), node_id(None).unwrap());
+        // remembered peers: bounded, survive a reopen, garbage lines skipped
+        assert!(st.load_peers().is_empty());
+        let peers: Vec<SocketAddr> = (0..20).map(|i| format!("127.0.0.1:{}", 7000 + i).parse().unwrap()).collect();
+        st.save_peers(&peers).unwrap();
+        assert_eq!(Store::open(Some(&dir)).unwrap().load_peers(), peers[..MAX_PEERS]);
+        std::fs::write(dir.join("peers"), "garbage\n10.0.0.1:7946\n").unwrap();
+        assert_eq!(st.load_peers(), vec!["10.0.0.1:7946".parse::<SocketAddr>().unwrap()]);
+        assert!(Store::open(None).unwrap().load_peers().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

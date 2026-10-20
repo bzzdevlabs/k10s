@@ -162,6 +162,7 @@ pub fn json_str(s: &str) -> String {
 }
 
 fn svc_json(s: &ServiceRt, now: u64) -> String {
+    let live = s.live.load(Relaxed);
     let snap = match s.snapshot.get() {
         Some(sn) => format!("{{\"extent\":{},\"pages\":{}}}", sn.extent(), sn.pages()),
         None => "null".into(),
@@ -169,6 +170,7 @@ fn svc_json(s: &ServiceRt, now: u64) -> String {
     format!(
         concat!(
             "{{\"name\":{},\"rt\":{},\"placement\":{},\"code\":\"{}\",\"memory\":{},\"max_instances\":{},\"cpu_ms\":{},\"fresh\":{},",
+            "\"mem_reserved\":{},\"mem_used\":{},\"mem_shared\":{},",
             "\"instances\":{{\"live\":{},\"idle\":{},\"peak\":{}}},\"queue\":{},\"snapshot\":{},",
             "\"requests\":{},\"ok\":{},\"errors\":{},\"traps\":{},\"interrupted\":{},\"created\":{},\"destroyed\":{},",
             "\"reclaimed\":{},\"queued\":{},\"cpu_ms_total\":{:.3},\"init_ms_total\":{:.3},\"backoff_ms\":{},",
@@ -188,7 +190,10 @@ fn svc_json(s: &ServiceRt, now: u64) -> String {
         s.spec.max_instances,
         s.spec.cpu_ms,
         s.spec.fresh,
-        s.live.load(Relaxed),
+        s.mem_res.bytes(),
+        live as u64 * s.instance_bytes(),
+        live.saturating_sub(s.mem_res.in_use()) as u64 * s.instance_bytes(),
+        live,
         s.idle_total(),
         s.peak.load(Relaxed),
         s.waiting.load(Relaxed),
@@ -254,7 +259,8 @@ pub fn status_json(node: &NodeShared) -> String {
             "\"manifest\":{{\"version\":{},\"hash\":\"{}\"}},",
             "\"services\":[{}],",
             "\"memory\":{{\"rss_bytes\":{},\"slots_used\":{},\"slot_bytes\":{},\"reserved_bytes\":{},",
-            "\"snapshot_mapped\":{},\"mem_limit\":{}}},",
+            "\"snapshot_mapped\":{},\"mem_limit\":{},\"mem_reserved\":{},\"mem_shared_used\":{},\"mem_shared_limit\":{},",
+            "\"mem_committed\":{},\"mem_refused\":{}}},",
             "\"http_stats\":{{\"requests\":{},\"2xx\":{},\"4xx\":{},\"5xx\":{},\"admin\":{},\"connections_open\":{},",
             "\"accepted\":{},\"rejected\":{},\"conn_timeouts\":{},\"accept_pauses\":{},\"buffered_bytes\":{},",
             "\"buffer_max\":{},\"buffer_refused\":{}}},",
@@ -285,6 +291,11 @@ pub fn status_json(node: &NodeShared) -> String {
         m.reserved_bytes.load(Relaxed),
         m.snapshot_mapped.load(Relaxed),
         node.cfg.mem_limit,
+        node.budget.reserved(),
+        node.budget.shared_used(),
+        node.budget.limit().saturating_sub(node.budget.reserved()),
+        node.budget.committed(),
+        node.budget.refused(),
         shard_sum(node, |s| &s.http_requests),
         shard_sum(node, |s| &s.http_2xx),
         shard_sum(node, |s| &s.http_4xx),
@@ -347,6 +358,12 @@ pub fn metrics(node: &NodeShared) -> String {
         ("k10s_service_instances", "gauge", "Live instances", |s| s.live.load(Relaxed) as u64),
         ("k10s_service_instances_idle", "gauge", "Idle instances", |s| s.idle_total() as u64),
         ("k10s_service_queue", "gauge", "Requests waiting for an instance", |s| s.waiting.load(Relaxed) as u64),
+        ("k10s_service_memory_reserved_bytes", "gauge", "Node memory reserved for the service (one instance when placed here)", |s| {
+            s.mem_res.bytes()
+        }),
+        ("k10s_service_memory_bytes", "gauge", "Memory of the service's live instances (slots)", |s| {
+            s.live.load(Relaxed) as u64 * s.instance_bytes()
+        }),
     ];
     for (name, ty, help, get) in per_svc {
         let _ = writeln!(o, "# HELP {name} {help}\n# TYPE {name} {ty}");
@@ -380,6 +397,12 @@ pub fn metrics(node: &NodeShared) -> String {
     gauge(&mut o, "k10s_fibers", "gauge", "Coroutines (pooled)", shard_sum(node, |s| &s.fibers));
     gauge(&mut o, "k10s_slots_used", "gauge", "Instance memory slots in use", node.mem.slots_used.load(Relaxed));
     gauge(&mut o, "k10s_slot_bytes", "gauge", "Address space of slots in use", node.mem.slot_bytes_used.load(Relaxed));
+    let b = &node.budget;
+    gauge(&mut o, "k10s_memory_limit_bytes", "gauge", "Instance memory budget (--mem)", b.limit());
+    gauge(&mut o, "k10s_memory_reserved_bytes", "gauge", "Instance memory reserved for the services placed here", b.reserved());
+    gauge(&mut o, "k10s_memory_shared_used_bytes", "gauge", "Instance memory used beyond the reservations (burst instances)", b.shared_used());
+    gauge(&mut o, "k10s_memory_committed_bytes", "gauge", "Reservations plus burst instances", b.committed());
+    gauge(&mut o, "k10s_memory_refused_total", "counter", "Instance creations refused for lack of memory", b.refused());
     gauge(&mut o, "k10s_rss_bytes", "gauge", "Resident set size of the node process", sys::rss_bytes());
     gauge(&mut o, "k10s_manifest_version", "gauge", "Applied manifest version", table.version);
     let code = node.backend.stats();
