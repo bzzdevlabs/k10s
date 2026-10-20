@@ -60,9 +60,7 @@ fn probe(node: &k10_node::Node, prober: &str, target: &str, n: u32) -> (i64, i64
     (v[0], v[1], v[2] as f64 / n as f64)
 }
 
-/// The manifest's `calls` allowlist (this suite also runs with `K10S_BACKEND=interp`): granted calls work; any
-/// other call — to an existing service, to the caller itself, to a name that exists nowhere — gets exactly what a
-/// call to an unknown service gets (status -1, empty response), through the same path (similar `now_ns` timing).
+/// `calls` allowlist (both backends): granted calls work; any other call gets exactly what an unknown service gets.
 #[test]
 fn call_allowlist_denied_call_is_indistinguishable_from_unknown() {
     let node = start(config(1));
@@ -83,51 +81,47 @@ fn call_allowlist_denied_call_is_indistinguishable_from_unknown() {
     assert_eq!(st("probe", "echo"), (200, 6));
     assert_eq!(st("probe", "echo/sub/path"), (200, 6));
     assert_eq!(st("any", "other"), (200, 6), "the wildcard reaches every service");
-    // A genuinely unknown service (only a wildcard caller gets that far) ...
+    // A truly unknown service (only a wildcard caller gets that far) and every denied call look the same.
     let unknown = st("any", "nosuch");
     assert_eq!(unknown, (-1, 0));
-    // ... and every denied call look the same: existing services, the caller itself, nonexistent names.
     for (p, t) in [("probe", "other"), ("probe", "probe"), ("probe", "none"), ("probe", "nosuch"), ("probe", "echo2")] {
         assert_eq!(st(p, t), unknown, "{p} -> {t}");
     }
     for t in ["echo", "none", "nosuch"] {
         assert_eq!(st("none", t), unknown, "no `calls`: nothing, not even itself (none -> {t})");
     }
-    // Self-calls follow the same rule: `me` lists itself (the inner call `me/echo` is then denied: echo is not
-    // listed), `none` does not.
+    // Self-calls need an entry: `me` lists itself (its inner call to echo is then denied, hence status 200).
     let mut c = client(&node);
     let r = c.request("POST", "/me/me/echo", b"1").unwrap();
     assert!(r.text().starts_with("200 "), "{}", r.text());
-    // Denied calls never reached a service: only the granted / wildcard ones are counted.
+    // Denied calls reached no service.
     let s = status(&node);
     assert_eq!(svc_stat(&s, "echo", "requests"), 2);
     assert_eq!(svc_stat(&s, "other", "requests"), 1);
-    // Same path, same timing class: a denied call to an existing service vs. to a name that does not exist. Rounds of
-    // 10 000 calls (the per-invocation limit), interleaved so that both see the same machine load; best of 7. The
-    // paths are identical (one binary search over the allowlist, no lookup): only noise separates them, hence the
-    // loose bound (a forwarded or executed call would be orders of magnitude apart).
+    // Same timing class, denied existing vs. missing name: interleaved rounds of 10 000 calls, best of 7; the loose
+    // bound absorbs machine noise (identical paths; a forwarded or executed call is orders of magnitude slower).
+    let cases = [("probe", "other"), ("probe", "no-such-service"), ("any", "nosuch"), ("probe", "echo")];
     let mut best = [f64::MAX; 4];
     for _ in 0..7 {
-        for (k, (p, t)) in [("probe", "other"), ("probe", "no-such-service"), ("any", "nosuch"), ("probe", "echo")].iter().enumerate() {
+        for (k, (p, t)) in cases.iter().enumerate() {
             best[k] = best[k].min(probe(&node, p, t, 10_000).2);
         }
     }
-    let [exists, missing, wild_unknown, granted] = best;
-    eprintln!(
-        "ns per call: denied (exists) {exists:.0}, denied (no such service) {missing:.0}, unknown via wildcard {wild_unknown:.0}, granted {granted:.0}"
-    );
+    let [exists, missing, wild, granted] = best;
+    eprintln!("ns/call: denied {exists:.0} (exists) {missing:.0} (missing), wildcard unknown {wild:.0}, granted {granted:.0}");
     assert!(exists < 2.5 * missing && missing < 2.5 * exists, "denied timings differ: {exists:.0} vs {missing:.0} ns");
     node.shutdown();
 }
 
-/// A `calls` entry naming no service of the manifest is refused at apply time (typos are caught, nothing changes).
+/// A callee that is not in the manifest is refused at apply time (typos are caught, nothing changes).
 #[test]
 fn apply_rejects_calls_to_services_not_in_the_manifest() {
     let node = start(config(1));
     node.apply(bundle(vec![svc("echo", &demo::echo())])).unwrap();
-    let e = node.apply(bundle(vec![svc("echo", &demo::echo()), svc("c", &demo::caller("echo")).calls(&["ehco"])])).unwrap_err();
+    let typo = bundle(vec![svc("echo", &demo::echo()), svc("c", &demo::caller("echo")).calls(&["ehco"])]);
+    let e = node.apply(typo).unwrap_err();
     assert!(e.contains("calls `ehco`"), "{e}");
-    // Over HTTP the bundle does not even decode (the canonical manifest decoder checks the references too).
+    // Over HTTP the bundle does not even decode (the decoder checks callees too).
     let b = bundle(vec![svc("c", &demo::caller("echo")).calls(&["echo"])]).encode();
     let mut c = client(&node);
     let r = c.request("POST", "/_k10s/apply", &b).unwrap();
@@ -657,7 +651,10 @@ fn pipelined_requests_respect_backpressure() {
 #[test]
 fn stress_calls_through_small_pools_across_shards_with_reapply() {
     let node = start(k10_node::NodeConfig { call_timeout: Duration::from_secs(10), ..config(4) });
-    let mk = |cfg: &str| bundle(vec![svc("front", &demo::caller("back")).calls(&["back"]).max(8), svc("back", &demo::burn()).config(cfg).max(3)]);
+    let mk = |cfg: &str| {
+        let front = svc("front", &demo::caller("back")).calls(&["back"]).max(8);
+        bundle(vec![front, svc("back", &demo::burn()).config(cfg).max(3)])
+    };
     node.apply(mk("1")).unwrap();
     let addr = node.http_addr().to_string();
     let ok = AtomicU64::new(0);

@@ -442,7 +442,7 @@ def manifest(prefix, n, code, kv):
     def val(k, v):
         if k in ("code", "config"):
             return f'"{v}"'
-        if k == "calls":  # calls=a,b -> ["a", "b"] (the allowlist of services each one may `call`)
+        if k == "calls":  # calls=a,b -> ["a", "b"]
             return "[" + ", ".join(f'"{x}"' for x in v.split(",") if x) + "]"
         return v
     attrs = " ".join(f"{k} = {val(k, v)}" for k, v in kv)

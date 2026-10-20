@@ -219,9 +219,8 @@ pub fn call_loop(target: &str) -> Module {
     )
 }
 
-/// `call_probe`: `/<probe>/<target>` with body `N` (decimal; empty = 1) calls `<target>` (`name` or `name/path`,
-/// empty body) N times and answers `<status> <call_resp_len> <ns>`: the last call's result, its response length and
-/// the `now_ns` time the N calls took — everything a workload can observe about a call. The path must not be empty.
+/// `call_probe`: `/<probe>/<target>` with body `N` (default 1) calls `<target>` N times and answers `<status>
+/// <call_resp_len> <ns>` (last call; all N): what a workload observes of a call. The path must not be empty.
 pub fn call_probe() -> Module {
     let mut m = Mb::new(16);
     emit_const(&mut m.mb, 64, b" ");

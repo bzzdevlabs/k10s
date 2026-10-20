@@ -419,9 +419,8 @@ fn svc_num(status: &str, name: &str, key: &str) -> Option<i64> {
     num_after(&status[at..], key)
 }
 
-/// The `calls` allowlist is enforced by the calling node before any routing: a call the manifest does not grant is
-/// answered like a call to an unknown service and never leaves the node (no forward, no peer serves it), while the
-/// same call granted to another service (same code) is forwarded to the node hosting the callee.
+/// A denied call is answered like an unknown service by the calling node and never forwarded; the same call
+/// granted (same code, other service) is.
 #[test]
 fn denied_call_is_not_forwarded() {
     let (dir, nodes) = start_cluster("deny", 3, &Opts::default());
@@ -922,7 +921,8 @@ fn measure_latency() {
     write_modules(&dir, 12);
     let mut man = String::new();
     for i in 0..12 {
-        man.push_str(&format!("service e{i} {{ code = \"echo.k10\" memory = 64KiB }}\nservice c{i} {{ code = \"c{i}.k10\" memory = 64KiB calls = [\"e{i}\"] }}\n"));
+        man.push_str(&format!("service e{i} {{ code = \"echo.k10\" memory = 64KiB }}\n"));
+        man.push_str(&format!("service c{i} {{ code = \"c{i}.k10\" memory = 64KiB calls = [\"e{i}\"] }}\n"));
     }
     apply(&dir, &nodes[0], &man);
     wait_applied(&nodes, 1, Duration::from_secs(30));

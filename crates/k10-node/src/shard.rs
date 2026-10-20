@@ -321,8 +321,7 @@ struct Fiber {
     depth: u8,
     deadline: u64,
     calls: u32,
-    /// The service of the current job (its `calls` allowlist is checked in `on_call`). Valid while the job runs:
-    /// same lifetime argument as [`Job::svc`].
+    /// Service of the current job, whose `calls` `on_call` checks (valid while the job runs, like [`Job::svc`]).
     caller: *const ServiceRt,
     rng_seed: u64,
     /// Own preemption word (interpreter).
@@ -664,8 +663,7 @@ const STACK_KEEP: usize = 64 << 10;
 // Scheduler
 // ------------------------------------------------------------------------------------------------------------------
 
-/// The result of invoking a service this node does not know — and of a `call` the caller's allowlist does not
-/// grant, which must be indistinguishable from it.
+/// Result for an unknown service, and for a `call` the caller's allowlist denies (must be indistinguishable).
 fn unknown_service(name: &[u8]) -> CallResult {
     CallResult::error(CALL_UNKNOWN, format!("unknown service `{}`", String::from_utf8_lossy(name)))
 }
@@ -1122,9 +1120,7 @@ impl Shard {
         } else if calls > cfg.max_calls_per_invocation {
             Err(CallResult::error(CALL_UNAVAILABLE, "too many calls in one invocation"))
         } else if !allowed {
-            // Not in the caller's `calls` allowlist: answered exactly like an unknown service (same status, same
-            // empty body), decided here before any lookup, routing or forwarding — and without looking the name up,
-            // so whether such a service exists does not change the path taken.
+            // Denied = unknown, decided before any lookup or routing: whether the name exists changes nothing.
             Err(unknown_service(&target[..name_len]))
         } else {
             let (name, path) = match split {
