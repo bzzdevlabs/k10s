@@ -268,6 +268,7 @@ fn outsiders_cannot_join_forge_gossip_or_use_peer_links() {
     let mut sec = peer_handshake(&mut s, 0xf00d);
     let mut out = Vec::new();
     sec.push(&k10_mesh::wire::Msg::Call { service: "echo", path: b"/x", body: b"", deadline_ms: 5000, method: 0 }, 7, &mut out).unwrap();
+    sec.seal_pending(&mut out);
     s.write_all(&out).unwrap();
     wait_for("authenticated call served", Duration::from_secs(10), || cluster_num(&n1, "served_for_peers") > served);
     // The cluster is unharmed.
@@ -297,6 +298,7 @@ fn wrong_key_handshake(s: &mut TcpStream) {
     };
     sec.on_auth(&payload, None, &mut out).unwrap();
     sec.push(&k10_mesh::wire::Msg::Ping, 1, &mut out).unwrap();
+    sec.seal_pending(&mut out);
     let _ = s.write_all(&out);
 }
 

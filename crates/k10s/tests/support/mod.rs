@@ -81,6 +81,7 @@ pub fn peer_handshake(s: &mut std::net::TcpStream, id: u64) -> k10_mesh::secure:
     let a: k10_mesh::Addr = "127.0.0.1:1".parse().unwrap();
     let me = k10_mesh::Member::new(k10_mesh::NodeId(id), a, a, a, k10_mesh::Capacity { mem_bytes: 1 << 30, cores: 1 });
     sec.push(&Msg::Hello { member: me }, 0, &mut out).unwrap();
+    sec.seal_pending(&mut out);
     s.write_all(&out).unwrap();
     sec
 }

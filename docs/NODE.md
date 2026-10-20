@@ -399,16 +399,18 @@ gossip key, a peer key and a public key id (`"auth"."key_id"` in status: equal o
   against their SHA-256 when fetched.
 - **Peer links**: each side sends `Auth` (kind 11, in clear: version, node id, 32 fresh random bytes from
   `getrandom`), then derives one key per direction,
-  `k(A→B) = HKDF-Expand(HKDF-Extract("k10s link v1", peer key), id_A | id_B | nonce_A | nonce_B)`. Every later frame
-  is `len:u32 | ChaCha20-Poly1305(kind | request_id | payload) | tag[16]` (`len` counts the tag and is authenticated)
-  with the frame counter as nonce. The first sealed frame each side receives is the peer's `Hello`, whose id must
-  match its `Auth`: opening it proves the peer holds the key and agrees on both nonces (mutual challenge–response).
+  `k(A→B) = HKDF-Expand(HKDF-Extract("k10s link v1", peer key), id_A | id_B | nonce_A | nonce_B)`. Frames then
+  travel in sealed records, `len:u32 | ChaCha20-Poly1305(frames) | tag[16]` (`len` counts the tag and is
+  authenticated), with the record counter as nonce: one record per write (the frames a loop iteration queued for that
+  peer; records close at 64 KiB, a larger frame travels alone), so crypto costs one seal per batch, not per frame.
+  The first record each side receives starts with the peer's `Hello`, whose id must match its `Auth`: opening it
+  proves the peer holds the key and agrees on both nonces (mutual challenge–response).
   Fresh nonces give fresh keys per connection; per-direction keys stop reflection; the implicit counter stops
   injection, replay, reordering and dropping — any failure closes the link (`link_auth_failures`; a dialed peer is
   backed off). Before `Auth` the decoder accepts nothing larger than an `Auth` frame, and a link that has not
   completed the handshake within 5 s is closed. A peer claiming this node's id, or a dialed link reaching another
-  node, is refused. Frames queued during the handshake wait unsealed at the end of the write buffer (not written) and
-  are sealed in place once the peer's `Auth` arrives; afterwards frames are sealed in place as they are queued and
+  node, is refused. Records queued during the handshake wait unsealed at the end of the write buffer (not written)
+  and are sealed in place once the peer's `Auth` arrives; afterwards records are sealed in place when written and
   opened in place in the decoder's buffer (no extra copy). One handshake round trip is added per connection.
 - Cost: ChaCha20 runs four blocks per batch with SSE2 intrinsics on hosted x86-64 (the only `unsafe` in `k10-mesh`;
   portable interleaved lanes on metal), fused with Poly1305 per 256-byte batch.

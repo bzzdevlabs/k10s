@@ -150,6 +150,7 @@ fn peer_that_never_reads_is_cut_off() {
                 sent += 1;
                 sec.push(&k10_mesh::wire::Msg::GetManifest { version: 1 }, sent, &mut reqs).unwrap();
             }
+            sec.seal_pending(&mut reqs);
             if w.write_all(&reqs).is_err() {
                 break; // the node closed the link
             }

@@ -3,7 +3,7 @@
 //!
 //! ## Peer links
 //! One persistent TCP connection per peer pair carries everything, multiplexed by request id (`k10_mesh::wire`).
-//! With a cluster key both sides first exchange `Auth` frames, then seal every frame (`k10_mesh::secure`); a peer
+//! With a cluster key both sides first exchange `Auth` frames, then send sealed records (`k10_mesh::secure`); a peer
 //! that fails to authenticate or to finish within [`HANDSHAKE_TIMEOUT_NS`] is dropped. Both sides send
 //! `Hello{member}` first. A node dials peers with a larger id as soon as they come up, and any peer
 //! lazily when it first needs it; if both ends dialed at once, the connection dialed by the smaller id wins and the
@@ -47,7 +47,7 @@ use crate::host::{Request, CALL_TIMEOUT, CALL_UNAVAILABLE};
 use crate::router::Completion;
 use crate::sys::{self, mono_ns, Epoll, Fd};
 use k10_mesh::driver::UdpDriver;
-use k10_mesh::secure::{AuthError, SecureLink, AUTH_FRAME_LEN, FRAME_TAG_LEN};
+use k10_mesh::secure::{AuthError, SecureLink, AUTH_FRAME_LEN};
 use k10_mesh::sha256::sha256;
 use k10_mesh::wire::{FrameDecoder, Msg, WireError, DEFAULT_MAX_FRAME, HEADER_LEN, KIND_AUTH};
 use k10_mesh::{DesiredState, Event, Manifest, Member, MemberState, NodeId};
@@ -938,7 +938,6 @@ impl Mesh {
         if l.doomed {
             return Err(QueueError::Overflow);
         }
-        let start = l.queued;
         let before = l.wbuf.len();
         // Checked before encoding: a sealed frame cannot be taken back.
         if l.unsent() + m.frame_len_bound() + l.sec.overhead() > LINK_HARD_CAP {
@@ -948,10 +947,14 @@ impl Mesh {
             eprintln!("k10s: mesh: link to {} holds over {} MiB unsent: closing it", fmt_peer(l.peer), LINK_HARD_CAP >> 20);
             return Err(QueueError::Overflow);
         }
-        if let Err(e) = l.sec.push(m, id, &mut l.wbuf) {
-            eprintln!("k10s: mesh: dropping un-encodable frame: {e}");
-            return Err(QueueError::Encode);
-        }
+        let at = match l.sec.push(m, id, &mut l.wbuf) {
+            Ok(at) => at,
+            Err(e) => {
+                eprintln!("k10s: mesh: dropping un-encodable frame: {e}");
+                return Err(QueueError::Encode);
+            }
+        };
+        let start = l.queued + (at - before) as u64;
         l.queued += (l.wbuf.len() - before) as u64;
         if !l.dirty {
             l.dirty = true;
@@ -1144,7 +1147,10 @@ impl Mesh {
     /// Writes buffered frames. Returns false if the link was closed.
     fn flush(&mut self, li: u32) -> bool {
         let l = self.links[li as usize].as_mut().unwrap();
-        // Frames queued during the handshake wait, unsealed, at the end of the buffer.
+        // One sealed record per write; records queued during the handshake wait, unsealed, at the end of the buffer.
+        let before = l.wbuf.len();
+        l.sec.seal_pending(&mut l.wbuf);
+        l.queued += (l.wbuf.len() - before) as u64;
         let end = l.wbuf.len() - l.sec.held();
         while l.wpos < end {
             match sys::writev2(l.fd.raw(), &l.wbuf[l.wpos..end], &[]) {
@@ -1216,9 +1222,12 @@ impl Mesh {
                             }
                             let payload = f.payload.to_vec();
                             let expect = if l.dialed { l.peer } else { None };
-                            match l.sec.on_auth(&payload, expect, &mut l.wbuf) {
+                            let before = l.wbuf.len();
+                            let r = l.sec.on_auth(&payload, expect, &mut l.wbuf);
+                            l.queued += (l.wbuf.len() - before) as u64;
+                            match r {
                                 Ok((peer, opener)) => {
-                                    l.dec.set_opener(opener, DEFAULT_MAX_FRAME + FRAME_TAG_LEN);
+                                    l.dec.set_opener(opener, DEFAULT_MAX_FRAME);
                                     l.auth_peer = Some(peer);
                                     authed = true;
                                 }

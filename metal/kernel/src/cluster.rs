@@ -38,7 +38,7 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use k10_mesh::secure::{AuthError, ClusterKey, GossipCipher, SecureLink, AUTH_FRAME_LEN, FRAME_TAG_LEN, GOSSIP_OVERHEAD};
+use k10_mesh::secure::{AuthError, ClusterKey, GossipCipher, SecureLink, AUTH_FRAME_LEN, GOSSIP_OVERHEAD};
 use k10_mesh::sha256::{sha256, to_hex};
 use k10_mesh::wire::{FrameDecoder, Msg, WireError, KIND_AUTH};
 use k10_mesh::{place, Bundle, Capacity, DesiredState, Event, Gossip, Manifest, Member, MemberState, NodeId, Output};
@@ -1042,9 +1042,9 @@ impl Cluster {
     /// message cannot be encoded — a field too long for the wire — and nothing was queued).
     fn queue(&mut self, li: u32, m: &Msg<'_>, id: u64) -> Option<u64> {
         let l = self.links[li as usize].as_mut().unwrap();
-        let start = l.queued;
         let before = l.wbuf.len();
-        l.sec.push(m, id, &mut l.wbuf).ok()?;
+        let at = l.sec.push(m, id, &mut l.wbuf).ok()?;
+        let start = l.queued + (at - before) as u64;
         l.queued += (l.wbuf.len() - before) as u64;
         Some(start)
     }
@@ -1172,9 +1172,12 @@ impl Cluster {
                     }
                     let payload = f.payload.to_vec();
                     let expect = if l.dialed { l.peer } else { None };
-                    match l.sec.on_auth(&payload, expect, &mut l.wbuf) {
+                    let before = l.wbuf.len();
+                    let r = l.sec.on_auth(&payload, expect, &mut l.wbuf);
+                    l.queued += (l.wbuf.len() - before) as u64;
+                    match r {
                         Ok((peer, opener)) => {
-                            l.dec.set_opener(opener, self.max_frame + FRAME_TAG_LEN);
+                            l.dec.set_opener(opener, self.max_frame);
                             l.auth_peer = Some(peer);
                         }
                         Err(e) => {
@@ -1231,7 +1234,10 @@ impl Cluster {
             return;
         }
         let s = net.tcp(l.sock);
-        // Frames queued during the handshake wait, unsealed, at the end of the buffer.
+        // One sealed record per write; records queued during the handshake wait, unsealed, at the end of the buffer.
+        let before = l.wbuf.len();
+        l.sec.seal_pending(&mut l.wbuf);
+        l.queued += (l.wbuf.len() - before) as u64;
         let end = l.wbuf.len() - l.sec.held();
         while l.wpos < end && s.can_send() {
             match s.send_slice(&l.wbuf[l.wpos..end]) {

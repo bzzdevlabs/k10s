@@ -91,9 +91,9 @@ addr    = 4 ip[4] port:u16 | 6 ip[16] port:u16;  raddr = 0 port:u16 (same IP as 
 `frame = len:u32 LE | kind:u8 | request_id:u64 LE | payload`, with `len = 9 + payload`.
 Messages: Hello{member}, GetManifest{version}/Manifest{bytes}, GetBlob{hash}/Blob{hash,bytes}/BlobMissing{hash},
 Call{service,path,body,deadline_ms,method}/CallResult{status,body}, Ping/Pong. With a cluster key
-(`secure::SecureLink`) each side first sends `Auth` (kind 11: id, fresh nonce); every later frame is
-`len | ChaCha20-Poly1305(kind | request_id | payload) | tag[16]` under a per-direction session key, opened in place
-by `FrameDecoder::set_opener`. Payload layouts are documented in
+(`secure::SecureLink`) each side first sends `Auth` (kind 11: id, fresh nonce); frames then travel in records,
+`len | ChaCha20-Poly1305(frames) | tag[16]` (one per write, ≤ 64 KiB unless one larger frame), under a per-direction
+session key, opened in place by `FrameDecoder::set_opener`. Payload layouts are documented in
 `src/wire.rs`. `FrameDecoder` takes partial input (`feed`, or `spare`/`commit` to read in place) and caps the
 frame size (default: the largest bundle blob plus headers). Errors are sticky, and the decoder never allocates from a claimed length. `encode_header` allows
 vectored writes of large blobs.

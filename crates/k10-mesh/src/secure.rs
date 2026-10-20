@@ -1,5 +1,5 @@
 //! Cluster authentication with one shared 32-byte key: HKDF subkeys, sealed gossip ([`GossipCipher`]) and
-//! authenticated, encrypted peer links ([`SecureLink`]). Protocol and threat model: docs/NODE.md, SECURITY.md.
+//! authenticated, encrypted peer links ([`SecureLink`], sealed records of frames). Protocol: docs/NODE.md.
 
 use crate::codec::put_u64;
 use crate::crypto::aead::{self, xopen, xseal, TAG_LEN};
@@ -260,6 +260,10 @@ pub const AUTH_VERSION: u8 = 1;
 pub const AUTH_PAYLOAD_LEN: usize = 1 + 8 + 32;
 /// The `len` field of an `Auth` frame: what a decoder waiting for one must accept, and nothing larger.
 pub const AUTH_FRAME_LEN: usize = 9 + AUTH_PAYLOAD_LEN;
+/// Bytes before a record's ciphertext (its `len`).
+pub const RECORD_HEADER: usize = 4;
+/// A record is closed before it would grow past this; a larger frame travels alone.
+pub const RECORD_TARGET: usize = 64 << 10;
 
 fn frame_nonce(ctr: u64) -> [u8; 12] {
     let mut n = [0u8; 12];
@@ -267,14 +271,14 @@ fn frame_nonce(ctr: u64) -> [u8; 12] {
     n
 }
 
-/// Seals the frames of one direction of a link.
+/// Seals the records of one direction of a link.
 pub struct Sealer {
     key: aead::Key,
     ctr: u64,
 }
 
 impl Sealer {
-    /// Seals `len:u32 | kind | id | payload | tag space` in place (`len` counts the tag).
+    /// Seals `len:u32 | frames | tag space` in place (`len` counts the tag).
     pub fn seal(&mut self, frame: &mut [u8]) {
         let n = frame_nonce(self.ctr);
         self.ctr += 1;
@@ -285,14 +289,14 @@ impl Sealer {
     }
 }
 
-/// Opens the other direction's frames (installed in the link's [`crate::wire::FrameDecoder`]).
+/// Opens the other direction's records (installed in the link's [`crate::wire::FrameDecoder`]).
 pub struct Opener {
     key: aead::Key,
     ctr: u64,
 }
 
 impl Opener {
-    /// Authenticates and decrypts one frame in place; false (forged, replayed, reordered) is final.
+    /// Authenticates and decrypts one record in place; false (forged, replayed, reordered) is final.
     #[must_use]
     pub fn open(&mut self, frame: &mut [u8]) -> bool {
         if frame.len() < 4 + TAG_LEN {
@@ -335,25 +339,30 @@ impl fmt::Display for AuthError {
 
 enum LinkState {
     Plain,
-    /// `Auth` sent; frames queued meanwhile wait unsealed (tag space reserved) at the end of the buffer.
-    Awaiting { peer_key: [u8; 32], me: NodeId, nonce: [u8; 32], held: usize },
+    /// `Auth` sent; records queued meanwhile wait unsealed at the end of the buffer.
+    Awaiting { peer_key: [u8; 32], me: NodeId, nonce: [u8; 32] },
     Up { tx: Sealer },
 }
 
-/// Handshake and sending side of a peer link; only `out[..len − held()]` of its write buffer may be sent.
+/// Handshake and sending side of a peer link. Frames are batched into records (one seal per
+/// [`SecureLink::seal_pending`], i.e. per write); only `out[..len − held()]` may be sent.
 pub struct SecureLink {
     state: LinkState,
+    /// Unsealed bytes at the end of the write buffer: closed records (handshake) then the open record.
+    held: usize,
+    /// Bytes of the open record (header included) at the very end of the buffer; 0 = none.
+    open: usize,
 }
 
 impl SecureLink {
     /// No protection (`--insecure-unauthenticated-cluster`).
     pub fn plain() -> SecureLink {
-        SecureLink { state: LinkState::Plain }
+        SecureLink { state: LinkState::Plain, held: 0, open: 0 }
     }
 
     /// `nonce`: 32 fresh random bytes for this connection.
     pub fn new(key: &ClusterKey, me: NodeId, nonce: [u8; 32]) -> SecureLink {
-        SecureLink { state: LinkState::Awaiting { peer_key: key.peer, me, nonce, held: 0 } }
+        SecureLink { state: LinkState::Awaiting { peer_key: key.peer, me, nonce }, held: 0, open: 0 }
     }
 
     pub fn is_plain(&self) -> bool {
@@ -365,12 +374,12 @@ impl SecureLink {
         matches!(self.state, LinkState::Awaiting { .. })
     }
 
-    /// Bytes each frame grows by on this link.
+    /// Upper bound of what a frame grows by on this link (record header and tag).
     pub fn overhead(&self) -> usize {
         if self.is_plain() {
             0
         } else {
-            TAG_LEN
+            RECORD_HEADER + TAG_LEN
         }
     }
 
@@ -384,39 +393,62 @@ impl SecureLink {
         }
     }
 
-    /// Unsealed bytes at the end of the write buffer (queued before the handshake completed).
+    /// Bytes at the end of the write buffer that may not be sent yet.
     pub fn held(&self) -> usize {
-        match self.state {
-            LinkState::Awaiting { held, .. } => held,
-            _ => 0,
-        }
+        self.held
     }
 
-    /// Appends one frame (sealed, or held during the handshake); nothing is written on an encoding error.
-    pub fn push(&mut self, m: &Msg<'_>, request_id: u64, out: &mut Vec<u8>) -> Result<(), WireError> {
+    /// Appends one frame to the open record; returns the frame's offset in `out`. Nothing is written on an encoding
+    /// error.
+    pub fn push(&mut self, m: &Msg<'_>, request_id: u64, out: &mut Vec<u8>) -> Result<usize, WireError> {
         if self.is_plain() {
-            return m.encode(request_id, out);
+            let at = out.len();
+            return m.encode(request_id, out).map(|_| at);
         }
-        let start = out.len();
-        m.encode(request_id, out)?;
-        let len = u32::from_le_bytes(out[start..start + 4].try_into().unwrap());
-        let Some(len) = len.checked_add(TAG_LEN as u32) else {
-            out.truncate(start);
-            return Err(WireError::Malformed("frame larger than 4 GiB"));
-        };
-        out[start..start + 4].copy_from_slice(&len.to_le_bytes());
-        out.resize(out.len() + TAG_LEN, 0);
-        match &mut self.state {
-            LinkState::Up { tx } => tx.seal(&mut out[start..]),
-            LinkState::Awaiting { held, .. } => *held += out.len() - start,
-            LinkState::Plain => unreachable!(),
+        if self.open > RECORD_HEADER && self.open + m.frame_len_bound() > RECORD_TARGET {
+            self.close(out);
         }
-        Ok(())
+        let opened = self.open == 0;
+        if opened {
+            out.extend_from_slice(&[0; RECORD_HEADER]);
+        }
+        let at = out.len();
+        if let Err(e) = m.encode(request_id, out) {
+            if opened {
+                out.truncate(at - RECORD_HEADER);
+            }
+            return Err(e);
+        }
+        let n = out.len() - at + if opened { RECORD_HEADER } else { 0 };
+        self.open += n;
+        self.held += n;
+        Ok(at)
     }
 
-    /// Peer's `Auth`: derives the session keys, seals held frames, returns the peer id and the decoder's [`Opener`].
+    /// Closes the open record: sealed now once authenticated, else at [`SecureLink::on_auth`]. Call before each write.
+    pub fn seal_pending(&mut self, out: &mut Vec<u8>) {
+        self.close(out);
+    }
+
+    fn close(&mut self, out: &mut Vec<u8>) {
+        if self.open == 0 {
+            return;
+        }
+        out.extend_from_slice(&[0; TAG_LEN]);
+        let rec = self.open + TAG_LEN;
+        let start = out.len() - rec;
+        out[start..start + 4].copy_from_slice(&((rec - RECORD_HEADER) as u32).to_le_bytes());
+        self.open = 0;
+        self.held += TAG_LEN;
+        if let LinkState::Up { tx } = &mut self.state {
+            tx.seal(&mut out[start..]);
+            self.held = 0;
+        }
+    }
+
+    /// Peer's `Auth`: derives the session keys, seals held records, returns the peer id and the decoder's [`Opener`].
     pub fn on_auth(&mut self, payload: &[u8], expect: Option<NodeId>, out: &mut Vec<u8>) -> Result<(NodeId, Opener), AuthError> {
-        let LinkState::Awaiting { peer_key, me, nonce, held } = &self.state else { return Err(AuthError::Unexpected) };
+        let LinkState::Awaiting { peer_key, me, nonce } = &self.state else { return Err(AuthError::Unexpected) };
         if payload.len() != AUTH_PAYLOAD_LEN || payload[0] != AUTH_VERSION {
             return Err(AuthError::Malformed);
         }
@@ -434,12 +466,14 @@ impl SecureLink {
         hkdf_expand(&prk, &[&me.0.to_le_bytes(), &peer.0.to_le_bytes(), nonce, &peer_nonce], &mut k_tx);
         hkdf_expand(&prk, &[&peer.0.to_le_bytes(), &me.0.to_le_bytes(), &peer_nonce, nonce], &mut k_rx);
         let mut tx = Sealer { key: aead::Key::new(&k_tx), ctr: 0 };
-        let mut pos = out.len() - *held;
+        self.close(out);
+        let mut pos = out.len() - self.held;
         while pos < out.len() {
             let len = u32::from_le_bytes(out[pos..pos + 4].try_into().unwrap()) as usize;
             tx.seal(&mut out[pos..pos + 4 + len]);
             pos += 4 + len;
         }
+        self.held = 0;
         self.state = LinkState::Up { tx };
         Ok((peer, Opener { key: aead::Key::new(&k_rx), ctr: 0 }))
     }
@@ -586,8 +620,9 @@ mod tests {
             End { sec, out, sent: 0, dec: FrameDecoder::new(AUTH_FRAME_LEN), peer: None, got: Vec::new(), err: None }
         }
 
-        /// Bytes that may go on the wire now.
+        /// Bytes that may go on the wire now (closes the open record, like a write does).
         fn take(&mut self) -> Vec<u8> {
+            self.sec.seal_pending(&mut self.out);
             let end = self.out.len() - self.sec.held();
             let v = self.out[self.sent..end].to_vec();
             self.sent = end;
@@ -602,7 +637,7 @@ mod tests {
                         assert_eq!(f.kind, KIND_AUTH);
                         let p = f.payload.to_vec();
                         let (peer, opener) = self.sec.on_auth(&p, expect, &mut self.out).unwrap();
-                        self.dec.set_opener(opener, DEFAULT_MAX_FRAME + TAG_LEN);
+                        self.dec.set_opener(opener, DEFAULT_MAX_FRAME);
                         self.peer = Some(peer);
                     }
                     Ok(Some(f)) => self.got.push((f.kind, f.request_id, f.payload.to_vec())),
@@ -623,6 +658,7 @@ mod tests {
         let mut b = End::new(&k, 2, 0xb);
         // A queues frames before the handshake: they are held, not sent.
         a.sec.push(&Msg::Hello { member: member(1) }, 0, &mut a.out).unwrap();
+        a.sec.seal_pending(&mut a.out);
         a.sec.push(&Msg::GetManifest { version: 3 }, 9, &mut a.out).unwrap();
         assert!(a.sec.held() > 0);
         let a1 = a.take();
@@ -643,18 +679,31 @@ mod tests {
         assert_eq!(Msg::decode(b.got[0].0, &b.got[0].2).unwrap(), Msg::Hello { member: member(1) });
         assert_eq!((b.got[1].0, b.got[1].1), (crate::wire::KIND_GET_MANIFEST, 9));
         assert_eq!(a.got.len(), 1);
-        // Steady state: sealed at push time, byte-by-byte delivery works.
+        // Steady state: many frames per record (one seal per write), records split at RECORD_TARGET, a frame larger
+        // than a record travels alone; byte-by-byte delivery works.
         for i in 0..50u64 {
             let body = vec![i as u8; (i * 37) as usize];
             b.sec.push(&Msg::CallResult { status: i as i32, body: &body }, 100 + i, &mut b.out).unwrap();
+            if i % 7 == 0 {
+                b.sec.seal_pending(&mut b.out);
+            }
+        }
+        let big = vec![5u8; RECORD_TARGET + 1000];
+        b.sec.push(&Msg::Blob { hash: [1; 32], bytes: &big }, 200, &mut b.out).unwrap();
+        for _ in 0..40 {
+            b.sec.push(&Msg::Blob { hash: [2; 32], bytes: &[7; 4000] }, 201, &mut b.out).unwrap();
         }
         let stream = b.take();
         for c in stream.chunks(7) {
             a.recv(c, None);
         }
-        assert!(a.err.is_none());
-        assert_eq!(a.got.len(), 51);
+        assert!(a.err.is_none(), "{:?}", a.err);
+        assert_eq!(a.got.len(), 92);
         assert_eq!(Msg::decode(a.got[50].0, &a.got[50].2).unwrap(), Msg::CallResult { status: 49, body: &[49u8; 49 * 37] });
+        assert_eq!(Msg::decode(a.got[51].0, &a.got[51].2).unwrap(), Msg::Blob { hash: [1; 32], bytes: &big });
+        assert_eq!(a.got[91].1, 201);
+        // An empty write adds nothing.
+        assert!(b.take().is_empty());
     }
 
     fn established(k1: &ClusterKey, k2: &ClusterKey) -> (End, End) {

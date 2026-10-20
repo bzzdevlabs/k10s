@@ -32,7 +32,7 @@ Out of scope by design (documented in `docs/DESIGN.md`):
   `k10.cluster_key=`); cluster mode refuses to start without it unless `--insecure-unauthenticated-cluster`.
   Gossip datagrams are sealed (XChaCha20-Poly1305) and rejected before decoding when forged, stale (clock skew bound,
   default 300 s) or replayed. Peer links run a mutual handshake on fresh nonces and are then encrypted and
-  authenticated frame by frame (ChaCha20-Poly1305, per-direction keys, counter nonces: no injection, replay,
+  authenticated record by record (ChaCha20-Poly1305, per-direction keys, counter nonces: no injection, replay,
   reordering or reflection). A desired state can only be announced by a key holder, and its manifest and code blobs
   are still checked against its SHA-256 when fetched.
 
@@ -46,5 +46,5 @@ Not covered (open):
 - **No TLS on the admin API or service ingress**: tokens travel in clear unless the admin listener sits on a trusted
   network or behind a TLS proxy. A local reverse proxy in front of the ingress makes remote clients look like loopback
   ones: configure a token (or `--admin`) in that setup.
-- **Traffic analysis**: message sizes and timing are visible; gossip datagrams leak their size, peer frames their
+- **Traffic analysis**: message sizes and timing are visible; gossip datagrams leak their size, peer records their
   length.
