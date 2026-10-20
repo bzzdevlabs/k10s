@@ -17,6 +17,8 @@ libc = { workspace = true, optional = true }
 
 [dev-dependencies]
 k10-ir = { path = "../k10-ir", features = ["gen"] }
+# SFI verifier test: compiles examples/*.ten.
+k10-lang = { path = "../k10-lang" }
 libc.workspace = true
 
 [[bench]]
