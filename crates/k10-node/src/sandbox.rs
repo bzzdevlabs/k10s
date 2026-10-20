@@ -883,6 +883,9 @@ pub fn before_threads(mode: Mode, user: Option<User>, policy: &Policy) -> Result
     } else if let Some(d) = &policy.data_dir {
         std::fs::create_dir_all(d).map_err(|e| format!("cannot create {}: {e}", d.display()))?;
     }
+    for d in &policy.write_dirs {
+        let _ = std::fs::create_dir_all(d); // best effort (K10_JIT_DUMP)
+    }
     let landlock = match mode {
         Mode::On => Some(landlock(policy).map_err(|e| format!("landlock: {e} (use --sandbox off to run without it)"))?),
         _ => None,
@@ -1382,35 +1385,50 @@ mod tests {
     #[test]
     #[ignore]
     fn syscall_overhead() {
+        // Best of 20 rounds (robust to a busy machine), ns per call.
+        fn best(n: u32, f: impl Fn()) -> f64 {
+            (0..20)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    for _ in 0..n {
+                        f();
+                    }
+                    t.elapsed().as_nanos() as f64 / n as f64
+                })
+                .fold(f64::MAX, f64::min)
+        }
         fn bench(label: &str) {
-            let n = 2_000_000u32;
-            let t = std::time::Instant::now();
-            for _ in 0..n {
-                // SAFETY: raw getpid.
-                unsafe { libc::syscall(libc::SYS_getpid) };
-            }
-            let a = t.elapsed().as_nanos() as f64 / n as f64;
-            let m = 200_000u32;
-            let t = std::time::Instant::now();
-            for _ in 0..m {
-                // SAFETY: fresh private mapping, unmapped at once.
-                unsafe {
-                    let p = libc::mmap(std::ptr::null_mut(), 4096, 3, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1, 0);
-                    libc::munmap(p, 4096);
-                }
-            }
-            let b = t.elapsed().as_nanos() as f64 / m as f64;
+            // SAFETY: raw getpid.
+            let a = best(100_000, || unsafe {
+                libc::syscall(libc::SYS_getpid);
+            });
+            // SAFETY: fresh private mapping, unmapped at once.
+            let b = best(10_000, || unsafe {
+                let p = libc::mmap(std::ptr::null_mut(), 4096, 3, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1, 0);
+                libc::munmap(p, 4096);
+            });
             eprintln!("{label}: getpid {a:.1} ns, mmap+munmap {b:.1} ns");
         }
-        let prog = build_filter(Mode::On, 0);
-        let st = in_child(move || {
-            bench("no filter");
-            // SAFETY: plain prctl.
-            unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
-            install_filter(&prog, false).unwrap();
-            bench("filter   ");
-            0
-        });
-        assert!(exited(st, 0));
+        // A filter reading an argument makes nothing cacheable: stacked under ours, both always run.
+        let defeat = vec![
+            libc::sock_filter { code: BPF_LD_W_ABS, jt: 0, jf: 0, k: off_arg_lo(0) },
+            libc::sock_filter { code: BPF_RET_K, jt: 0, jf: 0, k: RET_ALLOW },
+        ];
+        for (label, progs) in [
+            ("no filter", vec![]),
+            ("filter (action cache)", vec![build_filter(Mode::On, 0)]),
+            ("filter (cache defeated)", vec![defeat, build_filter(Mode::On, 0)]),
+        ] {
+            let st = in_child(move || {
+                // SAFETY: plain prctl.
+                unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+                for p in &progs {
+                    install_filter(p, false).unwrap();
+                }
+                bench(label);
+                0
+            });
+            assert!(exited(st, 0));
+        }
     }
 }
