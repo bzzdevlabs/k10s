@@ -758,6 +758,19 @@ mod tests {
         a.recv(&own, None);
         assert_eq!(a.err, Some(WireError::Unauthenticated));
 
+        // A frame may not cross a record boundary.
+        let (mut a, mut b) = established(&k, &k);
+        let mut f = Vec::new();
+        Msg::Ping.encode(1, &mut f).unwrap();
+        let mut rec = ((10 + TAG_LEN) as u32).to_le_bytes().to_vec();
+        rec.extend_from_slice(&f[..10]);
+        rec.extend_from_slice(&[0; TAG_LEN]);
+        if let LinkState::Up { tx } = &mut a.sec.state {
+            tx.seal(&mut rec);
+        }
+        b.recv(&rec, None);
+        assert!(matches!(b.err, Some(WireError::Malformed(_))), "{:?}", b.err);
+
         // A tampered length (it is authenticated too).
         let (mut a, mut b) = established(&k, &k);
         a.sec.push(&Msg::CallResult { status: 0, body: b"0123456789" }, 1, &mut a.out).unwrap();
