@@ -3,8 +3,9 @@
 //!
 //! * **Membership**: the sans-IO `k10_mesh::Gossip` state machine over a smoltcp UDP socket (port 7946). Time is the
 //!   kernel's monotonic clock; datagrams and events come back as return values and are handled on the main loop.
-//! * **Peer links**: `k10_mesh::wire` frames over smoltcp TCP (port 7947): `Hello` first on both sides, then
-//!   requests multiplexed by id. A node dials members with a larger id as soon as they come up and any member lazily;
+//! * **Authentication**: as hosted (`k10_mesh::secure`); `k10.cluster_key=HEX` or `k10.insecure_unauthenticated_cluster`.
+//! * **Peer links**: `k10_mesh::wire` frames over smoltcp TCP (port 7947): `Auth` (with a key), then `Hello` first on
+//!   both sides, then requests multiplexed by id. A node dials members with a larger id as soon as they come up and any member lazily;
 //!   when both ends dialed, the connection dialed by the smaller id is kept (same rule as the hosted node).
 //! * **Desired state**: a newer `DesiredState{version, hash, origin}` from gossip is fetched over the links
 //!   (`GetManifest`, then `GetBlob` for missing blobs; the origin first, then the other live members), checked with
@@ -25,7 +26,8 @@
 //! Kernel command line: `k10.join=HOST:PORT[,…]` (gossip addresses of members), `k10.gossip=ADDR`,
 //! `k10.rpc=ADDR`, `k10.http=ADDR` (advertised addresses; default 127.0.0.1:7946/7947/80), `k10.node_id=HEX`
 //! (default random; reuse it to rejoin as the same member), `k10.probe_ms=N`, `k10.suspicion_mult=N`,
-//! `k10.mem=BYTES` (advertised capacity; default the free memory at boot), `k10.host_alias=IP` (10.0.2.2).
+//! `k10.mem=BYTES` (advertised capacity; default the free memory at boot), `k10.host_alias=IP` (10.0.2.2),
+//! `k10.cluster_key=HEX` | `k10.insecure_unauthenticated_cluster`, `k10.gossip_max_skew_s=N` (300; 0 = off).
 //! Any of `k10.join`, `k10.gossip` or `k10.cluster` turns cluster mode on.
 
 use alloc::collections::{BTreeMap, VecDeque};
@@ -36,8 +38,9 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+use k10_mesh::secure::{ClusterKey, GossipCipher, SecureLink, AUTH_FRAME_LEN, FRAME_TAG_LEN, GOSSIP_OVERHEAD};
 use k10_mesh::sha256::{sha256, to_hex};
-use k10_mesh::wire::{FrameDecoder, Msg};
+use k10_mesh::wire::{FrameDecoder, Msg, WireError, KIND_AUTH};
 use k10_mesh::{place, Bundle, Capacity, DesiredState, Event, Gossip, Manifest, Member, MemberState, NodeId, Output};
 use smoltcp::iface::SocketHandle;
 use smoltcp::socket::tcp;
@@ -62,6 +65,8 @@ const DEBOUNCE_NS: u64 = 50_000_000;
 const MAX_EXTRA_ATTEMPTS: usize = 3;
 /// Closing sockets are dropped after this long even if the peer never finishes the close handshake.
 const CLOSE_LINGER_NS: u64 = 2_000_000_000;
+/// A peer that has not completed the handshake (`Auth`, `Hello`) this long after the link was created is dropped.
+const HANDSHAKE_TIMEOUT_NS: u64 = 5_000_000_000;
 
 pub struct Config {
     pub id: NodeId,
@@ -73,13 +78,34 @@ pub struct Config {
     pub probe_ms: Option<u64>,
     pub suspicion_mult: Option<u64>,
     pub mem_bytes: Option<u64>,
+    /// `None`: unauthenticated (only with `k10.insecure_unauthenticated_cluster`).
+    pub key: Option<ClusterKey>,
+    pub max_skew_ms: u64,
 }
 
-/// Cluster configuration from the kernel command line (`None`: single-node mode).
+/// Cluster configuration from the kernel command line (`None`: single node); halts without key or insecure flag.
 pub fn config(bi: &BootInfo) -> Option<Config> {
     if !(bi.has_flag("k10.cluster") || bi.arg("k10.join").is_some() || bi.arg("k10.gossip").is_some()) {
         return None;
     }
+    let fatal = |msg: &str| -> ! {
+        kprintln!("cluster: {msg}");
+        crate::arch::qemu_exit(crate::arch::EXIT_FAILURE);
+        crate::arch::halt_forever()
+    };
+    let key = match (bi.arg("k10.cluster_key"), bi.has_flag("k10.insecure_unauthenticated_cluster")) {
+        (Some(k), false) => match ClusterKey::parse_hex(k) {
+            Ok(k) if crate::arch::has_rdrand() => Some(k),
+            Ok(_) => fatal("k10.cluster_key needs RDRAND for handshake nonces (use -cpu host)"),
+            Err(e) => fatal(&alloc::format!("k10.cluster_key: {e}")),
+        },
+        (None, true) => {
+            kprintln!("cluster: WARNING: k10.insecure_unauthenticated_cluster: gossip and peer links are NOT authenticated");
+            None
+        }
+        (Some(_), true) => fatal("k10.cluster_key and k10.insecure_unauthenticated_cluster exclude each other"),
+        (None, false) => fatal("cluster mode needs k10.cluster_key=HEX (`k10s keygen`), or k10.insecure_unauthenticated_cluster"),
+    };
     let lo = IpAddr::V4(Ipv4Addr::LOCALHOST);
     let addr = |key: &str, port: u16| -> SocketAddr {
         match bi.arg(key) {
@@ -108,7 +134,17 @@ pub fn config(bi: &BootInfo) -> Option<Config> {
         probe_ms: bi.arg("k10.probe_ms").and_then(|v| v.parse().ok()).filter(|&n| n >= 10),
         suspicion_mult: bi.arg("k10.suspicion_mult").and_then(|v| v.parse().ok()).filter(|&n| n >= 1),
         mem_bytes: bi.arg("k10.mem").and_then(|v| v.parse().ok()),
+        key,
+        max_skew_ms: bi.arg("k10.gossip_max_skew_s").and_then(|v| v.parse::<u64>().ok()).unwrap_or(300) * 1000,
     })
+}
+
+/// Fills `buf` from RDRAND (checked available when the key was configured).
+fn random_bytes(buf: &mut [u8]) {
+    for chunk in buf.chunks_mut(8) {
+        let v = crate::arch::rdrand().expect("RDRAND failed");
+        chunk.copy_from_slice(&v.to_le_bytes()[..chunk.len()]);
+    }
 }
 
 // --- desired-state store (in memory) ---------------------------------------------------------------------------
@@ -163,6 +199,9 @@ struct Link {
     hello_rx: bool,
     /// Superseded by the peer's other connection: closed (if we dialed it) once our requests on it are answered.
     retiring: bool,
+    sec: SecureLink,
+    /// Node id proven by the peer's `Auth` (its `Hello` must match).
+    auth_peer: Option<NodeId>,
     dec: FrameDecoder,
     wbuf: Vec<u8>,
     wpos: usize,
@@ -261,6 +300,8 @@ struct Stats {
     dial_failures: u64,
     peer_bytes_in: u64,
     peer_bytes_out: u64,
+    gossip_rejected: u64,
+    link_auth_failures: u64,
     fetches: u64,
     blobs_fetched: u64,
     applies: u64,
@@ -271,6 +312,7 @@ pub struct Cluster {
     cfg: Config,
     me: NodeId,
     gossip: Gossip,
+    cipher: Option<GossipCipher>,
     udp: SocketHandle,
     /// Gossip datagrams to send (produced outside `poll` too, e.g. by an operator apply).
     out: Vec<(SocketAddr, Vec<u8>)>,
@@ -331,8 +373,18 @@ pub fn start(cfg: Config, net: &mut Net) -> bool {
     if let Some(m) = cfg.suspicion_mult {
         gc.suspicion_mult = m;
     }
+    if cfg.key.is_some() {
+        // Sealed datagrams stay within the unsealed size budget.
+        gc.max_packet = gc.max_packet.saturating_sub(GOSSIP_OVERHEAD);
+    }
     let seed = crate::arch::rdrand().unwrap_or_else(crate::arch::rdtsc);
     let gossip = Gossip::new(me.clone(), gc, seed);
+    let cipher = cfg.key.as_ref().map(|k| {
+        let mut boot = [0u8; 8];
+        random_bytes(&mut boot);
+        kprintln!("cluster: authentication: key id {}", k.id_hex());
+        GossipCipher::new(k, boot, cfg.max_skew_ms)
+    });
     kprintln!(
         "k10-metal cluster node {}: gossip {} rpc {} http {} mem {} KiB, joining {:?}",
         cfg.id,
@@ -345,6 +397,7 @@ pub fn start(cfg: Config, net: &mut Net) -> bool {
     let mut c = Cluster {
         me: cfg.id,
         gossip,
+        cipher,
         udp,
         out: Vec::new(),
         events: Vec::new(),
@@ -397,7 +450,7 @@ pub fn has_work(net: &mut Net) -> bool {
     !c.out.is_empty()
         || c.links.iter().flatten().any(|l| {
             let s = net.tcp(l.sock);
-            (l.wpos < l.wbuf.len() && s.can_send()) || s.can_recv()
+            (l.wpos < l.wbuf.len() - l.sec.held() && s.can_send()) || s.can_recv()
         })
 }
 
@@ -414,8 +467,8 @@ pub fn next_deadline_ns() -> Option<u64> {
     if let Some(d) = c.placement_due {
         t = t.min(d);
     }
-    for l in c.links.iter().flatten().filter(|l| l.connecting) {
-        t = t.min(l.since + CONNECT_TIMEOUT_NS);
+    for l in c.links.iter().flatten().filter(|l| l.connecting || !l.hello_rx) {
+        t = t.min(l.since + if l.connecting { CONNECT_TIMEOUT_NS } else { HANDSHAKE_TIMEOUT_NS });
     }
     if let Some(f) = &c.fetch {
         t = t.min(if f.cur.is_some() { f.attempt_deadline } else { f.retry_at });
@@ -445,10 +498,23 @@ impl Cluster {
         // Gossip: received datagrams, then timers.
         let mut got: Vec<(Vec<u8>, SocketAddr)> = Vec::new();
         while net.udp_recv(self.udp, &mut |d, from| got.push((d.to_vec(), from))) {}
-        for (d, from) in got {
+        for (mut d, from) in got {
             self.stats.gossip_packets_received += 1;
             self.stats.gossip_bytes_received += d.len() as u64;
-            let out = self.gossip.on_packet(from, &d, now_ms());
+            let pkt: &[u8] = match &mut self.cipher {
+                Some(c) => match c.open(&mut d, time::unix_ms()) {
+                    Ok(p) => p,
+                    Err(why) => {
+                        self.stats.gossip_rejected += 1;
+                        if crate::verbose() {
+                            kprintln!("cluster: dropped gossip datagram from {from}: {why}");
+                        }
+                        continue;
+                    }
+                },
+                None => &d,
+            };
+            let out = self.gossip.on_packet(from, pkt, now_ms());
             self.absorb(out);
         }
         let now = now_ms();
@@ -496,9 +562,17 @@ impl Cluster {
             }
         }
         self.reap_closing(net);
+        let mut sealed = Vec::new();
         for (to, d) in core::mem::take(&mut self.out) {
             let to = self.wire_addr(to);
-            if net.udp_send(self.udp, to, &d) {
+            let d: &[u8] = match &mut self.cipher {
+                Some(c) => {
+                    c.seal(&d, time::unix_ms(), &mut sealed);
+                    &sealed
+                }
+                None => &d,
+            };
+            if net.udp_send(self.udp, to, d) {
                 self.stats.gossip_packets_sent += 1;
                 self.stats.gossip_bytes_sent += d.len() as u64;
             } else {
@@ -784,9 +858,16 @@ impl Cluster {
             }
         }
         let stuck: Vec<u32> = (0..self.links.len() as u32)
-            .filter(|&i| self.links[i as usize].as_ref().is_some_and(|l| l.connecting && now >= l.since + CONNECT_TIMEOUT_NS))
+            .filter(|&i| {
+                self.links[i as usize].as_ref().is_some_and(|l| {
+                    (l.connecting && now >= l.since + CONNECT_TIMEOUT_NS) || (!l.hello_rx && now >= l.since + HANDSHAKE_TIMEOUT_NS)
+                })
+            })
             .collect();
         for li in stuck {
+            if !self.links[li as usize].as_ref().unwrap().connecting {
+                self.auth_failed(li, "handshake not completed in time");
+            }
             self.close_link(net, li, true, false);
         }
         if self.placement_due.is_some_and(|t| now >= t) {
@@ -963,7 +1044,7 @@ impl Cluster {
         let l = self.links[li as usize].as_mut().unwrap();
         let start = l.queued;
         let before = l.wbuf.len();
-        m.encode(id, &mut l.wbuf).ok()?;
+        l.sec.push(m, id, &mut l.wbuf).ok()?;
         l.queued += (l.wbuf.len() - before) as u64;
         Some(start)
     }
@@ -978,6 +1059,18 @@ impl Cluster {
         };
         let gen = self.next_gen;
         self.next_gen = self.next_gen.wrapping_add(1).max(1);
+        let sec = match &self.cfg.key {
+            Some(k) => {
+                let mut nonce = [0u8; 32];
+                random_bytes(&mut nonce);
+                SecureLink::new(k, self.me, nonce)
+            }
+            None => SecureLink::plain(),
+        };
+        // Until the peer has authenticated, accept nothing larger than its `Auth` frame.
+        let dec = if sec.is_plain() { FrameDecoder::new(self.max_frame) } else { FrameDecoder::new(AUTH_FRAME_LEN) };
+        let mut wbuf = Vec::new();
+        sec.start(&mut wbuf);
         self.links[li as usize] = Some(Link {
             sock,
             gen,
@@ -987,10 +1080,12 @@ impl Cluster {
             since: time::now_ns(),
             hello_rx: false,
             retiring: false,
-            dec: FrameDecoder::new(self.max_frame),
-            wbuf: Vec::new(),
+            queued: wbuf.len() as u64,
+            sec,
+            auth_peer: None,
+            dec,
+            wbuf,
             wpos: 0,
-            queued: 0,
             written: 0,
             outstanding: 0,
             bytes_in: 0,
@@ -1065,8 +1160,35 @@ impl Cluster {
         self.stats.peer_bytes_in += n_in as u64;
         let mut frames: Vec<(u64, In)> = Vec::new();
         let mut bad = false;
+        let mut auth_err: Option<String> = None;
         loop {
             match l.dec.next() {
+                Ok(Some(f)) if l.sec.awaiting_auth() => {
+                    // The first frame must be `Auth`: derive the keys, seal what we queued, open the rest.
+                    if f.kind != KIND_AUTH {
+                        auth_err = Some("peer did not authenticate (no cluster key?)".into());
+                        bad = true;
+                        break;
+                    }
+                    let payload = f.payload.to_vec();
+                    let expect = if l.dialed { l.peer } else { None };
+                    match l.sec.on_auth(&payload, expect, &mut l.wbuf) {
+                        Ok((peer, opener)) => {
+                            l.dec.set_opener(opener, self.max_frame + FRAME_TAG_LEN);
+                            l.auth_peer = Some(peer);
+                        }
+                        Err(e) => {
+                            auth_err = Some(alloc::format!("handshake refused: {e}"));
+                            bad = true;
+                            break;
+                        }
+                    }
+                }
+                Ok(Some(f)) if f.kind == KIND_AUTH => {
+                    auth_err = Some("peer uses a cluster key; this node is insecure".into());
+                    bad = true;
+                    break;
+                }
                 Ok(Some(f)) => match f.msg() {
                     Ok(m) => frames.push((f.request_id, In::from(m))),
                     Err(_) => {
@@ -1075,7 +1197,10 @@ impl Cluster {
                     }
                 },
                 Ok(None) => break,
-                Err(_) => {
+                Err(e) => {
+                    if e == WireError::Unauthenticated {
+                        auth_err = Some(e.to_string());
+                    }
                     bad = true;
                     break;
                 }
@@ -1083,6 +1208,9 @@ impl Cluster {
         }
         let closed = bad || !s.may_recv();
         let gen = l.gen;
+        if let Some(e) = auth_err {
+            self.auth_failed(li, &e);
+        }
         for (id, m) in frames {
             if !self.link_live(li, gen) {
                 return;
@@ -1100,8 +1228,10 @@ impl Cluster {
             return;
         }
         let s = net.tcp(l.sock);
-        while l.wpos < l.wbuf.len() && s.can_send() {
-            match s.send_slice(&l.wbuf[l.wpos..]) {
+        // Frames queued during the handshake wait, unsealed, at the end of the buffer.
+        let end = l.wbuf.len() - l.sec.held();
+        while l.wpos < end && s.can_send() {
+            match s.send_slice(&l.wbuf[l.wpos..end]) {
                 Ok(0) => break,
                 Ok(n) => {
                     l.wpos += n;
@@ -1152,6 +1282,11 @@ impl Cluster {
 
     fn on_hello(&mut self, net: &mut Net, li: u32, member: Member) {
         let l = self.links[li as usize].as_mut().unwrap();
+        if !l.sec.is_plain() && l.auth_peer != Some(member.id) {
+            self.auth_failed(li, "Hello does not match the authenticated node id");
+            return self.close_link(net, li, true, false);
+        }
+        let l = self.links[li as usize].as_mut().unwrap();
         if l.dialed && l.peer != Some(member.id) {
             // The address now belongs to another node (restarted with a new id): drop the link.
             return self.close_link(net, li, false, false);
@@ -1177,6 +1312,15 @@ impl Cluster {
             None => {
                 self.primary.insert(peer, li);
             }
+        }
+    }
+
+    /// Counts (and in verbose mode logs) a peer that failed to authenticate; the caller closes the link.
+    fn auth_failed(&mut self, li: u32, why: &str) {
+        self.stats.link_auth_failures += 1;
+        if crate::verbose() {
+            let peer = self.links[li as usize].as_ref().and_then(|l| l.peer);
+            kprintln!("cluster: peer link {peer:?} closed: {why}");
         }
     }
 
@@ -1290,6 +1434,12 @@ impl Cluster {
             "{{\"id\":\"{}\",\"incarnation\":{},\"gossip\":\"{}\",\"rpc\":\"{}\",\"http\":\"{}\",\"leaving\":false,",
             self.me, local.incarnation, local.gossip, local.rpc, local.http
         );
+        match &self.cfg.key {
+            Some(k) => {
+                let _ = write!(s, "\"auth\":{{\"mode\":\"key\",\"key_id\":\"{}\"}},", k.id_hex());
+            }
+            None => s.push_str("\"auth\":{\"mode\":\"insecure\"},"),
+        }
         match self.gossip.desired() {
             Some(d) => {
                 let _ = write!(s, "\"desired\":{{\"version\":{},\"hash\":\"{}\",\"origin\":\"{}\"}},", d.version, to_hex(&d.hash), d.origin);
@@ -1371,6 +1521,7 @@ impl Cluster {
                 "\"gossip_bytes_received\":{},\"gossip_send_dropped\":{},\"gossip_malformed\":{},\"forwarded\":{},",
                 "\"forward_retries\":{},\"forward_failed\":{},\"forward_local\":{},\"resent_unsent\":{},",
                 "\"served_for_peers\":{},\"not_here\":{},\"dial_failures\":{},\"peer_bytes_in\":{},\"peer_bytes_out\":{},",
+                "\"gossip_rejected\":{},\"link_auth_failures\":{},",
                 "\"pending_calls\":{},\"fetches\":{},\"blobs_fetched\":{},\"blobs\":{},\"store_bytes\":{},\"applies\":{},",
                 "\"apply_errors\":{}}}}}"
             ),
@@ -1390,6 +1541,8 @@ impl Cluster {
             st.dial_failures,
             st.peer_bytes_in,
             st.peer_bytes_out,
+            st.gossip_rejected,
+            st.link_auth_failures,
             self.pending.len(),
             st.fetches,
             st.blobs_fetched,

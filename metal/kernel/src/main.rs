@@ -123,7 +123,7 @@ extern "C" fn kmain() -> ! {
         if arch::apic::uses_tsc_deadline() { "TSC-deadline" } else { "LAPIC one-shot" },
         if arch::paging::nx_enabled() { "on" } else { "off" },
         if jit { "jit" } else { "interp" },
-        bi.cmdline()
+        bi.cmdline_redacted()
     ); }
 
     if bi.has_flag("k10.selftest") {
@@ -131,6 +131,9 @@ extern "C" fn kmain() -> ! {
         arch::qemu_exit(if ok { arch::EXIT_SUCCESS } else { arch::EXIT_FAILURE });
         arch::halt_forever();
     }
+
+    // Admin API access: a bearer token, or explicitly open (`k10.admin_insecure`), else only /_k10s/health.
+    runtime::admin_init(bi.arg("k10.admin_token").filter(|t| !t.is_empty()), bi.has_flag("k10.admin_insecure"));
 
     // Network.
     let t_banner = arch::rdtsc();

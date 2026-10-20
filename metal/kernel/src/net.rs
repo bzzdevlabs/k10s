@@ -452,7 +452,15 @@ impl Net {
                         c.close_after = true;
                     }
                     Parse::Head(h) => {
-                        if h.content_length > self.limits.max_body {
+                        // Admin access control, before the body is read.
+                        if let Some(st) = crate::runtime::admin_gate(&h.target, h.auth.map(|(a, b)| &c.inbuf[a..b])) {
+                            self.stats.bad_requests += 1;
+                            let msg: &[u8] = if st == 401 { b"admin API: missing or invalid bearer token\n" } else { b"admin API disabled: boot with k10.admin_token=TOKEN\n" };
+                            http::write_head(&mut c.out, st, Some("text/plain"), msg.len(), false);
+                            c.out.extend_from_slice(msg);
+                            c.inbuf.clear();
+                            c.close_after = true;
+                        } else if h.content_length > self.limits.max_body {
                             self.stats.bad_requests += 1;
                             http::write_head(&mut c.out, 413, None, 0, false);
                             c.inbuf.clear();
