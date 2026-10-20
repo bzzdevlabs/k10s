@@ -19,6 +19,73 @@ In scope — please report:
   service from one that does not exist.
 - Memory-safety bugs in the node runtime, the mesh, or the bare-metal kernel.
 
+## Defense in depth
+SFI is the isolation boundary; its trusted base is the validator, the code generator, the x86-64 encoder, the
+bulk-memory helpers, the host API and the runtime's `unsafe` code. Two further layers bound the damage of a bug there.
+
+**1. Machine-code assurance (tests, `crates/k10-jit/tests/xdis*`; skipped without `/usr/bin/objdump`).**
+- `xdis_encoder`: differential fuzzing of the encoder against GNU objdump (random forms, all registers, every
+  addressing special case, immediate/displacement boundaries); seeded, `K10_FUZZ_LONG=1` for 2 M instructions.
+- `xdis_sfi`: a VeriWasm-style verifier, independent of the code generator, re-checks the JIT-ABI invariants on the
+  decoded code of every function: guest accesses only `[r15 + (x & r13)]` or `[r15 + c]` with `c < 2^min_mem_log2`;
+  frame accesses inside the checked frame, never the return address; vmctx read-only; r13/r14/r15 never written;
+  entry stack check before `sub rsp`; direct branches inside the function or to prelude trap stubs; calls only to
+  functions, host functions (`[host_fns + 8k]`, `k < imports`) and helpers; indirect jumps only through a bounded
+  `br_table` (bound proven by `cmp`+`jae`, a `cmp`+`cmov` clamp or an `sbb`/`and` mask; it must equal the table
+  length); no `syscall`/`int`/`rdtsc`/`cpuid`/privileged instructions. It knows each `--jit-indirect` mode (below):
+  indirect calls and table jumps must have that mode's exact form (`lfence` before `call/jmp r11`, or the retpoline
+  thunk, reached only with `r11` loaded from a host/helper slot or a table), the thunk must be byte-exact in the
+  prelude in retpoline mode only, and preludes must be identical per mode. It runs over random modules, `br_table`
+  modules (trees and tables) and the Ten examples in every mode and lowering, and every red-team module, and rejects
+  hand-made violations and mutated real code. The full rule list is at the top of `tests/xdis/sfi.rs`. It could
+  become a load-time check (decode with an in-tree length decoder, verify, then seal the code) at the cost of a
+  disassembler in the TCB-adjacent path.
+
+**2. Process sandbox of `k10s node` (Linux, `--sandbox on|log|off`, default `on`, or `$K10S_SANDBOX`).**
+- At start: inherited descriptors ≥ 3 are closed, `PR_SET_NO_NEW_PRIVS` is set.
+- Landlock (best effort, logged when the kernel lacks it), applied before the first thread: files are limited to the
+  data directory (read-write, no execution, no special files) and a few read-only `/proc`/`/sys` entries; nothing can
+  be executed. With Landlock ABI ≥ 4 (Linux 6.7) TCP `bind` is limited to the node's own ports (when they are fixed),
+  with ABI ≥ 6 (Linux 6.12) signals and abstract UNIX sockets are scoped to the node.
+- seccomp-bpf on every thread (`SECCOMP_FILTER_FLAG_TSYNC`) once the node runs: an allowlist of 83 syscalls
+  (`SYSCALLS` in `crates/k10-node/src/sandbox.rs`); anything else kills the process (`SIGSYS`). Notably denied:
+  `execve`, `fork`/non-thread `clone`, namespaces, `ptrace`, `process_vm_*`, `mount`, `bpf`, `perf_event_open`,
+  `io_uring`, `keyctl`, modules, `personality`, `bind`/`listen` (no new ports), non-IP sockets, executable `mmap`
+  and writable+executable `mprotect`, x32 and i386 syscalls. Hot-path syscalls take no argument checks, so the
+  kernel's seccomp action cache serves them (no measurable cost; see docs/NODE.md).
+- `log` mode is a dry run: no Landlock, seccomp violations are logged by the kernel (`journalctl -k | grep
+  type=1326`) instead of killing. `off` disables everything.
+- Limits: W^X is checked per `mmap`/`mprotect` call (a JIT needs `mprotect(PROT_EXEC)`, so RW→RX of one mapping and
+  memfd double mapping stay possible); outbound TCP `connect` is not restricted (peers' ports are not known in
+  advance); on kernels booted with `spec_store_bypass_disable=seccomp` the filter also turns on SSBD for the node.
+
+**Running a node.** Start it as an unprivileged user, or as root with `--user k10s` (listeners are bound first, then
+real/effective/saved ids drop to the user; the data directory must belong to that user). A systemd unit adds its own
+layer:
+```ini
+[Service]
+ExecStart=/usr/local/bin/k10s node --data /var/lib/k10s --http 0.0.0.0:8080
+User=k10s
+StateDirectory=k10s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+# The JIT maps code RW then RX: leave MemoryDenyWriteExecute off.
+CapabilityBoundingSet=
+# For a port < 1024 instead: CapabilityBoundingSet=CAP_NET_BIND_SERVICE and AmbientCapabilities=CAP_NET_BIND_SERVICE
+LimitNOFILE=65536
+```
+On bare metal (`metal/`) there is no OS layer: hardware NX and W^X for the kernel and JIT code are the only extra
+barrier (metal/README.md), so the machine-code verification matters most there.
+
 Out of scope by design (documented in `docs/DESIGN.md`):
 - CPU side channels (Spectre-class) between workloads sharing a node, beyond the mitigations listed under "CPU side
   channels" below. Workloads on one node are assumed to belong to one organization; use separate nodes (separate

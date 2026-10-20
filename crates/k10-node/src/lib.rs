@@ -25,6 +25,7 @@ pub mod kv;
 pub mod logs;
 pub mod node;
 pub mod router;
+pub mod sandbox;
 pub mod service;
 pub mod shard;
 pub mod slot;
