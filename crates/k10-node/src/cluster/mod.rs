@@ -705,7 +705,7 @@ impl ClusterSetup {
         let capacity = Capacity { mem_bytes: node.cfg.mem_limit, cores: node.shards.len() as u32 };
         let mut me = Member::new(id, adv(gossip_bound), adv(rpc_bound), adv(http_bound), capacity);
         // A restarted node keeps its id: start above any incarnation it used before (refutes stale Dead records).
-        me.incarnation = sys::wall_ms();
+        me.incarnation = store.next_incarnation(sys::wall_ms())?;
         let cs = Arc::new(ClusterShared {
             node: node.clone(),
             cfg: cfg.clone(),

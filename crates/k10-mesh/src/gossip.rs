@@ -16,15 +16,17 @@
 //!   `retransmit_mult × (digits(n) + 1)` times, least-sent/freshest first, items about the destination first;
 //! * a periodic push-pull full-state sync with a random member (split across ≤ `max_packet` datagrams) repairs
 //!   anything gossip missed, merges partitions and bootstraps joiners (at a doubling interval right after a
-//!   join, and towards any sender we have never heard of); occasionally it targets a recently dead member or a
-//!   seed, which heals partitions;
-//! * dead members are kept `dead_retain_ms` (so syncs spread the news; members that learn of them later only use
-//!   them for reconnects), then compacted to `(id, incarnation)` tombstones kept `tombstone_ttl_ms` so stale gossip
-//!   cannot resurrect them.
+//!   join, and towards any sender we have never heard of);
+//! * reconnects heal partitions and restarts: one sync per `join_retry_ms`, round-robin over the addresses of dead
+//!   members, tombstones, seeds that are not live and (while isolated) the fallback seeds, each backed off
+//!   exponentially up to 60 s;
+//! * dead members are kept `dead_retain_ms` (so syncs spread the news), then compacted to tombstones
+//!   `(incarnation, last gossip address)` kept `tombstone_ttl_ms` so stale gossip cannot resurrect them.
 
 use crate::codec::{put_u32, put_u64, DecodeError, Reader, Res, Rng};
 use crate::member::{get_addr, put_addr, Addr, Member, MemberState, NodeId};
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
+use core::ops::Bound::{Excluded, Unbounded};
 use alloc::vec::Vec;
 
 const MAGIC: u8 = 0x6b; // 'k'
@@ -47,8 +49,8 @@ const GC_INTERVAL_MS: u64 = 1000;
 const MAX_HINTS: usize = 256;
 const MAX_CONFIRMATIONS: u32 = 3;
 const SMALLEST_ITEM: usize = 17;
-/// Dead members learned from syncs (never known alive here) kept for reconnects.
-const MAX_LOST: usize = 256;
+/// Longest reconnect backoff per address.
+const RECONNECT_MAX_MS: u64 = 60_000;
 
 /// Tunables. Defaults target a LAN / datacenter.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,7 +69,7 @@ pub struct Config {
     pub retransmit_mult: u32,
     /// Push-pull full-state sync period (scaled by `log2(n) - 4` above 32 members).
     pub sync_interval_ms: u64,
-    /// While alone after `join`, re-contact the seeds this often.
+    /// Reconnect cadence (one sync per period) and first backoff of an address.
     pub join_retry_ms: u64,
     /// Keep dead/left members (full records, included in syncs) this long, then compact to a tombstone.
     pub dead_retain_ms: u64,
@@ -288,6 +290,13 @@ impl Suspicion {
     }
 }
 
+#[derive(Clone, Copy)]
+struct Tomb {
+    inc: u64,
+    at: u64,
+    addr: Option<Addr>,
+}
+
 struct Entry {
     m: Member,
     changed_at: u64,
@@ -391,9 +400,7 @@ pub struct Gossip {
     me: NodeId,
     members: BTreeMap<NodeId, Entry>,
     live: usize,
-    tombstones: BTreeMap<NodeId, (u64, u64)>,
-    /// Dead members we never knew alive: (gossip address, until), re-contacted like our own dead ones.
-    lost: BTreeMap<NodeId, (Addr, u64)>,
+    tombstones: BTreeMap<NodeId, Tomb>,
     probe_order: Vec<NodeId>,
     probe_pos: usize,
     probe: Option<Probe>,
@@ -404,10 +411,14 @@ pub struct Gossip {
     sync_ramp: u64,
     /// Earliest time of the next sync triggered by a datagram from an unknown sender.
     next_discovery: u64,
-    syncs: u64,
     next_gc: u64,
-    next_join: Option<u64>,
     seeds: Vec<Addr>,
+    /// Contacted while isolated (the node's remembered peers).
+    fallback: Vec<Addr>,
+    /// Reconnect state per address: (next attempt, backoff).
+    retry: BTreeMap<Addr, (u64, u64)>,
+    retry_cursor: Option<Addr>,
+    next_reconnect: u64,
     seq: u32,
     bcast: Vec<Bcast>,
     bcast_seq: u64,
@@ -439,7 +450,6 @@ impl Gossip {
             members,
             live: 1,
             tombstones: BTreeMap::new(),
-            lost: BTreeMap::new(),
             probe_order: Vec::new(),
             probe_pos: 0,
             probe: None,
@@ -448,10 +458,12 @@ impl Gossip {
             next_gossip: 0,
             sync_ramp: 0,
             next_discovery: 0,
-            syncs: 0,
             next_gc: 0,
-            next_join: None,
             seeds: Vec::new(),
+            fallback: Vec::new(),
+            retry: BTreeMap::new(),
+            retry_cursor: None,
+            next_reconnect: 0,
             seq: 0,
             bcast: Vec::new(),
             bcast_seq: 0,
@@ -466,8 +478,8 @@ impl Gossip {
 
     // ----- public API ---------------------------------------------------------------------------------------
 
-    /// Contacts `seeds` (gossip addresses; ids need not be known) with a push-pull sync and announces ourselves.
-    /// Retries every `join_retry_ms` while we know no other live member. Calling it again replaces the seeds.
+    /// Contacts `seeds` and the fallback seeds (gossip addresses; ids need not be known) with a push-pull sync and
+    /// announces ourselves; seeds that are not live are retried by reconnects. Calling it again replaces the seeds.
     pub fn join(&mut self, seeds: &[Addr], now_ms: u64) -> Output {
         self.start(now_ms);
         let mut out = Output::default();
@@ -482,10 +494,13 @@ impl Gossip {
             }
         }
         self.queue(Item::Alive(self.local().clone()));
-        for s in self.seeds.clone() {
+        let mut first: Vec<Addr> = self.seeds.iter().chain(&self.fallback).copied().collect();
+        first.sort();
+        first.dedup();
+        for s in first {
+            self.retry.insert(s, (now_ms + self.cfg.join_retry_ms, self.cfg.join_retry_ms.max(1)));
             self.send_sync(s, None, true, &mut out);
         }
-        self.next_join = if self.seeds.is_empty() { None } else { Some(now_ms + self.cfg.join_retry_ms) };
         // More push-pulls soon after joining (≈1 s, 2 s, 4 s, …): the seed's reply only had the members it knew
         // at that moment, which during a mass bootstrap is a small part of the cluster, and early joiners'
         // announcements were sent with the small retransmit budget of a tiny cluster.
@@ -493,6 +508,14 @@ impl Gossip {
         let early = now_ms + self.jitter(self.sync_ramp);
         self.next_sync = self.next_sync.min(early);
         out
+    }
+
+    /// Sets the addresses contacted while this node knows no other live member (e.g. its remembered peers).
+    pub fn set_fallback_seeds(&mut self, addrs: &[Addr]) {
+        let me = self.local().gossip;
+        self.fallback = addrs.iter().copied().filter(|a| *a != me).collect();
+        self.fallback.sort();
+        self.fallback.dedup();
     }
 
     /// Graceful leave: tells up to `leave_fanout` members (who re-gossip it) and stops participating.
@@ -563,15 +586,8 @@ impl Gossip {
                 self.next_sync = now + self.jitter(iv);
             }
         }
-        if let Some(t) = self.next_join {
-            if self.live > 1 {
-                self.next_join = None;
-            } else if now >= t {
-                for s in self.seeds.clone() {
-                    self.send_sync(s, None, true, &mut out);
-                }
-                self.next_join = Some(now + self.cfg.join_retry_ms);
-            }
+        if now >= self.next_reconnect {
+            self.reconnect(now, &mut out);
         }
         if now >= self.next_gc {
             self.gc(now);
@@ -697,9 +713,7 @@ impl Gossip {
                 t = t.min(p.start + self.cfg.probe_timeout_ms);
             }
         }
-        if let Some(j) = self.next_join {
-            t = t.min(j);
-        }
+        t = t.min(self.next_reconnect);
         for e in self.members.values() {
             if let Some(s) = &e.susp {
                 t = t.min(s.deadline);
@@ -762,6 +776,7 @@ impl Gossip {
         let iv = self.sync_interval();
         self.next_sync = now + self.jitter(iv);
         self.next_gc = now + GC_INTERVAL_MS;
+        self.next_reconnect = now + self.cfg.join_retry_ms;
         self.next_gossip = now + self.rng.below(self.cfg.gossip_interval_ms.max(1) as usize) as u64;
         let me = self.me;
         if let Some(e) = self.members.get_mut(&me) {
@@ -841,49 +856,54 @@ impl Gossip {
     }
 
     fn periodic_sync(&mut self, out: &mut Output) {
-        self.syncs += 1;
         if let Some((id, addr)) = self.random_live(1, None).pop() {
             self.send_sync(addr, Some(id), true, out);
         }
-        // Reconnect: sometimes sync with a recently dead member; if it is alive on the other side of a healed
-        // partition, both sides learn they were wrong and refute.
-        if self.rng.below(4) == 0 {
-            let mut dead: Vec<(NodeId, Addr)> = self
-                .members
-                .values()
-                .filter(|e| e.m.state == MemberState::Dead)
-                .map(|e| (e.m.id, e.m.gossip))
-                .collect();
-            dead.extend(self.lost.iter().filter(|(id, _)| !self.members.contains_key(id)).map(|(id, (a, _))| (*id, *a)));
-            if !dead.is_empty() {
-                let (id, addr) = dead[self.rng.below(dead.len())];
-                self.send_sync(addr, Some(id), true, out);
-            }
+    }
+
+    /// One sync to the next due address (round-robin) of the reconnect set, then back off that address.
+    fn reconnect(&mut self, now: u64, out: &mut Output) {
+        self.next_reconnect = now + self.cfg.join_retry_ms.max(1);
+        let me = self.local().gossip;
+        let live: BTreeSet<Addr> = self.members.values().filter(|e| e.m.is_live()).map(|e| e.m.gossip).collect();
+        let mut cands: BTreeSet<Addr> =
+            self.members.values().filter(|e| e.m.state == MemberState::Dead).map(|e| e.m.gossip).collect();
+        cands.extend(self.tombstones.values().filter_map(|t| t.addr));
+        cands.extend(&self.seeds);
+        if self.live == 1 {
+            cands.extend(&self.fallback);
         }
-        // Seeds that are not live members (e.g. on the far side of a long partition) are retried now and then.
-        if self.syncs.is_multiple_of(4) && !self.seeds.is_empty() {
-            let s = self.seeds[self.rng.below(self.seeds.len())];
-            if !self.members.values().any(|e| e.m.is_live() && e.m.gossip == s) {
-                self.send_sync(s, None, true, out);
-            }
-        }
+        cands.remove(&me);
+        cands.retain(|a| !live.contains(a));
+        self.retry.retain(|a, _| cands.contains(a));
+        let due = |a: &&Addr| self.retry.get(*a).is_none_or(|(at, _)| *at <= now);
+        let pick = match self.retry_cursor {
+            Some(c) => cands.range((Excluded(c), Unbounded)).chain(cands.range(..=c)).find(due).copied(),
+            None => cands.iter().find(due).copied(),
+        };
+        let Some(a) = pick else { return };
+        let first = self.cfg.join_retry_ms.max(1);
+        let e = self.retry.entry(a).or_insert((0, 0));
+        e.1 = if e.1 == 0 { first } else { (e.1 * 2).min(RECONNECT_MAX_MS) };
+        e.0 = now + e.1;
+        self.retry_cursor = Some(a);
+        self.send_sync(a, None, true, out);
     }
 
     fn gc(&mut self, now: u64) {
         let retain = self.cfg.dead_retain_ms;
-        let expired: Vec<(NodeId, u64)> = self
+        let expired: Vec<(NodeId, u64, Option<Addr>)> = self
             .members
             .values()
             .filter(|e| !e.m.is_live() && e.m.id != self.me && e.changed_at.saturating_add(retain) <= now)
-            .map(|e| (e.m.id, e.m.incarnation))
+            .map(|e| (e.m.id, e.m.incarnation, (e.m.state == MemberState::Dead).then_some(e.m.gossip)))
             .collect();
-        for (id, inc) in expired {
+        for (id, inc, addr) in expired {
             self.members.remove(&id);
-            self.add_tombstone(id, inc, now);
+            self.add_tombstone(id, inc, now, addr);
         }
-        self.lost.retain(|_, (_, until)| *until > now);
         let ttl = self.cfg.tombstone_ttl_ms;
-        self.tombstones.retain(|_, (_, at)| at.saturating_add(ttl) > now);
+        self.tombstones.retain(|_, t| t.at.saturating_add(ttl) > now);
         self.trim_tombstones();
         let members = &self.members;
         let before = self.probe_order.len();
@@ -893,17 +913,20 @@ impl Gossip {
         self.probe_pos = pos - removed_before_pos;
     }
 
-    fn add_tombstone(&mut self, id: NodeId, inc: u64, now: u64) {
-        let t = self.tombstones.entry(id).or_insert((inc, now));
-        if inc >= t.0 {
-            *t = (inc, now);
+    /// `addr`: the gossip address of a member that failed (reconnects try it), `None` if it left or is unknown.
+    fn add_tombstone(&mut self, id: NodeId, inc: u64, now: u64, addr: Option<Addr>) {
+        let t = self.tombstones.entry(id).or_insert(Tomb { inc, at: now, addr });
+        if inc >= t.inc {
+            t.inc = inc;
+            t.at = now;
+            t.addr = addr.or(t.addr);
         }
         self.trim_tombstones();
     }
 
     fn trim_tombstones(&mut self) {
         while self.tombstones.len() > self.cfg.max_tombstones {
-            let oldest = self.tombstones.iter().min_by_key(|(_, (_, at))| *at).map(|(id, _)| *id);
+            let oldest = self.tombstones.iter().min_by_key(|(_, t)| t.at).map(|(id, _)| *id);
             match oldest {
                 Some(id) => self.tombstones.remove(&id),
                 None => break,
@@ -947,10 +970,8 @@ impl Gossip {
                 }
             }
             MemberState::Dead if !self.members.contains_key(&rec.id) => {
-                // Died before we knew it: re-contact its address now and then too (never re-shared, so it expires).
-                if self.lost.len() < MAX_LOST {
-                    self.lost.entry(rec.id).or_insert((rec.gossip, now.saturating_add(self.cfg.dead_retain_ms)));
-                }
+                // Died before we knew it: a tombstone with its address (reconnects try it; never re-shared).
+                self.add_tombstone(rec.id, rec.incarnation, now, Some(rec.gossip));
             }
             MemberState::Suspect | MemberState::Dead => {
                 // Relayed state is not an independent confirmation (it would shrink the Lifeguard timeout
@@ -1000,7 +1021,7 @@ impl Gossip {
             self.queue(Item::Alive(snapshot));
             return AliveRes::Applied;
         }
-        if let Some(&(tinc, _)) = self.tombstones.get(&id) {
+        if let Some(tinc) = self.tombstones.get(&id).map(|t| t.inc) {
             if m.incarnation <= tinc {
                 return AliveRes::Rejected(tinc);
             }
@@ -1061,7 +1082,7 @@ impl Gossip {
         }
         let Some(e) = self.members.get_mut(&id) else {
             // Unknown: remember it so stale Alive gossip with an older incarnation cannot introduce it.
-            self.add_tombstone(id, inc, now);
+            self.add_tombstone(id, inc, now, None);
             return;
         };
         if inc < e.m.incarnation || !e.m.is_live() {
@@ -1102,7 +1123,7 @@ impl Gossip {
             Some(e) if !e.m.is_live() => e.m.incarnation,
             Some(_) => return,
             None => match self.tombstones.get(&sender) {
-                Some(&(inc, _)) => inc,
+                Some(t) => t.inc,
                 None => return,
             },
         };
@@ -1118,11 +1139,11 @@ impl Gossip {
             .values()
             .filter(|e| !e.m.is_live() && e.m.id != self.me)
             .min_by_key(|e| e.changed_at)
-            .map(|e| (e.m.id, e.m.incarnation, e.changed_at));
+            .map(|e| (e.m.id, e.m.incarnation, e.changed_at, (e.m.state == MemberState::Dead).then_some(e.m.gossip)));
         match victim {
-            Some((id, inc, at)) => {
+            Some((id, inc, at, addr)) => {
                 self.members.remove(&id);
-                self.add_tombstone(id, inc, at);
+                self.add_tombstone(id, inc, at, addr);
                 true
             }
             None => false,
@@ -1442,6 +1463,42 @@ mod tests {
         gs[1] = Gossip::new(Member { incarnation: 99, ..node(2) }, cfg.clone(), 7);
         run(&mut gs, &[0], &mut now, 30_000, &mut seen);
         assert_eq!((gs[1].num_live(), gs[2].num_live()), (2, 2), "the restarted member was found");
+    }
+
+    #[test]
+    fn isolated_node_rejoins_through_fallback_seeds() {
+        let cfg = Config { probe_interval_ms: 100, probe_timeout_ms: 40, ..Config::default() };
+        let mut gs: Vec<Gossip> = (1..=3).map(|i| Gossip::new(node(i), cfg.clone(), i)).collect();
+        let (mut now, mut seen) = (0, Vec::new());
+        let _ = gs[1].join(&[node(1).gossip], now);
+        run(&mut gs, &[], &mut now, 5000, &mut seen);
+        assert_eq!((gs[0].num_live(), gs[2].num_live()), (2, 1), "no seed, no fallback: alone");
+        gs[2].set_fallback_seeds(&[node(2).gossip, node(3).gossip]);
+        run(&mut gs, &[], &mut now, 5000, &mut seen);
+        assert_eq!((gs[0].num_live(), gs[2].num_live()), (3, 3));
+    }
+
+    #[test]
+    fn reconnects_back_off_per_address() {
+        let cfg = Config { probe_interval_ms: 100, probe_timeout_ms: 40, ..Config::default() };
+        let mut gs: Vec<Gossip> = (1..=2).map(|i| Gossip::new(node(i), cfg.clone(), i)).collect();
+        let (mut now, mut seen) = (0, Vec::new());
+        let _ = gs[1].join(&[node(1).gossip], now);
+        run(&mut gs, &[], &mut now, 2000, &mut seen);
+        run(&mut gs, &[1], &mut now, 5000, &mut seen);
+        assert_eq!(gs[0].member(NodeId(1002)).map(|m| m.state), Some(MemberState::Dead));
+        seen.clear();
+        let t0 = now;
+        let mut at = Vec::new();
+        for _ in 0..1200 {
+            run(&mut gs, &[1], &mut now, 100, &mut seen);
+            if seen.drain(..).any(|(from, to)| from == 0 && to == node(2).gossip) {
+                at.push(now - t0);
+            }
+        }
+        // 1, 2, 4, … 60 s apart: about 8 attempts in 120 s, the last ones a minute apart.
+        assert!((5..=10).contains(&at.len()), "{at:?}");
+        assert!(at[at.len() - 1] - at[at.len() - 2] >= 30_000, "{at:?}");
     }
 
     #[test]

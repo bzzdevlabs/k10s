@@ -246,8 +246,9 @@ pub(crate) struct Mesh {
     peers_due: Option<u64>,
     peers_last: u64,
     peers_saved: Vec<SocketAddr>,
-    /// Joined with remembered peers as seeds: once in, go back to the `--join` seeds alone.
-    trim_seeds: bool,
+    /// Cluster key id (or `insecure`) stamped in `DATA/peers`.
+    peers_stamp: String,
+    inc_saved: u64,
 }
 
 /// `DATA/peers` is rewritten at most this often.
@@ -260,6 +261,7 @@ impl Mesh {
         epoll.add(listener.raw(), sys::EPOLLIN, TOK_LISTEN)?;
         epoll.add(inbox.efd.raw(), sys::EPOLLIN, TOK_INBOX)?;
         let me = udp.gossip().id();
+        let peers_stamp = cs.cfg.key.as_ref().map_or_else(|| "insecure".into(), |k| k.id_hex());
         Ok(Mesh {
             cs,
             inbox,
@@ -296,7 +298,8 @@ impl Mesh {
             peers_due: None,
             peers_last: 0,
             peers_saved: Vec::new(),
-            trim_seeds: false,
+            peers_stamp,
+            inc_saved: 0,
         })
     }
 
@@ -306,15 +309,13 @@ impl Mesh {
     }
 
     pub(crate) fn run(mut self) {
-        // Seeds = `--join` + the members last seen alive, so a restart rejoins even with dead, moved or no seeds.
-        let mut seeds = self.cs.cfg.join.clone();
-        let remembered: Vec<SocketAddr> = self.cs.store.load_peers().into_iter().filter(|p| !seeds.contains(p)).collect();
-        if !remembered.is_empty() {
-            eprintln!("k10s: mesh: also contacting {} remembered member(s)", remembered.len());
-            self.trim_seeds = true;
-            seeds.extend(remembered);
-        }
-        if !seeds.is_empty() {
+        // The members last seen alive are contacted whenever this node is isolated: it rejoins even with dead,
+        // moved or no `--join` seeds.
+        self.peers_saved = self.cs.store.load_peers(&self.peers_stamp);
+        self.inc_saved = self.udp.gossip().local().incarnation;
+        self.udp.set_fallback_seeds(&self.peers_saved);
+        let seeds = self.cs.cfg.join.clone();
+        if !seeds.is_empty() || !self.peers_saved.is_empty() {
             let now = self.now_ms();
             self.udp.join(&seeds, now);
         }
@@ -522,12 +523,6 @@ impl Mesh {
             if self.peers_due.is_none() {
                 self.peers_due = Some(mono_ns().max(self.peers_last + PEERS_SAVE_NS));
             }
-            if self.trim_seeds && live.len() > 1 {
-                // Re-joining with the configured seeds replaces the seed list.
-                self.trim_seeds = false;
-                let (seeds, now) = (self.cs.cfg.join.clone(), self.now_ms());
-                self.udp.join(&seeds, now);
-            }
             *self.cs.members.lock().unwrap_or_else(|e| e.into_inner()) = live;
             if fp != self.live_fp {
                 self.live_fp = fp;
@@ -540,19 +535,25 @@ impl Mesh {
         }
     }
 
-    /// Writes the live members' gossip addresses to `DATA/peers` if they changed (never an empty list).
+    /// Rewrites `DATA/peers`: remembered peers still live, then random other live members (never an empty list).
     fn save_peers(&mut self) {
-        let mut live: Vec<(NodeId, SocketAddr)> =
-            self.udp.gossip().live_members().iter().filter(|m| m.id != self.me).map(|m| (m.id, m.gossip)).collect();
-        live.sort();
-        let peers: Vec<SocketAddr> = live.into_iter().map(|(_, a)| a).take(super::store::MAX_PEERS).collect();
+        let mut others: Vec<SocketAddr> =
+            self.udp.gossip().live_members().iter().filter(|m| m.id != self.me).map(|m| m.gossip).collect();
+        let mut peers: Vec<SocketAddr> = self.peers_saved.iter().copied().filter(|a| others.contains(a)).collect();
+        others.retain(|a| !peers.contains(a));
+        while peers.len() < super::store::MAX_PEERS && !others.is_empty() {
+            peers.push(others.swap_remove((sys::getrandom_u64() % others.len() as u64) as usize));
+        }
         if peers.is_empty() || peers == self.peers_saved {
             return;
         }
-        if let Err(e) = self.cs.store.save_peers(&peers) {
-            eprintln!("k10s: mesh: cannot save peers: {e}");
+        match self.cs.store.save_peers(&self.peers_stamp, &peers) {
+            Ok(()) => {
+                self.udp.set_fallback_seeds(&peers);
+                self.peers_saved = peers;
+            }
+            Err(e) => eprintln!("k10s: mesh: cannot save peers: {e}"),
         }
-        self.peers_saved = peers;
     }
 
     /// Remembers a member's rpc address; a changed address (restart on another port) invalidates our links to it.
@@ -784,6 +785,14 @@ impl Mesh {
             self.peers_due = None;
             self.peers_last = now;
             self.save_peers();
+        }
+        let inc = self.udp.gossip().local().incarnation;
+        if inc > self.inc_saved {
+            // Refuted: persist so the next life starts above it.
+            match self.cs.store.save_incarnation(inc) {
+                Ok(()) => self.inc_saved = inc,
+                Err(e) => eprintln!("k10s: mesh: cannot save incarnation: {e}"),
+            }
         }
         let (timeout, retry_origin) = match &self.fetch {
             Some(f) if f.cur.is_some() && now >= f.attempt_deadline => (true, None),
