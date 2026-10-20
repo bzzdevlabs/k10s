@@ -626,6 +626,28 @@ fn includes() {
 }
 
 #[test]
+fn includes_through_a_reader() {
+    // Paths that do not exist on disk: files are identified by their lexically normalized path.
+    let root = std::path::Path::new("/nonexistent-k10-lang/app");
+    let mut reads = Vec::new();
+    let mut read = |p: &std::path::Path| {
+        reads.push(p.to_path_buf());
+        match p.to_str().unwrap() {
+            "/nonexistent-k10-lang/app/lib/a.ten" => Ok("include \"../lib/./b.ten\"; fn a() -> i64 { return b(); }".to_string()),
+            "/nonexistent-k10-lang/app/lib/../lib/./b.ten" => Ok("include \"../main.ten\"; fn b() -> i64 { return 7; }".to_string()),
+            _ => Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+        }
+    };
+    let src = "include \"lib/a.ten\"; export fn f() -> i64 { return a(); }";
+    let m = crate::compile_with_reader(src, Some(&root.join("main.ten")), &mut crate::Sources::new(), &mut read).unwrap();
+    assert_eq!(run_module(&m, "f", &[]), Ok(Some(7)));
+    let d = crate::compile_with_reader("include \"x.ten\";", Some(&root.join("main.ten")), &mut crate::Sources::new(), &mut read).unwrap_err();
+    assert!(d[0].message.contains("cannot include") && d[0].line == 1, "{d:?}");
+    // a.ten, b.ten (main.ten is not read again), x.ten.
+    assert_eq!(reads.len(), 3, "{reads:?}");
+}
+
+#[test]
 fn ten_md_example_compiles_and_runs() {
     let doc = include_str!("../../../../docs/TEN.md");
     let start = doc.find("## Example\n```\n").expect("example section") + "## Example\n```\n".len();

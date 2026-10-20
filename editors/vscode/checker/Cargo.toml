@@ -1,0 +1,26 @@
+[package]
+name = "k10-check-wasm"
+description = "Ten, .k10s and TIR diagnostics for the VS Code extension (wasm32-unknown-unknown)"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+# Built on its own (`editors/vscode/build.sh`), outside the k10s workspace.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+k10-ir = { path = "../../../crates/k10-ir" }
+k10-lang = { path = "../../../crates/k10-lang" }
+k10-mesh = { path = "../../../crates/k10-mesh", default-features = false }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

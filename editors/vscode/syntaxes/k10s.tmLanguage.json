@@ -1,0 +1,145 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "k10s manifest",
+  "scopeName": "source.k10s",
+  "fileTypes": [
+    "k10s"
+  ],
+  "patterns": [
+    {
+      "include": "#comment"
+    },
+    {
+      "include": "#service"
+    },
+    {
+      "include": "#body"
+    }
+  ],
+  "repository": {
+    "comment": {
+      "name": "comment.line.number-sign.k10s",
+      "begin": "#",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.comment.k10s"
+        }
+      },
+      "end": "$"
+    },
+    "service": {
+      "begin": "\\b(service)\\b\\s*([A-Za-z0-9_-]+|\\\"[^\\\"\\n]*\\\")?",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.other.service.k10s"
+        },
+        "2": {
+          "name": "entity.name.type.service.k10s"
+        }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.block.end.k10s"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comment"
+        },
+        {
+          "match": "\\{",
+          "name": "punctuation.section.block.begin.k10s"
+        },
+        {
+          "include": "#body"
+        }
+      ]
+    },
+    "body": {
+      "patterns": [
+        {
+          "include": "#comment"
+        },
+        {
+          "match": "\\b(code|replicas|memory|max_instances|cpu_ms|fresh|config|calls)\\s*(=)",
+          "captures": {
+            "1": {
+              "name": "variable.other.property.k10s"
+            },
+            "2": {
+              "name": "keyword.operator.assignment.k10s"
+            }
+          }
+        },
+        {
+          "match": "\\b([A-Za-z0-9_-]+)\\s*(=)",
+          "captures": {
+            "1": {
+              "name": "invalid.illegal.unknown-key.k10s"
+            },
+            "2": {
+              "name": "keyword.operator.assignment.k10s"
+            }
+          }
+        },
+        {
+          "name": "string.quoted.double.k10s",
+          "begin": "\"",
+          "end": "\"|$",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.begin.k10s"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.end.k10s"
+            }
+          },
+          "patterns": [
+            {
+              "name": "constant.character.escape.k10s",
+              "match": "\\\\(?:[ntr0\\\\\\\"]|x[0-9A-Fa-f]{2})"
+            },
+            {
+              "name": "invalid.illegal.escape.k10s",
+              "match": "\\\\."
+            }
+          ]
+        },
+        {
+          "match": "\\b(\\d[\\d_]*)\\s*((?i:b|kib|mib|gib))?\\b",
+          "captures": {
+            "1": {
+              "name": "constant.numeric.decimal.k10s"
+            },
+            "2": {
+              "name": "keyword.other.unit.k10s"
+            }
+          }
+        },
+        {
+          "match": "\\b(true|false)\\b",
+          "name": "constant.language.boolean.k10s"
+        },
+        {
+          "match": "\\*",
+          "name": "constant.language.any.k10s"
+        },
+        {
+          "match": "[\\[\\]]",
+          "name": "punctuation.section.brackets.k10s"
+        },
+        {
+          "match": ",",
+          "name": "punctuation.separator.comma.k10s"
+        },
+        {
+          "match": ";",
+          "name": "punctuation.terminator.k10s"
+        }
+      ]
+    }
+  }
+}
