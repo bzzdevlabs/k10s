@@ -12,6 +12,7 @@ use crate::exec::{Backend, Code};
 use crate::host::{resolve_imports, Request};
 use crate::kv::KvNs;
 use crate::logs::LogRing;
+use crate::slot::Reservation;
 use crate::snapshot::Snapshot;
 use k10_mesh::{Manifest, ServiceSpec};
 use std::collections::{HashMap, VecDeque};
@@ -75,6 +76,8 @@ pub struct ServiceRt {
     pub kv: Arc<KvNs>,
     pub log: Arc<LogRing>,
     pub placement: Placement,
+    /// Memory reserved for this version (one instance when placed here; see `slot::MemBudget`).
+    pub mem_res: Reservation,
     /// New instances start from a post-`init` snapshot (always for `fresh` services; optional otherwise).
     pub use_snapshot: bool,
     pub snapshot: OnceLock<Arc<Snapshot>>,
@@ -126,6 +129,7 @@ impl ServiceRt {
             kv,
             log,
             placement: Placement::Local,
+            mem_res: Reservation::new(0, 0),
             snapshot: OnceLock::new(),
             live: AtomicU32::new(0),
             peak: AtomicU32::new(0),
@@ -144,6 +148,12 @@ impl ServiceRt {
 
     pub fn mem_log2(&self) -> u8 {
         self.spec.mem_log2
+    }
+
+    /// Memory of one instance (slot + tail page): the unit of the memory budget.
+    #[inline]
+    pub fn instance_bytes(&self) -> u64 {
+        k10_mesh::instance_bytes(&self.spec)
     }
 
     pub fn cpu_budget_ns(&self) -> u64 {

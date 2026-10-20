@@ -1,11 +1,12 @@
 //! Real-socket integration (std only).
 //!
 //! * [`UdpDriver`]: a non-blocking `UdpSocket` + [`Gossip`], driven by the caller's own event loop
-//!   (`raw_fd` → epoll; `on_readable` when readable; `on_tick` at `next_deadline`).
+//!   (`raw_fd` → epoll; `on_readable` when readable; `on_tick` at `next_deadline`); optionally sealed ([`UdpDriver::set_cipher`]).
 //! * [`MeshThread`]: a self-contained thread running a `UdpDriver` (tests, examples, tools).
 
 use crate::gossip::{Config, DesiredState, Event, Gossip, Output};
 use crate::member::{Addr, Member};
+use crate::secure::{GossipCipher, GossipCipherStats, Reject};
 use std::collections::VecDeque;
 use std::io::{self, ErrorKind};
 use std::net::UdpSocket;
@@ -25,6 +26,8 @@ pub struct IoStats {
     pub packets_received: u64,
     pub bytes_received: u64,
     pub send_errors: u64,
+    /// Datagrams dropped by the [`GossipCipher`] (not authentic, stale or replayed).
+    pub rejected: u64,
 }
 
 /// A UDP socket plus the gossip state machine.
@@ -34,6 +37,14 @@ pub struct UdpDriver {
     events: VecDeque<Event>,
     rx: Vec<u8>,
     stats: IoStats,
+    cipher: Option<GossipCipher>,
+    sealed: Vec<u8>,
+    last_reject: Option<(Addr, Reject)>,
+}
+
+/// Unix time in milliseconds (the gossip cipher's timestamps).
+fn wall_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
 impl UdpDriver {
@@ -52,7 +63,30 @@ impl UdpDriver {
     /// Wraps an already bound socket (switched to non-blocking mode).
     pub fn with_socket(sock: UdpSocket, gossip: Gossip) -> io::Result<UdpDriver> {
         sock.set_nonblocking(true)?;
-        Ok(UdpDriver { sock, gossip, events: VecDeque::new(), rx: vec![0u8; 65_536], stats: IoStats::default() })
+        Ok(UdpDriver {
+            sock,
+            gossip,
+            events: VecDeque::new(),
+            rx: vec![0u8; 65_536],
+            stats: IoStats::default(),
+            cipher: None,
+            sealed: Vec::new(),
+            last_reject: None,
+        })
+    }
+
+    /// Seals every datagram from now on and drops received ones the cipher rejects.
+    pub fn set_cipher(&mut self, cipher: GossipCipher) {
+        self.cipher = Some(cipher);
+    }
+
+    pub fn cipher_stats(&self) -> Option<GossipCipherStats> {
+        self.cipher.as_ref().map(|c| c.stats())
+    }
+
+    /// Source and reason of the last rejected datagram since the previous call.
+    pub fn take_last_reject(&mut self) -> Option<(Addr, Reject)> {
+        self.last_reject.take()
     }
 
     /// The socket's file descriptor, to register (read interest) with the caller's epoll/kqueue.
@@ -72,7 +106,18 @@ impl UdpDriver {
                     n += 1;
                     self.stats.packets_received += 1;
                     self.stats.bytes_received += len as u64;
-                    let out = self.gossip.on_packet(from, &self.rx[..len], now_ms);
+                    let pkt = match &mut self.cipher {
+                        Some(c) => match c.open(&mut self.rx[..len], wall_ms()) {
+                            Ok(p) => p,
+                            Err(r) => {
+                                self.stats.rejected += 1;
+                                self.last_reject = Some((from, r));
+                                continue;
+                            }
+                        },
+                        None => &self.rx[..len],
+                    };
+                    let out = self.gossip.on_packet(from, pkt, now_ms);
                     self.flush(out);
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => break,
@@ -139,10 +184,17 @@ impl UdpDriver {
 
     fn flush(&mut self, out: Output) {
         for (to, pkt) in out.packets {
-            match self.sock.send_to(&pkt, to) {
+            let bytes: &[u8] = match &mut self.cipher {
+                Some(c) => {
+                    c.seal(&pkt, wall_ms(), &mut self.sealed);
+                    &self.sealed
+                }
+                None => &pkt,
+            };
+            match self.sock.send_to(bytes, to) {
                 Ok(_) => {
                     self.stats.packets_sent += 1;
-                    self.stats.bytes_sent += pkt.len() as u64;
+                    self.stats.bytes_sent += bytes.len() as u64;
                 }
                 Err(_) => self.stats.send_errors += 1, // UDP is best effort; gossip tolerates loss
             }

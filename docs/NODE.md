@@ -26,8 +26,36 @@ placement and peer links on top of it.
   no syscall. Freed slots are `madvise(MADV_DONTNEED)`-ed (they read back as zeros) and reused.
   Regions are `MADV_NOHUGEPAGE`: with THP `always`, one touch would commit 2 MiB, i.e. ~30 neighbouring 64 KiB
   slots (measured: 70 KB RSS per instance instead of 4.4 KB). Physical memory = pages actually touched.
-  `--mem SIZE` caps the address space handed to live instances (sum of `S + 4 KiB`; default: physical RAM); beyond
-  it instance creation fails (503 / call −2).
+  `--mem SIZE` caps the address space handed to live instances (sum of `S + 4 KiB`; default: physical RAM), with
+  per-service reservations (below).
+- **Memory reservations** (`slot::MemBudget`). Every service placed on the node reserves one instance,
+  `S + 4 KiB` (what it needs to serve; its snapshot is captured from that instance), out of `--mem`; burst instances
+  beyond a service's reservation come from the shared remainder (`--mem` − reservations). So a service with many
+  concurrent requests can fill the shared pool but never another service's reservation: every service can always
+  create its first instance. The sum of the reservations must fit (address space, like `--mem` itself: 100k
+  services of 64 KiB reserve 6.6 GiB, so very dense nodes need `--mem` above physical RAM): a single-node apply that
+  does not fit is rejected (422, `memory reservations do not fit: N service(s) … reserve X … --mem is Y`), and in
+  cluster mode placement charges exactly this footprint per replica against each node's advertised capacity
+  (`--mem`), so it never places a service where its reservation cannot fit (a cluster apply is never refused: should
+  the inputs disagree,
+  what does not fit runs without a reservation). Services placed on other nodes reserve nothing (they only run here
+  as a fallback, from the shared pool); stacked replicas (more replicas than nodes) reserve one instance per node,
+  the rest of their placement share is shared-pool headroom. Accounting: one atomic `committed` = active reservations
+  + burst instances (+ instances of replaced versions still finishing); a burst instance is created only while
+  `committed + its size ≤ --mem` (one compare-exchange; the charge is kept in the slot's padding: no per-instance
+  memory, no per-request work). A request that finds no memory for a new instance waits for one of the service's
+  instances (like at `max_instances`) when it has some, else fails (503 / call −2). A burst instance that finishes a
+  job moves into its service's reservation when that has a free unit; idle reclaim destroys burst instances first.
+  An apply that adds reservations while burst instances hold the shared pool is honoured at once (a reserved
+  instance is always allowed, so `committed` may exceed `--mem` by the new reservations); until the node is back
+  within its budget, shards destroy idle burst instances (on the table change and every 250 ms) and burst instances
+  as soon as their job ends (unless it is the last instance of a service with queued requests). Status:
+  `memory.mem_reserved`, `mem_shared_used`, `mem_shared_limit`, `mem_committed`, `mem_refused` (creations refused for
+  lack of memory), per service `mem_reserved`, `mem_used`, `mem_shared`; metrics `k10s_memory_{limit,reserved,
+  shared_used,committed}_bytes`, `k10s_memory_refused_total`, `k10s_service_memory_{reserved_,}bytes`. Outside
+  `--mem` (bounded separately): snapshots (≤ 2 × the non-zero pages of one instance per service version), prepared
+  code and data segments (per module), KV (`--kv-max` per service), connection buffers (`--conn-buffer-max`
+  node-wide), fiber stacks (`max_fibers` per shard).
 - **Copy-on-write snapshots**: after `init()`, an instance's resident non-zero pages are written into a sparse
   `memfd` (`extent` = up to the last non-zero page). New instances either *map* it `MAP_PRIVATE|MAP_FIXED` over their
   slot prefix (pages only read stay shared by all instances) or *copy* its non-zero pages. Freeing a mapped slot maps
@@ -62,8 +90,9 @@ placement and peer links on top of it.
   ≤ 10 ms latency while 3 infinite loops shared the same single shard).
 - **Actor rule**: an instance is either in its shard's idle list or owned by exactly one job.
 - **Dispatch** of a request for service S on shard X: take an idle instance of S on X (LIFO) → else create one if S's
-  node-wide `live < max_instances`, no crash backoff and the node memory cap (`--mem`) allows → else push the request
-  on S's node-wide wait queue and poke a shard that has an idle instance of S. Whichever shard frees an instance of
+  node-wide `live < max_instances`, no crash backoff and the memory budget allows (S's reservation, else the shared
+  pool; with no memory and no live instance of S: 503) → else push the request on S's node-wide wait queue and poke
+  a shard that has an idle instance of S. Whichever shard frees an instance of
   S first serves the queue (FIFO; expired entries are dropped) and sends the result to the origin shard's inbox.
   This is also how cross-shard calls happen: calls run on the caller's shard unless the callee is at capacity.
 - **Instance creation** runs inside the job's fiber (data segments or snapshot, then `init()` with the host API and
@@ -155,6 +184,16 @@ status ≥ 0, −1 unknown service, −2 unavailable (crash backoff with nothing
   KV keys; memory: RSS,
   slots used, slot bytes, reserved, snapshot-mapped; HTTP, execution and KV counters; per shard), `GET metrics`
   (Prometheus text), `GET logs/<svc>`, `GET health`, `POST apply`.
+- **Admin access** (`admin::gate`, decided on the request head before any body is read or reserved; a refusal
+  closes the connection): `health` and `metrics` are open (liveness, read-only counters: a scraper should not need a
+  secret that can deploy code). Everything else needs `Authorization: Bearer <token>` when the node has
+  `--admin-token-file FILE` (only its SHA-256 is kept; constant-time comparison; 401 with `WWW-Authenticate`).
+  Without a token only loopback peers (`getpeername`) are served, and not when a `Forwarded`/`X-Forwarded-For`
+  header shows a local proxy relaying someone else (403). `--admin ADDR` serves the admin API on its own listener
+  (accepted by shard 0); the ingress then answers only `/_k10s/health` of it (404 otherwise), and the admin listener
+  serves no services. Credentials are only parsed for `/_k10s` targets: service traffic pays one prefix check.
+  CLI: `k10s apply|status|logs` send the token from `--admin-token-file`, `$K10S_ADMIN_TOKEN_FILE` or
+  `$K10S_ADMIN_TOKEN`; `k10s keygen [-o FILE]` writes 32 random bytes as hex (mode 0600, never overwrites).
 
 ## Apply and persistence
 - `POST /_k10s/apply` body = `k10_mesh::Bundle::encode()`. The node decodes the bundle, validates the manifest,
@@ -308,6 +347,8 @@ changes. Code: `cluster/mod.rs` (config, applier, operator apply, status), `clus
 
 **Start-up.** `k10s node` runs in cluster mode when any of `--gossip ADDR` (UDP, default `0.0.0.0:7946`), `--rpc ADDR`
 (TCP, default `0.0.0.0:7947`), `--join HOST:PORT[,…]` (gossip addresses of members) or `--advertise HOST` is given.
+It refuses to start without `--cluster-key-file FILE` (the same `k10s keygen` key on every node) unless
+`--insecure-unauthenticated-cluster` is given (see "Cluster authentication").
 `ClusterSetup::bind` (sockets, store, id) → `Node::start_with_router(cfg, setup.router())` → `setup.start(node)`.
 - Identity: a random `NodeId` persisted in `DATA/node-id`; the incarnation starts at the wall clock in ms, so a
   restarted node (same id) refutes the Dead/Left records of its previous life.
@@ -318,6 +359,17 @@ changes. Code: `cluster/mod.rs` (config, applier, operator apply, status), `clus
 - The stored desired state (`DATA/manifest.k10m` + `DATA/blobs/`) is applied at start (placed over this node alone)
   and announced with `set_desired`: the highest version in the cluster wins, so a whole-cluster restart converges
   on the newest one. `DATA/bundle.k10b` (single-node mode) is not used.
+- **Joining through several members.** Give every node, the first one included, the same `--join a,b,c` list of a
+  few members' gossip addresses (a node skips its own address; while it knows no other live member it re-contacts
+  the list every second, so the first node simply waits for the others): no node then depends on one seed being up
+  when it (re)starts. In addition, each node remembers the gossip addresses of the members it last saw alive
+  (`DATA/peers`, up to 16, rewritten at most once per second when membership changes, never emptied) and contacts
+  them at start besides `--join`: a restarted node rejoins its cluster even when its seeds are down or moved, or when
+  it was started without `--join` (the bootstrap node; before this, such a node restarted on another address formed
+  a one-node cluster of its own, forever). Once it has joined, its seed list goes back to `--join` alone, so stale
+  remembered addresses are not retried. Nodes also re-contact dead members now and then at their old address (also
+  those that died before they joined or restarted, learned from syncs), which heals partitions and finds a node
+  restarted on its old address.
 
 **Desired state.** `POST /_k10s/apply` (`k10s apply`) works on any node: decode, version = highest known + 1 (stored,
 applied or announced by gossip) when the bundle says 0 (an explicit version must be higher; the same version and
@@ -345,8 +397,9 @@ router's fallback order. Remote-placed services keep their prepared code (any no
 warm instance (idle reclaim down to 0).
 
 **Peer links** (`k10_mesh::wire` framing, TCP_NODELAY). One persistent connection per peer pair, multiplexed by
-request id (each side picks ids for its own requests; requests and responses are told apart by kind). Both sides
-send `Hello{member}` first. A node dials members with a larger id as soon as they come up, and any member lazily on
+request id (each side picks ids for its own requests; requests and responses are told apart by kind). With a
+cluster key both sides start with the `Auth` handshake (see "Cluster authentication"); then both send
+`Hello{member}`. A node dials members with a larger id as soon as they come up, and any member lazily on
 first use; when both ends dialed at once, the connection dialed by the smaller id is kept and the other one is closed
 by its dialer once its requests are answered. Frames are appended to the link's write buffer and written once per
 mesh-loop iteration (batching; edge-triggered epoll, partial writes resume on `EPOLLOUT`). A failed dial (or one
@@ -389,7 +442,8 @@ thread stops.
 applied (version, hash), fetch in progress, last apply error, members (id, state, incarnation, gossip/rpc/http
 addresses, capacity), placement (service → node ids), links (peer, state, outstanding, bytes, unsent), counters
 (gossip packets/bytes, forwarded, retries, failed, local fallback, served for peers, not-here, dial failures,
-congested skips, links overflowed, accept pauses, peer bytes, fetches, applies). Each service also reports its `rt` id and `placement` (`"local"` or node ids). `GET
+congested skips, links overflowed, accept pauses, peer bytes, fetches, applies, link auth failures, gossip datagrams
+rejected: bad tag / stale / replayed), and `"auth"`: `{"mode":"key","key_id":…}` or `{"mode":"insecure"}`. Each service also reports its `rt` id and `placement` (`"local"` or node ids). `GET
 /_k10s/cluster` renders the same as text; `k10s status` prints it in cluster mode (`--json` for the JSON).
 
 **Tests** (`crates/k10s/tests/cluster.rs`, real `k10s node` processes on ephemeral localhost ports, `--probe-ms 100`):
@@ -400,13 +454,52 @@ while it is down, restart with the same data directory → same id, higher incar
 and a join under load (4 → 3 → 4 nodes): 0 failed requests, services whose placement did not change keep their
 runtime; re-applies under load on 5 nodes (0 failed requests) and two concurrent applies on two nodes (one winner
 everywhere); the origin of a desired state crashes and a node joining later fetches it from the other members; a
-call the caller's `calls` does not grant is answered −1 locally and never forwarded.
-Unit tests: store (persist/reload/corruption/gc/pinning, node id), ranking vs `place`; node test:
+call the caller's `calls` does not grant is answered −1 locally and never forwarded; memory reservations (3 nodes
+with `--mem 1MiB`, 45 services of 64 KiB: exactly 15 placed and reserved per node).
+`crates/k10s/tests/chaos.rs` faults every node, the seed included (SIGKILL, SIGSTOP, leave + rejoin, apply then kill
+of its origin, restarts with live-member, static or no `--join`, on the same or new ports) and checks membership,
+version and placement convergence and 0 errors through every ingress after each round.
+Unit tests: store (persist/reload/corruption/gc/pinning, node id, peers), ranking vs `place`; node test:
 `apply_cluster` ordering and placement-only updates. `cargo test -p k10s --test cluster` takes ≈ 2–4 s.
 `crates/k10s/tests/mesh_abuse.rs`: a hostile non-UTF-8 call path; a fake peer that requests ≈ 1 GB of replies and
 never reads (the link is closed at the cap, peak RSS stays < 100 MB, forwarding unaffected); a node started with
 `RLIMIT_NOFILE = 64` whose HTTP and peer listeners both hit `EMFILE` (≈ 0 CPU while out of descriptors, two log
 lines, both serve again afterwards).
+
+### Cluster authentication
+Every member holds the same 32-byte cluster key (`k10_mesh::secure`; hand-written `no_std` crypto in
+`k10_mesh::crypto`, checked against the RFC 8439 / 5869 / 4231 and XChaCha draft vectors). HKDF-SHA256 derives a
+gossip key, a peer key and a public key id (`"auth"."key_id"` in status: equal on nodes sharing a key).
+- **Gossip**: each datagram is sealed with XChaCha20-Poly1305,
+  `'K' | 1 | nonce[24] = boot[8] (random per process) ctr[8] ts_ms[8] | ciphertext | tag[16]` (42 bytes; gossip's
+  `max_packet` shrinks by as much, so datagrams stay ≤ 1400 bytes). A receiver drops a datagram before decoding it
+  when the tag fails (another key, plaintext, forgery), when `ts` is more than `--gossip-max-skew` (300 s; 0 = off)
+  from its own clock, or when it is a replay: per sender it keeps the newest boot (a later `ts` replaces it) and a
+  64-counter sliding window. SWIM incarnations and desired-state versions are monotonic as well, so nothing can be
+  rolled back; a desired state can only come from a key holder, and the manifest and blobs it names are still checked
+  against their SHA-256 when fetched.
+- **Peer links**: each side sends `Auth` (kind 11, in clear: version, node id, 32 fresh random bytes from
+  `getrandom`), then derives one key per direction,
+  `k(A→B) = HKDF-Expand(HKDF-Extract("k10s link v1", peer key), id_A | id_B | nonce_A | nonce_B)`. Frames then
+  travel in sealed records, `len:u32 | ChaCha20-Poly1305(frames) | tag[16]` (`len` counts the tag and is
+  authenticated), with the record counter as nonce: one record per write (the frames a loop iteration queued for that
+  peer; records close at 64 KiB, a larger frame travels alone), so crypto costs one seal per batch, not per frame.
+  The first record each side receives starts with the peer's `Hello`, whose id must match its `Auth`: opening it
+  proves the peer holds the key and agrees on both nonces (mutual challenge–response).
+  Fresh nonces give fresh keys per connection; per-direction keys stop reflection; the implicit counter stops
+  injection, replay, reordering and dropping — any failure closes the link (`link_auth_failures`; a dialed peer is
+  backed off). Before `Auth` the decoder accepts nothing larger than an `Auth` frame, and a link that has not
+  completed the handshake within 5 s is closed. A peer claiming this node's id, or a dialed link reaching another
+  node, is refused. Records queued during the handshake wait unsealed at the end of the write buffer (not written)
+  and are sealed in place once the peer's `Auth` arrives; afterwards records are sealed in place when written and
+  opened in place in the decoder's buffer (no extra copy). One handshake round trip is added per connection.
+- Cost: ChaCha20 runs four blocks per batch with SSE2 intrinsics on hosted x86-64 (the only `unsafe` in `k10-mesh`;
+  LLVM does not vectorize the rotations itself; portable interleaved lanes on metal), fused with Poly1305; a short
+  record costs one batch. Sealing per record rather than per frame keeps it to one seal/open per write: the first
+  per-frame version cost ≈ 2 µs of mesh CPU per forwarded request (−8 % throughput at c = 64 on the loaded host).
+  Numbers: `cargo bench -p k10-mesh --bench crypto` and the table below.
+- `--insecure-unauthenticated-cluster` keeps the old plaintext protocol (no `Auth`, no sealing) and prints a warning;
+  it does not interoperate with keyed nodes (each side drops the other's datagrams and links).
 
 ### Cluster measurements (release, localhost, i7-7820HQ 4C/8T; other agents compiling: load 3.5–12, so numbers are noisy)
 | what | result |
@@ -420,6 +513,8 @@ lines, both serve again afterwards).
 | SIGSTOP (hung node, no reset), default / tight gossip | first success 270–315 / 57–103 ms (once suspected); 100 % of new probes OK after 260–300 / 47–90 ms; requests stuck on the node fail when it is declared dead (1.1 s / 0.2 s) |
 | `call` latency, c=1 (2 shards per node): ingress → caller → callee same node / other node | p50 50 / 118 µs (17k / 7.8k rps); with `--idle-spin-us 50`: 26 / 109 µs |
 | ingress forwarding, echo via the hosting node / via another node | c=1: p50 34 / 124 µs (25k / 6.7k rps); c=16: 90k / 36k rps (p50 149 / 294 µs); c=64: 91k / 65k rps (p50 516 / 652 µs) |
+| cluster authentication: crypto (`cargo bench`, host load ≈ 10–20) | seal or open of a ≤ 128 B record 0.3–0.5 µs; 1 MiB 400–480 MB/s (ChaCha20 SSE2 0.8–0.9 GB/s, Poly1305 0.9–1.2 GB/s, portable lanes 0.2–0.3 GB/s); gossip datagram (1400 B, XChaCha20) 3.4–4.5 µs |
+| cluster authentication vs 08f2921 (3 nodes × 2 shards, echo, 10 interleaved rounds, host load 9–22; medians) | forwarded c=1 p50 156 / 156 µs; forwarded c=64 51k / 58k rps (spread 9–101k: noise); open loop 4000 rps forwarded p50 700 / 752 µs; mesh-thread CPU per forwarded request +5.8 µs at c=1 (four cold-cache seal/open), +0.4 µs at c=64 (records batch); node CPU per request +6 % / +1 %; local ingress c=1 p50 45 / 46 µs, CPU per request +2 % (noise) |
 | idle 5-node cluster (2 shards each), no services / 20 services × 2 replicas | RSS 2.6–4.7 / 2.8–4.9 MiB per node; CPU ≈ 0.1 % of a core; gossip ≈ 300–350 B/s out and in per node |
 
 A forwarded request crosses six thread hand-offs (shard → mesh → peer mesh → peer shard → peer mesh → mesh → shard),
@@ -429,11 +524,14 @@ Reproduce: `cargo test --release -p k10s --test cluster -- --ignored --nocapture
 
 ## Known limitations
 - No TLS; no chunked request bodies; responses always use `Content-Length`.
-- Cluster: no authentication or encryption on gossip (UDP) or peer links (TCP): run on a trusted network. KV is
-  node-local (replicas of a service, and a service that moves, see different data). No consensus: two concurrent
+- Cluster: one shared key authenticates every member; any key holder is fully trusted (no per-node identity,
+  revocation = re-keying every node, no forward secrecy), and bundles are not signed. KV is node-local (replicas of a service, and a service that moves, see different data). No consensus: two concurrent
   applies resolve by `(version, hash)`, the loser's change is dropped silently; an operator apply on a node that has
-  not yet learned the cluster's latest version can likewise lose. A service unplaced for lack of memory, or whose
-  hosts are all down, is run by the next node of its ranking (or this node) regardless of `--mem` headroom planning.
+  not yet learned the cluster's latest version can likewise lose. An apply whose node dies before any peer fetched
+  it stays pending (peers retry every second) until that node restarts with its data, or a newer apply supersedes
+  it (chaos-tested: kill right after apply, then restart). A service unplaced for lack of memory, or whose
+  hosts are all down, is run by the next node of its ranking (or this node) from that node's shared pool (no
+  reservation: it may get 503 when the pool is full).
   Forwarding costs six thread hand-offs (see measurements). Non-UTF-8 call paths are converted lossily on the wire.
   Peer links have no application-level keepalive (gossip detects dead peers).
 - KV is node-local with an asynchronous durability window (no fsync-before-ack mode yet); compaction serializes the

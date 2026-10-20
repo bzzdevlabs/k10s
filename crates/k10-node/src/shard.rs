@@ -40,7 +40,7 @@ use crate::http::{self, Method, Parse, RequestHead};
 use crate::node::NodeShared;
 use crate::router::Completion;
 use crate::service::{bump, NoInstance, Placement, Queued, ServiceRt, ServiceTable};
-use crate::slot::{Slot, SlotPools};
+use crate::slot::{Charge, Slot, SlotPools};
 use crate::snapshot::Snapshot;
 use crate::sys::{self, mono_ns, EventFd, Epoll, Fd};
 use k10_ir::Trap;
@@ -59,6 +59,7 @@ use std::time::Duration;
 const TOK_LISTENER: u64 = 0;
 const TOK_EVENTFD: u64 = 1 << 62;
 const TOK_CONN: u64 = 2 << 62;
+const TOK_ADMIN_LISTENER: u64 = 3 << 62;
 const MAINT_NS: u64 = 250_000_000;
 
 // ------------------------------------------------------------------------------------------------------------------
@@ -405,6 +406,8 @@ struct Conn {
     /// response is produced) and the response bytes not yet written.
     reserved: u64,
     wcharged: u64,
+    /// Accepted on the separate admin listener.
+    admin: bool,
 }
 
 /// Reserves `n` bytes of the node-wide connection buffer budget ([`crate::NodeConfig::conn_buffer_max`]). Always
@@ -447,6 +450,8 @@ pub(crate) struct Shard {
     me: Arc<ShardShared>,
     epoll: Epoll,
     listener: Option<Fd>,
+    /// The admin API's own listener (`NodeConfig::admin_listen`), on shard 0.
+    admin_listener: Option<Fd>,
     events: Vec<libc::epoll_event>,
     table: Arc<ServiceTable>,
     table_ver: u64,
@@ -675,11 +680,14 @@ fn split_target(t: &str) -> (&str, &str) {
 }
 
 impl Shard {
-    pub(crate) fn new(idx: usize, node: Arc<NodeShared>, listener: Option<Fd>) -> io::Result<Shard> {
+    pub(crate) fn new(idx: usize, node: Arc<NodeShared>, listener: Option<Fd>, admin_listener: Option<Fd>) -> io::Result<Shard> {
         let me = node.shards[idx].clone();
         let epoll = Epoll::new()?;
         if let Some(l) = &listener {
             epoll.add(l.raw(), sys::EPOLLIN, TOK_LISTENER)?;
+        }
+        if let Some(l) = &admin_listener {
+            epoll.add(l.raw(), sys::EPOLLIN, TOK_ADMIN_LISTENER)?;
         }
         epoll.add(me.efd.raw(), sys::EPOLLIN, TOK_EVENTFD)?;
         let table = node.current_table();
@@ -691,6 +699,7 @@ impl Shard {
             me,
             epoll,
             listener,
+            admin_listener,
             events: vec![libc::epoll_event { events: 0, u64: 0 }; 512],
             table,
             table_ver,
@@ -750,6 +759,9 @@ impl Shard {
                 if let Some(l) = &self.listener {
                     let _ = self.epoll.add(l.raw(), sys::EPOLLIN, TOK_LISTENER);
                 }
+                if let Some(l) = &self.admin_listener {
+                    let _ = self.epoll.add(l.raw(), sys::EPOLLIN, TOK_ADMIN_LISTENER);
+                }
             }
             let mut timeout = if !self.runq.is_empty() || !self.yielded.is_empty() || !self.conn_ready.is_empty() {
                 0
@@ -788,7 +800,8 @@ impl Shard {
                 let ev = self.events[i];
                 let (tok, bits) = (ev.u64, ev.events);
                 match tok & (3 << 62) {
-                    TOK_LISTENER => self.accept_all(),
+                    TOK_LISTENER => self.accept_all(false),
+                    TOK_ADMIN_LISTENER => self.accept_all(true),
                     TOK_EVENTFD => {
                         self.me.efd.drain();
                         self.me.notified.store(false, SeqCst);
@@ -827,6 +840,40 @@ impl Shard {
                 if self.local.get(&id).is_some_and(|l| l.idle.is_empty()) {
                     self.local.remove(&id);
                 }
+            }
+            self.relieve_memory_pressure();
+        }
+    }
+
+    /// While the budget is over-committed, destroys this shard's idle burst instances.
+    fn relieve_memory_pressure(&mut self) {
+        if !self.node.budget.over() {
+            return;
+        }
+        let ids: Vec<u64> = self.local.keys().copied().collect();
+        for id in ids {
+            let shared: Vec<u32> = {
+                let l = &self.local[&id];
+                l.idle
+                    .iter()
+                    .copied()
+                    .filter(|&ii| self.instances[ii as usize].as_ref().is_some_and(|i| i.slot.charge == Charge::Shared))
+                    .collect()
+            };
+            for ii in shared {
+                let inst = self.instances[ii as usize].as_mut().unwrap();
+                // Claim the bytes atomically (shards relieve in parallel), then free uncharged.
+                if !self.node.budget.reclaim_over(inst.svc.instance_bytes()) {
+                    return;
+                }
+                inst.slot.charge = Charge::None;
+                let l = self.local.get_mut(&id).unwrap();
+                l.idle.retain(|&x| x != ii);
+                let svc = l.svc.clone();
+                let idle = &svc.st(self.idx).idle;
+                idle.store(idle.load(Relaxed) - 1, Relaxed);
+                bump(&svc.st(self.idx).reclaimed, 1);
+                self.destroy_instance(ii);
             }
         }
     }
@@ -1201,7 +1248,12 @@ impl Shard {
                 }
                 Err(msg) => {
                     svc.release();
-                    self.deliver(reply, CallResult::error(CALL_UNAVAILABLE, msg));
+                    if svc.live.load(Acquire) > 0 {
+                        // No memory for another instance: wait for an existing one (as at `max_instances`).
+                        self.enqueue(svc, Queued { req, reply, deadline, depth });
+                    } else {
+                        self.deliver(reply, CallResult::error(CALL_UNAVAILABLE, msg));
+                    }
                 }
             },
             Err(NoInstance::Retired) => {
@@ -1307,12 +1359,19 @@ impl Shard {
     }
 
     fn new_instance(&mut self, svc: &Arc<ServiceRt>) -> Result<u32, String> {
-        // Atomic reserve-and-allocate against the node memory cap (see `SlotPools::alloc_within`): concurrent shards
-        // cannot both pass the check and overshoot `--mem`.
-        let slot = self
-            .pools
-            .alloc_within(svc.mem_log2(), self.node.cfg.mem_limit)
-            .map_err(|e| format!("cannot allocate instance memory: {e}"))?;
+        // Charge the budget first (atomic across shards): the service's reservation, else the shared pool.
+        let bytes = svc.instance_bytes();
+        let Some(charge) = self.node.budget.charge(&svc.mem_res, bytes) else {
+            return Err(format!("cannot allocate instance memory: node memory budget (--mem) exhausted for `{}`", svc.name()));
+        };
+        let mut slot = match self.pools.alloc(svc.mem_log2()) {
+            Ok(s) => s,
+            Err(e) => {
+                self.node.budget.refund(&svc.mem_res, bytes, charge);
+                return Err(format!("cannot allocate instance memory: {e}"));
+            }
+        };
+        slot.charge = charge;
         let inst = Box::new(Instance { svc: svc.clone(), slot, idle_since: 0 });
         let ii = match self.free_instances.pop() {
             Some(i) => {
@@ -1334,7 +1393,7 @@ impl Shard {
     /// An instance finished a job successfully: serve the queue, go idle, or retire.
     fn instance_done(&mut self, ii: u32) {
         let now = mono_ns();
-        let (svc, fresh_ok) = {
+        let (svc, keep) = {
             let inst = self.instances[ii as usize].as_mut().unwrap();
             // SAFETY: valid while the instance lives: never used after `destroy_instance` below.
             let svc: &ServiceRt = unsafe { &*(&*inst.svc as *const ServiceRt) };
@@ -1346,9 +1405,23 @@ impl Shard {
                     None => false,
                 };
             }
+            // A burst instance moves into a free reservation unit; while over-committed it is destroyed (unless it
+            // is the last instance of a service with queued requests).
+            if ok && inst.slot.charge == Charge::Shared {
+                let budget = &self.node.budget;
+                if budget.promote(&svc.mem_res, svc.instance_bytes()) {
+                    inst.slot.charge = Charge::Reserved;
+                } else if budget.over()
+                    && !(svc.waiting.load(SeqCst) > 0 && svc.live.load(Acquire) <= 1)
+                    && budget.reclaim_over(svc.instance_bytes())
+                {
+                    inst.slot.charge = Charge::None;
+                    ok = false;
+                }
+            }
             (svc, ok)
         };
-        if !fresh_ok {
+        if !keep {
             self.destroy_instance(ii);
             return;
         }
@@ -1378,7 +1451,9 @@ impl Shard {
         self.n_instances -= 1;
         self.me.stats.instances.store(self.n_instances as u64, Relaxed);
         let Instance { svc, slot, .. } = *inst;
+        let charge = slot.charge;
         self.pools.free(slot);
+        self.node.budget.refund(&svc.mem_res, svc.instance_bytes(), charge);
         if release {
             svc.release();
         }
@@ -1526,12 +1601,14 @@ impl Shard {
             let (svc, cand) = {
                 let l = &self.local[&id];
                 // Services placed on other nodes only run here as a fallback: keep no warm instance.
-                let cand: Vec<u32> = l
+                let mut cand: Vec<u32> = l
                     .idle
                     .iter()
                     .copied()
                     .filter(|&ii| now.saturating_sub(self.instances[ii as usize].as_ref().unwrap().idle_since) >= idle_ns)
                     .collect();
+                // Burst instances first: the warm instance kept is the reserved one.
+                cand.sort_by_key(|&ii| self.instances[ii as usize].as_ref().unwrap().slot.charge != Charge::Shared);
                 (l.svc.clone(), cand)
             };
             let keep = if matches!(svc.placement, Placement::Remote { .. }) { 0 } else { keep };
@@ -1551,6 +1628,7 @@ impl Shard {
                 self.local.remove(&id);
             }
         }
+        self.relieve_memory_pressure();
         // Connection timeouts.
         let cfg = &self.node.cfg;
         let head_ns = cfg.header_timeout.as_nanos() as u64;
@@ -1597,7 +1675,7 @@ impl Shard {
 
     fn start_drain(&mut self) {
         self.draining = true;
-        if let Some(l) = self.listener.take() {
+        for l in [self.listener.take(), self.admin_listener.take()].into_iter().flatten() {
             self.epoll.del(l.raw());
         }
         let idle: Vec<u32> = self
@@ -1617,11 +1695,14 @@ impl Shard {
             *c = None;
         }
         self.listener = None;
+        self.admin_listener = None;
         // Instances (fibers blocked mid-job are abandoned: their instances are freed here, their stacks below).
         for i in 0..self.instances.len() {
             if let Some(inst) = self.instances[i].take() {
                 let Instance { svc, slot, .. } = *inst;
+                let charge = slot.charge;
                 self.pools.free(slot);
+                self.node.budget.refund(&svc.mem_res, svc.instance_bytes(), charge);
                 svc.release();
             }
         }
@@ -1637,8 +1718,9 @@ impl Shard {
     // HTTP connections
     // --------------------------------------------------------------------------------------------------------------
 
-    fn accept_all(&mut self) {
-        let Some(l) = self.listener.as_ref().map(|l| l.raw()) else { return };
+    fn accept_all(&mut self, admin: bool) {
+        let listener = if admin { &self.admin_listener } else { &self.listener };
+        let Some(l) = listener.as_ref().map(|l| l.raw()) else { return };
         for _ in 0..256 {
             match sys::accept(l) {
                 Ok(Some(fd)) => {
@@ -1680,6 +1762,7 @@ impl Shard {
                         head_scanned: 0,
                         reserved: 0,
                         wcharged: 0,
+                        admin,
                     });
                     self.open_conns += 1;
                     bump(&self.me.stats.conns_accepted, 1);
@@ -1693,7 +1776,10 @@ impl Shard {
                     // spinning (and logging) on every loop iteration.
                     let now = mono_ns();
                     self.accept_pause.failed(now, &format!("shard {}", self.idx), &e);
-                    self.epoll.del(l);
+                    // Out of descriptors is process-wide: pause both listeners.
+                    for l in [&self.listener, &self.admin_listener].into_iter().flatten() {
+                        self.epoll.del(l.raw());
+                    }
                     bump(&self.me.stats.accept_pauses, 1);
                     break;
                 }
@@ -1844,6 +1930,15 @@ impl Shard {
                     } else {
                         match http::parse_head(&c.rbuf, &lim) {
                             Parse::Complete(h) => {
+                                // Admin access control (admin listener, `/_k10s` targets), before the body is read.
+                                if c.admin || h.target.starts_with("/_k10s") {
+                                    let fd = c.fd.raw();
+                                    if let Some((st, msg)) = crate::admin::gate(&self.node, c.admin, &h, &c.rbuf, || sys::peer_is_loopback(fd)) {
+                                        self.conn_error(idx, st, msg);
+                                        return;
+                                    }
+                                }
+                                let c = self.conns[idx as usize].as_mut().unwrap();
                                 // The body is buffered until the response is produced: reserve it in the node-wide
                                 // budget first (before reading it, before `100 Continue`).
                                 if h.content_length > 0 {

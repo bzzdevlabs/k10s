@@ -8,6 +8,7 @@
 //! --nocapture --test-threads 1`).
 
 mod common;
+mod support;
 
 use k10_node::demo;
 use k10_node::http::{self, Client};
@@ -91,6 +92,7 @@ fn spawn_node(name: &str, data: &Path, join: Option<&str>, o: &Opts) -> NodeProc
         args.extend(["--join".into(), j.to_string()]);
     }
     args.extend(o.extra.iter().cloned());
+    support::with_cluster_key(&mut args);
     let mut child = Command::new(bin).args(&args).stderr(Stdio::piped()).stdout(Stdio::null()).spawn().expect("spawn k10s node");
     let log = Arc::new(Mutex::new(String::new()));
     let (tx, rx) = mpsc::channel();
@@ -401,6 +403,7 @@ fn three_nodes_join_apply_route_and_call() {
     let txt = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success());
     assert!(txt.contains("members: 3 live / 3 known") && txt.contains("applied v1") && txt.contains("(this node)"), "{txt}");
+    assert!(txt.contains("auth: cluster key id "), "{txt}");
     let out = Command::new(env!("CARGO_BIN_EXE_k10s")).args(["status", "--json", "--node", &nodes[0].http]).output().unwrap();
     assert!(String::from_utf8_lossy(&out.stdout).contains("\"cluster\":{"));
     // A stale explicit version is refused; re-applying the same content is a no-op.
@@ -711,6 +714,37 @@ fn fetch_from_any_member_when_the_origin_is_gone() {
     assert!(cluster_part(&nodes[2].status()).contains(&format!("\"origin\":\"{origin_id}\"")));
     assert!(cluster_num(&nodes[2].status(), "blobs_fetched").unwrap() >= 3, "{}", nodes[2].status());
     check_all_services(&nodes, "from-n3", 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Placement charges reservations: 3 nodes × room for 15 instances (`--mem 1MiB`), 45 services of 64 KiB: each node
+/// gets exactly 15 (plain rendezvous hashing would overload some), reserves them, and every service answers.
+#[test]
+fn placement_respects_memory_reservations() {
+    let o = Opts { extra: vec!["--mem".into(), "1MiB".into()], ..Opts::default() };
+    let (dir, nodes) = start_cluster("reserve", 3, &o);
+    write_modules(&dir, 0);
+    let m: String = (0..45).map(|i| format!("service s{i} {{ code = \"echo.k10\" memory = 64KiB }}\n")).collect();
+    apply(&dir, &nodes[1], &m);
+    wait_applied(&nodes, 1, Duration::from_secs(30));
+    let one = 64 * 1024 + 4096;
+    let p = placement(&nodes[0].status());
+    assert_eq!(p.len(), 45);
+    assert!(p.values().all(|ids| ids.len() == 1), "every service placed: {p:?}");
+    for n in &nodes {
+        let s = n.status();
+        assert_eq!(placement(&s), p, "same placement on {}", n.name);
+        let here = p.values().filter(|ids| ids[0] == n.id).count() as i64;
+        assert_eq!(here, 15, "{} hosts {here} services, its budget holds 15", n.name);
+        let mem = &s[s.find("\"memory\":{").unwrap()..];
+        assert_eq!(num_after(mem, "mem_reserved"), Some(here * one), "{}: {mem}", n.name);
+        assert!(num_after(mem, "mem_reserved") <= num_after(mem, "mem_limit"));
+    }
+    let mut c = Client::connect(&nodes[2].http, Duration::from_secs(10)).unwrap();
+    for i in 0..45 {
+        let r = c.request("GET", &format!("/s{i}"), b"").unwrap();
+        assert_eq!((r.status, r.text().as_str()), (200, "hello\n"), "s{i}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

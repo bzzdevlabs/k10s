@@ -16,6 +16,7 @@ Environment: BASE (ports, 19700), K10S, REPS, DUR, PROBE_MS, SUSPICION_MULT, ENG
 """
 import json
 import os
+import secrets
 import shutil
 import statistics
 import subprocess
@@ -38,6 +39,8 @@ GUEST_ID = "00000000000000a1"
 H = [BASE + 1, BASE + 2, BASE + 3]
 G = [BASE + 101, BASE + 102, BASE + 103]
 R = [BASE + 201, BASE + 202, BASE + 203]
+TOKEN = secrets.token_hex(16)  # the guest's admin API token (hosted nodes: loopback, no token)
+KEY = secrets.token_hex(32)  # cluster key
 
 
 def now():
@@ -46,7 +49,8 @@ def now():
 
 def get(port, path, timeout=2.0):
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=timeout) as r:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers={"Authorization": f"Bearer {TOKEN}"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, r.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
@@ -87,7 +91,10 @@ def hosted(name, i, join=None):
     os.makedirs(OUT, exist_ok=True)
     args = [K10S, "node", "--name", name, "--http", f"127.0.0.1:{H[i]}", "--gossip", f"127.0.0.1:{G[i]}", "--rpc",
             f"127.0.0.1:{R[i]}", "--data", f"{OUT}/{name}", "--mem", "64MiB", "--shards", "2", "--probe-ms", PROBE_MS,
-            "--suspicion-mult", SUSP]
+            "--suspicion-mult", SUSP, "--cluster-key-file", f"{OUT}/cluster.key"]
+    if not os.path.exists(f"{OUT}/cluster.key"):
+        with os.fdopen(os.open(f"{OUT}/cluster.key", os.O_WRONLY | os.O_CREAT, 0o600), "w") as f:
+            f.write(KEY + "\n")
     if join:
         args += ["--join", join]
     return subprocess.Popen(args, stderr=open(f"{OUT}/{name}.log", "w"), stdout=subprocess.DEVNULL)
@@ -96,7 +103,7 @@ def hosted(name, i, join=None):
 def guest():
     append = (f"k10.engine={ENGINE} k10.join=127.0.0.1:{G[0]},127.0.0.1:{G[1]} k10.gossip=127.0.0.1:{G[2]} "
               f"k10.rpc=127.0.0.1:{R[2]} k10.http=127.0.0.1:{H[2]} k10.node_id={GUEST_ID} k10.probe_ms={PROBE_MS} "
-              f"k10.suspicion_mult={SUSP} k10.mem=67108864")
+              f"k10.suspicion_mult={SUSP} k10.mem=67108864 k10.cluster_key={KEY} k10.admin_token={TOKEN}")
     cmd = ["qemu-system-x86_64", "-M", "pc", "-enable-kvm", "-cpu", "host", "-m", "128M", "-smp", "1", "-nodefaults",
            "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
            "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{H[2]}-:80,hostfwd=udp:127.0.0.1:{G[2]}-:7946,"

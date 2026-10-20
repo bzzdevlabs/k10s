@@ -93,6 +93,25 @@ pub fn getrandom_u64() -> u64 {
     v
 }
 
+/// Fills `buf` from `getrandom(2)` (keys, nonces): deliberately no fallback.
+pub fn fill_random(buf: &mut [u8]) -> io::Result<()> {
+    let mut done = 0;
+    while done < buf.len() {
+        let rest = &mut buf[done..];
+        // SAFETY: writes at most `rest.len()` bytes into `rest`.
+        let r = unsafe { libc::getrandom(rest.as_mut_ptr() as *mut libc::c_void, rest.len(), 0) };
+        if r < 0 {
+            let e = io::Error::last_os_error();
+            if e.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(e);
+        }
+        done += r as usize;
+    }
+    Ok(())
+}
+
 // ------------------------------------------------------------------------------------------------------------------
 // Memory
 // ------------------------------------------------------------------------------------------------------------------
@@ -476,10 +495,28 @@ pub fn socket_error(fd: RawFd) -> io::Result<()> {
 
 /// The local address a socket is bound to.
 pub fn local_addr(fd: RawFd) -> io::Result<std::net::SocketAddr> {
-    // SAFETY: zeroed sockaddr_storage is valid; getsockname writes at most `len` bytes.
+    sock_name(fd, false)
+}
+
+/// The address of a connected socket's peer.
+pub fn peer_addr(fd: RawFd) -> io::Result<std::net::SocketAddr> {
+    sock_name(fd, true)
+}
+
+/// The connected peer is on a loopback address (IPv4-mapped included).
+pub fn peer_is_loopback(fd: RawFd) -> bool {
+    peer_addr(fd).is_ok_and(|a| match a.ip() {
+        std::net::IpAddr::V4(ip) => ip.is_loopback(),
+        std::net::IpAddr::V6(ip) => ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback()),
+    })
+}
+
+fn sock_name(fd: RawFd, peer: bool) -> io::Result<std::net::SocketAddr> {
+    // SAFETY: zeroed sockaddr_storage is valid; getsockname/getpeername write at most `len` bytes.
     let mut ss: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
     let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-    cvt(unsafe { libc::getsockname(fd, &mut ss as *mut _ as *mut libc::sockaddr, &mut len) })?;
+    let sa = &mut ss as *mut _ as *mut libc::sockaddr;
+    cvt(unsafe { if peer { libc::getpeername(fd, sa, &mut len) } else { libc::getsockname(fd, sa, &mut len) } })?;
     match ss.ss_family as i32 {
         libc::AF_INET => {
             // SAFETY: the kernel filled a sockaddr_in.

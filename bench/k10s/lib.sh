@@ -66,6 +66,8 @@ PY
   fi
 }
 [ -x "$K10S" ] && [ -f "$CACHE/mod/hold.k10" ] || prepare_k10s
+CLUSTER_KEY="$CACHE/cluster.key"                     # cluster key shared by every benchmark node
+[ -f "$CLUSTER_KEY" ] || "$K10S" keygen -o "$CLUSTER_KEY" 2>/dev/null
 
 # start_node <tag> <http_port> [k10s node flags...] -> sets LAST_PID (not via $(...): the node must be a child of this
 # shell). Fresh, empty data dir per start unless KEEP_DATA=1.
@@ -115,7 +117,7 @@ start_cluster() { # start_cluster <tag> [n] [extra flags...]
   local i join=""
   for i in $(seq 0 $(( n - 1 ))); do
     local hp gp rp; hp=$(cluster_port 101 "$i"); gp=$(cluster_port 201 "$i"); rp=$(cluster_port 301 "$i")
-    local args=(--shards "$CLUSTER_SHARDS" --gossip "127.0.0.1:$gp" --rpc "127.0.0.1:$rp" "$@")
+    local args=(--shards "$CLUSTER_SHARDS" --gossip "127.0.0.1:$gp" --rpc "127.0.0.1:$rp" --cluster-key-file "$CLUSTER_KEY" "$@")
     [ -n "$join" ] && args+=(--join "$join")
     start_node "$tag-$i" "$hp" "${args[@]}"; CL_PIDS+=("$LAST_PID")
     CL_HTTP+=("127.0.0.1:$hp"); CL_GOSSIP+=("127.0.0.1:$gp")

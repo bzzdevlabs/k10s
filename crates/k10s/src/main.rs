@@ -5,24 +5,29 @@
 //!             [--snapshots fresh|all] [--idle-timeout SECS] [--idle-spin-us N] [--log-stderr] [--pin]
 //!             [--timer-res-us N] [--jit-indirect jump|lfence|retpoline]
 //!             [--sandbox on|log|off] [--user USER[:GROUP]]
+//!             admin API: [--admin ADDR] [--admin-token-file FILE]
 //!             cluster mode (any of): [--gossip ADDR] [--rpc ADDR] [--join HOST:PORT[,…]] [--advertise HOST]
+//!             cluster auth: --cluster-key-file FILE | --insecure-unauthenticated-cluster; [--gossip-max-skew SECS]
 //!             tuning: [--probe-ms N] [--suspicion-mult N] [--leave-grace-ms N]
-//! k10s apply  FILE.k10s [--node HOST:PORT]
+//! k10s keygen [-o FILE]
+//! k10s apply  FILE.k10s [--node HOST:PORT] [--admin-token-file FILE]
 //! k10s build  FILE.ten [-o FILE.k10]
 //! k10s run    FILE.ten|FILE.k10 [--path /p?q=1] [--method GET|POST|PUT|DELETE] [--body STR|@FILE]
 //!             [--backend jit|interp] [--memory SIZE] [--config STR] [--cpu-ms N]
-//! k10s status [--node HOST:PORT] [--json]
-//! k10s logs   SERVICE [--node HOST:PORT]
+//! k10s status [--node HOST:PORT] [--json] [--admin-token-file FILE]
+//! k10s logs   SERVICE [--node HOST:PORT] [--admin-token-file FILE]
 //! k10s version                       (also `--version`, `-V`)
 //! ```
 //! Argument parsing is hand-written (no dependencies beyond the workspace). The default backend is `K10S_BACKEND`
 //! (`jit` | `interp`) if set, else the JIT.
 
 use k10_mesh::manifest::parse_text;
+use k10_mesh::secure::ClusterKey;
 use k10_mesh::sha256::sha256;
 use k10_mesh::{Bundle, Manifest, ServiceSpec};
 use k10_node::cluster::{ClusterConfig, ClusterSetup};
 use k10_node::http;
+use k10_node::admin::AdminToken;
 use k10_node::sandbox;
 use k10_node::{BackendKind, Node, NodeConfig, SnapshotPolicy};
 use std::io::Write;
@@ -40,10 +45,18 @@ const USAGE: &str = "usage:
               [--jit-indirect jump|lfence|retpoline] (Spectre v2 hardening of JIT code, default jump)
               [--sandbox on|log|off] (process sandbox: Landlock + seccomp, default on or $K10S_SANDBOX)
               [--user USER[:GROUP]] (started as root: run as USER once the listeners are bound)
+              admin API (/_k10s/; health and metrics are always open):
+              [--admin-token-file FILE] (bearer token required; without it only loopback clients may use it)
+              [--admin ADDR] (own listener for the admin API; the ingress then serves only /_k10s/health)
               cluster mode (any of these flags turns it on):
               [--gossip ADDR] (UDP, default 0.0.0.0:7946)  [--rpc ADDR] (TCP, default 0.0.0.0:7947)
               [--join HOST:PORT,...] (gossip addresses of members)  [--advertise HOST] (IP given to peers)
+              --cluster-key-file FILE (required: same key on every node, see keygen)
+                or --insecure-unauthenticated-cluster (no authentication: trusted networks only)
+              [--gossip-max-skew SECS] (clock skew allowed on gossip, 300; 0 = off)
               [--probe-ms N] (gossip probe period, 200)  [--suspicion-mult N] (4)  [--leave-grace-ms N] (1000)
+  k10s keygen [-o FILE]                           (32 random bytes as hex: a cluster key or an admin token;
+                                                   FILE is created with mode 0600, never overwritten)
   k10s apply  FILE.k10s [--node HOST:PORT]        (code = \"x.ten\" sources are compiled, \"x.k10\" sent as is)
   k10s build  FILE.ten [-o FILE.k10]              (compile Ten to TIR)
   k10s run    FILE.ten|FILE.k10 [--path /p?q=1] [--method GET|POST|PUT|DELETE] [--body STR|@FILE]
@@ -52,6 +65,8 @@ const USAGE: &str = "usage:
   k10s status [--node HOST:PORT] [--json]
   k10s logs   SERVICE [--node HOST:PORT]
   k10s version                                    (also --version, -V)
+  apply, status and logs send the admin token from --admin-token-file FILE, else $K10S_ADMIN_TOKEN_FILE, else
+  $K10S_ADMIN_TOKEN.
 
 The default node address is 127.0.0.1:8080. In a cluster, `apply` and HTTP requests work on any node.
 The default backend is $K10S_BACKEND (jit|interp) if set, else jit.";
@@ -77,6 +92,7 @@ fn main() -> ExitCode {
             println!("k10s {VERSION}");
             Ok(())
         }
+        "keygen" => cmd_keygen(rest),
         "help" | "--help" | "-h" => {
             println!("{USAGE}");
             Ok(())
@@ -160,12 +176,54 @@ fn parse_size(s: &str) -> Result<u64, String> {
     n.checked_mul(mul).ok_or_else(|| format!("size `{s}` overflows"))
 }
 
+/// Reads a secret file (trimmed); warns when other users may read it.
+fn read_secret(flag: &str, path: &str) -> Result<String, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = std::fs::metadata(path).map_err(|e| format!("--{flag} {path}: {e}"))?;
+    if meta.permissions().mode() & 0o077 != 0 {
+        eprintln!("k10s: warning: {path} is readable by other users (chmod 600 it)");
+    }
+    let s = std::fs::read_to_string(path).map_err(|e| format!("--{flag} {path}: {e}"))?;
+    let s = s.trim().to_string();
+    if s.is_empty() {
+        return Err(format!("--{flag} {path}: empty"));
+    }
+    Ok(s)
+}
+
+fn cmd_keygen(args: &[String]) -> Result<(), String> {
+    let a = Args::parse(args, &[])?;
+    a.check_known(&["o", "output"])?;
+    if !a.positional.is_empty() {
+        return Err("usage: k10s keygen [-o FILE]".into());
+    }
+    let mut key = [0u8; 32];
+    k10_node::sys::fill_random(&mut key).map_err(|e| format!("getrandom: {e}"))?;
+    let line = format!("{}\n", k10_mesh::sha256::to_hex(&key));
+    match a.get("o").or(a.get("output")) {
+        None => print!("{line}"),
+        Some(f) => {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(f)
+                .map_err(|e| format!("{f}: {e}"))?;
+            file.write_all(line.as_bytes()).map_err(|e| format!("{f}: {e}"))?;
+            eprintln!("k10s: wrote a new key to {f} (mode 0600)");
+        }
+    }
+    Ok(())
+}
+
 fn cmd_node(args: &[String]) -> Result<(), String> {
-    let a = Args::parse(args, &["log-stderr", "pin"])?;
+    let a = Args::parse(args, &["log-stderr", "pin", "insecure-unauthenticated-cluster"])?;
     a.check_known(&[
         "http", "data", "shards", "backend", "name", "mem", "kv-max", "conn-buffer-max", "snapshots", "idle-timeout", "idle-spin-us", "log-stderr",
         "pin", "rpc", "gossip", "join", "advertise", "probe-ms", "suspicion-mult", "leave-grace-ms",
-        "timer-res-us", "jit-indirect", "sandbox", "user",
+        "timer-res-us", "jit-indirect", "admin", "admin-token-file", "cluster-key-file",
+        "insecure-unauthenticated-cluster", "gossip-max-skew", "sandbox", "user",
     ])?;
     // Process sandbox (k10-node/src/sandbox.rs): early() here, Landlock before the first thread, seccomp after start.
     let sandbox_mode = match a.get("sandbox") {
@@ -182,6 +240,12 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
     let mut cfg = NodeConfig::default();
     if let Some(h) = a.get("http") {
         cfg.http = h.parse().map_err(|_| format!("invalid --http address `{h}` (want IP:PORT)"))?;
+    }
+    if let Some(h) = a.get("admin") {
+        cfg.admin_listen = Some(h.parse().map_err(|_| format!("invalid --admin address `{h}` (want IP:PORT)"))?);
+    }
+    if let Some(f) = a.get("admin-token-file") {
+        cfg.admin_token = Some(AdminToken::new(read_secret("admin-token-file", f)?.as_bytes()));
     }
     cfg.data_dir = a.get("data").map(PathBuf::from);
     if let Some(n) = a.get("shards") {
@@ -234,7 +298,10 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
         data_dir: data.clone(),
         write_dirs: std::env::var_os("K10_JIT_DUMP").filter(|d| !d.is_empty()).map(PathBuf::from).into_iter().collect(),
         read_paths: Vec::new(),
-        tcp_bind_ports: [Some(cfg.http.port()), cluster_cfg.as_ref().map(|c| c.rpc_bind.port())].into_iter().flatten().collect(),
+        tcp_bind_ports: [Some(cfg.http.port()), cfg.admin_listen.map(|a| a.port()), cluster_cfg.as_ref().map(|c| c.rpc_bind.port())]
+            .into_iter()
+            .flatten()
+            .collect(),
     };
     let sandbox_setup = sandbox::before_threads(sandbox_mode, user, &policy)?;
     let (node, cluster) = match cluster_cfg {
@@ -249,6 +316,12 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
         }
     };
     eprintln!("{}", sandbox::after_start(sandbox_setup)?);
+    let admin_where = match node.shared().admin_addr.get() {
+        Some(a) => format!("on http://{a}"),
+        None => "on the ingress".into(),
+    };
+    let admin_auth = if node.shared().cfg.admin_token.is_some() { "bearer token required" } else { "loopback clients only" };
+    eprintln!("k10s: admin API {admin_where}: {admin_auth} (health and metrics open)");
     eprintln!(
         "k10s {VERSION}: node `{}` listening on http://{} ({} shards, backend {}, data {})",
         node.shared().cfg.name,
@@ -285,7 +358,7 @@ fn parse_bind(flag: &str, v: &str) -> Result<SocketAddr, String> {
 /// Cluster mode is on when any cluster flag is given.
 fn cluster_config(a: &Args) -> Result<Option<ClusterConfig>, String> {
     if !["gossip", "rpc", "join", "advertise"].iter().any(|f| a.has(f)) {
-        for f in ["probe-ms", "suspicion-mult", "leave-grace-ms"] {
+        for f in ["probe-ms", "suspicion-mult", "leave-grace-ms", "cluster-key-file", "insecure-unauthenticated-cluster", "gossip-max-skew"] {
             if a.has(f) {
                 return Err(format!("--{f} needs cluster mode (--gossip/--rpc/--join/--advertise)"));
             }
@@ -293,6 +366,20 @@ fn cluster_config(a: &Args) -> Result<Option<ClusterConfig>, String> {
         return Ok(None);
     }
     let mut c = ClusterConfig::default();
+    match (a.get("cluster-key-file"), a.has("insecure-unauthenticated-cluster")) {
+        (Some(_), true) => return Err("--cluster-key-file and --insecure-unauthenticated-cluster exclude each other".into()),
+        (Some(f), false) => c.key = Some(ClusterKey::parse_hex(&read_secret("cluster-key-file", f)?).map_err(|e| format!("--cluster-key-file {f}: {e}"))?),
+        (None, true) => c.insecure = true,
+        (None, false) => {
+            return Err("cluster mode needs --cluster-key-file FILE (create it once with `k10s keygen -o FILE` and copy it to \
+                        every node), or --insecure-unauthenticated-cluster where every host that can reach the gossip and rpc \
+                        ports is trusted"
+                .into())
+        }
+    }
+    if let Some(v) = a.get("gossip-max-skew") {
+        c.gossip_max_skew = Duration::from_secs(v.parse().map_err(|_| "invalid --gossip-max-skew (seconds)")?);
+    }
     if let Some(v) = a.get("gossip") {
         c.gossip_bind = parse_bind("gossip", v)?;
     }
@@ -516,9 +603,35 @@ fn node_addr(a: &Args) -> String {
     a.get("node").unwrap_or("127.0.0.1:8080").to_string()
 }
 
+/// The admin token to send: `--admin-token-file`, else `$K10S_ADMIN_TOKEN_FILE`, else `$K10S_ADMIN_TOKEN`.
+fn client_token(a: &Args) -> Result<Option<String>, String> {
+    if let Some(f) = a.get("admin-token-file") {
+        return read_secret("admin-token-file", f).map(Some);
+    }
+    if let Some(f) = std::env::var_os("K10S_ADMIN_TOKEN_FILE").filter(|f| !f.is_empty()) {
+        return read_secret("admin-token-file ($K10S_ADMIN_TOKEN_FILE)", &f.to_string_lossy()).map(Some);
+    }
+    Ok(std::env::var("K10S_ADMIN_TOKEN").ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()))
+}
+
+/// A request to the admin API with the configured token; 401/403 get a hint.
+fn admin_request(a: &Args, method: &str, path: &str, body: &[u8], timeout: Duration) -> Result<http::ClientResponse, String> {
+    let addr = node_addr(a);
+    let token = client_token(a)?;
+    let r = http::request_auth(&addr, method, path, body, timeout, token.as_deref()).map_err(|e| format!("cannot reach node {addr}: {e}"))?;
+    if r.status == 401 || r.status == 403 {
+        return Err(format!(
+            "node {addr} refused: {} (HTTP {}); pass the node's admin token with --admin-token-file FILE or $K10S_ADMIN_TOKEN_FILE",
+            r.text().trim(),
+            r.status
+        ));
+    }
+    Ok(r)
+}
+
 fn cmd_apply(args: &[String]) -> Result<(), String> {
     let a = Args::parse(args, &[])?;
-    a.check_known(&["node"])?;
+    a.check_known(&["node", "admin-token-file"])?;
     let [file] = a.positional.as_slice() else { return Err("usage: k10s apply FILE.k10s [--node HOST:PORT]".into()) };
     let path = Path::new(file);
     let src = std::fs::read_to_string(path).map_err(|e| format!("{file}: {e}"))?;
@@ -539,9 +652,7 @@ fn cmd_apply(args: &[String]) -> Result<(), String> {
     // Version 0: the node assigns current + 1.
     let bundle = Bundle::new(Manifest { version: 0, services }, blobs);
     let bytes = bundle.encode();
-    let addr = node_addr(&a);
-    let r = http::request(&addr, "POST", "/_k10s/apply", &bytes, Duration::from_secs(60))
-        .map_err(|e| format!("cannot reach node {addr}: {e}"))?;
+    let r = admin_request(&a, "POST", "/_k10s/apply", &bytes, Duration::from_secs(60))?;
     println!("{}", r.text());
     if r.status == 200 {
         Ok(())
@@ -552,19 +663,16 @@ fn cmd_apply(args: &[String]) -> Result<(), String> {
 
 fn cmd_status(args: &[String]) -> Result<(), String> {
     let a = Args::parse(args, &["json"])?;
-    a.check_known(&["node", "json"])?;
-    let addr = node_addr(&a);
+    a.check_known(&["node", "json", "admin-token-file"])?;
     if !a.has("json") {
         // Cluster mode: the cluster view (members, desired/applied version, placement, links).
-        let r = http::request(&addr, "GET", "/_k10s/cluster", b"", Duration::from_secs(10))
-            .map_err(|e| format!("cannot reach node {addr}: {e}"))?;
+        let r = admin_request(&a, "GET", "/_k10s/cluster", b"", Duration::from_secs(10))?;
         if r.status == 200 {
             print!("{}", r.text());
             return Ok(());
         }
     }
-    let r = http::request(&addr, "GET", "/_k10s/status", b"", Duration::from_secs(10))
-        .map_err(|e| format!("cannot reach node {addr}: {e}"))?;
+    let r = admin_request(&a, "GET", "/_k10s/status", b"", Duration::from_secs(10))?;
     println!("{}", r.text());
     if r.status == 200 {
         Ok(())
@@ -575,11 +683,9 @@ fn cmd_status(args: &[String]) -> Result<(), String> {
 
 fn cmd_logs(args: &[String]) -> Result<(), String> {
     let a = Args::parse(args, &[])?;
-    a.check_known(&["node"])?;
+    a.check_known(&["node", "admin-token-file"])?;
     let [svc] = a.positional.as_slice() else { return Err("usage: k10s logs SERVICE [--node HOST:PORT]".into()) };
-    let addr = node_addr(&a);
-    let r = http::request(&addr, "GET", &format!("/_k10s/logs/{svc}"), b"", Duration::from_secs(10))
-        .map_err(|e| format!("cannot reach node {addr}: {e}"))?;
+    let r = admin_request(&a, "GET", &format!("/_k10s/logs/{svc}"), b"", Duration::from_secs(10))?;
     print!("{}", r.text());
     if r.status == 200 {
         Ok(())

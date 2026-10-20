@@ -10,3 +10,8 @@ default = ["std"]
 std = []
 
 [dependencies]
+
+[[bench]]
+name = "crypto"
+harness = false
+required-features = ["std"]

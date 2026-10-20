@@ -1,7 +1,8 @@
 //! Admin API under `/_k10s/`: `GET status` (JSON), `GET metrics` (Prometheus text), `GET logs/<svc>`,
 //! `POST apply` (body = encoded `k10_mesh::Bundle`), `GET health`, `GET cluster` (text, cluster mode).
+//! Access control: [`gate`].
 
-use crate::http::Method;
+use crate::http::{Method, RequestHead};
 use crate::node::{short_hash, NodeShared};
 use crate::service::ServiceRt;
 use crate::sys;
@@ -20,9 +21,82 @@ fn respond(status: u16, ctype: &'static str, body: impl Into<Vec<u8>>) -> AdminO
     AdminOut::Respond { status, ctype, body: body.into() }
 }
 
-pub fn handle(node: &Arc<NodeShared>, method: Method, target: &str, body: Vec<u8>) -> AdminOut {
+/// The admin endpoint a target names (`/_k10s/logs/x?q` → `logs/x`), `None` for service traffic.
+pub fn endpoint(target: &str) -> Option<&str> {
     let path = target.split('?').next().unwrap_or("");
-    let path = path.strip_prefix("/_k10s").unwrap_or(path).trim_start_matches('/');
+    let rest = path.strip_prefix("/_k10s")?;
+    (rest.is_empty() || rest.starts_with('/')).then(|| rest.trim_start_matches('/'))
+}
+
+/// Open endpoints: liveness and read-only counters (scrapers should not need a token that can deploy code).
+fn is_public(endpoint: &str) -> bool {
+    matches!(endpoint, "health" | "metrics")
+}
+
+/// Admin bearer token; only its SHA-256 is kept, compared in constant time.
+#[derive(Clone)]
+pub struct AdminToken([u8; 32]);
+
+impl AdminToken {
+    pub fn new(secret: &[u8]) -> AdminToken {
+        AdminToken(k10_mesh::sha256::sha256(secret))
+    }
+
+    pub fn matches(&self, presented: &[u8]) -> bool {
+        k10_mesh::crypto::ct_eq(&k10_mesh::sha256::sha256(presented), &self.0)
+    }
+}
+
+impl std::fmt::Debug for AdminToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AdminToken(..)")
+    }
+}
+
+/// Access check on a request head (body not read yet): `None` = proceed, else the status and message to close with.
+pub fn gate(
+    node: &NodeShared,
+    admin_listener: bool,
+    h: &RequestHead,
+    head: &[u8],
+    peer_is_loopback: impl FnOnce() -> bool,
+) -> Option<(u16, &'static str)> {
+    let ep = match (endpoint(&h.target), admin_listener) {
+        (None, false) => return None,
+        (None, true) => return Some((404, "this listener serves the admin API (/_k10s/) only")),
+        (Some(ep), false) if node.admin_addr.get().is_some() => {
+            return (ep != "health").then_some((404, "the admin API is served on the admin listener (--admin)"));
+        }
+        (Some(ep), _) => ep,
+    };
+    if is_public(ep) {
+        return None;
+    }
+    match &node.cfg.admin_token {
+        Some(t) => {
+            let presented = h.auth.and_then(|(a, b)| bearer(&head[a..b]));
+            match presented {
+                Some(tok) if t.matches(tok) => None,
+                _ => Some((401, "admin API: missing or invalid bearer token")),
+            }
+        }
+        None if !h.forwarded && peer_is_loopback() => None,
+        None => Some((403, "admin API: without --admin-token-file only loopback clients may use it")),
+    }
+}
+
+/// The token of an `Authorization: Bearer <token>` value.
+fn bearer(v: &[u8]) -> Option<&[u8]> {
+    let (scheme, rest) = (v.get(..6)?, &v[6..]);
+    if !scheme.eq_ignore_ascii_case(b"bearer") || !rest.first().is_some_and(|c| *c == b' ' || *c == b'\t') {
+        return None;
+    }
+    let t = rest.trim_ascii();
+    (!t.is_empty()).then_some(t)
+}
+
+pub fn handle(node: &Arc<NodeShared>, method: Method, target: &str, body: Vec<u8>) -> AdminOut {
+    let path = endpoint(target).unwrap_or("");
     match (method, path) {
         (Method::Get | Method::Head, "status") => respond(200, "application/json", status_json(node)),
         (Method::Get | Method::Head, "metrics") => respond(200, "text/plain; version=0.0.4", metrics(node)),
@@ -88,6 +162,7 @@ pub fn json_str(s: &str) -> String {
 }
 
 fn svc_json(s: &ServiceRt, now: u64) -> String {
+    let live = s.live.load(Relaxed);
     let snap = match s.snapshot.get() {
         Some(sn) => format!("{{\"extent\":{},\"pages\":{}}}", sn.extent(), sn.pages()),
         None => "null".into(),
@@ -95,6 +170,7 @@ fn svc_json(s: &ServiceRt, now: u64) -> String {
     format!(
         concat!(
             "{{\"name\":{},\"rt\":{},\"placement\":{},\"code\":\"{}\",\"memory\":{},\"max_instances\":{},\"cpu_ms\":{},\"fresh\":{},",
+            "\"mem_reserved\":{},\"mem_used\":{},\"mem_shared\":{},",
             "\"instances\":{{\"live\":{},\"idle\":{},\"peak\":{}}},\"queue\":{},\"snapshot\":{},",
             "\"requests\":{},\"ok\":{},\"errors\":{},\"traps\":{},\"interrupted\":{},\"created\":{},\"destroyed\":{},",
             "\"reclaimed\":{},\"queued\":{},\"cpu_ms_total\":{:.3},\"init_ms_total\":{:.3},\"backoff_ms\":{},",
@@ -114,7 +190,10 @@ fn svc_json(s: &ServiceRt, now: u64) -> String {
         s.spec.max_instances,
         s.spec.cpu_ms,
         s.spec.fresh,
-        s.live.load(Relaxed),
+        s.mem_res.bytes(),
+        live as u64 * s.instance_bytes(),
+        live.saturating_sub(s.mem_res.in_use()) as u64 * s.instance_bytes(),
+        live,
         s.idle_total(),
         s.peak.load(Relaxed),
         s.waiting.load(Relaxed),
@@ -180,7 +259,8 @@ pub fn status_json(node: &NodeShared) -> String {
             "\"manifest\":{{\"version\":{},\"hash\":\"{}\"}},",
             "\"services\":[{}],",
             "\"memory\":{{\"rss_bytes\":{},\"slots_used\":{},\"slot_bytes\":{},\"reserved_bytes\":{},",
-            "\"snapshot_mapped\":{},\"mem_limit\":{}}},",
+            "\"snapshot_mapped\":{},\"mem_limit\":{},\"mem_reserved\":{},\"mem_shared_used\":{},\"mem_shared_limit\":{},",
+            "\"mem_committed\":{},\"mem_refused\":{}}},",
             "\"http_stats\":{{\"requests\":{},\"2xx\":{},\"4xx\":{},\"5xx\":{},\"admin\":{},\"connections_open\":{},",
             "\"accepted\":{},\"rejected\":{},\"conn_timeouts\":{},\"accept_pauses\":{},\"buffered_bytes\":{},",
             "\"buffer_max\":{},\"buffer_refused\":{}}},",
@@ -211,6 +291,11 @@ pub fn status_json(node: &NodeShared) -> String {
         m.reserved_bytes.load(Relaxed),
         m.snapshot_mapped.load(Relaxed),
         node.cfg.mem_limit,
+        node.budget.reserved(),
+        node.budget.shared_used(),
+        node.budget.limit().saturating_sub(node.budget.reserved()),
+        node.budget.committed(),
+        node.budget.refused(),
         shard_sum(node, |s| &s.http_requests),
         shard_sum(node, |s| &s.http_2xx),
         shard_sum(node, |s| &s.http_4xx),
@@ -273,6 +358,12 @@ pub fn metrics(node: &NodeShared) -> String {
         ("k10s_service_instances", "gauge", "Live instances", |s| s.live.load(Relaxed) as u64),
         ("k10s_service_instances_idle", "gauge", "Idle instances", |s| s.idle_total() as u64),
         ("k10s_service_queue", "gauge", "Requests waiting for an instance", |s| s.waiting.load(Relaxed) as u64),
+        ("k10s_service_memory_reserved_bytes", "gauge", "Node memory reserved for the service (one instance when placed here)", |s| {
+            s.mem_res.bytes()
+        }),
+        ("k10s_service_memory_bytes", "gauge", "Memory of the service's live instances (slots)", |s| {
+            s.live.load(Relaxed) as u64 * s.instance_bytes()
+        }),
     ];
     for (name, ty, help, get) in per_svc {
         let _ = writeln!(o, "# HELP {name} {help}\n# TYPE {name} {ty}");
@@ -306,6 +397,12 @@ pub fn metrics(node: &NodeShared) -> String {
     gauge(&mut o, "k10s_fibers", "gauge", "Coroutines (pooled)", shard_sum(node, |s| &s.fibers));
     gauge(&mut o, "k10s_slots_used", "gauge", "Instance memory slots in use", node.mem.slots_used.load(Relaxed));
     gauge(&mut o, "k10s_slot_bytes", "gauge", "Address space of slots in use", node.mem.slot_bytes_used.load(Relaxed));
+    let b = &node.budget;
+    gauge(&mut o, "k10s_memory_limit_bytes", "gauge", "Instance memory budget (--mem)", b.limit());
+    gauge(&mut o, "k10s_memory_reserved_bytes", "gauge", "Instance memory reserved for the services placed here", b.reserved());
+    gauge(&mut o, "k10s_memory_shared_used_bytes", "gauge", "Instance memory used beyond the reservations (burst instances)", b.shared_used());
+    gauge(&mut o, "k10s_memory_committed_bytes", "gauge", "Reservations plus burst instances", b.committed());
+    gauge(&mut o, "k10s_memory_refused_total", "counter", "Instance creations refused for lack of memory", b.refused());
     gauge(&mut o, "k10s_rss_bytes", "gauge", "Resident set size of the node process", sys::rss_bytes());
     gauge(&mut o, "k10s_manifest_version", "gauge", "Applied manifest version", table.version);
     let code = node.backend.stats();
@@ -319,7 +416,24 @@ pub fn metrics(node: &NodeShared) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::json_str;
+    use super::{bearer, endpoint, json_str, AdminToken};
+
+    #[test]
+    fn endpoints_and_bearer() {
+        assert_eq!(endpoint("/_k10s/status?x=1"), Some("status"));
+        assert_eq!(endpoint("/_k10s//health"), Some("health"));
+        assert_eq!(endpoint("/_k10s"), Some(""));
+        assert_eq!(endpoint("/_k10sx/status"), None);
+        assert_eq!(endpoint("/echo"), None);
+        assert_eq!(bearer(b"Bearer abc"), Some(&b"abc"[..]));
+        assert_eq!(bearer(b"bearer  abc "), Some(&b"abc"[..]));
+        assert_eq!(bearer(b"Basic abc"), None);
+        assert_eq!(bearer(b"Bearerabc"), None);
+        assert_eq!(bearer(b"Bearer "), None);
+        let t = AdminToken::new(b"s3cret");
+        assert!(t.matches(b"s3cret") && !t.matches(b"s3cre") && !t.matches(b""));
+        assert_eq!(format!("{t:?}"), "AdminToken(..)");
+    }
 
     #[test]
     fn json_escape() {

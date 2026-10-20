@@ -61,6 +61,10 @@ pub struct RequestHead {
     pub expect_continue: bool,
     /// Bytes of the head including the final empty line.
     pub head_len: usize,
+    /// Admin targets (`/_k10s…`) only: byte range of the `Authorization` value in the parsed buffer.
+    pub auth: Option<(usize, usize)>,
+    /// Admin targets only: a `Forwarded` / `X-Forwarded-For` header is present (a proxy relays the client).
+    pub forwarded: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -181,6 +185,10 @@ pub fn parse_head(buf: &[u8], lim: &Limits) -> Parse {
     let mut te = false;
     let mut te_chunked = false;
     let mut n_headers = 0;
+    // Credentials only matter for the admin API (no extra work on service traffic).
+    let admin = target.starts_with("/_k10s");
+    let mut auth = None;
+    let mut forwarded = false;
     for line in lines {
         if line.is_empty() {
             break;
@@ -225,6 +233,11 @@ pub fn parse_head(buf: &[u8], lim: &Limits) -> Parse {
                     keep_alive = true;
                 }
             }
+        } else if admin && name.eq_ignore_ascii_case(b"authorization") {
+            let at = value.as_ptr() as usize - buf.as_ptr() as usize;
+            auth = Some((at, at + value.len()));
+        } else if admin && (name.eq_ignore_ascii_case(b"forwarded") || name.eq_ignore_ascii_case(b"x-forwarded-for")) {
+            forwarded = true;
         } else if name.eq_ignore_ascii_case(b"expect") {
             if value.eq_ignore_ascii_case(b"100-continue") {
                 expect_continue = minor == 1;
@@ -248,7 +261,7 @@ pub fn parse_head(buf: &[u8], lim: &Limits) -> Parse {
     if content_length > limit {
         return Parse::Error(413, "request body too large");
     }
-    Parse::Complete(RequestHead { method, target, minor, content_length, keep_alive, expect_continue, head_len: end })
+    Parse::Complete(RequestHead { method, target, minor, content_length, keep_alive, expect_continue, head_len: end, auth, forwarded })
 }
 
 pub fn reason(status: u16) -> &'static str {
@@ -299,6 +312,9 @@ pub fn write_head(out: &mut Vec<u8>, status: u16, body_len: usize, keep_alive: b
     }
     if !keep_alive {
         out.extend_from_slice(b"\r\nconnection: close");
+    }
+    if status == 401 {
+        out.extend_from_slice(b"\r\nwww-authenticate: Bearer realm=\"k10s\"");
     }
     out.extend_from_slice(b"\r\n\r\n");
 }
@@ -366,8 +382,17 @@ impl Client {
 
     /// Sends one request and reads its response.
     pub fn request(&mut self, method: &str, path: &str, body: &[u8]) -> io::Result<ClientResponse> {
+        self.request_with(method, path, body, None)
+    }
+
+    /// [`Client::request`] with an optional admin bearer token.
+    pub fn request_with(&mut self, method: &str, path: &str, body: &[u8], token: Option<&str>) -> io::Result<ClientResponse> {
         let mut req = Vec::with_capacity(128 + body.len());
-        write!(req, "{method} {path} HTTP/1.1\r\nhost: {}\r\ncontent-length: {}\r\n\r\n", self.host, body.len())?;
+        write!(req, "{method} {path} HTTP/1.1\r\nhost: {}\r\ncontent-length: {}\r\n", self.host, body.len())?;
+        if let Some(t) = token {
+            write!(req, "authorization: Bearer {t}\r\n")?;
+        }
+        req.extend_from_slice(b"\r\n");
         req.extend_from_slice(body);
         self.stream.write_all(&req)?;
         self.read_response()
@@ -425,6 +450,11 @@ impl Client {
 /// One-shot request on a new connection.
 pub fn request(addr: &str, method: &str, path: &str, body: &[u8], timeout: Duration) -> io::Result<ClientResponse> {
     Client::connect(addr, timeout)?.request(method, path, body)
+}
+
+/// One-shot request with an optional admin bearer token.
+pub fn request_auth(addr: &str, method: &str, path: &str, body: &[u8], timeout: Duration, token: Option<&str>) -> io::Result<ClientResponse> {
+    Client::connect(addr, timeout)?.request_with(method, path, body, token)
 }
 
 #[cfg(test)]
@@ -528,6 +558,17 @@ mod tests {
         assert_eq!(ok(b"POST / HTTP/1.1\r\nContent-Length: 3, 3\r\n\r\n").content_length, 3);
         // admin apply gets a larger limit
         assert_eq!(ok(b"POST /_k10s/apply HTTP/1.1\r\nContent-Length: 33554432\r\n\r\n").content_length, 32 << 20);
+    }
+
+    #[test]
+    fn admin_credentials_are_captured_for_admin_targets_only() {
+        let req = b"GET /_k10s/status HTTP/1.1\r\nAuthorization:  Bearer abc \r\nX-Forwarded-For: 1.2.3.4\r\n\r\n";
+        let h = ok(req);
+        let (a, b) = h.auth.unwrap();
+        assert_eq!(&req[a..b], b"Bearer abc");
+        assert!(h.forwarded);
+        let h = ok(b"GET /echo HTTP/1.1\r\nAuthorization: Bearer abc\r\nForwarded: for=x\r\n\r\n");
+        assert_eq!((h.auth, h.forwarded), (None, false));
     }
 
     #[test]

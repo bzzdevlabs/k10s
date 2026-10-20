@@ -39,6 +39,8 @@ pub struct Head {
     pub expect_continue: bool,
     /// Bytes of the head including the final CRLFCRLF.
     pub len: usize,
+    /// Admin targets (`/_k10s…`) only: byte range of the `Authorization` value in the parsed buffer.
+    pub auth: Option<(usize, usize)>,
 }
 
 pub enum Parse {
@@ -90,7 +92,9 @@ pub fn parse_head(buf: &[u8]) -> Parse {
         keep_alive: http11,
         expect_continue: false,
         len,
+        auth: None,
     };
+    let admin = h.target.starts_with(b"/_k10s");
     for l in lines {
         let Some(colon) = l.iter().position(|&c| c == b':') else { continue };
         let name = trim(&l[..colon]);
@@ -109,6 +113,9 @@ pub fn parse_head(buf: &[u8]) -> Parse {
                     h.keep_alive = true;
                 }
             }
+        } else if admin && name.eq_ignore_ascii_case(b"authorization") {
+            let at = value.as_ptr() as usize - buf.as_ptr() as usize;
+            h.auth = Some((at, at + value.len()));
         } else if name.eq_ignore_ascii_case(b"transfer-encoding") {
             return Parse::Error(411);
         } else if name.eq_ignore_ascii_case(b"expect") && value.eq_ignore_ascii_case(b"100-continue") {
@@ -125,6 +132,8 @@ pub fn reason(status: u16) -> &'static str {
         201 => "Created",
         204 => "No Content",
         400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         408 => "Request Timeout",
@@ -158,6 +167,9 @@ pub fn write_head(out: &mut Vec<u8>, status: u16, content_type: Option<&str>, bo
     }
     if !keep_alive {
         let _ = w.write_str("Connection: close\r\n");
+    }
+    if status == 401 {
+        let _ = w.write_str("WWW-Authenticate: Bearer realm=\"k10s\"\r\n");
     }
     let _ = w.write_str("Server: k10-metal\r\n\r\n");
 }
