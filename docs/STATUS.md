@@ -19,10 +19,9 @@ reworks were started by agents and stopped mid-way (token budget). Each lives on
 where needed as English one-liners, no perf regression (A/B with `bench/k10s/ab.py` vs 08f2921), no pushes/tags until
 step 8, never experiment with namespaces/privileges on this machine.
 
-1. **Calls allowlist** — `worktree-agent-a83b919d56b747b59` (84426fb, committed; verify). Nothing is released: the
-   index-based `calls` encoding is format 2 (no format 3, no old-format-2 decoder), canonical by construction; per-entry
-   decode checks + cap ∝ service count; warn at apply/reload when a module imports `call` with empty `calls`; null
-   `Fiber::caller` in `finish`. Run all suites + metal tests, merge.
+1. DONE (merged 93ada5f) — **Calls allowlist**: index-based `calls` format 2, canonical `Calls`, strict decode bounded
+   by service count, warnings at apply/reload, `Fiber::caller` nulled in `finish`; status shows per-service grants as
+   `may_call` (`calls` stays the call counter). All suites both backends, metal test (294) and cluster-test (114) green.
 2. **Reservations / rejoin** — `worktree-agent-ab0b13f5d4325918b` (3f742c3, committed; final verification pending). Review
    items: reload never comes up empty (H1); cluster mode installs all reservations (M2); bounded `--mem` overshoot with a
    "retiring" counter, no queued-waiters exception (M3); stranded waiters fail fast (M4); no 250 ms relief polling;
