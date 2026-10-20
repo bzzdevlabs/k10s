@@ -312,9 +312,7 @@ fn host_module() -> (Module, u32, u32) {
     (mb.build(), with, without)
 }
 
-/// `br_table` dispatch loop: `iters` iterations, each selecting one of `n` cases (`n` a power of two, every case a
-/// distinct target) by `i & (n-1)` (cyclic: predictable for small `n`) or by an LCG (random), and folding a
-/// case-specific constant into an accumulator.
+/// `br_table` dispatch loop over `n` distinct cases (power of two), index `i & (n-1)` (cyclic) or an LCG (random).
 fn brtable_module(n: usize, random: bool) -> (Module, u32) {
     let mut mb = ModuleBuilder::new();
     let mut f = FuncBuilder::new(1, 1);
@@ -353,7 +351,7 @@ fn brtable_ns(m: &Module, f: u32, iters: i64, opts: &CompileOptions) -> f64 {
 
 fn brtable_bench() {
     use k10_jit::IndirectBranch::*;
-    let iters = 20_000_000i64;
+    let iters = 10_000_000i64;
     let d = CompileOptions::default();
     let modes = [
         ("default", d),
@@ -378,7 +376,7 @@ fn brtable_bench() {
             println!();
         }
     }
-    // Hardened modes also route host calls through `lfence` / the retpoline thunk.
+    // Hardened modes also apply to host calls.
     let (m, with, without) = host_module();
     let n = 20_000_000i64;
     print!("host-call overhead, ns/call:");

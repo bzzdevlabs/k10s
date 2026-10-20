@@ -5,14 +5,13 @@
 //! * [`validate`](mod@validate) — [`validate()`] → [`ModuleInfo`] (frame sizes, control structure).
 //! * [`interp`] — the reference interpreter [`Interp`], plus [`init_memory`].
 //! * [`sem`] — per-instruction reference semantics shared by every back end.
-//! * [`nospec`] — branch-free clamps for host code indexing with guest values (Spectre v1); [`clock`] — the
-//!   coarse, jittered clock guests see. Shared by the hosted node and the bare-metal kernel.
+//! * [`nospec`] — branch-free clamps for host code (Spectre v1); [`clock`] — the coarse guest clock.
 //! * [`builder`] — [`ModuleBuilder`] / [`FuncBuilder`] for constructing modules in code and tests.
 //! * `gen` (feature `gen`) — random valid, terminating program generator for differential testing.
 //!
 //! Builds as `no_std + alloc` with `--no-default-features`.
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
-// `nospec` is the only module with `unsafe` (register-only inline assembly); everything else stays safe.
+// Only `nospec` uses `unsafe` (register-only inline asm).
 #![deny(unsafe_code)]
 extern crate alloc;
 

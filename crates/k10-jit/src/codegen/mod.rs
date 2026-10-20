@@ -19,16 +19,14 @@ pub struct CompileOptions {
     pub features: CpuFeatures,
     /// Maximum number of locals kept in registers per function, `0..=6` (default 6).
     pub max_pinned: u8,
-    /// How generated code performs indirect branches (Spectre v2 hardening; default [`IndirectBranch::Jump`]).
+    /// Indirect-branch form (Spectre v2 hardening; default [`IndirectBranch::Jump`]).
     pub indirect: IndirectBranch,
-    /// A `br_table` whose targets form at most this many runs (maximal ranges of consecutive indices with the same
-    /// target, the default range included) is lowered to a binary tree of compares — no indirect jump at all;
-    /// larger ones use a jump table (default [`DEFAULT_BR_TREE_MAX`]; 0 or 1: always a jump table, unless every
-    /// index has the same target).
+    /// `br_table`s with at most this many target runs (ranges of indices sharing a target, default included) become
+    /// compare trees, larger ones jump tables (default [`DEFAULT_BR_TREE_MAX`]; 0: tables unless a single target).
     pub br_tree_max: u16,
 }
 
-/// Default [`CompileOptions::br_tree_max`]: a tree of at most 3 levels of compares.
+/// Default [`CompileOptions::br_tree_max`] (at most 3 compare levels).
 pub const DEFAULT_BR_TREE_MAX: u16 = 8;
 
 impl Default for CompileOptions {
@@ -42,25 +40,17 @@ impl Default for CompileOptions {
     }
 }
 
-/// How generated code performs its indirect branches: the `br_table` jump-table dispatch, host-function and helper
-/// calls, the interrupt hook call and the entry trampoline's call. Only the branch *prediction* differs; every
-/// mode computes the same target, and `br_table` indices are always clamped branch-free first (Spectre v1).
-///
-/// An indirect branch is predicted from the branch target buffer, which any code on the same core — another
-/// workload included — can train: the CPU may then speculatively run an attacker-chosen target (Spectre v2,
-/// branch target injection) with the victim's registers. docs/JIT-ABI.md lists the exact sequences.
+/// Form of every indirect branch the JIT emits (jump tables, host/helper calls, interrupt hook, entry trampoline).
+/// Only prediction differs: plain branches use the branch target buffer, which other workloads on the core can
+/// train (Spectre v2). Sequences in docs/JIT-ABI.md.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum IndirectBranch {
-    /// Plain `jmp reg` / `call [mem]` (default; no overhead).
+    /// Plain `jmp reg` / `call [mem]` (default, no overhead).
     #[default]
     Jump,
-    /// The target is loaded into `r11` and an `lfence` precedes `jmp/call r11`: the predicted target cannot run
-    /// before the real one is known, which shrinks the window to the branch's own resolution (AMD's former
-    /// recommendation; cheaper than a retpoline, but not a complete fix).
+    /// Target in `r11`, then `lfence; jmp/call r11`: narrows the speculation window, does not close it.
     Lfence,
-    /// Retpoline: the branch goes through a shared thunk that turns it into a `ret` whose prediction (the return
-    /// stack, pointing at a `pause; lfence` loop) never uses the branch target buffer. Costs a return
-    /// misprediction (~20–30 cycles) per indirect branch.
+    /// Through a retpoline thunk: a `ret` predicted from the return stack (a `pause; lfence` trap), never the BTB.
     Retpoline,
 }
 
@@ -132,12 +122,11 @@ pub(crate) struct Shared {
     /// `(params, results)` of each import.
     pub imports: Vec<(u8, u8)>,
     pub indirect: IndirectBranch,
-    /// The retpoline thunk (target in `r11`; reached by `call` or `jmp`). Bound only in retpoline mode.
+    /// Retpoline thunk (target in `r11`, entered by `call` or `jmp`); bound in retpoline mode only.
     pub retpoline: Label,
 }
 
-/// Indirect `call` to the address in `target` with the configured [`IndirectBranch`] mode. Clobbers `r11` except
-/// in `Jump` mode (the call then reads `target` directly).
+/// Indirect `call target` in the configured [`IndirectBranch`] form (clobbers `r11` except in `Jump` mode).
 pub(crate) fn indirect_call(a: &mut Asm, sh: &Shared, target: RM) {
     match sh.indirect {
         IndirectBranch::Jump => a.call_rm(target),
@@ -299,7 +288,7 @@ fn emit_prelude(a: &mut Asm, sh: &Shared) -> u32 {
     }
     a.alu_ri(Alu::Sub, Rsp.into(), 8); // 9 pushes + 8 = 80 bytes: aligned
     a.mov_rr(Rdi, R14);
-    indirect_call(a, sh, Mem::b(R14, OFF_INTERRUPT).into()); // r11 was saved above
+    indirect_call(a, sh, Mem::b(R14, OFF_INTERRUPT).into()); // r11 saved above
     a.test32(Rax, Rax); // u32 result: only eax is defined
     a.jcc(Cond::Ne, sh.trap_common);
     a.alu_ri(Alu::Add, Rsp.into(), 8);
@@ -310,9 +299,7 @@ fn emit_prelude(a: &mut Asm, sh: &Shared) -> u32 {
     a.pop(Rbp);
     a.ret();
 
-    // ---- retpoline thunk: jumps to r11 (`call thunk` = `call r11`, `jmp thunk` = `jmp r11`) without consulting
-    // the branch target buffer: the inner `call` pushes the address of a speculation trap (a `pause; lfence`
-    // loop), which the return stack predicts for the `ret`; the `ret` really goes to r11 once the store executed.
+    // ---- retpoline thunk: `call/jmp thunk` = `call/jmp r11`; the `ret` is predicted to the pause/lfence trap.
     if sh.indirect == IndirectBranch::Retpoline {
         a.align(16, 0xCC);
         a.bind(sh.retpoline);

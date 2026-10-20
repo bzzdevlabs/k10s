@@ -1,23 +1,13 @@
-//! The clock guests see (`now_ns`, `time_ms`, docs/HOSTAPI.md): coarsened and jittered so that it cannot time a
-//! single cache hit or miss (the measuring half of a Spectre-style or cache side-channel attack).
+//! Guest clock (`now_ns`, `time_ms`): too coarse to time one cache hit or miss (side-channel measurement).
 //!
-//! **Coarsening with fuzzy edges** (the scheme browsers use for `performance.now()`): time is cut into intervals of
-//! `res` ns; within interval `k` the reported value is `k·res` before a secret threshold `θ_k ∈ [0, res)` and
-//! `(k+1)·res` from it on, where `θ_k` is a keyed hash of `k`. So
-//! * values are multiples of `res`, at most `res` ahead of and never behind the real time;
-//! * the clock stays **monotonic**: in interval `k` it reports `k·res` then `(k+1)·res`, in interval `k+1` it
-//!   reports `(k+1)·res` then `(k+2)·res`;
-//! * a guest cannot recover resolution by spinning until the value changes and counting loop iterations to the
-//!   next change ("clock-edge" amplification), because the edges fall at unpredictable points of each interval.
-//!
-//! `res ≤ 1` is the identity (full resolution, for trusted single-tenant nodes).
+//! Fuzzy edges, as browsers do: in interval `k` of `res` ns the value is `k·res` before a keyed-random threshold and
+//! `(k+1)·res` after it, so it is monotonic, at most `res` ahead, and spinning to an edge (clock-edge amplification)
+//! gains nothing. `res <= 1` = full resolution.
 
-/// Default resolution of the guest clock: 100 µs (Chrome's `performance.now()` resolution for pages that are not
-/// cross-origin isolated; see SECURITY.md for the rationale).
+/// Default resolution: 100 µs (Chrome's `performance.now()` without cross-origin isolation; see SECURITY.md).
 pub const DEFAULT_RES_NS: u64 = 100_000;
 
-/// SplitMix64 finalizer: a fast 64-bit mixer (bijective, good avalanche). Not a cryptographic PRF; it only has to
-/// make thresholds unpredictable without the key.
+/// SplitMix64 finalizer (not a PRF; only makes thresholds unpredictable without the key).
 #[inline]
 fn mix(mut z: u64) -> u64 {
     z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -26,7 +16,7 @@ fn mix(mut z: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// What the guest sees for the raw reading `t` (ns) at resolution `res` (ns) with the node's secret `key`.
+/// Guest view of the raw reading `t` (ns) at resolution `res` (ns) with the node's secret `key`.
 #[inline]
 pub fn coarsen(t: u64, res: u64, key: u64) -> u64 {
     if res <= 1 {
@@ -42,9 +32,7 @@ pub fn coarsen(t: u64, res: u64, key: u64) -> u64 {
     }
 }
 
-/// Wall-clock Unix milliseconds for guests from the raw wall clock `unix_ns`: exact (truncated) at full
-/// resolution, else coarsened like [`coarsen`] at `max(res, 1 ms)` so that its millisecond edges are fuzzy too
-/// (an exact millisecond edge would be as good as a fine clock for edge amplification).
+/// Guest Unix ms from the raw `unix_ns`: exact at full resolution, else [`coarsen`] at `max(res, 1 ms)` (fuzzy ms edges).
 #[inline]
 pub fn coarsen_ms(unix_ns: u64, res: u64, key: u64) -> u64 {
     if res <= 1 {
@@ -80,12 +68,12 @@ mod tests {
                 assert!(v >= prev, "monotonic: {v} after {prev} at t={t}");
                 assert!(v + res > t && v <= t + res, "within one resolution step: t={t} v={v}");
                 if v > prev && prev != 0 {
-                    thresholds.insert(t % res / 1000); // where (in µs) the edge fell inside its interval
+                    thresholds.insert(t % res / 1000); // edge position in µs
                 }
                 prev = v;
-                t += 997; // not a divisor of res: edges are found to ~1 µs
+                t += 997; // not a divisor of res
             }
-            // 300 edges over 100 one-µs buckets: a fixed edge (plain rounding) would hit one bucket.
+            // 300 edges over 100 buckets; plain rounding would hit one.
             assert!(thresholds.len() > 50, "edges must fall at varied points of each interval: {}", thresholds.len());
         }
         // Different keys give different edges.

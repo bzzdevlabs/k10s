@@ -6,8 +6,7 @@ use k10_ir::gen::{gen_args, gen_module, DiffHost, GenConfig, GenImport, Rng};
 use k10_ir::{new_memory, Interp, Module};
 use k10_jit::{compile_with, CompileOptions, CpuFeatures, IndirectBranch};
 
-/// Compiler options rotated over seeds: detected/baseline CPU features × pinned-register budgets × indirect-branch
-/// modes × `br_table` lowering (generated tables are small: `br_tree_max: 0` forces jump tables).
+/// Options rotated over seeds: CPU features × pinned registers × indirect-branch mode × `br_table` lowering.
 pub fn opts_for(seed: u64) -> CompileOptions {
     let det = CpuFeatures::detect();
     let (features, max_pinned) = match seed % 5 {

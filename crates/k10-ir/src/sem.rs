@@ -373,22 +373,19 @@ pub fn store(mem: &mut [u8], e: usize, width: usize, v: i64) {
 /// Range check shared by `mem.copy`, `mem.fill` and host-call buffers: returns the masked start `a & (S-1)` if
 /// `n ≤ S` and `(a & (S-1)) + n ≤ S` (as u64), else `MemOutOfBounds`. `size = S`.
 ///
-/// Not speculation-safe on its own: code that then indexes with `n` must use [`check_span`] instead.
+/// Not speculation-safe for `n`: code indexing with `n` must use [`check_span`].
 #[inline(always)]
 pub fn check_range(a: i64, n: i64, size: u64) -> Result<usize, Trap> {
     check_span(a, n, size).map(|(d, _)| d)
 }
 
-/// [`check_range`] that also returns the length, **speculation-safe** (Spectre v1): `Ok((start, len))` with
-/// `start = a & (S-1)` and `len = n`, where `len` is additionally masked by a branch-free comparison
-/// ([`crate::nospec::mask_le`]) so that code running behind a mispredicted check sees `len = 0` (and an in-slot
-/// `start`), never the guest's out-of-range length. Every host access to instance memory at a guest-chosen
-/// `(ptr, len)` goes through this. `size = S` (a power of two).
+/// [`check_range`] returning `(start, len)`, speculation-safe: `len` is masked branch-free, so it is 0 behind a
+/// mispredicted check (Spectre v1). Use it for every host access at a guest `(ptr, len)`. `size = S`.
 #[inline(always)]
 pub fn check_span(a: i64, n: i64, size: u64) -> Result<(usize, usize), Trap> {
     let d = (a as u64) & (size - 1);
     let n = n as u64;
-    // d < S, so `S - d` does not wrap, and `n ≤ S - d` ⇔ (`n ≤ S` and `d + n ≤ S`).
+    // d < S: `n ≤ S - d` ⇔ `n ≤ S && d + n ≤ S`.
     let m = crate::nospec::mask_le(n, size - d);
     if m == 0 {
         return Err(Trap::MemOutOfBounds);

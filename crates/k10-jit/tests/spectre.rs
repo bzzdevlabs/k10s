@@ -1,7 +1,5 @@
-//! Speculation hardening (docs/JIT-ABI.md, "Speculation hardening"): the exact `br_table` sequences (branch-free
-//! index clamp, compare trees, the three indirect-branch modes), the retpoline thunk and host-call sequences, and
-//! every [`IndirectBranch`] mode running `br_table`s, host calls, bulk-memory helpers and interrupts exactly like
-//! the interpreter.
+//! Speculation hardening (docs/JIT-ABI.md): exact `br_table`, thunk and host-call sequences per [`IndirectBranch`]
+//! mode, and every mode running like the interpreter.
 
 mod common;
 use common::*;
@@ -12,9 +10,9 @@ use Op::*;
 use Reg::*;
 
 const MODES: [IndirectBranch; 3] = [IndirectBranch::Jump, IndirectBranch::Lfence, IndirectBranch::Retpoline];
-/// Registers the code generator may allocate (never r11, rsp, r13-r15).
+/// Allocatable registers (never r11, rsp, r13-r15).
 const ALLOCATABLE: [Reg; 11] = [Rsi, Rdi, R8, R9, R10, Rbx, Rbp, R12, Rax, Rcx, Rdx];
-/// The retpoline thunk: `call 1f; 2: pause; lfence; jmp 2b; 1: mov [rsp], r11; ret`.
+/// `call 1f; 2: pause; lfence; jmp 2b; 1: mov [rsp], r11; ret`.
 const THUNK: [u8; 17] = [0xE8, 7, 0, 0, 0, 0xF3, 0x90, 0x0F, 0xAE, 0xE8, 0xEB, 0xF9, 0x4C, 0x89, 0x1C, 0x24, 0xC3];
 
 fn opts(indirect: IndirectBranch, br_tree_max: u16) -> CompileOptions {
@@ -35,7 +33,7 @@ fn count(hay: &[u8], needle: &[u8]) -> usize {
     hay.windows(needle.len()).filter(|w| *w == needle).count()
 }
 
-/// Adds `sw(i)`: a `br_table` over `n` cases, case `k` returns `7k + 1`, the default returns -5.
+/// Adds `sw(i)`: `br_table` over `n` cases returning `7k + 1`, default -5.
 fn add_switch(mb: &mut ModuleBuilder, n: usize) -> u32 {
     let mut f = FuncBuilder::new(1, 1);
     f.op(Block);
@@ -59,8 +57,7 @@ fn switch_module(n: usize) -> (Module, u32) {
     (mb.build(), f)
 }
 
-/// The jump-table sequence of docs/JIT-ABI.md, for every mode: `mov r11d, n; cmp r, r11; cmovae r, r11;
-/// lea r11, [rip + table]; movsxd r, [r11 + 4r]`, then the mode's jump, then `n + 1` table entries.
+/// Jump-table sequence of docs/JIT-ABI.md in every mode: clamp, table load, the mode's jump, `n + 1` entries.
 #[test]
 fn jump_table_sequence() {
     for n in [5usize, 16, 300] {
@@ -78,7 +75,7 @@ fn jump_table_sequence() {
                     });
                     find(code, &clamp).map(|p| (r, p + clamp.len()))
                 })
-                .unwrap_or_else(|| panic!("n={n} {mode:?}: no branch-free clamp in the code"));
+                .unwrap_or_else(|| panic!("n={n} {mode:?}: no branch-free clamp"));
             assert_eq!(&code[at..at + 3], &[0x4C, 0x8D, 0x1D], "lea r11, [rip + table]");
             let table = (at + 7) as i64 + i32::from_le_bytes(code[at + 3..at + 7].try_into().unwrap()) as i64;
             let load = asm(|a| a.movsxd(r, RM::M(Mem::bi(R11, r, 2, 0))));
@@ -109,7 +106,7 @@ fn jump_table_sequence() {
                 assert_eq!(target, thunk, "br_table jumps through the retpoline thunk");
                 end += if code[end] == 0xEB { 2 } else { 5 };
             }
-            // The table follows (4-byte aligned): n + 1 entries, each a target inside this function's code.
+            // Then the 4-aligned table: n + 1 entries, all targets in this function.
             assert_eq!(table as usize, end.next_multiple_of(4));
             for k in 0..=n {
                 let e = table as usize + 4 * k;
@@ -120,8 +117,7 @@ fn jump_table_sequence() {
     }
 }
 
-/// The retpoline thunk is emitted exactly once, and only in retpoline mode; small tables become compare trees
-/// (no `lea r11, [rip + …]` table load at all).
+/// One thunk in retpoline mode only; small tables become compare trees (no table `lea`).
 #[test]
 fn thunk_and_trees() {
     let (m, _) = switch_module(16);
@@ -138,8 +134,7 @@ fn thunk_and_trees() {
     }
 }
 
-/// Host calls: `mov rax, [r14 + 32]`, then `call [rax + 8i]` / `mov r11, [rax + 8i]; lfence; call r11` /
-/// `mov r11, [rax + 8i]; call thunk`.
+/// Host-call sequence per mode (docs/JIT-ABI.md).
 #[test]
 fn host_call_sequences() {
     let mut mb = ModuleBuilder::new();
@@ -191,9 +186,7 @@ impl Host for H {
     }
 }
 
-/// `main(x)`: 40 rounds of `acc += h(big(x + i)) + small(x ^ i)` (a 41-run jump table and a 4-run tree), then
-/// `mem.fill` / `mem.copy` and a load — host calls, helpers, both `br_table` lowerings and (with
-/// `preempt_on_call`) the interrupt hook, in every mode, against the interpreter.
+/// Host calls, helpers, both `br_table` lowerings and interrupts in every mode, against the interpreter.
 #[test]
 fn all_modes_run_like_the_interpreter() {
     let mut mb = ModuleBuilder::new();

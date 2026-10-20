@@ -2,8 +2,7 @@
 //!
 //! They receive the memory base and mask from `r15`/`r13` (not from `VmCtx`) so that they operate on exactly the
 //! memory the generated code uses. They perform the TIR range checks themselves (docs/TIR.md §2) and return 0 or
-//! a trap code; they never panic. The checks are speculation-safe (`k10_ir::sem::check_span`): behind a
-//! mispredicted check the length is 0, so no byte outside the slot is read or written even speculatively.
+//! a trap code; they never panic. Checks are speculation-safe (`check_span`: length 0 behind a misprediction).
 
 use k10_ir::sem::check_span;
 use k10_ir::Trap;
@@ -32,7 +31,7 @@ pub unsafe extern "C" fn mem_copy(base: *mut u8, mask: u64, dst: i64, src: i64, 
     let size = mask.wrapping_add(1);
     match (check_span(dst, n, size), check_span(src, n, size)) {
         (Ok((d, nd)), Ok((s, ns))) => {
-            // `nd & ns` = n, or 0 behind a mispredicted check (Spectre v1: see `check_span`).
+            // `nd & ns`: n, or 0 behind a mispredicted check.
             // SAFETY: check_span guarantees d + n <= S and s + n <= S, and the caller guarantees that `base`
             // is valid for S bytes; `copy` has memmove semantics.
             unsafe { core::ptr::copy(base.add(s), base.add(d), nd & ns) };

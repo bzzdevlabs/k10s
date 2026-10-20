@@ -527,9 +527,7 @@ fn jumps_and_labels() {
     assert_eq!(out[1], 0);
 }
 
-/// Speculation-hardening forms (docs/JIT-ABI.md): `lfence` / `pause` bytes, the `br_table` index clamp
-/// `mov r11d, n; cmp r, r11; cmovae r, r11` (= unsigned `min(r, n)`) for every register and edge values, and a
-/// retpoline thunk used both as `call` and as `jmp`.
+/// `lfence`/`pause` bytes, the `br_table` clamp (= unsigned `min(r, n)`) on every register, a retpoline thunk.
 #[test]
 fn speculation_hardening_forms() {
     let bytes = |f: &dyn Fn(&mut Asm)| {
@@ -565,7 +563,7 @@ fn speculation_hardening_forms() {
             }
         }
     }
-    // Retpoline thunk: `call thunk` with r11 = target returns from the target; `jmp thunk` lands on the target.
+    // Retpoline thunk entered by `call` (returns here) and by `jmp`.
     let regs = init(7);
     let out = ex.run(regs, |x| {
         let (thunk, set, spin, target, after, done) =

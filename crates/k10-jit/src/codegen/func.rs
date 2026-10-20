@@ -26,8 +26,7 @@
 //!   a constant `c = addr + off < min(2^min_mem_log2, 2^31)` (`invoke` rejects masks below `2^min_mem_log2 - 1`).
 //!   Widths are ≤ 8, so accesses stay in `[base, base + S + 7]`.
 //! * Bulk operations call helpers that do the TIR range checks (speculation-safe). `br_table` is a compare tree or a
-//!   jump table whose index is clamped with `cmp` + `cmovae` (data flow, not a branch) before the table load, so not
-//!   even a mispredicted path reads past the table (Spectre v1).
+//!   jump table whose index is clamped by `cmovae`, not a branch (Spectre v1).
 //! * Frame accesses use compile-time offsets inside the frame checked by the entry safepoint.
 //! * Exits are host calls (through `ctx.host_fns`), the interrupt hook, helpers, returns and the trap path.
 
@@ -1001,7 +1000,7 @@ impl<'a> Fc<'a> {
         let r = self.take_reg(ii, 1, RegSet::EMPTY);
         self.drop_n(1); // `r` stays valid: nothing is allocated below
         assert!(n < i32::MAX as usize);
-        // Runs: maximal ranges of consecutive indices with the same target; the last one (default) is [k, 2^64).
+        // Runs: maximal index ranges sharing a target; the last (default) is [k, 2^64).
         let mut runs = core::mem::take(&mut self.s.runs);
         runs.clear();
         for (k, &d) in tab.iter().enumerate() {
@@ -1017,8 +1016,7 @@ impl<'a> Fc<'a> {
         self.s.runs = runs;
     }
 
-    /// Binary search over the runs (`(first index, depth)`, sorted, the first starting at 0, the last extending to
-    /// `2^64`): unsigned compares against run boundaries and direct jumps only — no indirect branch, no table load.
+    /// Binary search over `runs` (`(first index, depth)`, sorted): unsigned compares and direct jumps only.
     fn br_tree(&mut self, r: Reg, runs: &[(u32, u32)]) {
         if runs.len() == 1 {
             let l = self.target(runs[0].1);
@@ -1039,14 +1037,12 @@ impl<'a> Fc<'a> {
         self.br_tree(r, &runs[mid..]);
     }
 
-    /// Jump table with `n + 1` entries (entry `n` = the default). The index is clamped to `n` with `cmp` + `cmovae`
-    /// — data flow, not a branch — so a misprediction cannot load past the table (Spectre v1); the jump itself
-    /// follows [`crate::IndirectBranch`]. Sequence in docs/JIT-ABI.md.
+    /// Jump table of `n + 1` entries (last = default), index clamped by `cmovae`, not a branch (Spectre v1).
     fn br_jump_table(&mut self, r: Reg, tab: &[u32]) {
         let n = tab.len() - 1;
         self.a.mov_ri(TMP, n as i64);
         self.a.alu(Alu::Cmp, r, RM::R(TMP));
-        self.a.cmov(Cond::Ae, r, RM::R(TMP)); // unsigned: index >= n (including "negative") → slot n
+        self.a.cmov(Cond::Ae, r, RM::R(TMP)); // unsigned index >= n (incl. negative) → default slot n
         let table = self.a.new_label();
         self.a.lea(TMP, Mem::rip(table));
         self.a.movsxd(r, RM::M(Mem::bi(TMP, r, 2, 0)));
@@ -1183,7 +1179,7 @@ impl<'a> Fc<'a> {
         debug_assert!(self.in_use == RegSet::EMPTY);
         match target {
             ExtTarget::Host(imp) => {
-                // `imp` is a compile-time constant (validated import index): no guest-controlled table index.
+                // `imp` is a validated compile-time constant: no guest-indexed table.
                 self.a.load(Size::S64, Rax, Mem::b(R14, OFF_HOST_FNS));
                 let disp = 8 * imp as i64;
                 if fits_i32(disp) {
