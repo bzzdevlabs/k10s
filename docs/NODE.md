@@ -90,8 +90,9 @@ placement and peer links on top of it.
   ≤ 10 ms latency while 3 infinite loops shared the same single shard).
 - **Actor rule**: an instance is either in its shard's idle list or owned by exactly one job.
 - **Dispatch** of a request for service S on shard X: take an idle instance of S on X (LIFO) → else create one if S's
-  node-wide `live < max_instances`, no crash backoff and the node memory cap (`--mem`) allows → else push the request
-  on S's node-wide wait queue and poke a shard that has an idle instance of S. Whichever shard frees an instance of
+  node-wide `live < max_instances`, no crash backoff and the memory budget allows (S's reservation, else the shared
+  pool; with no memory and no live instance of S: 503) → else push the request on S's node-wide wait queue and poke
+  a shard that has an idle instance of S. Whichever shard frees an instance of
   S first serves the queue (FIFO; expired entries are dropped) and sends the result to the origin shard's inbox.
   This is also how cross-shard calls happen: calls run on the caller's shard unless the callee is at capacity.
 - **Instance creation** runs inside the job's fiber (data segments or snapshot, then `init()` with the host API and
@@ -319,8 +320,9 @@ changes. Code: `cluster/mod.rs` (config, applier, operator apply, status), `clus
   them at start besides `--join`: a restarted node rejoins its cluster even when its seeds are down or moved, or when
   it was started without `--join` (the bootstrap node; before this, such a node restarted on another address formed
   a one-node cluster of its own, forever). Once it has joined, its seed list goes back to `--join` alone, so stale
-  remembered addresses are not retried. Nodes also re-contact members they declared dead now and then (at their
-  old address), which heals partitions and finds a node restarted on its old address.
+  remembered addresses are not retried. Nodes also re-contact dead members now and then at their old address (also
+  those that died before they joined or restarted, learned from syncs), which heals partitions and finds a node
+  restarted on its old address.
 
 **Desired state.** `POST /_k10s/apply` (`k10s apply`) works on any node: decode, version = highest known + 1 (stored,
 applied or announced by gossip) when the bundle says 0 (an explicit version must be higher; the same version and
@@ -437,7 +439,9 @@ Reproduce: `cargo test --release -p k10s --test cluster -- --ignored --nocapture
 - Cluster: no authentication or encryption on gossip (UDP) or peer links (TCP): run on a trusted network. KV is
   node-local (replicas of a service, and a service that moves, see different data). No consensus: two concurrent
   applies resolve by `(version, hash)`, the loser's change is dropped silently; an operator apply on a node that has
-  not yet learned the cluster's latest version can likewise lose. A service unplaced for lack of memory, or whose
+  not yet learned the cluster's latest version can likewise lose. An apply whose node dies before any peer fetched
+  it stays pending (peers retry every second) until that node restarts with its data, or a newer apply supersedes
+  it (chaos-tested: kill right after apply, then restart). A service unplaced for lack of memory, or whose
   hosts are all down, is run by the next node of its ranking (or this node) from that node's shared pool (no
   reservation: it may get 503 when the pool is full).
   Forwarding costs six thread hand-offs (see measurements). Non-UTF-8 call paths are converted lossily on the wire.
