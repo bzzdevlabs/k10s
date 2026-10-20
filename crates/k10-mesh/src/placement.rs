@@ -2,7 +2,10 @@
 //!
 //! Algorithm (capacity-aware weighted rendezvous hashing):
 //! * candidates = Alive/Suspect members, deduplicated by id, sorted by id (input order never matters);
-//! * each node has a memory budget `capacity.mem_bytes`; one replica consumes `2^mem_log2` (one warm instance);
+//! * each node has a memory budget `capacity.mem_bytes`; one replica consumes [`instance_bytes`] = `2^mem_log2` +
+//!   4 KiB (one instance: its slot and tail page). This is exactly the memory a node *reserves* for every service
+//!   placed on it (`docs/NODE.md`, "Memory reservations"), so a placement never puts more reservations on a node
+//!   than its budget holds;
 //! * replicas are assigned in rounds — replica 0 of every service (by name), then replica 1, … — so first replicas
 //!   win over extra replicas when memory is short;
 //! * every node gets the weighted HRW score `w / −ln(u)` for the service, `u = hash(service, node)` uniform in
@@ -23,6 +26,15 @@ use crate::member::{Member, NodeId};
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
+
+/// Bytes of node memory one instance occupies beyond its `2^mem_log2` slot (the runtime's tail page).
+pub const INSTANCE_OVERHEAD: u64 = 4096;
+
+/// Node memory one instance of `s` occupies: its slot plus [`INSTANCE_OVERHEAD`]. Placement charges this per replica
+/// and a node reserves it for every service placed on it, so both sides of the accounting use one definition.
+pub fn instance_bytes(s: &ServiceSpec) -> u64 {
+    s.mem_bytes().saturating_add(INSTANCE_OVERHEAD)
+}
 
 /// Service name → nodes, where index r is the node running replica r (in the service's preference order).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -128,7 +140,7 @@ pub fn place(manifest: &Manifest, members: &[Member]) -> Placement {
                 unplaced += 1;
                 continue;
             }
-            let demand = s.mem_bytes();
+            let demand = instance_bytes(s);
             let skey = keys[si];
             let rkey = mix64(skey ^ (r as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15));
             for &n in &assigned[si] {
@@ -256,14 +268,22 @@ mod tests {
 
     #[test]
     fn capacity_respected() {
-        // 4 nodes × 1 MiB, services of 256 KiB: 16 slots total
-        let ms: Vec<Member> = (1..=4).map(|i| member(i, 1 << 20)).collect();
+        // 4 nodes with room for exactly 4 instances of 256 KiB (+ tail page) each: 16 slots total
+        let cap = 4 * (instance_bytes(&svc("x", 1, 18)));
+        let ms: Vec<Member> = (1..=4).map(|i| member(i, cap)).collect();
         let m = Manifest { version: 1, services: (0..6).map(|i| svc(&format!("s{i}"), 3, 18)).collect() };
         let p = place(&m, &ms);
         assert_eq!(p.placed(), 16);
         assert_eq!(p.unplaced, 2);
         for i in 1..=4 {
             assert!(p.count_on(NodeId(i)) <= 4);
+        }
+        // One byte less per node: only 3 instances fit (the tail page is part of an instance's footprint).
+        let ms: Vec<Member> = (1..=4).map(|i| member(i, cap - 1)).collect();
+        let p = place(&m, &ms);
+        assert_eq!(p.placed(), 12);
+        for i in 1..=4 {
+            assert!(p.count_on(NodeId(i)) as u64 * instance_bytes(&svc("x", 1, 18)) < cap);
         }
         // replica 0 of every service placed before any replica 2
         for i in 0..6 {

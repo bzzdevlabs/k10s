@@ -695,3 +695,137 @@ fn apply_cluster_orders_by_version_and_hash_and_updates_placement_only() {
     assert_eq!(get(&node, "/b").text(), hi_cfg);
     node.shutdown();
 }
+
+// ------------------------------------------------------------------------------------------------------------------
+// Memory reservations (`slot::MemBudget`)
+// ------------------------------------------------------------------------------------------------------------------
+
+/// A field of the node-wide `"memory"` object of a status document.
+fn mem_stat(s: &str, key: &str) -> i64 {
+    stat_from(&s[s.find("\"memory\":{").expect("memory section")..], key)
+}
+
+/// Memory of one instance of a `2^log2` service: the slot and its tail page.
+fn inst_bytes(log2: u8) -> u64 {
+    (1u64 << log2) + 4096
+}
+
+/// `n` concurrent GETs of `path` over HTTP; returns the responses' (status, body).
+fn concurrent_gets(node: &k10_node::Node, path: &str, n: usize) -> Vec<(u16, String)> {
+    let addr = node.http_addr().to_string();
+    std::thread::scope(|s| {
+        let hs: Vec<_> = (0..n)
+            .map(|_| {
+                let (addr, path) = (addr.clone(), path.to_string());
+                s.spawn(move || {
+                    let r = Client::connect(&addr, Duration::from_secs(10)).unwrap().request("GET", &path, b"").unwrap();
+                    (r.status, r.text())
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    })
+}
+
+/// A hog with many concurrent requests cannot take the memory another service needs to serve: every service placed
+/// on the node keeps one instance's worth of `--mem` that burst instances never touch. (Before reservations, the hog
+/// filled the node's budget with burst instances and `echo` could not even create its first instance: 503.)
+#[test]
+fn memory_reservations_keep_services_serving_while_a_hog_bursts() {
+    let hog = inst_bytes(20);
+    let limit = 12 * hog; // exactly 12 hog instances
+    let node = start(k10_node::NodeConfig { mem_limit: limit, idle_timeout: Duration::from_secs(3600), ..config(2) });
+    node.apply(bundle(vec![svc("hog", &demo::burn()).config("100").mem(20).max(64), svc("echo", &demo::echo())])).unwrap();
+    let s = status(&node);
+    assert_eq!(mem_stat(&s, "mem_reserved") as u64, hog + inst_bytes(16), "{s}");
+    assert_eq!(mem_stat(&s, "mem_shared_limit") as u64, limit - hog - inst_bytes(16));
+    assert_eq!(svc_stat(&s, "echo", "mem_reserved") as u64, inst_bytes(16));
+    let echo_during_burst = std::thread::scope(|sc| {
+        let burst = sc.spawn(|| concurrent_gets(&node, "/hog", 40));
+        // Wait until the hog holds every byte it may: its reservation and the whole shared pool.
+        let t = Instant::now();
+        while svc_stat(&status(&node), "hog", "live") < 11 {
+            assert!(t.elapsed() < Duration::from_secs(10), "hog did not burst: {}", status(&node));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let r = get(&node, "/echo");
+        let all = burst.join().unwrap();
+        // Requests beyond the hog's memory wait for one of its instances instead of failing.
+        assert!(all.iter().all(|(st, b)| *st == 200 && b == "done"), "{all:?}");
+        (r.status, r.text())
+    });
+    assert_eq!(echo_during_burst, (200, "hello\n".to_string()));
+    let s = status(&node);
+    assert_eq!(svc_stat(&s, "hog", "created"), 11, "1 reserved + 10 from the shared pool: {s}");
+    assert!(mem_stat(&s, "mem_refused") > 0);
+    assert!(mem_stat(&s, "mem_committed") as u64 <= limit);
+    assert_eq!(svc_stat(&s, "hog", "mem_shared") as u64, 10 * hog);
+    let metrics = k10_node::admin::metrics(node.shared());
+    assert!(metrics.contains(&format!("k10s_memory_reserved_bytes {}", hog + inst_bytes(16))), "{metrics}");
+    assert!(metrics.contains(&format!("k10s_service_memory_reserved_bytes{{service=\"echo\"}} {}", inst_bytes(16))));
+    node.shutdown();
+}
+
+/// An apply whose reservations exceed `--mem` is rejected with a clear error (422 over HTTP); the node keeps serving
+/// what it had.
+#[test]
+fn over_committed_apply_is_rejected() {
+    let node = start(k10_node::NodeConfig { mem_limit: 1 << 20, ..config(1) });
+    let many = |n: usize| bundle((0..n).map(|i| svc(&format!("s{i}"), &demo::echo())).collect());
+    // 15 × (64 KiB + 4 KiB) = 1020 KiB fit in 1 MiB; 16 do not.
+    node.apply(many(15)).unwrap();
+    let err = node.apply(many(16)).unwrap_err();
+    assert!(err.contains("memory reservations do not fit") && err.contains("--mem"), "{err}");
+    let r = client(&node).request("POST", "/_k10s/apply", &many(16).encode()).unwrap();
+    assert_eq!(r.status, 422, "{}", r.text());
+    assert!(r.text().contains("16 service(s)"), "{}", r.text());
+    let s = status(&node);
+    assert_eq!(stat_from(&s[s.find("\"manifest\":{").unwrap()..], "version"), 1, "{s}");
+    assert_eq!(mem_stat(&s, "mem_reserved") as u64, 15 * inst_bytes(16));
+    assert_eq!(get(&node, "/s14").text(), "hello\n");
+    assert_eq!(get(&node, "/s15").status, 404);
+    // Cluster mode never refuses the cluster's desired state (placement keeps reservations within each node's
+    // capacity, so this only happens if inputs disagree): what does not fit is installed without a reservation and
+    // competes for the shared pool (here: none left).
+    let mut b = many(16);
+    b.manifest.version = 7;
+    node.shared().apply_cluster(b, &|_| k10_node::service::Placement::Local).unwrap();
+    let s = status(&node);
+    assert_eq!(mem_stat(&s, "mem_reserved") as u64, 15 * inst_bytes(16));
+    assert_eq!(svc_stat(&s, "s15", "mem_reserved"), 0);
+    assert_eq!(get(&node, "/s14").text(), "hello\n");
+    assert_eq!(get(&node, "/s15").status, 503);
+    node.shutdown();
+}
+
+/// Reservations added while burst instances hold the whole budget are honoured at once (the new service serves),
+/// and the node gives burst instances back until it is within `--mem` again.
+#[test]
+fn reservations_added_while_the_pool_is_full_take_effect_at_once() {
+    let hog = inst_bytes(20);
+    let limit = 12 * hog;
+    let node = start(k10_node::NodeConfig { mem_limit: limit, idle_timeout: Duration::from_secs(3600), ..config(2) });
+    let hog_svc = || svc("hog", &demo::burn()).config("50").mem(20).max(64);
+    node.apply(bundle(vec![hog_svc()])).unwrap();
+    let all = concurrent_gets(&node, "/hog", 24);
+    assert!(all.iter().all(|(st, _)| *st == 200), "{all:?}");
+    let s = status(&node);
+    assert_eq!(svc_stat(&s, "hog", "live"), 12, "{s}");
+    assert_eq!(mem_stat(&s, "mem_committed") as u64, limit);
+    // Now add `echo`: its reservation does not fit next to 12 idle hog instances. It serves anyway…
+    node.apply(bundle(vec![hog_svc(), svc("echo", &demo::echo())])).unwrap();
+    assert_eq!(get(&node, "/echo").text(), "hello\n");
+    // …and the idle burst instances are given back until the node is within its budget.
+    let t = Instant::now();
+    loop {
+        let s = status(&node);
+        if mem_stat(&s, "mem_committed") as u64 <= limit {
+            assert_eq!(svc_stat(&s, "hog", "live"), 11, "{s}");
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(5), "still over-committed: {s}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(get(&node, "/hog").text(), "done");
+    node.shutdown();
+}

@@ -40,7 +40,7 @@ use crate::http::{self, Method, Parse, RequestHead};
 use crate::node::NodeShared;
 use crate::router::Completion;
 use crate::service::{bump, NoInstance, Placement, Queued, ServiceRt, ServiceTable};
-use crate::slot::{Slot, SlotPools};
+use crate::slot::{Charge, Slot, SlotPools};
 use crate::snapshot::Snapshot;
 use crate::sys::{self, mono_ns, EventFd, Epoll, Fd};
 use k10_ir::Trap;
@@ -821,6 +821,38 @@ impl Shard {
                     self.local.remove(&id);
                 }
             }
+            self.relieve_memory_pressure();
+        }
+    }
+
+    /// While the node is over-committed (an apply added reservations while burst instances held the shared pool),
+    /// destroys this shard's idle burst instances until it is not.
+    fn relieve_memory_pressure(&mut self) {
+        if !self.node.budget.over() {
+            return;
+        }
+        let ids: Vec<u64> = self.local.keys().copied().collect();
+        for id in ids {
+            let shared: Vec<u32> = {
+                let l = &self.local[&id];
+                l.idle
+                    .iter()
+                    .copied()
+                    .filter(|&ii| self.instances[ii as usize].as_ref().is_some_and(|i| i.slot.charge == Charge::Shared))
+                    .collect()
+            };
+            for ii in shared {
+                if !self.node.budget.over() {
+                    return;
+                }
+                let l = self.local.get_mut(&id).unwrap();
+                l.idle.retain(|&x| x != ii);
+                let svc = l.svc.clone();
+                let idle = &svc.st(self.idx).idle;
+                idle.store(idle.load(Relaxed) - 1, Relaxed);
+                bump(&svc.st(self.idx).reclaimed, 1);
+                self.destroy_instance(ii);
+            }
         }
     }
 
@@ -1185,7 +1217,13 @@ impl Shard {
                 }
                 Err(msg) => {
                     svc.release();
-                    self.deliver(reply, CallResult::error(CALL_UNAVAILABLE, msg));
+                    if svc.live.load(Acquire) > 0 {
+                        // Out of memory for another instance, but the service has some: wait for one (like at
+                        // `max_instances`) rather than fail.
+                        self.enqueue(svc, Queued { req, reply, deadline, depth });
+                    } else {
+                        self.deliver(reply, CallResult::error(CALL_UNAVAILABLE, msg));
+                    }
                 }
             },
             Err(NoInstance::Retired) => {
@@ -1291,12 +1329,20 @@ impl Shard {
     }
 
     fn new_instance(&mut self, svc: &Arc<ServiceRt>) -> Result<u32, String> {
-        // Atomic reserve-and-allocate against the node memory cap (see `SlotPools::alloc_within`): concurrent shards
-        // cannot both pass the check and overshoot `--mem`.
-        let slot = self
-            .pools
-            .alloc_within(svc.mem_log2(), self.node.cfg.mem_limit)
-            .map_err(|e| format!("cannot allocate instance memory: {e}"))?;
+        // Charge the node's memory budget first (atomic: concurrent shards cannot both pass and overshoot `--mem`):
+        // the service's own reservation if it has a free unit, else the shared pool.
+        let bytes = svc.instance_bytes();
+        let Some(charge) = self.node.budget.charge(&svc.mem_res, bytes) else {
+            return Err(format!("cannot allocate instance memory: node memory budget (--mem) exhausted for `{}`", svc.name()));
+        };
+        let mut slot = match self.pools.alloc(svc.mem_log2()) {
+            Ok(s) => s,
+            Err(e) => {
+                self.node.budget.refund(&svc.mem_res, bytes, charge);
+                return Err(format!("cannot allocate instance memory: {e}"));
+            }
+        };
+        slot.charge = charge;
         let inst = Box::new(Instance { svc: svc.clone(), slot, idle_since: 0 });
         let ii = match self.free_instances.pop() {
             Some(i) => {
@@ -1318,7 +1364,7 @@ impl Shard {
     /// An instance finished a job successfully: serve the queue, go idle, or retire.
     fn instance_done(&mut self, ii: u32) {
         let now = mono_ns();
-        let (svc, fresh_ok) = {
+        let (svc, keep) = {
             let inst = self.instances[ii as usize].as_mut().unwrap();
             // SAFETY: valid while the instance lives: never used after `destroy_instance` below.
             let svc: &ServiceRt = unsafe { &*(&*inst.svc as *const ServiceRt) };
@@ -1330,9 +1376,20 @@ impl Shard {
                     None => false,
                 };
             }
+            // A burst instance (shared pool) moves into its service's reservation when a unit is free. While the node
+            // is over-committed (reservations added while burst instances held the pool) it is given back at once,
+            // unless it is the last instance of a service that has queued requests.
+            if ok && inst.slot.charge == Charge::Shared {
+                let budget = &self.node.budget;
+                if budget.promote(&svc.mem_res, svc.instance_bytes()) {
+                    inst.slot.charge = Charge::Reserved;
+                } else if budget.over() && !(svc.waiting.load(SeqCst) > 0 && svc.live.load(Acquire) <= 1) {
+                    ok = false;
+                }
+            }
             (svc, ok)
         };
-        if !fresh_ok {
+        if !keep {
             self.destroy_instance(ii);
             return;
         }
@@ -1362,7 +1419,9 @@ impl Shard {
         self.n_instances -= 1;
         self.me.stats.instances.store(self.n_instances as u64, Relaxed);
         let Instance { svc, slot, .. } = *inst;
+        let charge = slot.charge;
         self.pools.free(slot);
+        self.node.budget.refund(&svc.mem_res, svc.instance_bytes(), charge);
         if release {
             svc.release();
         }
@@ -1510,12 +1569,14 @@ impl Shard {
             let (svc, cand) = {
                 let l = &self.local[&id];
                 // Services placed on other nodes only run here as a fallback: keep no warm instance.
-                let cand: Vec<u32> = l
+                let mut cand: Vec<u32> = l
                     .idle
                     .iter()
                     .copied()
                     .filter(|&ii| now.saturating_sub(self.instances[ii as usize].as_ref().unwrap().idle_since) >= idle_ns)
                     .collect();
+                // Burst instances (shared pool) go first: the warm instance kept is the reserved one.
+                cand.sort_by_key(|&ii| self.instances[ii as usize].as_ref().unwrap().slot.charge != Charge::Shared);
                 (l.svc.clone(), cand)
             };
             let keep = if matches!(svc.placement, Placement::Remote { .. }) { 0 } else { keep };
@@ -1535,6 +1596,7 @@ impl Shard {
                 self.local.remove(&id);
             }
         }
+        self.relieve_memory_pressure();
         // Connection timeouts.
         let cfg = &self.node.cfg;
         let head_ns = cfg.header_timeout.as_nanos() as u64;
@@ -1605,7 +1667,9 @@ impl Shard {
         for i in 0..self.instances.len() {
             if let Some(inst) = self.instances[i].take() {
                 let Instance { svc, slot, .. } = *inst;
+                let charge = slot.charge;
                 self.pools.free(slot);
+                self.node.budget.refund(&svc.mem_res, svc.instance_bytes(), charge);
                 svc.release();
             }
         }

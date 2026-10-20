@@ -665,6 +665,39 @@ fn fetch_from_any_member_when_the_origin_is_gone() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Placement accounts for memory reservations: three nodes with room for 15 instances each (`--mem 1MiB`, one
+/// 64 KiB service = 64 KiB + 4 KiB) and 45 single-replica services, exactly what fits. No node gets more than its
+/// budget holds (plain rendezvous hashing would overload some), each node reserves one instance per service placed
+/// on it, every node computes the same placement and every service answers through every ingress.
+#[test]
+fn placement_respects_memory_reservations() {
+    let o = Opts { extra: vec!["--mem".into(), "1MiB".into()], ..Opts::default() };
+    let (dir, nodes) = start_cluster("reserve", 3, &o);
+    write_modules(&dir, 0);
+    let m: String = (0..45).map(|i| format!("service s{i} {{ code = \"echo.k10\" memory = 64KiB }}\n")).collect();
+    apply(&dir, &nodes[1], &m);
+    wait_applied(&nodes, 1, Duration::from_secs(30));
+    let one = 64 * 1024 + 4096;
+    let p = placement(&nodes[0].status());
+    assert_eq!(p.len(), 45);
+    assert!(p.values().all(|ids| ids.len() == 1), "every service placed: {p:?}");
+    for n in &nodes {
+        let s = n.status();
+        assert_eq!(placement(&s), p, "same placement on {}", n.name);
+        let here = p.values().filter(|ids| ids[0] == n.id).count() as i64;
+        assert_eq!(here, 15, "{} hosts {here} services, its budget holds 15", n.name);
+        let mem = &s[s.find("\"memory\":{").unwrap()..];
+        assert_eq!(num_after(mem, "mem_reserved"), Some(here * one), "{}: {mem}", n.name);
+        assert!(num_after(mem, "mem_reserved") <= num_after(mem, "mem_limit"));
+    }
+    let mut c = Client::connect(&nodes[2].http, Duration::from_secs(10)).unwrap();
+    for i in 0..45 {
+        let r = c.request("GET", &format!("/s{i}"), b"").unwrap();
+        assert_eq!((r.status, r.text().as_str()), (200, "hello\n"), "s{i}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ------------------------------------------------------------------------------------------------------------------
 // Measurements (`cargo test --release -p k10s --test cluster -- --ignored --nocapture --test-threads 1 measure_`)
 // ------------------------------------------------------------------------------------------------------------------

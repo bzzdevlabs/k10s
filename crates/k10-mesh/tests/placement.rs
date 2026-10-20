@@ -156,15 +156,18 @@ fn anti_affinity_and_capacity() {
         first.dedup();
         assert_eq!(first.len(), 10);
     }
-    // capacity: 10 × 1 GiB, 3000 × 4 MiB = 11.7 GiB demand → exactly 2560 fit, none over budget
+    // capacity: 10 × 1 GiB, 3000 × (4 MiB + 4 KiB) = 11.7 GiB demand → exactly 10 × 255 fit, none over budget
     let m = manifest(1000, 3, 22);
     let p = place(&m, &members);
+    let one = k10_mesh::instance_bytes(&m.services[0]);
+    assert_eq!(one, (4 << 20) + 4096);
     for mem in &members {
-        let used: u64 = p.on_node(mem.id).iter().map(|_| 4u64 << 20).sum();
+        let used: u64 = p.on_node(mem.id).iter().map(|_| one).sum();
         assert!(used <= mem.capacity.mem_bytes);
     }
-    assert_eq!(p.placed(), 2560);
-    assert_eq!(p.unplaced, 3000 - 2560);
+    let per_node = (1u64 << 30) / one;
+    assert_eq!(p.placed() as u64, 10 * per_node);
+    assert_eq!(p.unplaced, 3000 - 10 * per_node);
     // first replicas are preferred over extra replicas when memory runs out
     assert!(p.services.values().all(|v| !v.is_empty()));
     println!("REPORT placement capacity: 10 × 1 GiB, 3000 × 4 MiB requested → {} placed, {} unplaced, all services have replica 0", p.placed(), p.unplaced);
