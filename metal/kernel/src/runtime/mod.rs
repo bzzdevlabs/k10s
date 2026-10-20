@@ -1374,7 +1374,8 @@ fn status_json() -> String {
     let l = |a: &AtomicU64| a.load(Ordering::Relaxed);
     let _ = write!(
         s,
-        "{{\"node\":\"k10-metal\",\"engine\":\"{}\",\"uptime_ms\":{},\"boot_ms\":{:.3},\"manifest_version\":{},\"cpu\":{{\"halted_ms\":{},\"polling_ms\":{},\"steal_ms\":{}}},",
+        "{{\"node\":\"k10-metal\",\"version\":\"{}\",\"engine\":\"{}\",\"uptime_ms\":{},\"boot_ms\":{:.3},\"manifest_version\":{},\"cpu\":{{\"halted_ms\":{},\"polling_ms\":{},\"steal_ms\":{}}},",
+        env!("K10S_VERSION_FULL"),
         if engine::jit_enabled() { "jit" } else { "interp" },
         time::now_ms(),
         crate::boot_ms(),
