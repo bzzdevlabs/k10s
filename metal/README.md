@@ -281,6 +281,10 @@ Deliberately *not* used:
   (generation check before running JIT code) rather than shootdown IPIs.
 * **No demand paging.** A slot is fully backed (64 KiB + 4 KiB for the test services). There are no CoW snapshots;
   `fresh` restores with `memcpy`.
+* **No per-service memory reservations.** Instances take free frames first come, first served (hosted nodes reserve
+  one instance per placed service, `docs/NODE.md`); placement, shared with hosted nodes, charges each replica
+  `2^memory` + 4 KiB against the guest's capacity, so placed services fit, but a busy service can take the frames
+  another one needs for its first instance.
 * **KV is in memory only.** There is no virtio-blk, so it is not durable across reboots.
 * **Cluster mode is volatile.** The desired state lives in memory: a rebooted guest fetches it again from its
   peers (a guest alone keeps nothing). No graceful leave (a stopped guest is detected as failed). KV is node-local,

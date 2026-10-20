@@ -22,3 +22,15 @@ Out of scope by design (documented in `docs/DESIGN.md`):
   one organization; use separate nodes (separate machines or VMs) per mutually distrustful tenant.
 - **Gossip and peer links are not authenticated or encrypted yet.** Run clusters only on trusted networks, and do not
   expose the admin API (`/_k10s/*`) to untrusted clients.
+
+## Denial of service: what bounds one workload (details in `docs/NODE.md`)
+- **Memory**: every service placed on a node reserves one instance (`2^memory` + 4 KiB) of `--mem`; burst instances
+  share the remainder, so a service under heavy concurrency can exhaust the shared pool but never another service's
+  reservation. Applies whose reservations do not fit are rejected; cluster placement charges the same footprint.
+  Per service: `max_instances`, KV quota (`--kv-max`), wait queue (10 000), host copies (16 MiB).
+- **CPU**: 2 ms time slices (preemption at JIT safepoints), per-request `cpu_ms` budget, crash-loop backoff.
+- **Connections**: node-wide buffer budget (`--conn-buffer-max`), per-connection head/body limits and timeouts,
+  `max_conns`; peer links have read/write caps.
+- **Not isolated yet**: the shared pool, the connection buffer budget and CPU are first come, first served between
+  services (no per-service share or weight); snapshots and prepared code are outside `--mem` (bounded per service
+  version by the manifest); KV is bounded per service, not node-wide.

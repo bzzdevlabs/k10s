@@ -13,8 +13,7 @@
 //! * Regions are `MADV_NOHUGEPAGE`: with transparent huge pages a single touch would otherwise commit 2 MiB, i.e.
 //!   the memory of dozens of neighbouring slots.
 //!
-//! Pools are per shard (no locking); node-wide accounting lives in [`MemStats`] (what is mapped and used) and
-//! [`MemBudget`] (what `--mem` allows: per-service reservations plus a shared pool for burst instances).
+//! Pools are per shard (no locking); node-wide accounting: [`MemStats`] (usage) and [`MemBudget`] (`--mem`).
 
 use crate::sys;
 use std::io;
@@ -22,7 +21,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::*};
 
 /// Bytes after `S` that belong to a slot.
 pub const TAIL: usize = 4096;
-// Placement charges one instance as `2^mem_log2 + INSTANCE_OVERHEAD`: the same footprint as a slot.
+// Placement charges an instance as `2^mem_log2 + INSTANCE_OVERHEAD`: a slot's footprint.
 const _: () = assert!(TAIL as u64 == k10_mesh::placement::INSTANCE_OVERHEAD);
 /// Target size of one reservation.
 const REGION_BYTES: usize = 1 << 30;
@@ -44,7 +43,7 @@ pub struct MemStats {
 /// What the memory of a live instance is charged to (see [`MemBudget`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Charge {
-    /// Not accounted (slots allocated outside the node's budget: tests, tools).
+    /// Not accounted (tests, tools).
     #[default]
     None,
     /// One unit of its service's [`Reservation`].
@@ -53,9 +52,7 @@ pub enum Charge {
     Shared,
 }
 
-/// A service version's memory reservation: `units` instances of `unit_bytes` each that other services' burst
-/// instances can never take. Inactive until [`MemBudget::install`] (an apply that fails leaves nothing behind),
-/// inactive again after [`MemBudget::release`] (the version was replaced or removed).
+/// A service version's reservation of `units` instances; active from [`MemBudget::install`] to [`MemBudget::release`].
 #[derive(Debug)]
 pub struct Reservation {
     units: u32,
@@ -71,7 +68,7 @@ impl Reservation {
         Reservation { units: units.min(RES_INACTIVE - 1), unit_bytes, state: AtomicU32::new(RES_INACTIVE) }
     }
 
-    /// Instances reserved (0 = none, e.g. a service placed on other nodes).
+    /// Instances reserved (0 = none: placed on other nodes).
     pub fn units(&self) -> u32 {
         self.units
     }
@@ -110,16 +107,10 @@ impl Reservation {
     }
 }
 
-/// Node-wide instance-memory budget (`--mem`) with per-service reservations.
-///
-/// Every service placed on the node holds a [`Reservation`] (one instance: what it needs to serve, and what its
-/// snapshot is captured from). The sum of the reservations must fit in `limit` (apply rejects what does not);
-/// burst instances beyond a service's reservation come from the shared remainder. `committed` = active reservations
-/// (used or not) + bytes of instances charged to the shared pool + bytes of reserved instances whose version was
-/// released but which are still alive. A shared instance is created only while `committed + its size ≤ limit`, so
-/// burst instances can never eat into a reservation. A reserved instance is always allowed: right after an apply
-/// adds reservations while burst instances fill the pool, `committed` may exceed `limit` until those drain
-/// ([`MemBudget::over`]: shards then destroy shared instances as soon as they are idle).
+/// Node-wide instance-memory budget (`--mem`): per-service [`Reservation`]s plus a shared pool for burst instances.
+/// `committed` = active reservations + shared instances + still-alive instances of released reservations; a shared
+/// instance needs `committed + size ≤ limit`, a reserved one always fits (so `committed` may briefly exceed `limit`
+/// after an apply adds reservations while the pool is full: see [`MemBudget::over`]).
 #[derive(Debug, Default)]
 pub struct MemBudget {
     limit: u64,
@@ -147,23 +138,23 @@ impl MemBudget {
         self.committed.load(Relaxed)
     }
 
-    /// Bytes committed beyond the reservations: burst instances (and released versions' instances still finishing).
+    /// Bytes committed beyond the reservations (burst instances, released versions still finishing).
     pub fn shared_used(&self) -> u64 {
         self.committed().saturating_sub(self.reserved())
     }
 
-    /// Instance creations refused because neither the service's reservation nor the shared pool had room.
+    /// Instance creations refused for lack of memory.
     pub fn refused(&self) -> u64 {
         self.refused.load(Relaxed)
     }
 
-    /// More is committed than the limit (reservations added while burst instances held the pool).
+    /// More committed than the limit: shards destroy burst instances until it is not.
     #[inline]
     pub fn over(&self) -> bool {
         self.committed.load(Relaxed) > self.limit
     }
 
-    /// Activates `r` (once). Callers check beforehand that the reservations fit.
+    /// Activates `r` (once); callers check that reservations fit.
     pub fn install(&self, r: &Reservation) {
         if r.units == 0 || r.state.fetch_and(!RES_INACTIVE, AcqRel) & RES_INACTIVE == 0 {
             return;
@@ -173,7 +164,7 @@ impl MemBudget {
         self.reserved.fetch_add(b, Relaxed);
     }
 
-    /// Deactivates `r`: its unused units are uncommitted now, the used ones when their instances are freed.
+    /// Deactivates `r`: unused units are uncommitted now, used ones when their instances are freed.
     pub fn release(&self, r: &Reservation) {
         if r.units == 0 {
             return;
@@ -187,8 +178,7 @@ impl MemBudget {
         self.reserved.fetch_sub(r.units as u64 * r.unit_bytes, Relaxed);
     }
 
-    /// Charges one new instance of `bytes` (= `r`'s unit size): to a free unit of `r`, else to the shared pool if it
-    /// has room. `None`: no room (the caller must not create the instance).
+    /// Charges a new instance of `bytes` to a free unit of `r`, else to the shared pool; `None`: no room.
     pub fn charge(&self, r: &Reservation, bytes: u64) -> Option<Charge> {
         if r.units != 0 && r.take() {
             return Some(Charge::Reserved);
@@ -206,7 +196,7 @@ impl MemBudget {
         }
     }
 
-    /// Gives back what [`MemBudget::charge`] (or [`MemBudget::promote`]) charged for an instance being freed.
+    /// Gives back the charge of an instance being freed.
     pub fn refund(&self, r: &Reservation, bytes: u64, c: Charge) {
         match c {
             Charge::None => {}
@@ -215,15 +205,14 @@ impl MemBudget {
             }
             Charge::Reserved => {
                 if r.state.fetch_sub(1, AcqRel) & RES_INACTIVE != 0 {
-                    // The reservation was released while this instance lived: its bytes go now.
+                    // Released while this instance lived: uncommit its bytes now.
                     self.committed.fetch_sub(bytes, Relaxed);
                 }
             }
         }
     }
 
-    /// Moves a shared instance into a free unit of its service's reservation (keeps the pool free for others once
-    /// a reserved instance was destroyed). Returns true if the instance is now [`Charge::Reserved`].
+    /// Moves a shared instance into a free unit of `r`; true if it is now [`Charge::Reserved`].
     pub fn promote(&self, r: &Reservation, bytes: u64) -> bool {
         if r.units != 0 && r.take() {
             self.committed.fetch_sub(bytes, Relaxed);
@@ -239,7 +228,7 @@ impl MemBudget {
 pub struct Slot {
     base: *mut u8,
     log2: u8,
-    /// What the slot's memory is charged to (lives in the struct's padding: no per-instance cost).
+    /// Budget charge (in the struct's padding: no per-instance cost).
     pub(crate) charge: Charge,
     /// Length of the prefix currently mapped from a snapshot memfd (0 = plain anonymous memory).
     pub(crate) mapped: usize,
@@ -333,8 +322,7 @@ impl SlotPools {
         assert!((12..=36).contains(&log2), "slot size class out of range");
         let stats = self.stats.clone();
         let stride = (1usize << log2) as u64 + TAIL as u64;
-        // Atomic reserve against the cap (shared by every shard). The node checks its budget ([`MemBudget`]) before
-        // and passes no limit here.
+        // Atomic reserve against the cap (the node checks its `MemBudget` first and passes no limit).
         if limit == u64::MAX {
             stats.slot_bytes_used.fetch_add(stride, Relaxed);
         } else {
@@ -499,7 +487,7 @@ mod tests {
 
     #[test]
     fn slot_stays_small() {
-        // The charge lives in the slot's padding: reservation accounting costs no per-instance memory.
+        // The charge lives in the padding: no per-instance memory.
         assert_eq!(std::mem::size_of::<Slot>(), 24);
     }
 
@@ -508,13 +496,13 @@ mod tests {
         const U: u64 = 100;
         let b = MemBudget::new(1000);
         let (a, h) = (Reservation::new(1, U), Reservation::new(1, U));
-        // Inactive reservations reserve nothing and hand out no units.
+        // Inactive: reserves nothing.
         assert_eq!(a.bytes(), 0);
         b.install(&a);
         b.install(&h);
         b.install(&h); // idempotent
         assert_eq!((b.reserved(), b.committed(), a.bytes()), (200, 200, U));
-        // The hog: its unit, then the shared pool (800): 8 more instances, then nothing.
+        // The hog: its unit, then the 800-byte shared pool.
         assert_eq!(b.charge(&h, U), Some(Charge::Reserved));
         let mut shared = 0;
         while b.charge(&h, U) == Some(Charge::Shared) {
@@ -522,20 +510,20 @@ mod tests {
         }
         assert_eq!(shared, 8);
         assert_eq!(b.refused(), 1);
-        // `a` still gets its instance: the hog never touched its reservation.
+        // `a` still gets its reserved instance.
         assert_eq!(b.charge(&a, U), Some(Charge::Reserved));
         assert_eq!(b.charge(&a, U), None, "a's burst has no room left");
         assert_eq!((b.committed(), b.shared_used()), (1000, 800));
-        // A shared instance freed: the pool has room again.
+        // A shared instance freed: room again.
         b.refund(&h, U, Charge::Shared);
         assert_eq!(b.charge(&a, U), Some(Charge::Shared));
-        // The hog's reserved instance dies; one of its shared instances moves into the free unit.
+        // The hog's reserved instance dies; a shared one moves into the unit.
         b.refund(&h, U, Charge::Reserved);
         assert_eq!(b.committed(), 1000, "an unused reservation stays committed");
         assert!(b.promote(&h, U));
         assert_eq!(b.committed(), 900);
         assert!(!b.promote(&h, U), "one unit only");
-        // Release `a` (replaced) while its reserved instance lives: committed drops when that instance goes.
+        // Release `a` while its reserved instance lives: uncommitted when it goes.
         b.release(&a);
         assert_eq!((b.reserved(), a.bytes()), (100, 0));
         assert_eq!(b.committed(), 900, "a's unit is still in use");
@@ -545,7 +533,7 @@ mod tests {
         assert_eq!(b.committed(), 800);
         b.release(&a); // idempotent
         assert_eq!(b.committed(), 800);
-        // Over-commit: a new reservation installed while the pool is full.
+        // Over-commit: a reservation installed while the pool is full.
         let c = Reservation::new(3, U);
         while b.charge(&h, U).is_some() {}
         b.install(&c);

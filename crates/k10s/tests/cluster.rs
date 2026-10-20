@@ -665,10 +665,8 @@ fn fetch_from_any_member_when_the_origin_is_gone() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Placement accounts for memory reservations: three nodes with room for 15 instances each (`--mem 1MiB`, one
-/// 64 KiB service = 64 KiB + 4 KiB) and 45 single-replica services, exactly what fits. No node gets more than its
-/// budget holds (plain rendezvous hashing would overload some), each node reserves one instance per service placed
-/// on it, every node computes the same placement and every service answers through every ingress.
+/// Placement charges reservations: 3 nodes × room for 15 instances (`--mem 1MiB`), 45 services of 64 KiB: each node
+/// gets exactly 15 (plain rendezvous hashing would overload some), reserves them, and every service answers.
 #[test]
 fn placement_respects_memory_reservations() {
     let o = Opts { extra: vec!["--mem".into(), "1MiB".into()], ..Opts::default() };

@@ -76,8 +76,7 @@ pub struct ServiceRt {
     pub kv: Arc<KvNs>,
     pub log: Arc<LogRing>,
     pub placement: Placement,
-    /// Node memory reserved for this version (one instance when placed here; see `slot::MemBudget`). Set by apply
-    /// before the version is published; active from install to retirement.
+    /// Memory reserved for this version (one instance when placed here; see `slot::MemBudget`).
     pub mem_res: Reservation,
     /// New instances start from a post-`init` snapshot (always for `fresh` services; optional otherwise).
     pub use_snapshot: bool,
@@ -151,7 +150,7 @@ impl ServiceRt {
         self.spec.mem_log2
     }
 
-    /// Node memory one instance occupies (its slot and tail page): the unit of the memory budget.
+    /// Memory of one instance (slot + tail page): the unit of the memory budget.
     #[inline]
     pub fn instance_bytes(&self) -> u64 {
         k10_mesh::instance_bytes(&self.spec)

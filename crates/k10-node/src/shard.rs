@@ -825,8 +825,7 @@ impl Shard {
         }
     }
 
-    /// While the node is over-committed (an apply added reservations while burst instances held the shared pool),
-    /// destroys this shard's idle burst instances until it is not.
+    /// While the budget is over-committed, destroys this shard's idle burst instances.
     fn relieve_memory_pressure(&mut self) {
         if !self.node.budget.over() {
             return;
@@ -1218,8 +1217,7 @@ impl Shard {
                 Err(msg) => {
                     svc.release();
                     if svc.live.load(Acquire) > 0 {
-                        // Out of memory for another instance, but the service has some: wait for one (like at
-                        // `max_instances`) rather than fail.
+                        // No memory for another instance: wait for an existing one (as at `max_instances`).
                         self.enqueue(svc, Queued { req, reply, deadline, depth });
                     } else {
                         self.deliver(reply, CallResult::error(CALL_UNAVAILABLE, msg));
@@ -1329,8 +1327,7 @@ impl Shard {
     }
 
     fn new_instance(&mut self, svc: &Arc<ServiceRt>) -> Result<u32, String> {
-        // Charge the node's memory budget first (atomic: concurrent shards cannot both pass and overshoot `--mem`):
-        // the service's own reservation if it has a free unit, else the shared pool.
+        // Charge the budget first (atomic across shards): the service's reservation, else the shared pool.
         let bytes = svc.instance_bytes();
         let Some(charge) = self.node.budget.charge(&svc.mem_res, bytes) else {
             return Err(format!("cannot allocate instance memory: node memory budget (--mem) exhausted for `{}`", svc.name()));
@@ -1376,9 +1373,8 @@ impl Shard {
                     None => false,
                 };
             }
-            // A burst instance (shared pool) moves into its service's reservation when a unit is free. While the node
-            // is over-committed (reservations added while burst instances held the pool) it is given back at once,
-            // unless it is the last instance of a service that has queued requests.
+            // A burst instance moves into a free reservation unit; while over-committed it is destroyed (unless it
+            // is the last instance of a service with queued requests).
             if ok && inst.slot.charge == Charge::Shared {
                 let budget = &self.node.budget;
                 if budget.promote(&svc.mem_res, svc.instance_bytes()) {
@@ -1575,7 +1571,7 @@ impl Shard {
                     .copied()
                     .filter(|&ii| now.saturating_sub(self.instances[ii as usize].as_ref().unwrap().idle_since) >= idle_ns)
                     .collect();
-                // Burst instances (shared pool) go first: the warm instance kept is the reserved one.
+                // Burst instances first: the warm instance kept is the reserved one.
                 cand.sort_by_key(|&ii| self.instances[ii as usize].as_ref().unwrap().slot.charge != Charge::Shared);
                 (l.svc.clone(), cand)
             };

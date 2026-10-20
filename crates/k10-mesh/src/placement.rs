@@ -2,10 +2,8 @@
 //!
 //! Algorithm (capacity-aware weighted rendezvous hashing):
 //! * candidates = Alive/Suspect members, deduplicated by id, sorted by id (input order never matters);
-//! * each node has a memory budget `capacity.mem_bytes`; one replica consumes [`instance_bytes`] = `2^mem_log2` +
-//!   4 KiB (one instance: its slot and tail page). This is exactly the memory a node *reserves* for every service
-//!   placed on it (`docs/NODE.md`, "Memory reservations"), so a placement never puts more reservations on a node
-//!   than its budget holds;
+//! * each node has a memory budget `capacity.mem_bytes`; one replica consumes [`instance_bytes`] (slot + tail page),
+//!   exactly what a node reserves per service placed on it, so reservations always fit;
 //! * replicas are assigned in rounds — replica 0 of every service (by name), then replica 1, … — so first replicas
 //!   win over extra replicas when memory is short;
 //! * every node gets the weighted HRW score `w / −ln(u)` for the service, `u = hash(service, node)` uniform in
@@ -27,11 +25,10 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// Bytes of node memory one instance occupies beyond its `2^mem_log2` slot (the runtime's tail page).
+/// Node memory one instance occupies beyond its `2^mem_log2` slot (the tail page).
 pub const INSTANCE_OVERHEAD: u64 = 4096;
 
-/// Node memory one instance of `s` occupies: its slot plus [`INSTANCE_OVERHEAD`]. Placement charges this per replica
-/// and a node reserves it for every service placed on it, so both sides of the accounting use one definition.
+/// Node memory of one instance of `s`: charged per replica by placement and reserved by the node hosting it.
 pub fn instance_bytes(s: &ServiceSpec) -> u64 {
     s.mem_bytes().saturating_add(INSTANCE_OVERHEAD)
 }
@@ -268,7 +265,7 @@ mod tests {
 
     #[test]
     fn capacity_respected() {
-        // 4 nodes with room for exactly 4 instances of 256 KiB (+ tail page) each: 16 slots total
+        // 4 nodes × room for 4 instances of 256 KiB (+ tail page): 16 slots
         let cap = 4 * (instance_bytes(&svc("x", 1, 18)));
         let ms: Vec<Member> = (1..=4).map(|i| member(i, cap)).collect();
         let m = Manifest { version: 1, services: (0..6).map(|i| svc(&format!("s{i}"), 3, 18)).collect() };
@@ -278,7 +275,7 @@ mod tests {
         for i in 1..=4 {
             assert!(p.count_on(NodeId(i)) <= 4);
         }
-        // One byte less per node: only 3 instances fit (the tail page is part of an instance's footprint).
+        // One byte less per node: only 3 fit (the tail page counts).
         let ms: Vec<Member> = (1..=4).map(|i| member(i, cap - 1)).collect();
         let p = place(&m, &ms);
         assert_eq!(p.placed(), 12);

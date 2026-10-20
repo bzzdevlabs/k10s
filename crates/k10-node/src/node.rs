@@ -378,8 +378,7 @@ impl NodeShared {
                 self.cfg.snapshots == SnapshotPolicy::All,
             );
             svc.min_mem_log2 = min_mem;
-            // A service placed here reserves one instance (what it needs to serve; its snapshot is captured from
-            // it); one placed elsewhere only runs here as a fallback, from the shared pool.
+            // Placed here: reserve one instance; elsewhere: fallback runs use the shared pool.
             let units = u32::from(place == Placement::Local);
             svc.mem_res = Reservation::new(units, svc.instance_bytes());
             svc.placement = place;
@@ -397,7 +396,7 @@ impl NodeShared {
                 report.removed.push(name.clone());
             }
         }
-        // The reservations of the new table must fit in the node's memory budget.
+        // The new table's reservations must fit in `--mem`.
         let limit = self.budget.limit();
         let need: u64 = by_name.values().map(|s| s.mem_res.units() as u64 * s.mem_res.unit_bytes()).sum();
         let mut install: Vec<&Arc<ServiceRt>> = new_rts.iter().collect();
@@ -412,9 +411,8 @@ impl NodeShared {
             if mode == ApplyMode::Operator {
                 return Err(msg);
             }
-            // Cluster mode: placement already accounts for reservations (`k10_mesh::place` charges one instance per
-            // replica against the capacity this node advertises), so this only happens if the inputs disagree.
-            // Never refuse the cluster's desired state: reserve in name order while it fits.
+            // Cluster: placement already charges reservations, so only disagreeing inputs get here; never refuse
+            // the desired state, reserve in name order while it fits.
             let mut left = limit.saturating_sub(by_name.values().map(|s| s.mem_res.bytes()).sum::<u64>());
             install.sort_by(|a, b| a.name().cmp(b.name()));
             install.retain(|s| {
@@ -436,8 +434,7 @@ impl NodeShared {
                 persist_bundle(&p, &bundle).map_err(|e| format!("cannot persist bundle: {e}"))?;
             }
         }
-        // Reserve for the new versions, publish, then retire what was replaced (shards re-route requests that race
-        // with retirement) and release its reservations (instances still alive keep their bytes until freed).
+        // Reserve, publish, then retire and release what was replaced (live instances keep their bytes until freed).
         for s in install {
             self.budget.install(&s.mem_res);
         }
@@ -712,7 +709,7 @@ impl Drop for Node {
     }
 }
 
-/// `12.0 MiB`-style rendering for messages.
+/// `12.0 MiB (…)` for messages.
 fn human(b: u64) -> String {
     const U: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let (mut v, mut i) = (b as f64, 0);

@@ -26,8 +26,34 @@ placement and peer links on top of it.
   no syscall. Freed slots are `madvise(MADV_DONTNEED)`-ed (they read back as zeros) and reused.
   Regions are `MADV_NOHUGEPAGE`: with THP `always`, one touch would commit 2 MiB, i.e. ~30 neighbouring 64 KiB
   slots (measured: 70 KB RSS per instance instead of 4.4 KB). Physical memory = pages actually touched.
-  `--mem SIZE` caps the address space handed to live instances (sum of `S + 4 KiB`; default: physical RAM); beyond
-  it instance creation fails (503 / call −2).
+  `--mem SIZE` caps the address space handed to live instances (sum of `S + 4 KiB`; default: physical RAM), with
+  per-service reservations (below).
+- **Memory reservations** (`slot::MemBudget`). Every service placed on the node reserves one instance,
+  `S + 4 KiB` (what it needs to serve; its snapshot is captured from that instance), out of `--mem`; burst instances
+  beyond a service's reservation come from the shared remainder (`--mem` − reservations). So a service with many
+  concurrent requests can fill the shared pool but never another service's reservation: every service can always
+  create its first instance. The sum of the reservations must fit: a single-node apply that does not fit is
+  rejected (422, `memory reservations do not fit: N service(s) … reserve X … --mem is Y`), and in cluster mode
+  placement charges exactly this footprint per replica against each node's advertised capacity (`--mem`), so it never
+  places a service where its reservation cannot fit (a cluster apply is never refused: should the inputs disagree,
+  what does not fit runs without a reservation). Services placed on other nodes reserve nothing (they only run here
+  as a fallback, from the shared pool); stacked replicas (more replicas than nodes) reserve one instance per node,
+  the rest of their placement share is shared-pool headroom. Accounting: one atomic `committed` = active reservations
+  + burst instances (+ instances of replaced versions still finishing); a burst instance is created only while
+  `committed + its size ≤ --mem` (one compare-exchange; the charge is kept in the slot's padding: no per-instance
+  memory, no per-request work). A request that finds no memory for a new instance waits for one of the service's
+  instances (like at `max_instances`) when it has some, else fails (503 / call −2). A burst instance that finishes a
+  job moves into its service's reservation when that has a free unit; idle reclaim destroys burst instances first.
+  An apply that adds reservations while burst instances hold the shared pool is honoured at once (a reserved
+  instance is always allowed, so `committed` may exceed `--mem` by the new reservations); until the node is back
+  within its budget, shards destroy idle burst instances (on the table change and every 250 ms) and burst instances
+  as soon as their job ends (unless it is the last instance of a service with queued requests). Status:
+  `memory.mem_reserved`, `mem_shared_used`, `mem_shared_limit`, `mem_committed`, `mem_refused` (creations refused for
+  lack of memory), per service `mem_reserved`, `mem_used`, `mem_shared`; metrics `k10s_memory_{limit,reserved,
+  shared_used,committed}_bytes`, `k10s_memory_refused_total`, `k10s_service_memory_{reserved_,}bytes`. Outside
+  `--mem` (bounded separately): snapshots (≤ 2 × the non-zero pages of one instance per service version), prepared
+  code and data segments (per module), KV (`--kv-max` per service), connection buffers (`--conn-buffer-max`
+  node-wide), fiber stacks (`max_fibers` per shard).
 - **Copy-on-write snapshots**: after `init()`, an instance's resident non-zero pages are written into a sparse
   `memfd` (`extent` = up to the last non-zero page). New instances either *map* it `MAP_PRIVATE|MAP_FIXED` over their
   slot prefix (pages only read stay shared by all instances) or *copy* its non-zero pages. Freeing a mapped slot maps
@@ -283,6 +309,16 @@ changes. Code: `cluster/mod.rs` (config, applier, operator apply, status), `clus
 - The stored desired state (`DATA/manifest.k10m` + `DATA/blobs/`) is applied at start (placed over this node alone)
   and announced with `set_desired`: the highest version in the cluster wins, so a whole-cluster restart converges
   on the newest one. `DATA/bundle.k10b` (single-node mode) is not used.
+- **Joining through several members.** Give every node, the first one included, the same `--join a,b,c` list of a
+  few members' gossip addresses (a node skips its own address; while it knows no other live member it re-contacts
+  the list every second, so the first node simply waits for the others): no node then depends on one seed being up
+  when it (re)starts. In addition, each node remembers the gossip addresses of the members it last saw alive
+  (`DATA/peers`, up to 16, rewritten at most once per second when membership changes, never emptied) and contacts
+  them at start besides `--join`: a restarted node rejoins its cluster even when its seeds are down or moved, or when
+  it was started without `--join` (the bootstrap node; before this, such a node restarted on another address formed
+  a one-node cluster of its own, forever). Once it has joined, its seed list goes back to `--join` alone, so stale
+  remembered addresses are not retried. Nodes also re-contact members they declared dead now and then (at their
+  old address), which heals partitions and finds a node restarted on its old address.
 
 **Desired state.** `POST /_k10s/apply` (`k10s apply`) works on any node: decode, version = highest known + 1 (stored,
 applied or announced by gossip) when the bundle says 0 (an explicit version must be higher; the same version and
@@ -363,8 +399,12 @@ or forwarded, methods preserved), `call` across nodes, 3 replicas on 3 distinct 
 while it is down, restart with the same data directory → same id, higher incarnation, catches up; graceful leave
 and a join under load (4 → 3 → 4 nodes): 0 failed requests, services whose placement did not change keep their
 runtime; re-applies under load on 5 nodes (0 failed requests) and two concurrent applies on two nodes (one winner
-everywhere); the origin of a desired state crashes and a node joining later fetches it from the other members.
-Unit tests: store (persist/reload/corruption/gc/pinning, node id), ranking vs `place`; node test:
+everywhere); the origin of a desired state crashes and a node joining later fetches it from the other members;
+memory reservations (3 nodes with `--mem 1MiB`, 45 services of 64 KiB: exactly 15 placed and reserved per node).
+`crates/k10s/tests/chaos.rs` faults every node, the seed included (SIGKILL, SIGSTOP, leave + rejoin, apply then kill
+of its origin, restarts with live-member, static or no `--join`, on the same or new ports) and checks membership,
+version and placement convergence and 0 errors through every ingress after each round.
+Unit tests: store (persist/reload/corruption/gc/pinning, node id, peers), ranking vs `place`; node test:
 `apply_cluster` ordering and placement-only updates. `cargo test -p k10s --test cluster` takes ≈ 2–4 s.
 `crates/k10s/tests/mesh_abuse.rs`: a hostile non-UTF-8 call path; a fake peer that requests ≈ 1 GB of replies and
 never reads (the link is closed at the cap, peak RSS stays < 100 MB, forwarding unaffected); a node started with
@@ -396,7 +436,8 @@ Reproduce: `cargo test --release -p k10s --test cluster -- --ignored --nocapture
   node-local (replicas of a service, and a service that moves, see different data). No consensus: two concurrent
   applies resolve by `(version, hash)`, the loser's change is dropped silently; an operator apply on a node that has
   not yet learned the cluster's latest version can likewise lose. A service unplaced for lack of memory, or whose
-  hosts are all down, is run by the next node of its ranking (or this node) regardless of `--mem` headroom planning.
+  hosts are all down, is run by the next node of its ranking (or this node) from that node's shared pool (no
+  reservation: it may get 503 when the pool is full).
   Forwarding costs six thread hand-offs (see measurements). Non-UTF-8 call paths are converted lossily on the wire.
   Peer links have no application-level keepalive (gossip detects dead peers).
 - KV is node-local with an asynchronous durability window (no fsync-before-ack mode yet); compaction serializes the
