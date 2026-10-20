@@ -86,3 +86,55 @@ fn udp_driver_in_a_caller_owned_loop() {
     assert!(up && b.gossip().num_live() == 2);
     assert!(a.io_stats().packets_received > 0 && b.io_stats().bytes_sent > 0);
 }
+
+/// Sealed gossip: members with the same cluster key converge; a member with another key, and forged plaintext
+/// datagrams (the pre-authentication attack: a `Desired` item pointing at the attacker), are dropped before decoding.
+#[test]
+fn sealed_gossip_rejects_other_keys_and_plaintext() {
+    use k10_mesh::secure::{ClusterKey, GossipCipher, DEFAULT_MAX_SKEW_MS};
+    let key = ClusterKey::new(&[42; 32]);
+    let mk = |id: u64, k: &ClusterKey| {
+        let mut d = UdpDriver::bind(member(id), fast(), id).unwrap();
+        d.set_cipher(GossipCipher::new(k, id.to_le_bytes(), DEFAULT_MAX_SKEW_MS));
+        d
+    };
+    let mut a = mk(20, &key);
+    let mut b = mk(21, &key);
+    let mut x = mk(22, &ClusterKey::new(&[7; 32]));
+    let a_addr = a.gossip().local().gossip;
+    let start = Instant::now();
+    let now = || start.elapsed().as_millis() as u64;
+    b.join(&[a_addr], now());
+    x.join(&[a_addr], now());
+    // A forged plaintext datagram: a sync from an unknown sender announcing a desired state.
+    let mut forger = k10_mesh::Gossip::new(member(23), fast(), 23);
+    let forged = forger.set_desired(99, [0xee; 32]);
+    let mut forged_pkts = forger.join(&[a_addr], 0).packets;
+    forged_pkts.extend(forged.packets);
+    let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    for (_, p) in &forged_pkts {
+        sock.send_to(p, a_addr).unwrap();
+    }
+    while start.elapsed() < Duration::from_secs(3) {
+        for d in [&mut a, &mut b, &mut x] {
+            d.on_readable(now()).unwrap();
+            if now() >= d.next_deadline() {
+                d.on_tick(now());
+            }
+            while d.poll_event().is_some() {}
+        }
+        if a.gossip().num_live() == 2 && b.gossip().num_live() == 2 && start.elapsed() > Duration::from_millis(500) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(a.gossip().num_live(), 2, "a and b only");
+    assert!(a.gossip().member(NodeId(22)).is_none() && a.gossip().member(NodeId(23)).is_none());
+    assert_eq!(x.gossip().num_live(), 1, "the node with another key stays alone");
+    assert!(a.gossip().desired().is_none(), "the forged desired state was not decoded");
+    let st = a.cipher_stats().unwrap();
+    assert!(st.bad_tag > 0 && st.malformed > 0, "{st:?}");
+    assert!(a.io_stats().rejected >= st.bad_tag + st.malformed);
+    assert!(a.take_last_reject().is_some());
+    assert_eq!(a.gossip().stats().malformed_packets, 0, "rejected datagrams never reach the gossip decoder");
+}

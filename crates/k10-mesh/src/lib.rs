@@ -22,6 +22,7 @@ pub mod gossip;
 pub mod manifest;
 pub mod member;
 pub mod placement;
+pub mod secure;
 pub mod sha256;
 pub mod wire;
 

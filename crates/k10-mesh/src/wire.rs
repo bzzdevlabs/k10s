@@ -19,12 +19,18 @@
 //! | 8    | CallResult    | status:i32 body |
 //! | 9    | Ping          | — |
 //! | 10   | Pong          | — |
+//! | 11   | Auth          | version:u8 id:u64 nonce:[32] — the handshake of authenticated links ([`crate::secure`]) |
 //!
 //! `deadline_ms` is the caller's remaining time budget, relative (clocks are not synchronized). `method` is the
 //! host API's `req_method` code (0 GET, 1 POST, 2 PUT, 3 DELETE, 4 other); it is carried as is.
+//!
+//! On an authenticated link (a cluster key is configured) each side first sends `Auth` in clear, then every frame
+//! is sealed: `len:u32 | ChaCha20-Poly1305(kind | request_id | payload) | tag:[16]`, `len` counting the tag. The
+//! decoder opens frames once [`FrameDecoder::set_opener`] has been called. See [`crate::secure`].
 
 use crate::codec::{put_u16, put_u32, put_u64, DecodeError, Reader};
 use crate::member::Member;
+use crate::secure::Opener;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -47,6 +53,8 @@ pub const KIND_CALL: u8 = 7;
 pub const KIND_CALL_RESULT: u8 = 8;
 pub const KIND_PING: u8 = 9;
 pub const KIND_PONG: u8 = 10;
+/// Handshake frame of authenticated links (not a [`Msg`]; see [`crate::secure::SecureLink`]).
+pub const KIND_AUTH: u8 = 11;
 
 /// A peer-protocol message. Borrowed fields make both encoding (no copy before the output buffer) and decoding
 /// (slices into the receive buffer) copy-free.
@@ -74,6 +82,9 @@ pub enum WireError {
     FrameTooShort { len: u32 },
     UnknownKind(u8),
     Malformed(&'static str),
+    /// A sealed frame failed authentication: another cluster key, or a forged, replayed, reordered or corrupted
+    /// frame.
+    Unauthenticated,
 }
 
 impl fmt::Display for WireError {
@@ -83,6 +94,7 @@ impl fmt::Display for WireError {
             WireError::FrameTooShort { len } => write!(f, "frame length {len} shorter than its header"),
             WireError::UnknownKind(k) => write!(f, "unknown frame kind {k}"),
             WireError::Malformed(what) => write!(f, "malformed {what}"),
+            WireError::Unauthenticated => f.write_str("frame failed authentication (different cluster key, or tampered)"),
         }
     }
 }
@@ -180,6 +192,22 @@ impl<'a> Msg<'a> {
         }
     }
 
+    /// An upper bound of the encoded frame size (header included, before any sealing tag): lets a sender check a
+    /// buffer cap before encoding.
+    pub fn frame_len_bound(&self) -> usize {
+        HEADER_LEN
+            + match self {
+                Msg::Hello { .. } => 128,
+                Msg::GetManifest { .. } => 8,
+                Msg::Manifest { bytes } => bytes.len(),
+                Msg::GetBlob { .. } | Msg::BlobMissing { .. } => 32,
+                Msg::Blob { bytes, .. } => 32 + bytes.len(),
+                Msg::Call { service, path, body, .. } => 8 + service.len() + path.len() + body.len(),
+                Msg::CallResult { body, .. } => 4 + body.len(),
+                Msg::Ping | Msg::Pong => 0,
+            }
+    }
+
     fn payload_len_hint(&self) -> usize {
         match self {
             Msg::Hello { .. } => 64,
@@ -243,6 +271,8 @@ pub struct FrameDecoder {
     start: usize,
     max_frame: usize,
     error: Option<WireError>,
+    /// Set once a link is authenticated: every later frame is sealed.
+    opener: Option<Opener>,
 }
 
 impl Default for FrameDecoder {
@@ -254,7 +284,14 @@ impl Default for FrameDecoder {
 impl FrameDecoder {
     /// `max_frame` caps `len` (kind + request id + payload).
     pub fn new(max_frame: usize) -> Self {
-        FrameDecoder { buf: Vec::new(), start: 0, max_frame: max_frame.max(9), error: None }
+        FrameDecoder { buf: Vec::new(), start: 0, max_frame: max_frame.max(9), error: None, opener: None }
+    }
+
+    /// From now on, frames are sealed: each is authenticated and decrypted in place before it is returned (a
+    /// failure is a sticky [`WireError::Unauthenticated`]). `max_frame` replaces the cap (it counts the tag).
+    pub fn set_opener(&mut self, opener: Opener, max_frame: usize) {
+        self.opener = Some(opener);
+        self.max_frame = max_frame.max(9 + crate::crypto::TAG_LEN);
     }
 
     fn compact(&mut self) {
@@ -311,7 +348,8 @@ impl FrameDecoder {
             return Ok(None);
         }
         let len = u32::from_le_bytes([avail[0], avail[1], avail[2], avail[3]]);
-        if (len as usize) < 9 {
+        let tag = if self.opener.is_some() { crate::crypto::TAG_LEN } else { 0 };
+        if (len as usize) < 9 + tag {
             let e = WireError::FrameTooShort { len };
             self.error = Some(e);
             return Err(e);
@@ -325,17 +363,26 @@ impl FrameDecoder {
         if avail.len() < total {
             return Ok(None);
         }
-        let kind = avail[4];
-        if !(KIND_HELLO..=KIND_PONG).contains(&kind) {
+        let s = self.start;
+        let last_kind = if let Some(o) = &mut self.opener {
+            if !o.open(&mut self.buf[s..s + total]) {
+                self.error = Some(WireError::Unauthenticated);
+                return Err(WireError::Unauthenticated);
+            }
+            KIND_PONG // `Auth` is never sealed
+        } else {
+            KIND_AUTH
+        };
+        let kind = self.buf[s + 4];
+        if !(KIND_HELLO..=last_kind).contains(&kind) {
             let e = WireError::UnknownKind(kind);
             self.error = Some(e);
             return Err(e);
         }
         let mut id = [0u8; 8];
-        id.copy_from_slice(&avail[5..13]);
-        let s = self.start;
+        id.copy_from_slice(&self.buf[s + 5..s + 13]);
         self.start += total;
-        Ok(Some(Frame { kind, request_id: u64::from_le_bytes(id), payload: &self.buf[s + HEADER_LEN..s + total] }))
+        Ok(Some(Frame { kind, request_id: u64::from_le_bytes(id), payload: &self.buf[s + HEADER_LEN..s + total - tag] }))
     }
 }
 
