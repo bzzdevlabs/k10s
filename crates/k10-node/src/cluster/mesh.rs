@@ -231,7 +231,16 @@ pub(crate) struct Mesh {
     /// Links to close at the next safe point (write buffer overflow).
     doomed: Vec<(u32, u32)>,
     accept_pause: sys::AcceptPause,
+    /// When to rewrite `DATA/peers` (membership changed), and when it was last written.
+    peers_due: Option<u64>,
+    peers_last: u64,
+    peers_saved: Vec<SocketAddr>,
+    /// Joined with remembered peers as seeds: once in, go back to the `--join` seeds alone.
+    trim_seeds: bool,
 }
+
+/// `DATA/peers` is rewritten at most this often.
+const PEERS_SAVE_NS: u64 = 1_000_000_000;
 
 impl Mesh {
     pub(crate) fn new(cs: Arc<ClusterShared>, inbox: Arc<MeshInbox>, udp: UdpDriver, listener: Fd) -> io::Result<Mesh> {
@@ -271,6 +280,10 @@ impl Mesh {
             read_again: Vec::new(),
             doomed: Vec::new(),
             accept_pause: sys::AcceptPause::default(),
+            peers_due: None,
+            peers_last: 0,
+            peers_saved: Vec::new(),
+            trim_seeds: false,
         })
     }
 
@@ -280,7 +293,14 @@ impl Mesh {
     }
 
     pub(crate) fn run(mut self) {
-        let seeds = self.cs.cfg.join.clone();
+        // Seeds = `--join` + the members last seen alive, so a restart rejoins even with dead, moved or no seeds.
+        let mut seeds = self.cs.cfg.join.clone();
+        let remembered: Vec<SocketAddr> = self.cs.store.load_peers().into_iter().filter(|p| !seeds.contains(p)).collect();
+        if !remembered.is_empty() {
+            eprintln!("k10s: mesh: also contacting {} remembered member(s)", remembered.len());
+            self.trim_seeds = true;
+            seeds.extend(remembered);
+        }
         if !seeds.is_empty() {
             let now = self.now_ms();
             self.udp.join(&seeds, now);
@@ -481,6 +501,15 @@ impl Mesh {
             let live = self.udp.gossip().live_members();
             let mut fp: Vec<(NodeId, u64, u32)> = live.iter().map(|m| (m.id, m.capacity.mem_bytes, m.capacity.cores)).collect();
             fp.sort();
+            if self.peers_due.is_none() {
+                self.peers_due = Some(mono_ns().max(self.peers_last + PEERS_SAVE_NS));
+            }
+            if self.trim_seeds && live.len() > 1 {
+                // Re-joining with the configured seeds replaces the seed list.
+                self.trim_seeds = false;
+                let (seeds, now) = (self.cs.cfg.join.clone(), self.now_ms());
+                self.udp.join(&seeds, now);
+            }
             *self.cs.members.lock().unwrap_or_else(|e| e.into_inner()) = live;
             if fp != self.live_fp {
                 self.live_fp = fp;
@@ -491,6 +520,21 @@ impl Mesh {
                 }
             }
         }
+    }
+
+    /// Writes the live members' gossip addresses to `DATA/peers` if they changed (never an empty list).
+    fn save_peers(&mut self) {
+        let mut live: Vec<(NodeId, SocketAddr)> =
+            self.udp.gossip().live_members().iter().filter(|m| m.id != self.me).map(|m| (m.id, m.gossip)).collect();
+        live.sort();
+        let peers: Vec<SocketAddr> = live.into_iter().map(|(_, a)| a).take(super::store::MAX_PEERS).collect();
+        if peers.is_empty() || peers == self.peers_saved {
+            return;
+        }
+        if let Err(e) = self.cs.store.save_peers(&peers) {
+            eprintln!("k10s: mesh: cannot save peers: {e}");
+        }
+        self.peers_saved = peers;
     }
 
     /// Remembers a member's rpc address; a changed address (restart on another port) invalidates our links to it.
@@ -705,6 +749,11 @@ impl Mesh {
         if self.placement_due.is_some_and(|t| now >= t) {
             self.placement_due = None;
             self.cs.request_replace();
+        }
+        if self.peers_due.is_some_and(|t| now >= t) {
+            self.peers_due = None;
+            self.peers_last = now;
+            self.save_peers();
         }
         let (timeout, retry_origin) = match &self.fetch {
             Some(f) if f.cur.is_some() && now >= f.attempt_deadline => (true, None),
