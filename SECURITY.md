@@ -30,7 +30,8 @@ chose: the textbook setting for Spectre. k10s closes the cheap gaps; a shared ad
 boundary, so **one node (machine or VM) per mutually distrustful tenant remains the isolation boundary** for
 side channels.
 
-Mitigated by default (no measurable cost; numbers in the commit that introduced them):
+Mitigated by default (cost: JIT code without `br_table` is byte-for-byte unchanged; a host function gains a few
+register instructions, the clock functions ~2-3 ns per call):
 - **Guest memory accesses** (Spectre v1): every address is masked by data flow (`base + ((addr + off) & (S - 1))`),
   not by a bounds-check branch, so a mispredicted branch cannot steer a guest load outside its slot.
 - **`br_table`** (Spectre v1): small tables (≤ 8 target runs) compile to compare trees — no table load, no indirect
@@ -50,7 +51,8 @@ Mitigated by default (no measurable cost; numbers in the commit that introduced 
   timeouts, rate limits and latency logging keep useful precision. Trusted single-tenant nodes restore full
   resolution with `k10s node --timer-res-us 0` (k10-metal: `k10.timer_res_us=0`); any other value sets the step.
 
-Opt-in (costs time on every indirect branch):
+Opt-in (measured on an i7-7820HQ: a host call goes from ~3-6 ns to ~8-12 ns with `lfence`, ~13-15 ns with a
+retpoline; a jump-table dispatch from ~5 ns to ~8 ns / ~16 ns when predictable):
 - **Spectre v2 / branch target injection on generated code**: by default a workload can train the branch target
   buffer so that another workload's indirect branch on the same core speculatively runs a chosen target with the
   victim's registers. `k10s node --jit-indirect retpoline` (k10-metal: `k10.jit_indirect=retpoline`) routes every

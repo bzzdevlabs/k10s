@@ -312,8 +312,9 @@ fn host_module() -> (Module, u32, u32) {
     (mb.build(), with, without)
 }
 
-/// `br_table` dispatch loop over `n` distinct cases (power of two), index `i & (n-1)` (cyclic) or an LCG (random).
-fn brtable_module(n: usize, random: bool) -> (Module, u32) {
+/// `br_table` dispatch loop: `n` entries (power of two) over `m` cases (entry k → case k·m/n, `m + 1` runs with the
+/// default), index `i & (n-1)` (cyclic) or an LCG (random).
+fn brtable_module(n: usize, m: usize, random: bool) -> (Module, u32) {
     let mut mb = ModuleBuilder::new();
     let mut f = FuncBuilder::new(1, 1);
     f.locals(4); // 1 = i, 2 = acc, 3 = x (LCG), 4 = index
@@ -324,16 +325,16 @@ fn brtable_module(n: usize, random: bool) -> (Module, u32) {
         f.ops(&[LocalGet(1)]);
     }
     f.ops(&[Const(n as i64 - 1), And, LocalSet(4), Block]);
-    for _ in 0..n {
+    for _ in 0..m {
         f.op(Block);
     }
     f.op(LocalGet(4));
-    let depths: Vec<u32> = (0..n as u32).collect();
-    f.br_table(&depths, n as u32);
-    for k in 0..n {
+    let depths: Vec<u32> = (0..n).map(|k| (k * m / n) as u32).collect();
+    f.br_table(&depths, m as u32);
+    for k in 0..m {
         f.op(End);
         f.ops(&[LocalGet(2), LocalGet(2), Const(5), Shl, Xor, Const(2 * k as i64 + 1), Add, LocalSet(2)]);
-        f.op(Br((n - 1 - k) as u32));
+        f.op(Br((m - 1 - k) as u32));
     }
     f.ops(&[End, LocalGet(1), Const(1), Add, LocalSet(1), Br(0), End, End, LocalGet(2)]);
     let idx = mb.add_func(f);
@@ -341,17 +342,27 @@ fn brtable_module(n: usize, random: bool) -> (Module, u32) {
     (mb.build(), idx)
 }
 
-/// ns per iteration of [`brtable_module`] compiled with `opts`.
-fn brtable_ns(m: &Module, f: u32, iters: i64, opts: &CompileOptions) -> f64 {
-    let jit = compile_with(m, opts).unwrap();
+/// Min ns per iteration of [`brtable_module`] under each of `opts`, sampled round-robin (robust to machine noise).
+fn brtable_ns(m: &Module, f: u32, opts: &[CompileOptions]) -> Vec<f64> {
+    let (iters, rounds) = (2_000_000i64, 15);
+    let jits: Vec<CompiledModule> = opts.iter().map(|o| compile_with(m, o).unwrap()).collect();
     let mut inst = Inst::new(m, 12);
-    let (t, _) = best_of(5, || inst.call(&jit, f, &[iters]));
-    t.as_secs_f64() * 1e9 / iters as f64
+    let mut best = vec![f64::MAX; jits.len()];
+    for _ in 0..rounds {
+        for (b, jit) in best.iter_mut().zip(&jits) {
+            let t = Instant::now();
+            black_box(inst.call(jit, f, &[iters]).unwrap());
+            *b = b.min(t.elapsed().as_secs_f64() * 1e9 / iters as f64);
+        }
+    }
+    best
 }
+
+/// (entries, cases) of the br_table bench.
+const BRTABLE_SHAPES: [(usize, usize); 10] = [(2, 2), (4, 3), (4, 4), (8, 5), (8, 6), (8, 8), (16, 16), (64, 4), (64, 64), (256, 256)];
 
 fn brtable_bench() {
     use k10_jit::IndirectBranch::*;
-    let iters = 10_000_000i64;
     let d = CompileOptions::default();
     let modes = [
         ("default", d),
@@ -360,18 +371,19 @@ fn brtable_bench() {
         ("table+lfence", CompileOptions { br_tree_max: 0, indirect: Lfence, ..d }),
         ("table+retpoline", CompileOptions { br_tree_max: 0, indirect: Retpoline, ..d }),
     ];
+    let opts: Vec<CompileOptions> = modes.iter().map(|m| m.1).collect();
     println!("\nbr_table dispatch loop, ns/iteration (default = br_tree_max {}):", d.br_tree_max);
-    print!("{:<14}", "cases");
+    print!("{:<20}", "entries/cases");
     for (name, _) in &modes {
         print!(" {name:>16}");
     }
     println!();
     for random in [false, true] {
-        for n in [2usize, 4, 8, 16, 64, 256] {
-            let (m, f) = brtable_module(n, random);
-            print!("{:<14}", format!("{n} {}", if random { "random" } else { "cyclic" }));
-            for (_, o) in &modes {
-                print!(" {:>16.2}", brtable_ns(&m, f, iters, o));
+        for (n, c) in BRTABLE_SHAPES {
+            let (m, f) = brtable_module(n, c, random);
+            print!("{:<20}", format!("{n}/{c} {}", if random { "random" } else { "cyclic" }));
+            for t in brtable_ns(&m, f, &opts) {
+                print!(" {t:>16.2}");
             }
             println!();
         }
