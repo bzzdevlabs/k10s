@@ -1,3 +1,5 @@
+<img src="logo/ten.svg" alt="Ten logo" width="72" align="right">
+
 # Ten — the k10s workload language (v0)
 
 Ten is a small systems language: C-level control, typed pointers and structs, no GC, no runtime, no hidden costs.

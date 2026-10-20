@@ -1,0 +1,14 @@
+**
+!package.json
+!README.md
+!CHANGELOG.md
+!LICENSE
+!language-configuration/**
+!syntaxes/**
+!icons/ten.svg
+!icons/k10s.svg
+!icons/folder-*.svg
+!NOTICE
+!icons/extension.png
+!src/**
+!dist/checker.wasm
