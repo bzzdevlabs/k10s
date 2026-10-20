@@ -15,6 +15,8 @@ In scope — please report:
   function it did not import, or corrupts the runtime (registers, stacks).
 - Any way for one workload to crash, hang or starve the node or other workloads (resource exhaustion through host
   functions, ingress, the admin API or the peer protocol).
+- Any way for a service to `call` a service its manifest `calls` allowlist does not grant, or to tell such a
+  service from one that does not exist.
 - Memory-safety bugs in the node runtime, the mesh, or the bare-metal kernel.
 
 Out of scope by design (documented in `docs/DESIGN.md`):

@@ -177,6 +177,13 @@ echo "    services placed on hosted nodes: $HSVC"
 
 echo "== every service through every ingress"
 serve_all "converged"
+PROBE_HOST=$(st "$H1" "c['placement']['probe'][0]")
+echo "== calls allowlist (probe may call hello only; enforced by probe's node: $PROBE_HOST, guest is $GUEST_ID)"
+for port in "$H1" "$H2" "$H3"; do
+    expect "probe -> hello (granted) via :$port" "http://127.0.0.1:$port/probe/hello/" 200 '^probe -> hello from k10-metal$'
+    expect "probe -> echo (denied) via :$port" "http://127.0.0.1:$port/probe/echo/x" 502 '^call failed: -1$'
+    expect "probe -> nosuch (unknown) via :$port" "http://127.0.0.1:$port/probe/nosuch" 502 '^call failed: -1$'
+done
 head -c 102400 /dev/zero | tr '\0' x > "$OUT/100k.txt"
 for port in "$H1" "$H2" "$H3"; do
     n=$(curl -s -m 10 --data-binary "@$OUT/100k.txt" "127.0.0.1:$port/echo/" | wc -c)

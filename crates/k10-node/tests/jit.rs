@@ -217,9 +217,9 @@ fn host_traps_abort_the_invocation() {
 fn calls_between_jit_services() {
     let node = Node::start(jit(2)).unwrap();
     node.apply(bundle(vec![
-        svc("front", &demo::caller("back")),
+        svc("front", &demo::caller("back")).calls(&["back"]),
         svc("back", &demo::path_echo()).max(1),
-        svc("loop", &demo::call_loop("echo")),
+        svc("loop", &demo::call_loop("echo")).calls(&["echo"]),
         svc("echo", &demo::echo()),
     ]))
     .unwrap();

@@ -43,7 +43,10 @@ guarantee all three:
 - **Control flow**: the IR has only structured control flow and direct calls, so no jump can leave the code the
   platform itself generated.
 - **Authority**: the only way out is a closed table of host calls. No syscalls, no filesystem, no sockets, no PIDs:
-  a workload cannot even *name* anything it was not given (capability model; replaces namespaces).
+  a workload cannot even *name* anything it was not given (capability model; replaces namespaces). Other services
+  are named, so the manifest grants them explicitly: a service may `call` only the services in its `calls`
+  allowlist (default: none). The calling node enforces it, and a denied call looks exactly like a call to a service
+  that does not exist.
 
 Result: thousands of workloads share **one** address space and one OS thread per core. Switching between them is a
 function call. This is the decisive change; every other gain follows from it.

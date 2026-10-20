@@ -89,6 +89,11 @@ functional() {
     expect "counter 1" "$U/counter" 200 '^1$'
     expect "counter 2 (kv persisted)" "$U/counter" 200 '^2$'
     expect "chain (call echo)" "$U/chain" 200 '^chain -> ping from chain$'
+    # `calls` allowlist: probe may call hello only; anything else fails like an unknown service.
+    expect "probe -> hello (granted)" "$U/probe/hello/" 200 '^probe -> hello from k10-metal$'
+    expect "probe -> echo (denied: exists, not granted)" "$U/probe/echo/x" 502 '^call failed: -1$'
+    expect "probe -> probe (denied: self)" "$U/probe/probe/hello/" 502 '^call failed: -1$'
+    expect "probe -> nosuch (unknown)" "$U/probe/nosuch" 502 '^call failed: -1$'
     expect "trap -> 500" "$U/trap" 500 'Unreachable'
     expect "instcount (init ran)" "$U/instcount" 200 '^1001$'
     expect "instcount (instance state kept)" "$U/instcount" 200 '^1002$'
@@ -165,7 +170,7 @@ if boot "$MEM" out/bundle.k10b "$OUT/serial-${E// /-}.log" "$CMD"; then
     expect "older version refused" "$U/_k10s/apply" 400 'older' -X POST --data-binary @out/bundle.k10b
     expect "garbage refused" "$U/_k10s/apply" 400 'apply failed' -X POST --data-binary 'not a bundle'
     target/release/mkbundle -o "$OUT/v3.k10b" --version 3 2>/dev/null
-    expect "apply v3 (all services back)" "$U/_k10s/apply" 200 '"version":3,"services":18' -X POST --data-binary "@$OUT/v3.k10b"
+    expect "apply v3 (all services back)" "$U/_k10s/apply" 200 '"version":3,"services":19' -X POST --data-binary "@$OUT/v3.k10b"
     expect "counter state kept across redeploys" "$U/counter" 200 '^3$'
 
     echo "== [$E] call waiting for a busy callee (max_instances = 1)"
@@ -187,7 +192,7 @@ if boot "$MEM" out/bundle.k10b "$OUT/serial-${E// /-}.log" "$CMD"; then
     fi
     expect "spin instance replaced after traps" "$U/_k10s/status" 200 '"name":"spin"[^}]*"instances":0[^}]*"interrupted":2'
     target/release/mkbundle -o "$OUT/v5.k10b" --version 5 2>/dev/null
-    expect "apply v5 (back to all services)" "$U/_k10s/apply" 200 '"version":5,"services":18' -X POST --data-binary "@$OUT/v5.k10b"
+    expect "apply v5 (back to all services)" "$U/_k10s/apply" 200 '"version":5,"services":19' -X POST --data-binary "@$OUT/v5.k10b"
 
     if [[ -x $LOADGEN ]]; then
         echo "== [$E] keep-alive load (loadgen, 64 connections, 3 s)"

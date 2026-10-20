@@ -321,6 +321,8 @@ struct Fiber {
     depth: u8,
     deadline: u64,
     calls: u32,
+    /// Service of the current job, whose `calls` `on_call` checks (valid while the job runs, like [`Job::svc`]).
+    caller: *const ServiceRt,
     rng_seed: u64,
     /// Own preemption word (interpreter).
     preempt: AtomicUsize,
@@ -661,6 +663,11 @@ const STACK_KEEP: usize = 64 << 10;
 // Scheduler
 // ------------------------------------------------------------------------------------------------------------------
 
+/// Result for an unknown service, and for a `call` the caller's allowlist denies (must be indistinguishable).
+fn unknown_service(name: &[u8]) -> CallResult {
+    CallResult::error(CALL_UNKNOWN, format!("unknown service `{}`", String::from_utf8_lossy(name)))
+}
+
 fn split_target(t: &str) -> (&str, &str) {
     let rest = t.strip_prefix('/').unwrap_or(t);
     let end = rest.find(['/', '?']).unwrap_or(rest.len());
@@ -934,6 +941,7 @@ impl Shard {
             depth: 0,
             deadline: 0,
             calls: 0,
+            caller: ptr::null(),
             rng_seed: 0,
             preempt: AtomicUsize::new(0),
             preempt_word: ptr::null(),
@@ -999,6 +1007,7 @@ impl Shard {
             (*f).depth = job.depth;
             (*f).deadline = job.deadline;
             (*f).calls = 0;
+            (*f).caller = job.svc;
             (*f).rng_seed = wyrand(&mut self.rng);
             (*f).call_result = None;
             let front = job.depth > 0;
@@ -1097,17 +1106,24 @@ impl Shard {
         let f = self.fibers[fid as usize];
         bump(&self.me.stats.calls, 1);
         // SAFETY: the fiber is suspended (blocked in `call`).
-        let (depth, pdeadline, seq, calls) = unsafe {
+        let (depth, pdeadline, seq, calls, caller) = unsafe {
             (*f).calls += 1;
-            ((*f).depth, (*f).deadline, (*f).seq, (*f).calls)
+            ((*f).depth, (*f).deadline, (*f).seq, (*f).calls, (*f).caller)
         };
         let cfg = &self.node.cfg;
+        let split = target.iter().position(|&c| c == b'/');
+        let name_len = split.unwrap_or(target.len());
+        // SAFETY: `caller` is the service of the job this fiber runs (see `Fiber::caller`).
+        let allowed = unsafe { (*caller).spec.may_call(&target[..name_len]) };
         let res = if depth >= cfg.max_call_depth {
             Err(CallResult::error(CALL_UNAVAILABLE, "call depth limit"))
         } else if calls > cfg.max_calls_per_invocation {
             Err(CallResult::error(CALL_UNAVAILABLE, "too many calls in one invocation"))
+        } else if !allowed {
+            // Denied = unknown, decided before any lookup or routing: whether the name exists changes nothing.
+            Err(unknown_service(&target[..name_len]))
         } else {
-            let (name, path) = match target.iter().position(|&c| c == b'/') {
+            let (name, path) = match split {
                 Some(p) => (target[..p].to_vec(), target[p..].to_vec()),
                 None => (target, Vec::new()),
             };
@@ -1153,7 +1169,7 @@ impl Shard {
     ) -> Result<(), CallResult> {
         let svc = std::str::from_utf8(name).ok().and_then(|n| self.table.get(n)).map(|a| a as *const Arc<ServiceRt>);
         let Some(svc) = svc else {
-            return Err(CallResult::error(CALL_UNKNOWN, format!("unknown service `{}`", String::from_utf8_lossy(name))));
+            return Err(unknown_service(name));
         };
         // SAFETY: the entry lives in `self.table`, which is only replaced by `check_table`; `dispatch` clones the Arc
         // before it could call that.

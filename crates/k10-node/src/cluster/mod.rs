@@ -779,6 +779,7 @@ mod tests {
                 cpu_ms: 100,
                 fresh: false,
                 config: vec![],
+                calls: vec![],
             })
             .collect();
         let m = Manifest { version: 1, services };

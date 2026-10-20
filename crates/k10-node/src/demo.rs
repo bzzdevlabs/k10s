@@ -219,6 +219,40 @@ pub fn call_loop(target: &str) -> Module {
     )
 }
 
+/// `call_probe`: `/<probe>/<target>` with body `N` (default 1) calls `<target>` N times and answers `<status>
+/// <call_resp_len> <ns>` (last call; all N): what a workload observes of a call. The path must not be empty.
+pub fn call_probe() -> Module {
+    let mut m = Mb::new(16);
+    emit_const(&mut m.mb, 64, b" ");
+    m.finish(
+        |f, i, wd, pd| {
+            f.locals(5); // 0 = target len, 1 = status, 2 = n, 3 = k, 4 = t0 / ns
+            f.const_(PATH_BUF).const_(256).call(i.req_path).local_set(0);
+            f.local_get(0).const_(256).local_get(0).const_(256).lt_s().select().local_set(0);
+            f.local_get(0).const_(1).sub().local_set(0); // without the leading '/'
+            f.call(i.input_len).local_set(2);
+            f.local_get(2).const_(20).local_get(2).const_(20).lt_s().select().local_set(2);
+            f.const_(IO_BUF).const_(0).local_get(2).call(i.input_read).drop();
+            f.const_(IO_BUF).local_get(2).call(pd).local_set(2);
+            f.local_get(2).eqz().if_().const_(1).local_set(2).end();
+            f.call(i.now_ns).local_set(4);
+            f.block().loop_();
+            f.local_get(3).local_get(2).ge_s().br_if(1);
+            f.const_(PATH_BUF + 1).local_get(0).const_(IO_BUF).const_(0).call(i.call).local_set(1);
+            f.local_get(3).const_(1).add().local_set(3);
+            f.br(0);
+            f.end().end();
+            f.call(i.now_ns).local_get(4).sub().local_set(4);
+            f.local_get(1).call(wd);
+            f.const_(64).const_(1).call(i.output_write).drop();
+            f.call(i.call_resp_len).call(wd);
+            f.const_(64).const_(1).call(i.output_write).drop();
+            f.local_get(4).call(wd);
+        },
+        None,
+    )
+}
+
 /// `kv`: `GET /<key>` → value (404 if absent), `POST|PUT /<key>` body → stores, `DELETE /<key>` → 200/404.
 pub fn kv() -> Module {
     let m = Mb::new(16);
@@ -431,6 +465,7 @@ mod tests {
             ("path", path_echo()),
             ("caller", caller("echo")),
             ("call_loop", call_loop("empty")),
+            ("call_probe", call_probe()),
             ("kv", kv()),
             ("counter", counter()),
             ("memcount", memcount(true)),

@@ -23,6 +23,7 @@ fn manifest(services: usize, replicas: u32, mem_log2: u8) -> Manifest {
                 cpu_ms: 100,
                 fresh: false,
                 config: vec![],
+                calls: vec![],
             })
             .collect(),
     }
