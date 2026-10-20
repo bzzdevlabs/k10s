@@ -280,3 +280,50 @@ fn report_long_runs() {
     let (b, p) = steady_bandwidth(500, 60);
     println!("REPORT steady state N=500: {b:.0} B/s/node ({p:.1} pkt/s/node)");
 }
+
+#[test]
+fn mixed_placement_versions_use_the_lowest_until_all_upgrade() {
+    use k10_mesh::{instance_bytes, place, Manifest, ServiceSpec};
+    let svc = |i: usize| ServiceSpec {
+        name: format!("s{i}"),
+        code_hash: [0; 32],
+        replicas: 1,
+        mem_log2: 12,
+        max_instances: 1,
+        cpu_ms: 1,
+        fresh: false,
+        config: vec![],
+        calls: vec![],
+    };
+    // 5 nodes × room for 10 instances of 4 KiB + tail (20 under version 1, which charges 4 KiB): 60 services.
+    let m = Manifest { version: 1, services: (0..60).map(svc).collect() };
+    let cap = 10 * instance_bytes(&svc(0));
+    let views = |s: &Sim| -> Vec<_> {
+        s.up_nodes()
+            .iter()
+            .map(|&i| {
+                let mut live = s.nodes[i].gossip.live_members();
+                live.iter_mut().for_each(|x| x.capacity.mem_bytes = cap);
+                place(&m, &live)
+            })
+            .collect()
+    };
+    let mut s = sim(0.0, 21);
+    let ids = s.add_cluster(4);
+    s.placement_version = 1;
+    let old = s.add_node();
+    s.join(old, &[ids[0]]);
+    s.run_until_true(60_000, 50, |s| s.converged()).unwrap();
+    let v = views(&s);
+    assert!(v.windows(2).all(|w| w[0] == w[1]), "every member computes the same placement");
+    assert_eq!(v[0].placed(), 60, "version 1 while an old node is live");
+    // The old node is replaced by an upgraded one: everyone switches to version 2.
+    s.placement_version = k10_mesh::PLACEMENT_VERSION;
+    s.crash(old);
+    s.run_for(1_000);
+    s.restart(old, &[ids[0]]);
+    s.run_until_true(60_000, 50, |s| s.converged()).unwrap();
+    let v = views(&s);
+    assert!(v.windows(2).all(|w| w[0] == w[1]));
+    assert_eq!(v[0].placed(), 50, "version 2 charges the tail page");
+}

@@ -93,6 +93,8 @@ pub struct Sim {
     /// When true, every event is appended to `log` as `(time, node index, event)`.
     pub record_events: bool,
     pub log: Vec<(u64, usize, Event)>,
+    /// Placement version advertised by nodes created from now on.
+    pub placement_version: u8,
     queue: BinaryHeap<Scheduled>,
     seq: u64,
     rng: Rng,
@@ -111,6 +113,7 @@ impl Sim {
             counters: SimCounters::default(),
             record_events: false,
             log: Vec::new(),
+            placement_version: crate::PLACEMENT_VERSION,
             queue: BinaryHeap::new(),
             seq: 0,
             rng,
@@ -124,7 +127,7 @@ impl Sim {
         let id = NodeId(self.rng.next_u64());
         let rpc = Addr::new(addr.ip(), 7947);
         let http = Addr::new(addr.ip(), 8080);
-        let m = Member::new(id, addr, rpc, http, Capacity { mem_bytes: 8 << 30, cores: 4 });
+        let m = Member { placement: self.placement_version, ..Member::new(id, addr, rpc, http, Capacity { mem_bytes: 8 << 30, cores: 4 }) };
         Gossip::new(m, self.cfg.gossip.clone(), self.rng.next_u64())
     }
 

@@ -230,7 +230,7 @@ pub(crate) struct Mesh {
     ranking: Arc<HashMap<String, Vec<NodeId>>>,
     fetch: Option<Fetch>,
     placement_due: Option<u64>,
-    live_fp: Vec<(NodeId, u64, u32)>,
+    live_fp: Vec<(NodeId, u64, u32, u8)>,
     t0: u64,
     last_view: u64,
     view_dirty: bool,
@@ -516,7 +516,8 @@ impl Mesh {
         }
         if membership {
             let live = self.udp.gossip().live_members();
-            let mut fp: Vec<(NodeId, u64, u32)> = live.iter().map(|m| (m.id, m.capacity.mem_bytes, m.capacity.cores)).collect();
+            let mut fp: Vec<(NodeId, u64, u32, u8)> =
+                live.iter().map(|m| (m.id, m.capacity.mem_bytes, m.capacity.cores, m.placement)).collect();
             fp.sort();
             if self.peers_due.is_none() {
                 self.peers_due = Some(mono_ns().max(self.peers_last + PEERS_SAVE_NS));

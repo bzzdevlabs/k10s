@@ -984,7 +984,8 @@ impl Gossip {
                 || e.m.gossip != m.gossip
                 || e.m.rpc != m.rpc
                 || e.m.http != m.http
-                || e.m.capacity != m.capacity;
+                || e.m.capacity != m.capacity
+                || e.m.placement != m.placement;
             e.m = Member { state: MemberState::Alive, ..m };
             e.susp = None;
             let snapshot = e.m.clone();
