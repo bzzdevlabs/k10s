@@ -1,10 +1,13 @@
-# Toolchain pins for every workflow: Rust (+musl, +x86_64-unknown-none), optional Go and QEMU/KVM.
+# Toolchain pins for every workflow: Rust (+musl, +x86_64-unknown-none), GNU binutils, optional Go and QEMU/KVM.
 name: k10s toolchains
 description: Pinned Rust toolchain with the musl and x86_64-unknown-none targets; optional Go and QEMU/KVM
 inputs:
   rust:
     description: Rust toolchain
     default: "1.98.1"
+  binutils:
+    description: GNU binutils version whose objdump the k10-jit encoder/SFI assurance tests run against
+    default: "2.42"
   go:
     description: Install Go (benchmark tools) ("true" / "false")
     default: "false"
@@ -26,6 +29,15 @@ runs:
         rustup target add --toolchain "$RUST" x86_64-unknown-linux-musl x86_64-unknown-none
         rustup default "$RUST"
         rustc -Vv
+    - name: binutils ${{ inputs.binutils }}
+      shell: bash
+      env:
+        BINUTILS: ${{ inputs.binutils }}
+      run: |
+        command -v objdump >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends binutils; }
+        v=$(objdump --version | head -1)
+        echo "$v"
+        [[ $v == *" $BINUTILS"* ]] || { echo "::error::objdump is '$v', pinned $BINUTILS (.github/actions/toolchains)"; exit 1; }
     - name: Go ${{ inputs.go-version }}
       if: inputs.go == 'true'
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0

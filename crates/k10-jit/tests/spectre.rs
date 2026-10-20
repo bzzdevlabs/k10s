@@ -12,8 +12,7 @@ use Reg::*;
 const MODES: [IndirectBranch; 3] = [IndirectBranch::Jump, IndirectBranch::Lfence, IndirectBranch::Retpoline];
 /// Allocatable registers (never r11, rsp, r13-r15).
 const ALLOCATABLE: [Reg; 11] = [Rsi, Rdi, R8, R9, R10, Rbx, Rbp, R12, Rax, Rcx, Rdx];
-/// `call 1f; 2: pause; lfence; jmp 2b; 1: mov [rsp], r11; ret`.
-const THUNK: [u8; 17] = [0xE8, 7, 0, 0, 0, 0xF3, 0x90, 0x0F, 0xAE, 0xE8, 0xEB, 0xF9, 0x4C, 0x89, 0x1C, 0x24, 0xC3];
+use common::RETPOLINE_THUNK as THUNK;
 
 fn opts(indirect: IndirectBranch, br_tree_max: u16) -> CompileOptions {
     CompileOptions { indirect, br_tree_max, ..CompileOptions::default() }

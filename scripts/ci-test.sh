@@ -20,6 +20,8 @@ run() {
 }
 
 unit() { # [--target TRIPLE]
+    export K10_REQUIRE_OBJDUMP=1 # the encoder/SFI assurance tests must run, not skip
+    objdump --version | head -1
     run env K10S_BACKEND=jit cargo test --release --locked "$@" "${EXTRA[@]}" "${CRATES[@]}" -- "${SKIP[@]}"
     run env K10S_BACKEND=interp cargo test --release --locked "$@" "${EXTRA[@]}" -p k10-node -p k10s -- "${SKIP[@]}"
 }

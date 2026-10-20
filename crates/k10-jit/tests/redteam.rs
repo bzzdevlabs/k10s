@@ -9,6 +9,8 @@
 //! result/trap and the full memory. Any escape or divergence fails the test.
 
 mod common;
+#[path = "xdis/sfi.rs"]
+mod sfi;
 mod xdis;
 use common::*;
 use k10_ir::{new_memory, FuncBuilder, Host, Interp, Module, ModuleBuilder, Op, Trap};
@@ -33,17 +35,32 @@ fn configs() -> Vec<CompileOptions> {
     ]
 }
 
-/// Independent check of the machine code by the objdump-based SFI verifier (tests/xdis/sfi.rs), once per module/config.
-fn sfi_check(m: &Module, opts: &CompileOptions) {
-    static SEEN: std::sync::Mutex<Vec<(Vec<u8>, String)>> = std::sync::Mutex::new(Vec::new());
-    let Some(od) = xdis::objdump() else { return };
-    let key = (k10_ir::encode(m), format!("{opts:?}"));
-    if SEEN.lock().unwrap().contains(&key) {
-        return;
-    }
-    let b = k10_jit::compile_blob(m, opts).unwrap();
-    xdis::verify_compiled(&od, &[(&b, opts.indirect)]).unwrap_or_else(|e| panic!("SFI verifier ({opts:?}): {e}"));
-    SEEN.lock().unwrap().push(key);
+type SfiQueue = (std::collections::HashSet<(Vec<u8>, String)>, Vec<(Module, CompileOptions)>);
+
+thread_local! {
+    /// Modules the running test compiled, deduplicated, verified in one batch by [`sfi_verify`].
+    static SFI: std::cell::RefCell<SfiQueue> = Default::default();
+}
+
+/// Queues `m` compiled with `opts` for the objdump-based SFI verifier (tests/xdis/sfi.rs).
+fn sfi_add(m: &Module, opts: &CompileOptions) {
+    SFI.with_borrow_mut(|(seen, all)| {
+        if seen.insert((k10_ir::encode(m), format!("{opts:?}"))) {
+            all.push((m.clone(), *opts));
+        }
+    });
+}
+
+/// Verifies everything the test queued in one objdump batch.
+fn sfi_verify() {
+    let all = SFI.with_borrow_mut(|(seen, all)| {
+        seen.clear();
+        std::mem::take(all)
+    });
+    let Some(od) = xdis::tool("redteam") else { return };
+    let blobs: Vec<_> = all.iter().map(|(m, o)| k10_jit::compile_blob(m, o).unwrap()).collect();
+    let refs: Vec<_> = all.iter().zip(&blobs).map(|((m, o), b)| (m, b, o.indirect)).collect();
+    sfi::verify_compiled(&od, &refs).unwrap_or_else(|e| panic!("SFI verifier: {e}"));
 }
 
 /// Compiles `m` under every config, runs `func(args)` with the JIT (canary-guarded, memory size `2^k`) and the
@@ -53,7 +70,7 @@ fn contain(m: &Module, func: u32, args: &[i64], k: u8) {
     let it = Interp::new(m).unwrap_or_else(|e| panic!("invalid attack module: {e}"));
     for opts in configs() {
         let jit = compile_with(m, &opts).unwrap_or_else(|e| panic!("compile failed: {e}"));
-        sfi_check(m, &opts);
+        sfi_add(m, &opts);
         let mut im = new_memory(m, k);
         let mut gm = GuardedMem::for_module(m, k);
         let ri = it.invoke(&mut im, k, &mut NoHost, func, args);
@@ -117,6 +134,7 @@ fn fold_limit_and_2e31_boundaries() {
             }
         }
     }
+    sfi_verify();
 }
 
 /// A module compiled for a big `min_mem_log2` but invoked with a smaller memory must refuse to run (the folded
@@ -132,7 +150,7 @@ fn fold_rejects_undersized_memory() {
     let m = mb.build();
     for opts in configs() {
         let jit = compile_with(&m, &opts).unwrap();
-        sfi_check(&m, &opts);
+        sfi_add(&m, &opts);
         for k in [12u8, 16, 19] {
             let mut gm = GuardedMem::new(k); // mask = 2^k - 1 < 2^20 - 1
             let (r, _) = run_jit(&jit, &m, &mut gm, &mut NoHost, f, &[], RunOpts::default());
@@ -141,6 +159,7 @@ fn fold_rejects_undersized_memory() {
             assert!(gm.mem().iter().all(|&b| b == 0), "no write on refusal (k {k})");
         }
     }
+    sfi_verify();
 }
 
 // --------------------------------------------------------------------- register/dynamic address + big offset
@@ -183,6 +202,7 @@ fn dynamic_address_max_offset() {
             }
         }
     }
+    sfi_verify();
 }
 
 /// Every width at every straddling position (0..=8 bytes past the end) with constant, register and
@@ -218,6 +238,7 @@ fn straddle_tail_all_widths() {
             }
         }
     }
+    sfi_verify();
 }
 
 // --------------------------------------------------------------------------------- bulk operation overflow
@@ -262,6 +283,7 @@ fn bulk_op_overflow() {
             }
         }
     }
+    sfi_verify();
 }
 
 // --------------------------------------------------------------------------------------- br_table bounds
@@ -315,6 +337,7 @@ fn br_table_jump_table_bounds() {
             contain(&m, idx, &[i], 12);
         }
     }
+    sfi_verify();
 }
 
 // ---------------------------------------------------------------------------- max params / locals / frames
@@ -342,6 +365,7 @@ fn max_params_255() {
     args[254] = i64::MAX;
     args[127] = -1;
     contain(&m, idx, &args, 12);
+    sfi_verify();
 }
 
 /// A near-maximal number of zero-initialized locals (`rep stosq` prologue, ~0.5 MiB frame): the frame stays
@@ -363,6 +387,7 @@ fn many_locals_rep_stosq() {
         let r = run_on_big_stack(&m, idx, &[0x55]);
         assert!(matches!(r, Ok(Some(0)) | Err(Trap::StackOverflow)), "nloc {nloc}: {r:?}");
     }
+    sfi_verify();
 }
 
 /// Deep structured nesting (near MAX_NESTING blocks) must compile and run, producing the same result as the
@@ -387,6 +412,7 @@ fn deep_nesting() {
         contain(&m, idx, &[0], 12);
         contain(&m, idx, &[1], 12);
     }
+    sfi_verify();
 }
 
 /// Maximum operand-stack height (1024) built from locals, then combined down: stresses spill slots.
@@ -409,6 +435,7 @@ fn deep_operand_stack() {
     contain(&m, idx, &[1], 12);
     contain(&m, idx, &[-1], 12);
     contain(&m, idx, &[0x0001_0001_0001_0001], 12);
+    sfi_verify();
 }
 
 /// Deep recursion with a > 4 KiB frame per call (the big-frame prologue path with the explicit wrap check):
@@ -428,7 +455,7 @@ fn big_frame_recursion_overflows_cleanly() {
     // A deep recursion on a modest stack: expect StackOverflow, canaries intact.
     let det = CpuFeatures::detect();
     let jit = compile_with(&m, &CompileOptions { features: det, max_pinned: 6, ..CompileOptions::default() }).unwrap();
-    sfi_check(&m, &CompileOptions { features: det, max_pinned: 6, ..CompileOptions::default() });
+    sfi_add(&m, &CompileOptions { features: det, max_pinned: 6, ..CompileOptions::default() });
     on_thread(2 << 20, || {
         let (lo, _) = stack_bounds();
         let mut gm = GuardedMem::for_module(&m, 12);
@@ -445,6 +472,7 @@ fn big_frame_recursion_overflows_cleanly() {
         gm.check_canaries();
         assert_eq!(r, Err(Trap::StackOverflow));
     });
+    sfi_verify();
 }
 
 // ----------------------------------------------------------------------------- call arity / arg shuffles
@@ -473,6 +501,7 @@ fn call_arity_many_args() {
     let m = mb.build();
     contain(&m, caller, &[3, 100], 12);
     contain(&m, caller, &[i64::MAX, i64::MIN], 12);
+    sfi_verify();
 }
 
 /// Host call taking all 5 arguments where the arguments are the live pinned locals in registers that overlap the
@@ -502,7 +531,7 @@ fn host_arg_shuffle_cycle() {
     let it = Interp::new(&m).unwrap();
     for opts in configs() {
         let jit = compile_with(&m, &opts).unwrap();
-        sfi_check(&m, &opts);
+        sfi_add(&m, &opts);
         let args = [1i64, 2, 4, 8, 16];
         let mut im = new_memory(&m, 12);
         let mut gm = GuardedMem::for_module(&m, 12);
@@ -512,6 +541,7 @@ fn host_arg_shuffle_cycle() {
         assert_eq!(ri, rj, "opts {opts:?}");
         assert_eq!(rj, Ok(Some(31)));
     }
+    sfi_verify();
 }
 
 // --------------------------------------------------------------------------------- div / shift edge cases
@@ -551,6 +581,7 @@ fn div_rem_edges() {
             }
         }
     }
+    sfi_verify();
 }
 
 // ----------------------------------------------------------------------------------------------- helpers
@@ -564,17 +595,20 @@ fn on_thread<T: Send>(size: usize, f: impl FnOnce() -> T + Send) -> T {
 fn run_on_big_stack(m: &Module, func: u32, args: &[i64]) -> Result<Option<i64>, Trap> {
     let m = m.clone();
     let args = args.to_vec();
+    let det = CpuFeatures::detect();
+    let configs = [
+        CompileOptions { features: det, max_pinned: 6, ..CompileOptions::default() },
+        CompileOptions { features: det, max_pinned: 0, indirect: IndirectBranch::Retpoline, br_tree_max: 0 },
+    ];
+    for opts in &configs {
+        sfi_add(&m, opts); // on this thread: the queue is per test thread
+    }
     on_thread(64 << 20, move || {
-        let det = CpuFeatures::detect();
         let it = Interp::new(&m).unwrap();
         let k = m.min_mem_log2;
         let mut res = None;
-        for opts in [
-            CompileOptions { features: det, max_pinned: 6, ..CompileOptions::default() },
-            CompileOptions { features: det, max_pinned: 0, indirect: IndirectBranch::Retpoline, br_tree_max: 0 },
-        ] {
+        for opts in configs {
             let jit = compile_with(&m, &opts).unwrap();
-            sfi_check(&m, &opts);
             let mut im = new_memory(&m, k);
             let mut gm = GuardedMem::for_module(&m, k);
             let ri = it.invoke(&mut im, k, &mut NoHost, func, &args);

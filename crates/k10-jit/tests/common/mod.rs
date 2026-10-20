@@ -8,6 +8,10 @@ use k10_jit::{CompiledModule, HostFn, VmCtx};
 use std::ffi::c_void;
 use std::sync::atomic::Ordering;
 
+/// The retpoline thunk of docs/JIT-ABI.md: `call 1f; 2: pause; lfence; jmp 2b; 1: mov [rsp], r11; ret`.
+pub const RETPOLINE_THUNK: [u8; 17] =
+    [0xE8, 7, 0, 0, 0, 0xF3, 0x90, 0x0F, 0xAE, 0xE8, 0xEB, 0xF9, 0x4C, 0x89, 0x1C, 0x24, 0xC3];
+
 /// Canary bytes placed before and after the instance region `[base, base + S + 8)`.
 pub const CANARY_LEN: usize = 4096;
 const CANARY: u8 = 0xA5;
