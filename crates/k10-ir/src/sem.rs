@@ -372,23 +372,36 @@ pub fn store(mem: &mut [u8], e: usize, width: usize, v: i64) {
 
 /// Range check shared by `mem.copy`, `mem.fill` and host-call buffers: returns the masked start `a & (S-1)` if
 /// `n ≤ S` and `(a & (S-1)) + n ≤ S` (as u64), else `MemOutOfBounds`. `size = S`.
+///
+/// Not speculation-safe on its own: code that then indexes with `n` must use [`check_span`] instead.
 #[inline(always)]
 pub fn check_range(a: i64, n: i64, size: u64) -> Result<usize, Trap> {
+    check_span(a, n, size).map(|(d, _)| d)
+}
+
+/// [`check_range`] that also returns the length, **speculation-safe** (Spectre v1): `Ok((start, len))` with
+/// `start = a & (S-1)` and `len = n`, where `len` is additionally masked by a branch-free comparison
+/// ([`crate::nospec::mask_le`]) so that code running behind a mispredicted check sees `len = 0` (and an in-slot
+/// `start`), never the guest's out-of-range length. Every host access to instance memory at a guest-chosen
+/// `(ptr, len)` goes through this. `size = S` (a power of two).
+#[inline(always)]
+pub fn check_span(a: i64, n: i64, size: u64) -> Result<(usize, usize), Trap> {
     let d = (a as u64) & (size - 1);
     let n = n as u64;
-    if n > size || d + n > size {
-        Err(Trap::MemOutOfBounds)
-    } else {
-        Ok(d as usize)
+    // d < S, so `S - d` does not wrap, and `n ≤ S - d` ⇔ (`n ≤ S` and `d + n ≤ S`).
+    let m = crate::nospec::mask_le(n, size - d);
+    if m == 0 {
+        return Err(Trap::MemOutOfBounds);
     }
+    Ok((d as usize, (n & m) as usize))
 }
 
 /// `mem.copy(dst, src, n)` (memmove semantics). `size = S`; `mem` holds at least `S` bytes.
 #[inline]
 pub fn mem_copy(mem: &mut [u8], size: u64, dst: i64, src: i64, n: i64) -> Result<(), Trap> {
-    let d = check_range(dst, n, size)?;
-    let s = check_range(src, n, size)?;
-    let n = n as usize;
+    let (d, nd) = check_span(dst, n, size)?;
+    let (s, ns) = check_span(src, n, size)?;
+    let n = nd & ns; // = n, or 0 behind a mispredicted check
     mem.copy_within(s..s + n, d);
     Ok(())
 }
@@ -396,7 +409,7 @@ pub fn mem_copy(mem: &mut [u8], size: u64, dst: i64, src: i64, n: i64) -> Result
 /// `mem.fill(dst, byte, n)`. `size = S`; `mem` holds at least `S` bytes.
 #[inline]
 pub fn mem_fill(mem: &mut [u8], size: u64, dst: i64, byte: i64, n: i64) -> Result<(), Trap> {
-    let d = check_range(dst, n, size)?;
-    mem[d..d + n as usize].fill(byte as u8);
+    let (d, n) = check_span(dst, n, size)?;
+    mem[d..d + n].fill(byte as u8);
     Ok(())
 }
