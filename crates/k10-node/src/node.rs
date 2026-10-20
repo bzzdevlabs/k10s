@@ -120,6 +120,10 @@ pub struct NodeConfig {
     /// Re-apply `DATA/bundle.k10b` at start (single-node mode). Cluster mode keeps its own store
     /// (`DATA/manifest.k10m` + `DATA/blobs/`) and turns this off.
     pub reload_bundle: bool,
+    /// Guest clock resolution ([`crate::clock`]; default 100 µs, `Duration::ZERO` = full). Process-wide.
+    pub timer_res: Duration,
+    /// JIT indirect-branch form, Spectre v2 hardening (default `Jump`, i.e. none).
+    pub jit_indirect: k10_jit::IndirectBranch,
 }
 
 impl Default for NodeConfig {
@@ -156,6 +160,8 @@ impl Default for NodeConfig {
             drain_timeout: Duration::from_secs(5),
             idle_spin: Duration::ZERO,
             reload_bundle: true,
+            timer_res: Duration::from_nanos(k10_ir::clock::DEFAULT_RES_NS),
+            jit_indirect: k10_jit::IndirectBranch::Jump,
         }
     }
 }
@@ -497,10 +503,11 @@ impl Node {
                         format!("stack_size must be at least {} KiB with the JIT backend", (2 * crate::jit::HOST_RESERVE) >> 10),
                     ));
                 }
-                Arc::new(JitBackend::new())
+                Arc::new(JitBackend::with_indirect(cfg.jit_indirect))
             }
             BackendKind::Interp => Arc::new(InterpBackend::default()),
         };
+        crate::clock::set_resolution(cfg.timer_res);
         if let Some(d) = &cfg.data_dir {
             std::fs::create_dir_all(d)?;
         }
