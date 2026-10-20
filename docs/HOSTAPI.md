@@ -25,9 +25,13 @@ An instance handles one request at a time (actor semantics); the runtime runs ma
 ## Service-to-service calls
 | name | params | returns |
 |---|---|---|
-| `call` | (name_ptr, name_len, req_ptr, req_len) | Invokes service `name` (optionally `name/path`) with the given body. Suspends the caller until the response arrives. Returns the callee's status (≥ 0) or an error: -1 unknown service, -2 unavailable, -3 timeout, -4 callee trapped |
+| `call` | (name_ptr, name_len, req_ptr, req_len) | Invokes service `name` (optionally `name/path`) with the given body. Suspends the caller until the response arrives. Returns the callee's status (≥ 0) or an error: -1 unknown service (or not granted), -2 unavailable, -3 timeout, -4 callee trapped |
 | `call_resp_len` | () | length of the last call's response body |
 | `call_resp_read` | (dst, off, n) | copies bytes of the last call's response; returns bytes copied |
+
+A service may call only the services listed in its manifest `calls` allowlist (`calls = ["echo"]`; none by default,
+not even itself; `["*"]` = any, discouraged). Any other call returns -1 with an empty response, exactly like a
+service that does not exist, so names cannot be probed.
 
 ## Durable key-value store (namespace = the service; node-local in v1)
 | name | params | returns |

@@ -92,7 +92,9 @@ vectored writes of large blobs.
 ## Manifest
 
 The binary format is canonical: services are sorted by name, so `hash = sha256(encode())`. The decoder is
-strict and bounded. The operator text format (`k10s apply`) looks like this:
+strict and bounded. Format 2 adds each service's `calls` list; a manifest without any is encoded as format 1 (the
+original bytes, so older manifests keep their hash and decode with empty lists). The operator text format
+(`k10s apply`) looks like this:
 
 ```
 service echo {
@@ -103,10 +105,12 @@ service echo {
   cpu_ms = 50         # per-request CPU budget; default 1000
   fresh = false       # default false
   config = "greeting=hi"
+  calls = ["kv-store"]  # services it may `call`; default none (not even itself); ["*"] = any (discouraged)
 }
 ```
 
-`parse_text` returns `ServiceDecl`s; errors read `line N: message`. Convert each one with
+`calls` names must be services of the same manifest (an error otherwise: typos are caught); the list is sorted
+and deduplicated. `parse_text` returns `ServiceDecl`s; errors read `line N: message`. Convert each one with
 `decl.to_spec(code_hash)`.
 
 ## Placement

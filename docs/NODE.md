@@ -107,6 +107,13 @@ docs/HOSTAPI.md, implemented once in `host.rs` (`HostCtx::dispatch(HostFn, args,
 `call` suspends the caller's fiber; the shard submits the callee like any request (method POST). Results: callee
 status ≥ 0, −1 unknown service, −2 unavailable (crash backoff with nothing alive, queue full (10 000), call depth
 > 32, more than 10 000 calls in one invocation, out of memory), −3 deadline, −4 callee trapped.
+- **Allowlist**: a service may call only the services of its manifest `calls` list (`calls = ["echo", "kv-store"]`;
+  none by default, itself included; `["*"]` = any, discouraged). Apply refuses names that are not services of the
+  manifest (typos). `on_call` checks the caller's list (the fiber records its job's service) after the depth and
+  call-count limits and before any lookup, routing or forwarding: one binary search over the sorted list, no
+  allocation. A denied call gets −1 and an empty response, exactly like an unknown service, without looking the
+  name up, so whether such a service exists changes neither the result nor the path taken. HTTP ingress is not
+  restricted (any client of the node reaches any service).
 - **Deadlines**: each call gets `min(now + call_timeout (5 s), caller's deadline)`; ingress requests 30 s. A timed-out
   waiter is resumed with −3 and removed from the wait queue; a late reply is dropped (token gone). This breaks call
   cycles that exhaust instances (A→B→A with `max_instances = 1`): the inner call times out and everything unwinds.
@@ -331,7 +338,8 @@ mesh inbox. Candidates: (1) placed replicas that are Alive and not backed off �
 link, round-robin on ties; (2) the service's rendezvous ranking (Alive members, at most `replicas + 3` attempts in
 total); if this node comes up in the ranking it runs the service itself (`NodeShared::serve_local`); (3) Suspect
 replicas. `Call` frames carry the remaining deadline in ms and the request method (`req_method` code). The peer runs the call locally whatever its own
-placement says — a request takes at most one hop — and answers `CallResult` (or `NOT_HERE` = −100, a peer-protocol
+placement says — a request takes at most one hop — without checking any `calls` allowlist (the calling node did;
+peers are trusted, like the rest of the peer protocol), and answers `CallResult` (or `NOT_HERE` = −100, a peer-protocol
 status that never reaches services, if the service is unknown there or the node is leaving).
 **Retry semantics (at most once):** a request goes to the next candidate only when it is known not to have run — its
 bytes never reached the socket (connect failure or timeout, connection lost before they were written; tracked with
