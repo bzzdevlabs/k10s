@@ -9,6 +9,7 @@
 //! result/trap and the full memory. Any escape or divergence fails the test.
 
 mod common;
+mod xdis;
 use common::*;
 use k10_ir::{new_memory, FuncBuilder, Host, Interp, Module, ModuleBuilder, Op, Trap};
 use k10_jit::{compile_with, CompileOptions, CpuFeatures};
@@ -31,6 +32,19 @@ fn configs() -> Vec<CompileOptions> {
     ]
 }
 
+/// Independent check of the machine code by the objdump-based SFI verifier (tests/xdis/sfi.rs), once per module/config.
+fn sfi_check(m: &Module, opts: &CompileOptions) {
+    static SEEN: std::sync::Mutex<Vec<(Vec<u8>, String)>> = std::sync::Mutex::new(Vec::new());
+    let Some(od) = xdis::objdump() else { return };
+    let key = (k10_ir::encode(m), format!("{opts:?}"));
+    if SEEN.lock().unwrap().contains(&key) {
+        return;
+    }
+    let b = k10_jit::compile_blob(m, opts).unwrap();
+    xdis::verify_compiled(&od, &[&b]).unwrap_or_else(|e| panic!("SFI verifier: {e}"));
+    SEEN.lock().unwrap().push(key);
+}
+
 /// Compiles `m` under every config, runs `func(args)` with the JIT (canary-guarded, memory size `2^k`) and the
 /// interpreter, and asserts containment + agreement (result/trap and full memory, canaries intact).
 #[track_caller]
@@ -38,6 +52,7 @@ fn contain(m: &Module, func: u32, args: &[i64], k: u8) {
     let it = Interp::new(m).unwrap_or_else(|e| panic!("invalid attack module: {e}"));
     for opts in configs() {
         let jit = compile_with(m, &opts).unwrap_or_else(|e| panic!("compile failed: {e}"));
+        sfi_check(m, &opts);
         let mut im = new_memory(m, k);
         let mut gm = GuardedMem::for_module(m, k);
         let ri = it.invoke(&mut im, k, &mut NoHost, func, args);
@@ -116,6 +131,7 @@ fn fold_rejects_undersized_memory() {
     let m = mb.build();
     for opts in configs() {
         let jit = compile_with(&m, &opts).unwrap();
+        sfi_check(&m, &opts);
         for k in [12u8, 16, 19] {
             let mut gm = GuardedMem::new(k); // mask = 2^k - 1 < 2^20 - 1
             let (r, _) = run_jit(&jit, &m, &mut gm, &mut NoHost, f, &[], RunOpts::default());
@@ -411,6 +427,7 @@ fn big_frame_recursion_overflows_cleanly() {
     // A deep recursion on a modest stack: expect StackOverflow, canaries intact.
     let det = CpuFeatures::detect();
     let jit = compile_with(&m, &CompileOptions { features: det, max_pinned: 6 }).unwrap();
+    sfi_check(&m, &CompileOptions { features: det, max_pinned: 6 });
     on_thread(2 << 20, || {
         let (lo, _) = stack_bounds();
         let mut gm = GuardedMem::for_module(&m, 12);
@@ -484,6 +501,7 @@ fn host_arg_shuffle_cycle() {
     let it = Interp::new(&m).unwrap();
     for opts in configs() {
         let jit = compile_with(&m, &opts).unwrap();
+        sfi_check(&m, &opts);
         let args = [1i64, 2, 4, 8, 16];
         let mut im = new_memory(&m, 12);
         let mut gm = GuardedMem::for_module(&m, 12);
@@ -552,6 +570,7 @@ fn run_on_big_stack(m: &Module, func: u32, args: &[i64]) -> Result<Option<i64>, 
         let mut res = None;
         for opts in [CompileOptions { features: det, max_pinned: 6 }, CompileOptions { features: det, max_pinned: 0 }] {
             let jit = compile_with(&m, &opts).unwrap();
+            sfi_check(&m, &opts);
             let mut im = new_memory(&m, k);
             let mut gm = GuardedMem::for_module(&m, k);
             let ri = it.invoke(&mut im, k, &mut NoHost, func, &args);
