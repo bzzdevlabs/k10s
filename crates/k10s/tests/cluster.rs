@@ -8,6 +8,7 @@
 //! --nocapture --test-threads 1`).
 
 mod common;
+mod support;
 
 use k10_node::demo;
 use k10_node::http::{self, Client};
@@ -91,6 +92,7 @@ fn spawn_node(name: &str, data: &Path, join: Option<&str>, o: &Opts) -> NodeProc
         args.extend(["--join".into(), j.to_string()]);
     }
     args.extend(o.extra.iter().cloned());
+    support::with_cluster_key(&mut args);
     let mut child = Command::new(bin).args(&args).stderr(Stdio::piped()).stdout(Stdio::null()).spawn().expect("spawn k10s node");
     let log = Arc::new(Mutex::new(String::new()));
     let (tx, rx) = mpsc::channel();

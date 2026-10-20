@@ -12,7 +12,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering::*};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 pub fn bin() -> PathBuf {
@@ -24,6 +24,65 @@ pub fn tmpdir(tag: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
+}
+
+/// A cluster key file shared by every test node of this process (fresh random key, mode 0600).
+pub fn key_file() -> &'static Path {
+    static F: OnceLock<PathBuf> = OnceLock::new();
+    F.get_or_init(|| {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::io::Write;
+        let p = std::env::temp_dir().join(format!("k10s-test-key-{}-{}", std::process::id(), k10_node::sys::mono_ns()));
+        let mut k = [0u8; 32];
+        k10_node::sys::fill_random(&mut k).unwrap();
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&p).unwrap();
+        writeln!(f, "{}", k10_mesh::sha256::to_hex(&k)).unwrap();
+        p
+    })
+}
+
+/// The cluster key of [`key_file`].
+pub fn cluster_key() -> k10_mesh::secure::ClusterKey {
+    k10_mesh::secure::ClusterKey::parse_hex(&std::fs::read_to_string(key_file()).unwrap()).unwrap()
+}
+
+/// Cluster-mode arguments get the test cluster key unless they choose their own authentication.
+pub fn with_cluster_key(args: &mut Vec<String>) {
+    let cluster = args.iter().any(|a| ["--gossip", "--rpc", "--join", "--advertise"].contains(&a.as_str()));
+    let chosen = args.iter().any(|a| a == "--cluster-key-file" || a == "--insecure-unauthenticated-cluster");
+    if cluster && !chosen {
+        args.extend(["--cluster-key-file".into(), key_file().display().to_string()]);
+    }
+}
+
+/// Handshakes a raw peer connection as member `id` with the test key and sends its `Hello`.
+pub fn peer_handshake(s: &mut std::net::TcpStream, id: u64) -> k10_mesh::secure::SecureLink {
+    use k10_mesh::secure::{SecureLink, AUTH_FRAME_LEN};
+    use k10_mesh::wire::{FrameDecoder, Msg};
+    use std::io::{Read, Write};
+    let mut nonce = [0u8; 32];
+    k10_node::sys::fill_random(&mut nonce).unwrap();
+    let mut sec = SecureLink::new(&cluster_key(), k10_mesh::NodeId(id), nonce);
+    let mut out = Vec::new();
+    sec.start(&mut out);
+    s.write_all(&out).unwrap();
+    out.clear();
+    let mut dec = FrameDecoder::new(AUTH_FRAME_LEN);
+    let mut buf = [0u8; 256];
+    let payload = loop {
+        if let Some(f) = dec.next().unwrap() {
+            break f.payload.to_vec();
+        }
+        let n = s.read(&mut buf).unwrap();
+        assert!(n > 0, "node closed the link during the handshake");
+        dec.feed(&buf[..n]);
+    };
+    sec.on_auth(&payload, None, &mut out).unwrap();
+    let a: k10_mesh::Addr = "127.0.0.1:1".parse().unwrap();
+    let me = k10_mesh::Member::new(k10_mesh::NodeId(id), a, a, a, k10_mesh::Capacity { mem_bytes: 1 << 30, cores: 1 });
+    sec.push(&Msg::Hello { member: me }, 0, &mut out).unwrap();
+    s.write_all(&out).unwrap();
+    sec
 }
 
 pub fn wait_for(what: &str, timeout: Duration, mut f: impl FnMut() -> bool) -> Duration {
@@ -128,6 +187,7 @@ impl Drop for NodeProc {
 pub fn spawn(name: &str, data: &Path, args: &[String]) -> NodeProc {
     let mut all: Vec<String> = vec!["node".into(), "--name".into(), name.into(), "--data".into(), data.display().to_string()];
     all.extend(args.iter().cloned());
+    with_cluster_key(&mut all);
     let mut child = Command::new(bin()).args(&all).stderr(Stdio::piped()).stdout(Stdio::null()).spawn().expect("spawn k10s node");
     let log = Arc::new(Mutex::new(String::new()));
     let (tx, rx) = mpsc::channel::<(String, String, String)>();

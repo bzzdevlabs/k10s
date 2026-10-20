@@ -66,6 +66,10 @@ pub struct NodeConfig {
     pub name: String,
     /// HTTP ingress + admin address. Port 0 picks an ephemeral port (shared by all shards).
     pub http: SocketAddr,
+    /// Separate admin listener; the ingress then serves only `/_k10s/health` of the admin API.
+    pub admin_listen: Option<SocketAddr>,
+    /// Admin bearer token (all of `/_k10s/` but `health`, `metrics`); `None`: loopback clients only.
+    pub admin_token: Option<crate::admin::AdminToken>,
     /// Persistent state (KV logs, last applied bundle). `None` = memory only.
     pub data_dir: Option<PathBuf>,
     pub shards: usize,
@@ -127,6 +131,8 @@ impl Default for NodeConfig {
         NodeConfig {
             name: hostname(),
             http: "127.0.0.1:8080".parse().unwrap(),
+            admin_listen: None,
+            admin_token: None,
             data_dir: None,
             shards: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
             backend: BackendKind::from_env(),
@@ -214,6 +220,8 @@ pub struct NodeShared {
     pub ticker: OnceLock<std::thread::Thread>,
     pub started_ns: u64,
     pub http_addr: OnceLock<SocketAddr>,
+    /// Bound address of the separate admin listener, if any.
+    pub admin_addr: OnceLock<SocketAddr>,
     pub counters: NodeCounters,
     /// Max instances with a snapshot mapped (VMA budget, from `vm.max_map_count`).
     pub snapshot_map_budget: u64,
@@ -515,6 +523,14 @@ impl Node {
             }
             listeners.push(l);
         }
+        let admin_listener = match cfg.admin_listen {
+            Some(a) => Some(sys::tcp_listen(&a, 1024).map_err(|e| io::Error::new(e.kind(), format!("admin listener {a}: {e}")))?),
+            None => None,
+        };
+        let admin_addr = match &admin_listener {
+            Some(l) => Some(sys::local_addr(l.raw())?),
+            None => None,
+        };
         let mut shard_shared = Vec::new();
         for i in 0..shards_n {
             shard_shared.push(Arc::new(ShardShared::new(i)?));
@@ -540,6 +556,7 @@ impl Node {
             ticker: OnceLock::new(),
             started_ns: sys::mono_ns(),
             http_addr: OnceLock::new(),
+            admin_addr: OnceLock::new(),
             counters: NodeCounters::default(),
             // 2 VMAs per mapped snapshot; keep room for fiber stacks (2 VMAs each) and everything else.
             snapshot_map_budget: max_maps.saturating_sub(2 * (shards_n * cfg_max_fibers) as u64 + 8192) / 2,
@@ -551,6 +568,10 @@ impl Node {
             cluster: OnceLock::new(),
         });
         let _ = shared.http_addr.set(addr);
+        if let Some(a) = admin_addr {
+            let _ = shared.admin_addr.set(a);
+        }
+        let mut admin_listener = admin_listener;
         // Reload the last applied bundle.
         if let Some(p) = shared.persist_path().filter(|_| shared.cfg.reload_bundle) {
             if let Ok(bytes) = std::fs::read(&p) {
@@ -570,11 +591,12 @@ impl Node {
         let mut shard_threads = Vec::new();
         for (i, l) in listeners.into_iter().enumerate() {
             let sh = shared.clone();
+            let admin = if i == 0 { admin_listener.take() } else { None };
             let h = std::thread::Builder::new().name(format!("k10s-shard-{i}")).spawn(move || {
                 if sh.cfg.pin_threads {
                     sys::pin_to_cpu(i);
                 }
-                sys::run_or_abort(&format!("shard-{i}"), || match shard::Shard::new(i, sh.clone(), Some(l)) {
+                sys::run_or_abort(&format!("shard-{i}"), || match shard::Shard::new(i, sh.clone(), Some(l), admin) {
                     Ok(mut s) => s.run(),
                     Err(e) => eprintln!("k10s: shard {i} failed to start: {e}"),
                 });

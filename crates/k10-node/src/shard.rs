@@ -59,6 +59,7 @@ use std::time::Duration;
 const TOK_LISTENER: u64 = 0;
 const TOK_EVENTFD: u64 = 1 << 62;
 const TOK_CONN: u64 = 2 << 62;
+const TOK_ADMIN_LISTENER: u64 = 3 << 62;
 const MAINT_NS: u64 = 250_000_000;
 
 // ------------------------------------------------------------------------------------------------------------------
@@ -403,6 +404,8 @@ struct Conn {
     /// response is produced) and the response bytes not yet written.
     reserved: u64,
     wcharged: u64,
+    /// Accepted on the separate admin listener.
+    admin: bool,
 }
 
 /// Reserves `n` bytes of the node-wide connection buffer budget ([`crate::NodeConfig::conn_buffer_max`]). Always
@@ -445,6 +448,8 @@ pub(crate) struct Shard {
     me: Arc<ShardShared>,
     epoll: Epoll,
     listener: Option<Fd>,
+    /// The admin API's own listener (`NodeConfig::admin_listen`), on shard 0.
+    admin_listener: Option<Fd>,
     events: Vec<libc::epoll_event>,
     table: Arc<ServiceTable>,
     table_ver: u64,
@@ -668,11 +673,14 @@ fn split_target(t: &str) -> (&str, &str) {
 }
 
 impl Shard {
-    pub(crate) fn new(idx: usize, node: Arc<NodeShared>, listener: Option<Fd>) -> io::Result<Shard> {
+    pub(crate) fn new(idx: usize, node: Arc<NodeShared>, listener: Option<Fd>, admin_listener: Option<Fd>) -> io::Result<Shard> {
         let me = node.shards[idx].clone();
         let epoll = Epoll::new()?;
         if let Some(l) = &listener {
             epoll.add(l.raw(), sys::EPOLLIN, TOK_LISTENER)?;
+        }
+        if let Some(l) = &admin_listener {
+            epoll.add(l.raw(), sys::EPOLLIN, TOK_ADMIN_LISTENER)?;
         }
         epoll.add(me.efd.raw(), sys::EPOLLIN, TOK_EVENTFD)?;
         let table = node.current_table();
@@ -684,6 +692,7 @@ impl Shard {
             me,
             epoll,
             listener,
+            admin_listener,
             events: vec![libc::epoll_event { events: 0, u64: 0 }; 512],
             table,
             table_ver,
@@ -743,6 +752,9 @@ impl Shard {
                 if let Some(l) = &self.listener {
                     let _ = self.epoll.add(l.raw(), sys::EPOLLIN, TOK_LISTENER);
                 }
+                if let Some(l) = &self.admin_listener {
+                    let _ = self.epoll.add(l.raw(), sys::EPOLLIN, TOK_ADMIN_LISTENER);
+                }
             }
             let mut timeout = if !self.runq.is_empty() || !self.yielded.is_empty() || !self.conn_ready.is_empty() {
                 0
@@ -781,7 +793,8 @@ impl Shard {
                 let ev = self.events[i];
                 let (tok, bits) = (ev.u64, ev.events);
                 match tok & (3 << 62) {
-                    TOK_LISTENER => self.accept_all(),
+                    TOK_LISTENER => self.accept_all(false),
+                    TOK_ADMIN_LISTENER => self.accept_all(true),
                     TOK_EVENTFD => {
                         self.me.efd.drain();
                         self.me.notified.store(false, SeqCst);
@@ -1581,7 +1594,7 @@ impl Shard {
 
     fn start_drain(&mut self) {
         self.draining = true;
-        if let Some(l) = self.listener.take() {
+        for l in [self.listener.take(), self.admin_listener.take()].into_iter().flatten() {
             self.epoll.del(l.raw());
         }
         let idle: Vec<u32> = self
@@ -1601,6 +1614,7 @@ impl Shard {
             *c = None;
         }
         self.listener = None;
+        self.admin_listener = None;
         // Instances (fibers blocked mid-job are abandoned: their instances are freed here, their stacks below).
         for i in 0..self.instances.len() {
             if let Some(inst) = self.instances[i].take() {
@@ -1621,8 +1635,9 @@ impl Shard {
     // HTTP connections
     // --------------------------------------------------------------------------------------------------------------
 
-    fn accept_all(&mut self) {
-        let Some(l) = self.listener.as_ref().map(|l| l.raw()) else { return };
+    fn accept_all(&mut self, admin: bool) {
+        let listener = if admin { &self.admin_listener } else { &self.listener };
+        let Some(l) = listener.as_ref().map(|l| l.raw()) else { return };
         for _ in 0..256 {
             match sys::accept(l) {
                 Ok(Some(fd)) => {
@@ -1664,6 +1679,7 @@ impl Shard {
                         head_scanned: 0,
                         reserved: 0,
                         wcharged: 0,
+                        admin,
                     });
                     self.open_conns += 1;
                     bump(&self.me.stats.conns_accepted, 1);
@@ -1677,7 +1693,10 @@ impl Shard {
                     // spinning (and logging) on every loop iteration.
                     let now = mono_ns();
                     self.accept_pause.failed(now, &format!("shard {}", self.idx), &e);
-                    self.epoll.del(l);
+                    // Out of descriptors is process-wide: pause both listeners.
+                    for l in [&self.listener, &self.admin_listener].into_iter().flatten() {
+                        self.epoll.del(l.raw());
+                    }
                     bump(&self.me.stats.accept_pauses, 1);
                     break;
                 }
@@ -1828,6 +1847,19 @@ impl Shard {
                     } else {
                         match http::parse_head(&c.rbuf, &lim) {
                             Parse::Complete(h) => {
+                                // Admin access control, before the body is read or reserved.
+                                let fd = c.fd.raw();
+                                let deny = crate::admin::gate(&self.node, c.admin, &h, &c.rbuf, || {
+                                    sys::peer_addr(fd).is_ok_and(|a| match a.ip() {
+                                        std::net::IpAddr::V4(ip) => ip.is_loopback(),
+                                        std::net::IpAddr::V6(ip) => ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback()),
+                                    })
+                                });
+                                if let Some((st, msg)) = deny {
+                                    self.conn_error(idx, st, msg);
+                                    return;
+                                }
+                                let c = self.conns[idx as usize].as_mut().unwrap();
                                 // The body is buffered until the response is produced: reserve it in the node-wide
                                 // budget first (before reading it, before `100 Continue`).
                                 if h.content_length > 0 {
