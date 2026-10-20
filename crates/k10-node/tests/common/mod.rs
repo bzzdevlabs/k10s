@@ -42,7 +42,7 @@ pub fn svc(name: &str, m: &k10_ir::Module) -> Svc {
             cpu_ms: 1000,
             fresh: false,
             config: Vec::new(),
-            calls: Vec::new(),
+            calls: Default::default(),
         },
         code,
     }
@@ -71,7 +71,7 @@ impl Svc {
     }
     /// The services this one may `call` (manifest allowlist).
     pub fn calls(mut self, names: &[&str]) -> Self {
-        self.spec.calls = k10_mesh::manifest::canonical_calls(names);
+        self.spec.calls = k10_mesh::Calls::from_list(names).expect("valid callees");
         self
     }
 }

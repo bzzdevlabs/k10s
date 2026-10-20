@@ -74,6 +74,11 @@ then `apply` to any of them. Gossip and peer links are authenticated and encrypt
 Prebuilt binaries: [Releases and versions](#releases-and-versions).
 
 ## Releases and versions
+**Breaking change (`calls` allowlist):** a service may `call` only the services its manifest lists in `calls`
+(none by default). After upgrading, re-apply manifests that use `call` with `calls = [...]` (nodes log a warning for
+every service that imports `call` but is granted nothing), and upgrade every node before applying such a manifest:
+nodes built before `calls` cannot decode it (manifest format 2).
+
 Prebuilt artifacts: [GitHub Releases](https://github.com/bzzdevlabs/k10s/releases). *Latest* is the last stable
 release; every push to `main` also publishes a development pre-release. All binaries are for x86-64 Linux. `V` below
 is the release's version (e.g. `0.1.0`, or `0.1.1-dev.45`).
@@ -83,7 +88,7 @@ is the release's version (e.g. `0.1.0`, or `0.1.1-dev.45`).
 | `k10s-V-x86_64-unknown-linux-musl.tar.gz` | `k10s` (CLI, node daemon, Ten compiler, JIT), static: runs on any x86-64 Linux; LICENSE, NOTICE, README.md, SECURITY.md |
 | `k10s-V-x86_64-unknown-linux-gnu.tar.gz` | the same, linked against glibc (built on Ubuntu 24.04) |
 | `k10s-examples-V.tar.gz` | [examples/](examples/): Ten sources, the compiled `.k10` modules, `app.k10s` (`k10s apply app.k10s`) |
-| `k10s-metal-V-x86_64.tar.gz` | the bare-metal kernel ([metal/](metal/)): `k10-metal.elf`, `k10-metal-embedded.elf` (test bundle baked in), `bundle.k10b` (18 test services), `mkbundle` (static; pass `--ten-dir examples` or `--no-ten`), `examples/*.ten`, metal README |
+| `k10s-metal-V-x86_64.tar.gz` | the bare-metal kernel ([metal/](metal/)): `k10-metal.elf`, `k10-metal-embedded.elf` (test bundle baked in), `bundle.k10b` (19 test services), `mkbundle` (static; pass `--ten-dir examples` or `--no-ten`), `examples/*.ten`, metal README |
 | `k10s-bench-V-linux-amd64.tar.gz` | [bench/](bench/) tools, static Go: workloads `echo` `compute` `chain` `counter` `compute-purego`, and `loadgen` |
 | `k10s-V-src.tar.gz` | the sources of the commit, stamped with its version (`.k10s-version`) for builds without git |
 | `SHA256SUMS` | `sha256sum -c SHA256SUMS --ignore-missing` |

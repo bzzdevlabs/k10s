@@ -25,7 +25,7 @@ fn spec(name: &str, code: &[u8], mem_log2: u8, max: u32) -> ServiceSpec {
         cpu_ms: 10_000,
         fresh: false,
         config: Vec::new(),
-        calls: Vec::new(),
+        calls: Default::default(),
     }
 }
 
@@ -45,7 +45,7 @@ fn bundle(svcs: &[(&str, k10_ir::Module, u8, u32)]) -> Bundle {
 /// Lets `caller` call `callees` (its `calls` allowlist in the manifest).
 fn grant(mut b: Bundle, caller: &str, callees: &[&str]) -> Bundle {
     let s = b.manifest.services.iter_mut().find(|s| s.name == caller).expect("caller in the bundle");
-    s.calls = k10_mesh::manifest::canonical_calls(callees);
+    s.calls = k10_mesh::Calls::from_list(callees).expect("valid callees");
     b
 }
 

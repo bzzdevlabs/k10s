@@ -169,7 +169,7 @@ fn svc_json(s: &ServiceRt, now: u64) -> String {
     };
     format!(
         concat!(
-            "{{\"name\":{},\"rt\":{},\"placement\":{},\"code\":\"{}\",\"memory\":{},\"max_instances\":{},\"cpu_ms\":{},\"fresh\":{},",
+            "{{\"name\":{},\"rt\":{},\"placement\":{},\"code\":\"{}\",\"memory\":{},\"max_instances\":{},\"cpu_ms\":{},\"fresh\":{},\"calls\":{},",
             "\"mem_reserved\":{},\"mem_used\":{},\"mem_shared\":{},",
             "\"instances\":{{\"live\":{},\"idle\":{},\"peak\":{}}},\"queue\":{},\"snapshot\":{},",
             "\"requests\":{},\"ok\":{},\"errors\":{},\"traps\":{},\"interrupted\":{},\"created\":{},\"destroyed\":{},",
@@ -190,6 +190,11 @@ fn svc_json(s: &ServiceRt, now: u64) -> String {
         s.spec.max_instances,
         s.spec.cpu_ms,
         s.spec.fresh,
+        if s.spec.calls.is_any() {
+            "\"*\"".to_string()
+        } else {
+            format!("[{}]", s.spec.calls.names().map(json_str).collect::<Vec<_>>().join(","))
+        },
         s.mem_res.bytes(),
         live as u64 * s.instance_bytes(),
         live.saturating_sub(s.mem_res.in_use()) as u64 * s.instance_bytes(),
@@ -235,6 +240,7 @@ pub fn status_json(node: &NodeShared) -> String {
     let mut names: Vec<&String> = table.by_name.keys().collect();
     names.sort();
     let services: Vec<String> = names.iter().map(|n| svc_json(&table.by_name[*n], now)).collect();
+    let warnings: Vec<String> = names.iter().filter_map(|n| table.by_name[*n].call_warning()).map(|w| json_str(&w)).collect();
     let m = &node.mem;
     let kv = node.kv.stats();
     let code = node.backend.stats();
@@ -256,7 +262,7 @@ pub fn status_json(node: &NodeShared) -> String {
         concat!(
             "{{\"node\":{},\"version\":\"{}\",\"backend\":\"{}\",\"shards\":{},\"uptime_s\":{:.3},\"http\":\"{}\",",
             "\"code\":{{\"modules\":{},\"code_bytes\":{},\"exec_bytes\":{},\"prepared\":{},\"prepare_ms_total\":{:.3}}},",
-            "\"manifest\":{{\"version\":{},\"hash\":\"{}\"}},",
+            "\"manifest\":{{\"version\":{},\"hash\":\"{}\",\"warnings\":[{}]}},",
             "\"services\":[{}],",
             "\"memory\":{{\"rss_bytes\":{},\"slots_used\":{},\"slot_bytes\":{},\"reserved_bytes\":{},",
             "\"snapshot_mapped\":{},\"mem_limit\":{},\"mem_reserved\":{},\"mem_shared_used\":{},\"mem_shared_limit\":{},",
@@ -284,6 +290,7 @@ pub fn status_json(node: &NodeShared) -> String {
         code.prepare_ns as f64 / 1e6,
         table.version,
         k10_mesh::sha256::to_hex(&table.manifest_hash),
+        warnings.join(","),
         services.join(","),
         sys::rss_bytes(),
         m.slots_used.load(Relaxed),

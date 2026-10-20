@@ -550,7 +550,7 @@ impl Level<'_> {
         self.last_call.clear();
         let split = name_path.iter().position(|&c| c == b'/').unwrap_or(name_path.len());
         // `calls` allowlist: denied = unknown, decided before any lookup or forwarding (existence changes nothing).
-        if !self.svc.spec.may_call(&name_path[..split]) {
+        if !self.svc.spec.calls.allows(&name_path[..split]) {
             return CALL_UNKNOWN;
         }
         let Ok(name) = core::str::from_utf8(&name_path[..split]) else { return CALL_UNKNOWN };
@@ -1242,6 +1242,7 @@ pub fn install<'b>(
     // and shared between services deployed with the same blob.
     let mut code: BTreeMap<[u8; 32], Arc<Prepared>> = old.values().map(|s| (s.spec.code_hash, s.prep.clone())).collect();
     let mut new = BTreeMap::new();
+    let mut warnings: Vec<String> = Vec::new();
     let (mut kept, mut unplaced) = (0, 0);
     for spec in &m.services {
         let Some(pl) = placement(spec) else {
@@ -1270,7 +1271,16 @@ pub fn install<'b>(
                 spec.name, spec.mem_log2, prep.min_mem_log2
             ));
         }
+        if spec.calls.is_none() && prep.imports.contains(&host::HostFn::Call) {
+            warnings.push(alloc::format!(
+                "service `{}` imports `call` but its manifest grants no `calls`: every call it makes fails (-1)",
+                spec.name
+            ));
+        }
         new.insert(spec.name.clone(), Arc::new(Service::new(spec, prep, pl)));
+    }
+    for w in &warnings {
+        kprintln!("apply: warning: {w}");
     }
     drop(code);
     let total = new.len();
@@ -1293,9 +1303,16 @@ pub fn install<'b>(
     if changed && (crate::verbose() || applies > 1) {
         kprintln!("apply: manifest v{}: {} service(s), {} here: {}", m.version, total, local, names.join(", "));
     }
+    // Warnings hold only service names and fixed text: nothing to escape.
+    let warnings: Vec<String> = warnings.iter().map(|w| alloc::format!("\"{w}\"")).collect();
     Ok(alloc::format!(
-        "{{\"version\":{},\"services\":{},\"local\":{},\"kept\":{},\"unplaced\":{}}}",
-        m.version, total, local, kept, unplaced
+        "{{\"version\":{},\"services\":{},\"local\":{},\"kept\":{},\"unplaced\":{},\"warnings\":[{}]}}",
+        m.version,
+        total,
+        local,
+        kept,
+        unplaced,
+        warnings.join(",")
     ))
 }
 
