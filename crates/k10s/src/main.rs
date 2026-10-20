@@ -568,7 +568,7 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         fresh: false,
         config: a.get("config").unwrap_or("").as_bytes().to_vec(),
         // The only service: nothing to call.
-        calls: Vec::new(),
+        calls: Default::default(),
     };
     let cfg = NodeConfig {
         http: "127.0.0.1:0".parse().unwrap(),

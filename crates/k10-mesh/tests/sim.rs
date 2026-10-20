@@ -2,7 +2,7 @@
 //! the `#[ignore]`d ones are long (run with `--release -- --ignored --nocapture`).
 
 use k10_mesh::sim::{Sim, SimConfig};
-use k10_mesh::{Config, MemberState};
+use k10_mesh::{Calls, Config, MemberState};
 
 fn sim(loss: f64, seed: u64) -> Sim {
     Sim::new(SimConfig { loss, latency_min_ms: 1, latency_max_ms: 5, gossip: Config::default(), seed })
@@ -293,7 +293,7 @@ fn mixed_placement_versions_use_the_lowest_until_all_upgrade() {
         cpu_ms: 1,
         fresh: false,
         config: vec![],
-        calls: vec![],
+        calls: Calls::none(),
     };
     // 5 nodes × room for 10 instances of 4 KiB + tail (20 under version 1, which charges 4 KiB): 60 services.
     let m = Manifest { version: 1, services: (0..60).map(svc).collect() };

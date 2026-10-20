@@ -324,7 +324,7 @@ struct Fiber {
     depth: u8,
     deadline: u64,
     calls: u32,
-    /// Service of the current job, whose `calls` `on_call` checks (valid while the job runs, like [`Job::svc`]).
+    /// Service of the running job (null between jobs), whose `calls` `on_call` checks.
     caller: *const ServiceRt,
     rng_seed: u64,
     /// Own preemption word (interpreter).
@@ -1086,7 +1086,10 @@ impl Shard {
     fn finish(&mut self, fid: u32) {
         let f = self.fibers[fid as usize];
         // SAFETY: the fiber is suspended in `fiber_main` after setting `done`.
-        let (done, cpu) = unsafe { ((*f).done.take(), (*f).cpu_ns) };
+        let (done, cpu) = unsafe {
+            (*f).caller = ptr::null();
+            ((*f).done.take(), (*f).cpu_ns)
+        };
         self.free_fibers.push(fid);
         if let Some(job) = self.backlog.pop_front() {
             self.start_job(job);
@@ -1161,8 +1164,9 @@ impl Shard {
         let cfg = &self.node.cfg;
         let split = target.iter().position(|&c| c == b'/');
         let name_len = split.unwrap_or(target.len());
+        debug_assert!(!caller.is_null());
         // SAFETY: `caller` is the service of the job this fiber runs (see `Fiber::caller`).
-        let allowed = unsafe { (*caller).spec.may_call(&target[..name_len]) };
+        let allowed = unsafe { (*caller).spec.calls.allows(&target[..name_len]) };
         let res = if depth >= cfg.max_call_depth {
             Err(CallResult::error(CALL_UNAVAILABLE, "call depth limit"))
         } else if calls > cfg.max_calls_per_invocation {

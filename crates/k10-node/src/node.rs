@@ -348,7 +348,10 @@ impl NodeShared {
                 .zip(&places)
                 .all(|(spec, p)| cur.get(&spec.name).is_some_and(|o| o.spec == *spec && o.placement == *p));
             if same {
-                return Ok(ApplyReport { version: cur.version, unchanged: cur.by_name.keys().cloned().collect(), ..Default::default() });
+                let mut r = ApplyReport { version: cur.version, unchanged: cur.by_name.keys().cloned().collect(), ..Default::default() };
+                r.warnings = cur.by_name.values().filter_map(|s| s.call_warning()).collect();
+                r.sort();
+                return Ok(r);
             }
         }
         // Every service placed here reserves one instance; check before preparing any code.
@@ -386,16 +389,17 @@ impl NodeShared {
                     continue;
                 }
             }
-            let (code, handle_fn, init_fn, data, min_mem) = if let Some(from) = code_cache.get(&spec.code_hash) {
+            let cached = code_cache.get(&spec.code_hash);
+            let (code, handle_fn, init_fn, data, min_mem, imports_call) = if let Some(from) = cached {
                 // same module as a deployed service: reuse its prepared code
-                (from.code.clone(), from.handle_fn, from.init_fn, from.data.clone(), from.min_mem_log2)
+                (from.code.clone(), from.handle_fn, from.init_fn, from.data.clone(), from.min_mem_log2, from.imports_call)
             } else {
                 if let std::collections::hash_map::Entry::Vacant(e) = fresh_prepared.entry(spec.code_hash) {
                     let blob = bundle.blob(&spec.code_hash).ok_or_else(|| format!("service `{}`: missing code blob", spec.name))?;
                     e.insert(prepare_blob(&*self.backend, blob).map_err(|e| format!("service `{}`: {e}", spec.name))?);
                 }
                 let p = &fresh_prepared[&spec.code_hash];
-                (p.code.clone(), p.handle_fn, p.init_fn, p.data.clone(), p.min_mem_log2)
+                (p.code.clone(), p.handle_fn, p.init_fn, p.data.clone(), p.min_mem_log2, p.imports_call)
             };
             if spec.mem_log2 < min_mem {
                 return Err(format!(
@@ -415,6 +419,7 @@ impl NodeShared {
                 self.cfg.snapshots == SnapshotPolicy::All,
             );
             svc.min_mem_log2 = min_mem;
+            svc.imports_call = imports_call;
             svc.mem_res = Reservation::new(if place == Placement::Local { svc.instance_bytes() } else { 0 });
             svc.placement = place;
             if cur.get(&spec.name).is_some() {
@@ -431,6 +436,7 @@ impl NodeShared {
                 report.removed.push(name.clone());
             }
         }
+        report.warnings = by_name.values().filter_map(|s| s.call_warning()).collect();
         let table = Arc::new(ServiceTable {
             version: bundle.manifest.version,
             manifest: bundle.manifest.clone(),
@@ -462,6 +468,9 @@ impl NodeShared {
         }
         self.counters.applies.fetch_add(1, Relaxed);
         report.sort();
+        for w in &report.warnings {
+            eprintln!("k10s: warning: {w}");
+        }
         Ok(report)
     }
 }
@@ -489,6 +498,7 @@ pub struct ApplyReport {
     pub updated: Vec<String>,
     pub removed: Vec<String>,
     pub unchanged: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 impl ApplyReport {
@@ -497,6 +507,7 @@ impl ApplyReport {
         self.updated.sort();
         self.removed.sort();
         self.unchanged.sort();
+        self.warnings.sort();
     }
 
     pub fn to_json(&self) -> String {
@@ -505,12 +516,13 @@ impl ApplyReport {
             format!("[{}]", items.join(","))
         };
         format!(
-            "{{\"ok\":true,\"version\":{},\"added\":{},\"updated\":{},\"removed\":{},\"unchanged\":{}}}",
+            "{{\"ok\":true,\"version\":{},\"added\":{},\"updated\":{},\"removed\":{},\"unchanged\":{},\"warnings\":{}}}",
             self.version,
             list(&self.added),
             list(&self.updated),
             list(&self.removed),
-            list(&self.unchanged)
+            list(&self.unchanged),
+            list(&self.warnings)
         )
     }
 }

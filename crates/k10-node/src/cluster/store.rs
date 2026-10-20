@@ -304,7 +304,7 @@ mod tests {
             cpu_ms: 100,
             fresh: false,
             config: vec![],
-            calls: vec![],
+            calls: Default::default(),
         }
     }
 

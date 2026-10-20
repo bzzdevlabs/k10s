@@ -131,6 +131,26 @@ fn apply_rejects_calls_to_services_not_in_the_manifest() {
     node.shutdown();
 }
 
+/// A service whose module imports `call` but whose manifest grants no `calls` (e.g. written before `calls`) is reported.
+#[test]
+fn apply_warns_about_callers_without_calls() {
+    let node = start(config(1));
+    let mut mb = k10_ir::ModuleBuilder::new();
+    let f = mb.func(0, 0, |_| {});
+    mb.export("handle", f);
+    let plain = mb.build();
+    let mk = || bundle(vec![svc("p", &plain), svc("c", &demo::caller("p")), svc("g", &demo::caller("p")).calls(&["p"])]);
+    let r = node.apply(mk()).unwrap();
+    assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+    assert!(r.warnings[0].starts_with("service `c` imports `call`"), "{:?}", r.warnings);
+    assert!(r.to_json().contains("\"warnings\":[\"service `c` imports `call`"));
+    let s = status(&node);
+    assert!(s.contains("\"warnings\":[\"service `c` imports `call`"), "{s}");
+    assert!(s.contains("\"name\":\"g\"") && s.contains("\"may_call\":[\"p\"]"), "{s}");
+    assert_eq!(node.apply(mk()).unwrap().warnings.len(), 1, "a no-op re-apply still reports it");
+    node.shutdown();
+}
+
 #[test]
 fn kv_and_bundle_persist_across_restart() {
     let dir = tmpdir("persist");
