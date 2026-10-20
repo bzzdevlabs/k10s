@@ -526,3 +526,78 @@ fn jumps_and_labels() {
     assert_eq!(out[0], 900);
     assert_eq!(out[1], 0);
 }
+
+/// Speculation-hardening forms (docs/JIT-ABI.md): `lfence` / `pause` bytes, the `br_table` index clamp
+/// `mov r11d, n; cmp r, r11; cmovae r, r11` (= unsigned `min(r, n)`) for every register and edge values, and a
+/// retpoline thunk used both as `call` and as `jmp`.
+#[test]
+fn speculation_hardening_forms() {
+    let bytes = |f: &dyn Fn(&mut Asm)| {
+        let mut a = Asm::new();
+        f(&mut a);
+        a.finish().unwrap()
+    };
+    assert_eq!(bytes(&|a| a.lfence()), [0x0F, 0xAE, 0xE8]);
+    assert_eq!(bytes(&|a| a.pause()), [0xF3, 0x90]);
+    let mut ex = Exec::new();
+    for (i, &r) in GPRS.iter().enumerate().filter(|(_, &r)| r != R11) {
+        for n in [1u64, 5, 255, 4096, i32::MAX as u64 - 1] {
+            for v in [0u64, 1, n - 1, n, n + 1, u32::MAX as u64, 1 << 40, i64::MAX as u64, u64::MAX - 1, u64::MAX] {
+                let mut regs = init(i as u64 * 31 + n);
+                regs[r.id() as usize] = v;
+                let out = ex.run(regs, |x| {
+                    x.lfence();
+                    x.mov_ri(R11, n as i64);
+                    x.alu(Alu::Cmp, r, RM::R(R11));
+                    x.cmov(Cond::Ae, r, RM::R(R11));
+                    x.pause();
+                });
+                for q in GPRS {
+                    let want = if q == r {
+                        v.min(n)
+                    } else if q == R11 {
+                        n
+                    } else {
+                        regs[q.id() as usize]
+                    };
+                    assert_eq!(out[q.id() as usize], want, "clamp {r:?}={v:#x} to {n}: register {q:?}");
+                }
+            }
+        }
+    }
+    // Retpoline thunk: `call thunk` with r11 = target returns from the target; `jmp thunk` lands on the target.
+    let regs = init(7);
+    let out = ex.run(regs, |x| {
+        let (thunk, set, spin, target, after, done) =
+            (x.new_label(), x.new_label(), x.new_label(), x.new_label(), x.new_label(), x.new_label());
+        x.lea(R11, Mem::rip(target));
+        x.call(thunk); // rax = 5 + 1
+        x.lea(R11, Mem::rip(after));
+        x.jmp(thunk); // to `after`
+        x.int3();
+        x.bind(thunk);
+        x.call(set);
+        x.bind(spin);
+        x.pause();
+        x.lfence();
+        x.jmp(spin);
+        x.bind(set);
+        x.store(Size::S64, Mem::b(Rsp, 0), R11);
+        x.ret();
+        x.bind(target);
+        x.mov_ri(Rax, 5);
+        x.alu_ri(Alu::Add, RM::R(Rax), 1);
+        x.ret();
+        x.bind(after);
+        x.alu_ri(Alu::Add, RM::R(Rax), 100);
+        x.jmp(done);
+        x.int3();
+        x.bind(done);
+    });
+    assert_eq!(out[Rax.id() as usize], 106);
+    for q in GPRS {
+        if q != Rax && q != R11 {
+            assert_eq!(out[q.id() as usize], regs[q.id() as usize], "{q:?} preserved");
+        }
+    }
+}

@@ -5,8 +5,10 @@
 //! * every load/store is `[r15 + ((addr + off) & r13)]` (64-bit add, then mask), touching at most
 //!   `base + S + 7` (the 8-byte tail);
 //! * bulk memory operations go through helpers that apply the TIR range checks;
-//! * control flow is structured (direct calls, bounds-checked `br_table`), the only exits are host calls through
-//!   `VmCtx::host_fns`, the interrupt hook and returning/trapping to `invoke`;
+//! * control flow is structured (direct calls; `br_table` as a compare tree, or a jump table indexed by a
+//!   branch-free clamped index), the only exits are host calls through `VmCtx::host_fns`, the interrupt hook and
+//!   returning/trapping to `invoke`; indirect branches can be hardened against branch target injection
+//!   ([`IndirectBranch`]);
 //! * stack overflow and preemption are checked at safepoints (function entry with the frame size, and `loop`).
 //!
 //! Layout:
@@ -35,7 +37,7 @@ mod exec;
 
 pub use abi::{HostFn, InterruptFn, VmCtx};
 pub use blob::{BlobMeta, CodeBlob, FuncEntry};
-pub use codegen::{compile_blob, CompileError, CompileOptions, MAX_BLOB_BYTES};
+pub use codegen::{compile_blob, CompileError, CompileOptions, IndirectBranch, DEFAULT_BR_TREE_MAX, MAX_BLOB_BYTES};
 pub use cpu::CpuFeatures;
 #[cfg(all(feature = "std", target_arch = "x86_64", unix))]
 pub use exec::{compile, compile_with, CompiledModule};

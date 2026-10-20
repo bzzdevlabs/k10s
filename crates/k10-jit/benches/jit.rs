@@ -7,7 +7,7 @@
 
 use k10_ir::gen::{gen_module, GenConfig};
 use k10_ir::{encode, new_memory, FuncBuilder, Host, Interp, InterpStack, Module, ModuleBuilder, Op, Trap};
-use k10_jit::{compile, compile_blob, CompileOptions, CompiledModule, HostFn, VmCtx};
+use k10_jit::{compile, compile_blob, compile_with, CompileOptions, CompiledModule, HostFn, VmCtx};
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 use Op::*;
@@ -312,6 +312,86 @@ fn host_module() -> (Module, u32, u32) {
     (mb.build(), with, without)
 }
 
+/// `br_table` dispatch loop: `iters` iterations, each selecting one of `n` cases (`n` a power of two, every case a
+/// distinct target) by `i & (n-1)` (cyclic: predictable for small `n`) or by an LCG (random), and folding a
+/// case-specific constant into an accumulator.
+fn brtable_module(n: usize, random: bool) -> (Module, u32) {
+    let mut mb = ModuleBuilder::new();
+    let mut f = FuncBuilder::new(1, 1);
+    f.locals(4); // 1 = i, 2 = acc, 3 = x (LCG), 4 = index
+    f.ops(&[Const(1), LocalSet(3), Block, Loop, LocalGet(1), LocalGet(0), GeS, BrIf(1)]);
+    if random {
+        f.ops(&[LocalGet(3), Const(LCG_A), Mul, Const(LCG_C), Add, LocalTee(3), Const(33), ShrU]);
+    } else {
+        f.ops(&[LocalGet(1)]);
+    }
+    f.ops(&[Const(n as i64 - 1), And, LocalSet(4), Block]);
+    for _ in 0..n {
+        f.op(Block);
+    }
+    f.op(LocalGet(4));
+    let depths: Vec<u32> = (0..n as u32).collect();
+    f.br_table(&depths, n as u32);
+    for k in 0..n {
+        f.op(End);
+        f.ops(&[LocalGet(2), LocalGet(2), Const(5), Shl, Xor, Const(2 * k as i64 + 1), Add, LocalSet(2)]);
+        f.op(Br((n - 1 - k) as u32));
+    }
+    f.ops(&[End, LocalGet(1), Const(1), Add, LocalSet(1), Br(0), End, End, LocalGet(2)]);
+    let idx = mb.add_func(f);
+    mb.export("sw", idx);
+    (mb.build(), idx)
+}
+
+/// ns per iteration of [`brtable_module`] compiled with `opts`.
+fn brtable_ns(m: &Module, f: u32, iters: i64, opts: &CompileOptions) -> f64 {
+    let jit = compile_with(m, opts).unwrap();
+    let mut inst = Inst::new(m, 12);
+    let (t, _) = best_of(5, || inst.call(&jit, f, &[iters]));
+    t.as_secs_f64() * 1e9 / iters as f64
+}
+
+fn brtable_bench() {
+    use k10_jit::IndirectBranch::*;
+    let iters = 20_000_000i64;
+    let d = CompileOptions::default();
+    let modes = [
+        ("default", d),
+        ("tree", CompileOptions { br_tree_max: u16::MAX, ..d }),
+        ("table", CompileOptions { br_tree_max: 0, ..d }),
+        ("table+lfence", CompileOptions { br_tree_max: 0, indirect: Lfence, ..d }),
+        ("table+retpoline", CompileOptions { br_tree_max: 0, indirect: Retpoline, ..d }),
+    ];
+    println!("\nbr_table dispatch loop, ns/iteration (default = br_tree_max {}):", d.br_tree_max);
+    print!("{:<14}", "cases");
+    for (name, _) in &modes {
+        print!(" {name:>16}");
+    }
+    println!();
+    for random in [false, true] {
+        for n in [2usize, 4, 8, 16, 64, 256] {
+            let (m, f) = brtable_module(n, random);
+            print!("{:<14}", format!("{n} {}", if random { "random" } else { "cyclic" }));
+            for (_, o) in &modes {
+                print!(" {:>16.2}", brtable_ns(&m, f, iters, o));
+            }
+            println!();
+        }
+    }
+    // Hardened modes also route host calls through `lfence` / the retpoline thunk.
+    let (m, with, without) = host_module();
+    let n = 20_000_000i64;
+    print!("host-call overhead, ns/call:");
+    for (name, o) in [("jump", d), ("lfence", CompileOptions { indirect: Lfence, ..d }), ("retpoline", CompileOptions { indirect: Retpoline, ..d })] {
+        let jit = compile_with(&m, &o).unwrap();
+        let mut inst = Inst::new(&m, 12);
+        let (tw, _) = best_of(3, || inst.call(&jit, with, &[n]));
+        let (to, _) = best_of(3, || inst.call(&jit, without, &[n]));
+        print!("  {name} {:.2}", (tw.as_secs_f64() - to.as_secs_f64()) * 1e9 / n as f64);
+    }
+    println!();
+}
+
 fn trivial_module() -> (Module, u32) {
     let mut mb = ModuleBuilder::new();
     let f = mb.func(0, 1, |f| {
@@ -355,7 +435,11 @@ fn workload(
 }
 
 fn main() {
-    // `cargo bench` passes `--bench`; ignore arguments.
+    // `cargo bench` passes `--bench`; ignore arguments. `K10_BENCH_ONLY=brtable`: only the br_table section.
+    if std::env::var("K10_BENCH_ONLY").as_deref() == Ok("brtable") {
+        brtable_bench();
+        return;
+    }
     println!("k10-jit benchmarks (release; best of N runs)\n");
 
     // ------------------------------------------------------------------------------------ compile speed
@@ -508,4 +592,5 @@ fn main() {
             r.interp.as_secs_f64() / r.jit.as_secs_f64()
         );
     }
+    brtable_bench();
 }
