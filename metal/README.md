@@ -293,6 +293,12 @@ Deliberately *not* used:
   quiet unless `k10.verbose` is given.
 * **No guard pages on coroutine stacks.** A canary is checked at every switch instead, and the call depth is
   bounded.
+* **No guard pages around instance slots.** Slots are contiguous frames in the 2 MiB identity map; a guard would cost
+  a page-table split and a frame per slot plus TLB shootdowns on every allocation (the kernel never revokes rights
+  it handed out), and would only catch linear overruns, which masked SFI addressing cannot produce (the 4 KiB tail
+  absorbs the 8-byte straddle). Hardware protection that does exist: slot memory is never executable (NX), JIT code
+  and the kernel are W^X, page 0 is unmapped. There is no OS layer under the kernel: an SFI escape here reaches
+  everything, which is why the JIT's output is verified independently (SECURITY.md, "Defense in depth").
 * **No ACPI.** The kernel parses no ACPI tables and assumes an xAPIC at the MSR-reported base and QEMU's fw_cfg for
   the CPU count. Power-off works only through `isa-debug-exit`.
 
