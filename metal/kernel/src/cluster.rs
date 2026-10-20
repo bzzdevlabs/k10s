@@ -38,7 +38,7 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use k10_mesh::secure::{ClusterKey, GossipCipher, SecureLink, AUTH_FRAME_LEN, FRAME_TAG_LEN, GOSSIP_OVERHEAD};
+use k10_mesh::secure::{AuthError, ClusterKey, GossipCipher, SecureLink, AUTH_FRAME_LEN, FRAME_TAG_LEN, GOSSIP_OVERHEAD};
 use k10_mesh::sha256::{sha256, to_hex};
 use k10_mesh::wire::{FrameDecoder, Msg, WireError, KIND_AUTH};
 use k10_mesh::{place, Bundle, Capacity, DesiredState, Event, Gossip, Manifest, Member, MemberState, NodeId, Output};
@@ -1178,7 +1178,10 @@ impl Cluster {
                             l.auth_peer = Some(peer);
                         }
                         Err(e) => {
-                            auth_err = Some(alloc::format!("handshake refused: {e}"));
+                            // A dialed address now held by another node is not an authentication failure.
+                            if !matches!(e, AuthError::WrongPeer(_)) {
+                                auth_err = Some(alloc::format!("handshake refused: {e}"));
+                            }
                             bad = true;
                             break;
                         }
@@ -1198,7 +1201,7 @@ impl Cluster {
                 },
                 Ok(None) => break,
                 Err(e) => {
-                    if e == WireError::Unauthenticated {
+                    if e == WireError::Unauthenticated || l.sec.awaiting_auth() {
                         auth_err = Some(e.to_string());
                     }
                     bad = true;

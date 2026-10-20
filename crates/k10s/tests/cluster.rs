@@ -403,6 +403,7 @@ fn three_nodes_join_apply_route_and_call() {
     let txt = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success());
     assert!(txt.contains("members: 3 live / 3 known") && txt.contains("applied v1") && txt.contains("(this node)"), "{txt}");
+    assert!(txt.contains("auth: cluster key id "), "{txt}");
     let out = Command::new(env!("CARGO_BIN_EXE_k10s")).args(["status", "--json", "--node", &nodes[0].http]).output().unwrap();
     assert!(String::from_utf8_lossy(&out.stdout).contains("\"cluster\":{"));
     // A stale explicit version is refused; re-applying the same content is a no-op.

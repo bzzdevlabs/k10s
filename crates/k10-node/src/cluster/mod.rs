@@ -523,6 +523,12 @@ impl ClusterHooks for ClusterShared {
             local.as_ref().map(|m| m.gossip.to_string()).unwrap_or_default(),
             local.as_ref().map(|m| m.rpc.to_string()).unwrap_or_default(),
         );
+        match &self.cfg.key {
+            Some(k) => {
+                let _ = writeln!(o, "auth: cluster key id {}", k.id_hex());
+            }
+            None => o.push_str("auth: NONE (--insecure-unauthenticated-cluster)\n"),
+        }
         match mv.desired {
             Some(d) => {
                 let _ = write!(o, "desired v{} ({}, from {})", d.version, short_hash(&d.hash), d.origin);

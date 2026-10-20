@@ -47,7 +47,7 @@ use crate::host::{Request, CALL_TIMEOUT, CALL_UNAVAILABLE};
 use crate::router::Completion;
 use crate::sys::{self, mono_ns, Epoll, Fd};
 use k10_mesh::driver::UdpDriver;
-use k10_mesh::secure::{SecureLink, AUTH_FRAME_LEN, FRAME_TAG_LEN};
+use k10_mesh::secure::{AuthError, SecureLink, AUTH_FRAME_LEN, FRAME_TAG_LEN};
 use k10_mesh::sha256::sha256;
 use k10_mesh::wire::{FrameDecoder, Msg, WireError, DEFAULT_MAX_FRAME, HEADER_LEN, KIND_AUTH};
 use k10_mesh::{DesiredState, Event, Manifest, Member, MemberState, NodeId};
@@ -1223,7 +1223,10 @@ impl Mesh {
                                     authed = true;
                                 }
                                 Err(e) => {
-                                    auth_err = Some(format!("handshake refused: {e}"));
+                                    // A dialed address now held by another node is not an authentication failure.
+                                    if !matches!(e, AuthError::WrongPeer(_)) {
+                                        auth_err = Some(format!("handshake refused: {e}"));
+                                    }
                                     closed = true;
                                     break;
                                 }
@@ -1243,7 +1246,7 @@ impl Mesh {
                         },
                         Ok(None) => break,
                         Err(e) => {
-                            if e == WireError::Unauthenticated {
+                            if e == WireError::Unauthenticated || l.sec.awaiting_auth() {
                                 auth_err = Some(e.to_string());
                             }
                             closed = true;

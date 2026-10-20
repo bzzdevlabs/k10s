@@ -61,6 +61,14 @@ fn main() {
     let c = ChaCha20::new(&[1; 32], &[2; 12]);
     let mut b = vec![0u8; 1 << 20];
     bench("chacha20 1 MiB", b.len(), || c.apply(1, black_box(&mut b)));
+    // The scalar lanes the bare-metal kernel uses (built there at opt-level "s").
+    let mut ks = [0u8; 256];
+    bench("chacha20 keystream, portable lanes, 1 MiB", 1 << 20, || {
+        for i in 0..(1u32 << 12) {
+            c.blocks_portable(black_box(i * 4), &mut ks);
+        }
+        black_box(&ks);
+    });
     bench("sha256 1 MiB", big.len(), || {
         black_box(sha256(black_box(&big)));
     });
