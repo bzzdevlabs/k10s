@@ -169,7 +169,7 @@ fn svc_json(s: &ServiceRt, now: u64) -> String {
     };
     format!(
         concat!(
-            "{{\"name\":{},\"rt\":{},\"placement\":{},\"code\":\"{}\",\"memory\":{},\"max_instances\":{},\"cpu_ms\":{},\"fresh\":{},\"calls\":{},",
+            "{{\"name\":{},\"rt\":{},\"placement\":{},\"code\":\"{}\",\"memory\":{},\"max_instances\":{},\"cpu_ms\":{},\"fresh\":{},\"may_call\":{},",
             "\"mem_reserved\":{},\"mem_used\":{},\"mem_shared\":{},",
             "\"instances\":{{\"live\":{},\"idle\":{},\"peak\":{}}},\"queue\":{},\"snapshot\":{},",
             "\"requests\":{},\"ok\":{},\"errors\":{},\"traps\":{},\"interrupted\":{},\"created\":{},\"destroyed\":{},",

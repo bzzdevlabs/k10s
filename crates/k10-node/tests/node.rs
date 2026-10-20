@@ -146,7 +146,7 @@ fn apply_warns_about_callers_without_calls() {
     assert!(r.to_json().contains("\"warnings\":[\"service `c` imports `call`"));
     let s = status(&node);
     assert!(s.contains("\"warnings\":[\"service `c` imports `call`"), "{s}");
-    assert!(s.contains("\"name\":\"g\"") && s.contains("\"calls\":[\"p\"]"), "{s}");
+    assert!(s.contains("\"name\":\"g\"") && s.contains("\"may_call\":[\"p\"]"), "{s}");
     assert_eq!(node.apply(mk()).unwrap().warnings.len(), 1, "a no-op re-apply still reports it");
     node.shutdown();
 }
