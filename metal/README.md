@@ -35,7 +35,9 @@ tools/cluster_measure.py   # cluster measurements with a metal member -> out/res
 
 Kernel command line (`APPEND=` for run.sh): `k10.verbose` (boot banner, phases, apply log), `k10.selftest` (run the
 in-kernel tests, then exit QEMU with status 33 on success), `k10.exit_on_ready`, `k10.spin_us=N` (busy-poll window
-before halting, default 50), `k10.engine=jit|interp` (default jit), `k10.smp=N` (use at most N CPUs). Cluster
+before halting, default 50), `k10.engine=jit|interp` (default jit), `k10.smp=N` (use at most N CPUs),
+`k10.jit_indirect=jump|lfence|retpoline` (Spectre v2 hardening of JIT indirect branches, default jump),
+`k10.timer_res_us=N` (resolution of the guests' `now_ns`/`time_ms`, default 100, 0 = full; SECURITY.md). Cluster
 mode: `k10.join=HOST:PORT[,…]`, `k10.gossip=`, `k10.rpc=`, `k10.http=` (advertised addresses), `k10.node_id=HEX`,
 `k10.probe_ms=N`, `k10.suspicion_mult=N`, `k10.mem=BYTES`, `k10.host_alias=IP` (see "Cluster mode" below).
 

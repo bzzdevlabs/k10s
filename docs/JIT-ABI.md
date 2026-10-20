@@ -74,3 +74,64 @@ needed: SFI masking makes every load/store valid, and every other fault is check
 ## Memory
 The runtime provides, per instance, `S + TAIL` bytes of readable/writable memory at `mem_base` (in practice a slot
 of `S + 4096` bytes). Code is W^X: emitted into RW memory, then remapped read+execute.
+
+## Speculation hardening
+Generated code must stay inside its slot and its code even on *mispredicted* paths (Spectre; threat model in
+SECURITY.md). Every guest address is masked with `r13` by data flow, so memory accesses need nothing more. What
+remains are the branches whose misprediction would index or jump with a guest value; their exact sequences
+(`r` = the register holding the index, any allocatable register: `rax rcx rdx rbx rbp rsi rdi r8 r9 r10 r12`;
+`r11` is the codegen's scratch register; Intel syntax):
+
+**`br_table`, jump table** (more than `CompileOptions::br_tree_max` target runs, default 8). The table has
+`n + 1` 4-byte entries, entry `n` = the default; the index is clamped by `cmovae` — data flow, which the CPU does not
+predict — so not even a mispredicted path loads outside the table:
+```
+mov    r11d, n                 ; 41 BB imm32
+cmp    r, r11                  ; unsigned 64-bit
+cmovae r, r11                  ; r = min(r, n): out-of-range and "negative" indices select the default entry
+lea    r11, [rip + table]      ; 4C 8D 1D rel32
+movsxd r, dword [r11 + r*4]    ; entry = target - table
+; then, by CompileOptions::indirect (IndirectBranch):
+;   Jump (default):  add r, r11 ; jmp r
+;   Lfence:          add r11, r ; lfence ; jmp r11
+;   Retpoline:       add r11, r ; jmp retpoline_thunk
+<0xCC padding to a multiple of 4>
+table: dd target_0 - table, …, dd target_{n-1} - table, dd default - table
+```
+**`br_table`, compare tree** (at most `br_tree_max` runs; a run = maximal range of consecutive indices with the
+same target, the last run being `[k, 2^64)` → default). A balanced binary search on the run boundaries with
+unsigned compares and direct jumps only — no indirect branch, no table load:
+```
+cmp r, imm32 ; jae right   (or, when the left half is one run: cmp r, imm32 ; jb target_left)
+…            ; leaves: jmp target
+```
+**Indirect calls** (host functions, the bulk-memory helpers, the interrupt hook, the entry trampoline's call of the
+function), by `IndirectBranch` mode — e.g. a host call (`imp` = the import index, a compile-time constant):
+```
+Jump:       mov rax, [r14 + 32] ; call [rax + 8*imp]
+Lfence:     mov rax, [r14 + 32] ; mov r11, [rax + 8*imp] ; lfence ; call r11
+Retpoline:  mov rax, [r14 + 32] ; mov r11, [rax + 8*imp] ; call retpoline_thunk
+```
+(helpers: `call [rip + slot]` / `mov r11, [rip + slot]; …`; interrupt hook: `call [r14 + 40]` / `mov r11,
+[r14 + 40]; …`; entry trampoline: `call rsi` / `mov r11, rsi; …`).
+
+**Retpoline thunk** (once per module, in the prelude, 16-byte aligned, only in `Retpoline` mode; target in `r11`,
+entered by `call` or `jmp`). Its `ret` is predicted by the return stack buffer — the speculation trap — never by
+the branch target buffer:
+```
+retpoline_thunk:
+    call 1f            ; E8 07 00 00 00
+2:  pause              ; F3 90
+    lfence             ; 0F AE E8
+    jmp 2b             ; EB F9
+1:  mov [rsp], r11     ; 4C 89 1C 24
+    ret                ; C3
+```
+`Jump` mode emits exactly the pre-hardening call sequences. Other bounds checks need no clamp: host-function and
+helper indices are compile-time constants, `call` targets are direct, frame offsets are constants checked by the
+entry safepoint, and division-by-zero checks guard no memory access. The bulk-memory helpers clamp their lengths
+branch-free (`k10_ir::sem::check_span`). Stack checks (`cmp rax, [r14 + 16]; jb slow`) are not clamped: a
+mispredicted check lets a speculative path run a few frames below `stack_limit` (into `HOST_RESERVE`, or a guard
+page), but JIT code writes every frame slot before reading it (locals are zeroed in the prologue, parameters and
+return addresses are written by the caller, spill slots by the spill), so such a path only reads back its own
+stores and never memory it does not own (residual risk: speculative store bypass, see SECURITY.md).

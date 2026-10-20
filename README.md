@@ -90,8 +90,8 @@ then `apply` to any of them.
 
 ## Status and limits
 Research prototype. Not yet: authentication/encryption of gossip and peer links, replicated storage (KV is
-node-local), consensus for singletons, hostile multi-tenancy on one node (Spectre-class side channels are out of
-scope by design), architectures other than x86-64 for the JIT (others run on the interpreter). See
+node-local), consensus for singletons, hostile multi-tenancy on one node (Spectre-class side channels are only
+partly mitigated), architectures other than x86-64 for the JIT (others run on the interpreter). See
 [docs/STATUS.md](docs/STATUS.md) and [SECURITY.md](SECURITY.md).
 
 ## License

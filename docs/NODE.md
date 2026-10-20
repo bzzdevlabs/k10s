@@ -101,7 +101,9 @@ docs/HOSTAPI.md, implemented once in `host.rs` (`HostCtx::dispatch(HostFn, args,
   per-service quota exhausted, `Host(4)` `kv_add` on a value that is not 8 bytes, `Host(0x7FFF)` internal error
   (host panic).
 - `random`: per-invocation wyrand stream seeded from a per-shard generator (seeded by `getrandom`). `now_ns` is
-  `CLOCK_MONOTONIC`, `time_ms` `CLOCK_REALTIME`.
+  `CLOCK_MONOTONIC`, `time_ms` `CLOCK_REALTIME`, both coarsened with fuzzy edges (`clock.rs`, `k10_ir::clock`) to
+  `--timer-res-us` (default 100; 0 = full resolution). Every guest `(ptr, len)`, offset and index is clamped
+  branch-free after its check (`check_span`, `k10_ir::nospec`; SECURITY.md, "CPU side channels").
 
 ## Service calls
 `call` suspends the caller's fiber; the shard submits the callee like any request (method POST). Results: callee
@@ -238,6 +240,8 @@ scale|create|density MODE N|idle N`, and `examples/demo_modules` + `k10s node` +
   `trap_request = 0` at entry, MXCSR/x87 control and the direction flag at their SysV defaults (nothing on fibers
   changes them; coroutine switches do not touch them). Code is compiled for the node's own CPU (`CpuFeatures::detect`),
   so every cluster member compiles the blobs it fetches itself.
+- **Spectre v2 hardening** (opt-in): `--jit-indirect lfence|retpoline` (`NodeConfig::jit_indirect`) compiles every
+  indirect branch of generated code through `lfence` or a retpoline (docs/JIT-ABI.md, "Speculation hardening").
 
 ### JIT measurements (release, i7-7820HQ 4C/8T, 8 shards; other agents running: load 3–8, numbers are noisy)
 loadgen (bench/bin/loadgen, closed loop, 10 s after 2 s warm-up) against `k10s node --backend jit|interp` with the
