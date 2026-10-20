@@ -16,6 +16,8 @@ adds a UDP driver, a thread runner and a deterministic simulator. The crate has 
 | `member` | `NodeId`, `Addr` (= `core::net::SocketAddr`), `Capacity`, `Member`, `MemberState` |
 | `wire` | TCP peer protocol framing: `Msg` (borrowed, copy-free), `FrameDecoder` (incremental) |
 | `sha256` | SHA-256, `to_hex`/`from_hex` |
+| `crypto` | ChaCha20 (SSE2 on x86-64), Poly1305, (X)ChaCha20-Poly1305, HMAC/HKDF-SHA256, `ct_eq` (RFC vectors) |
+| `secure` | cluster key, `GossipCipher` (sealed datagrams, anti-replay), `SecureLink` (peer-link handshake, sealed frames) |
 | `driver` (std) | `UdpDriver` (caller-owned epoll loop) and `MeshThread` (self-contained thread) |
 | `sim` (std) | discrete-event simulator: virtual time, loss, latency, partitions |
 
@@ -40,6 +42,10 @@ Events are `MemberUp`, `MemberDown`, `MemberUpdated` and `DesiredState { version
 `next_deadline()`, `poll_event()`.
 
 ## Gossip protocol (UDP, every datagram ≤ `max_packet` = 1400 bytes)
+
+With a cluster key every datagram below travels sealed (`secure::GossipCipher`, `UdpDriver::set_cipher`):
+`'K' | 1 | nonce[24] = boot ctr ts_ms | XChaCha20-Poly1305(datagram) | tag[16]`; forged, stale and replayed ones are
+dropped before decoding (docs/NODE.md "Cluster authentication").
 
 ```
 datagram = magic:u8=0x6b version:u8=1 type:u8 sender:u64 | body | n:u8 item*n
@@ -84,7 +90,10 @@ addr    = 4 ip[4] port:u16 | 6 ip[16] port:u16;  raddr = 0 port:u16 (same IP as 
 
 `frame = len:u32 LE | kind:u8 | request_id:u64 LE | payload`, with `len = 9 + payload`.
 Messages: Hello{member}, GetManifest{version}/Manifest{bytes}, GetBlob{hash}/Blob{hash,bytes}/BlobMissing{hash},
-Call{service,path,body,deadline_ms,method}/CallResult{status,body}, Ping/Pong. Payload layouts are documented in
+Call{service,path,body,deadline_ms,method}/CallResult{status,body}, Ping/Pong. With a cluster key
+(`secure::SecureLink`) each side first sends `Auth` (kind 11: id, fresh nonce); every later frame is
+`len | ChaCha20-Poly1305(kind | request_id | payload) | tag[16]` under a per-direction session key, opened in place
+by `FrameDecoder::set_opener`. Payload layouts are documented in
 `src/wire.rs`. `FrameDecoder` takes partial input (`feed`, or `spare`/`commit` to read in place) and caps the
 frame size (default: the largest bundle blob plus headers). Errors are sticky, and the decoder never allocates from a claimed length. `encode_header` allows
 vectored writes of large blobs.

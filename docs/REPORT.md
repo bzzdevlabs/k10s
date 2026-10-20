@@ -154,8 +154,9 @@ the caveats. Highlights beyond §0:
 
 ## 7. Limitations (honest list)
 - **Security model:** same-organization workloads per node. Spectre-class side channels between co-located workloads
-  are out of scope; use separate nodes per hostile tenant. **Gossip and peer links are not authenticated or
-  encrypted yet** — trusted networks only.
+  are out of scope; use separate nodes per hostile tenant. Gossip and peer links are authenticated and encrypted with
+  one shared cluster key and the admin API takes a bearer token, but every key holder is trusted (no per-node
+  identity, no signed bundles yet).
 - **Storage:** KV is durable but node-local (atomic per node via `kv_add`/`kv_cas`); no replication or consensus yet.
 - **Compute speed:** Ten + baseline JIT is ~1.1–1.6× slower than portable Go and ~4× slower than Go's SHA-256
   assembly; the JIT keeps at most six locals in registers and every memory access pays the mask.
@@ -165,7 +166,8 @@ the caveats. Highlights beyond §0:
 - **Bare metal:** VM guests only today (PVH, legacy virtio-net, 4 GiB mapped, no storage driver).
 
 ## 8. Roadmap (recommended order)
-1. **Cluster security:** node identity, authenticated/encrypted gossip and peer links, signed bundles.
+1. **Cluster security:** node identity and signed bundles (done: shared-key authenticated/encrypted gossip and peer
+   links, admin API token).
 2. **Replicated state:** per-service replicated KV (Raft per shard group) and leases for singletons.
 3. **Tier 1 images** (U0–U2): PID-1 mode merged, x86 images, signed A/B updates spread over gossip.
 4. **arm64:** interpreter everywhere now; arm64 JIT backend (shared by both tiers).

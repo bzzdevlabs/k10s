@@ -65,8 +65,12 @@ curl 127.0.0.1:8080/hello/
 curl '127.0.0.1:8080/compute/?n=1000'
 ```
 Try a single service without a node: `k10s run examples/echo.ten --method POST --body hi`.
-A cluster: start more nodes with `--gossip`, `--rpc` and `--join HOST:PORT` (see [docs/NODE.md](docs/NODE.md)),
-then `apply` to any of them.
+The admin API (`apply`, `status`, `logs`) answers loopback clients only until you give it a token
+(`--admin-token-file FILE` on the node, the same file to the CLI or `K10S_ADMIN_TOKEN_FILE`).
+
+A cluster: create a key once (`k10s keygen -o cluster.key`), copy it to every node, and start them with
+`--cluster-key-file cluster.key`, `--gossip`, `--rpc` and `--join HOST:PORT` (see [docs/NODE.md](docs/NODE.md));
+then `apply` to any of them. Gossip and peer links are authenticated and encrypted with that key.
 
 ## Repository
 
@@ -89,8 +93,8 @@ then `apply` to any of them.
 - Chaos, soak and abuse campaigns (see [docs/STATUS.md](docs/STATUS.md)).
 
 ## Status and limits
-Research prototype. Not yet: authentication/encryption of gossip and peer links, replicated storage (KV is
-node-local), consensus for singletons, hostile multi-tenancy on one node (Spectre-class side channels are out of
+Research prototype. Not yet: per-node identity and signed bundles (one shared cluster key today), TLS, replicated
+storage (KV is node-local), consensus for singletons, hostile multi-tenancy on one node (Spectre-class side channels are out of
 scope by design), architectures other than x86-64 for the JIT (others run on the interpreter). See
 [docs/STATUS.md](docs/STATUS.md) and [SECURITY.md](SECURITY.md).
 
