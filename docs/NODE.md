@@ -232,7 +232,7 @@ status ≥ 0, −1 unknown service, −2 unavailable (crash backoff with nothing
 - Order: close inherited fds ≥ 3 and `PR_SET_NO_NEW_PRIVS` → with `--user`: groups and fs uid/gid of the user (files
   are created as the user; the data directory must belong to it) → Landlock on the main thread before any thread
   exists (inherited by all threads): data dir rw, `/proc/self`, `/proc/sys/vm/{max_map_count,overcommit_memory}`,
-  `/sys/devices/system/cpu` and the binary read-only, `K10_JIT_DUMP` rw if set; TCP `bind` limited to the HTTP and
+  `/sys/devices/system/cpu` and the binary read-only, `K10_JIT_DUMP` rw if set; TCP `bind` limited to the HTTP, admin and
   peer ports with ABI ≥ 4 → listeners bound, threads started → `setresgid`/`setresuid` to the user (all threads) →
   seccomp allowlist installed with `SECCOMP_FILTER_FLAG_TSYNC`; threads created later inherit it. One log line
   states what was applied (Landlock ABI or why not, syscall count, user).
