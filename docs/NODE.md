@@ -32,10 +32,12 @@ placement and peer links on top of it.
   `S + 4 KiB` (what it needs to serve; its snapshot is captured from that instance), out of `--mem`; burst instances
   beyond a service's reservation come from the shared remainder (`--mem` − reservations). So a service with many
   concurrent requests can fill the shared pool but never another service's reservation: every service can always
-  create its first instance. The sum of the reservations must fit: a single-node apply that does not fit is
-  rejected (422, `memory reservations do not fit: N service(s) … reserve X … --mem is Y`), and in cluster mode
-  placement charges exactly this footprint per replica against each node's advertised capacity (`--mem`), so it never
-  places a service where its reservation cannot fit (a cluster apply is never refused: should the inputs disagree,
+  create its first instance. The sum of the reservations must fit (address space, like `--mem` itself: 100k
+  services of 64 KiB reserve 6.6 GiB, so very dense nodes need `--mem` above physical RAM): a single-node apply that
+  does not fit is rejected (422, `memory reservations do not fit: N service(s) … reserve X … --mem is Y`), and in
+  cluster mode placement charges exactly this footprint per replica against each node's advertised capacity
+  (`--mem`), so it never places a service where its reservation cannot fit (a cluster apply is never refused: should
+  the inputs disagree,
   what does not fit runs without a reservation). Services placed on other nodes reserve nothing (they only run here
   as a fallback, from the shared pool); stacked replicas (more replicas than nodes) reserve one instance per node,
   the rest of their placement share is shared-pool headroom. Accounting: one atomic `committed` = active reservations

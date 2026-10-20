@@ -841,9 +841,12 @@ impl Shard {
                     .collect()
             };
             for ii in shared {
-                if !self.node.budget.over() {
+                let inst = self.instances[ii as usize].as_mut().unwrap();
+                // Claim the bytes atomically (shards relieve in parallel), then free uncharged.
+                if !self.node.budget.reclaim_over(inst.svc.instance_bytes()) {
                     return;
                 }
+                inst.slot.charge = Charge::None;
                 let l = self.local.get_mut(&id).unwrap();
                 l.idle.retain(|&x| x != ii);
                 let svc = l.svc.clone();
@@ -1379,7 +1382,11 @@ impl Shard {
                 let budget = &self.node.budget;
                 if budget.promote(&svc.mem_res, svc.instance_bytes()) {
                     inst.slot.charge = Charge::Reserved;
-                } else if budget.over() && !(svc.waiting.load(SeqCst) > 0 && svc.live.load(Acquire) <= 1) {
+                } else if budget.over()
+                    && !(svc.waiting.load(SeqCst) > 0 && svc.live.load(Acquire) <= 1)
+                    && budget.reclaim_over(svc.instance_bytes())
+                {
+                    inst.slot.charge = Charge::None;
                     ok = false;
                 }
             }

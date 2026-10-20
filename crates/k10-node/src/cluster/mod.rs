@@ -559,10 +559,19 @@ impl ClusterHooks for ClusterShared {
                 human_bytes(l.bytes_out)
             );
         }
+        let b = &self.node.budget;
+        let _ = writeln!(
+            o,
+            "\nmemory: --mem {}, reserved {}, burst {} of {} shared",
+            human_bytes(b.limit()),
+            human_bytes(b.reserved()),
+            human_bytes(b.shared_used()),
+            human_bytes(b.limit().saturating_sub(b.reserved()))
+        );
         let s = &self.stats;
         let _ = writeln!(
             o,
-            "\nrouting: forwarded {} (retries {}, failed {}, local fallback {}), served for peers {}, not-here {}",
+            "routing: forwarded {} (retries {}, failed {}, local fallback {}), served for peers {}, not-here {}",
             s.forwarded.load(Relaxed),
             s.forward_retries.load(Relaxed),
             s.forward_failed.load(Relaxed),

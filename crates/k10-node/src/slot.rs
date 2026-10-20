@@ -212,6 +212,18 @@ impl MemBudget {
         }
     }
 
+    /// While over-committed, uncommits a shared instance of `bytes` the caller then frees uncharged; false otherwise.
+    pub fn reclaim_over(&self, bytes: u64) -> bool {
+        let mut cur = self.committed.load(Relaxed);
+        while cur > self.limit {
+            match self.committed.compare_exchange_weak(cur, cur.saturating_sub(bytes), Relaxed, Relaxed) {
+                Ok(_) => return true,
+                Err(c) => cur = c,
+            }
+        }
+        false
+    }
+
     /// Moves a shared instance into a free unit of `r`; true if it is now [`Charge::Reserved`].
     pub fn promote(&self, r: &Reservation, bytes: u64) -> bool {
         if r.units != 0 && r.take() {
@@ -540,6 +552,12 @@ mod tests {
         assert!(b.over());
         assert_eq!(b.charge(&c, U), Some(Charge::Reserved), "reserved instances are always allowed");
         assert_eq!(b.charge(&h, U), None, "no burst while over-committed");
+        // Relief claims exactly the overage.
+        let mut n = 0;
+        while b.reclaim_over(U) {
+            n += 1;
+        }
+        assert_eq!((n, b.over()), (3, false));
     }
 
     #[test]
