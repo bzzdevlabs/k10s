@@ -4,7 +4,7 @@
 service hello   { code = "hello.ten"   memory = 64KiB }
 service echo    { code = "echo.ten"    memory = 1MiB  replicas = 2 }
 service compute { code = "compute.ten" memory = 64KiB cpu_ms = 60000 }
-service chain   { code = "chain.ten"   memory = 64KiB config = "echo" }
+service chain   { code = "chain.ten"   memory = 64KiB config = "echo" calls = ["echo"] }
 service counter { code = "counter.ten" memory = 64KiB }
 service todo    { code = "todo.ten"    memory = 1MiB }
 service nbody   { code = "nbody.ten"   memory = 64KiB cpu_ms = 60000 }
