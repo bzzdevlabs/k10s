@@ -9,7 +9,14 @@ import (
 	"strconv"
 )
 
+// version is set at build time: -ldflags "-X main.version=..." (bench/workloads/build.sh).
+var version = "dev"
+
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-version" || os.Args[1] == "--version") {
+		os.Stdout.WriteString("compute " + version + "\n")
+		return
+	}
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"

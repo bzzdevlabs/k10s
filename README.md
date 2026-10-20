@@ -66,7 +66,49 @@ curl '127.0.0.1:8080/compute/?n=1000'
 ```
 Try a single service without a node: `k10s run examples/echo.ten --method POST --body hi`.
 A cluster: start more nodes with `--gossip`, `--rpc` and `--join HOST:PORT` (see [docs/NODE.md](docs/NODE.md)),
-then `apply` to any of them.
+then `apply` to any of them. Prebuilt binaries: [Releases and versions](#releases-and-versions).
+
+## Releases and versions
+Prebuilt artifacts: [GitHub Releases](https://github.com/bzzdevlabs/k10s/releases). *Latest* is the last stable
+release; every push to `main` also publishes a development pre-release. All binaries are for x86-64 Linux. `V` below
+is the release's version (e.g. `0.1.0`, or `0.1.1-dev.45`).
+
+| Archive | Contents |
+|---|---|
+| `k10s-V-x86_64-unknown-linux-musl.tar.gz` | `k10s` (CLI, node daemon, Ten compiler, JIT), static: runs on any x86-64 Linux; LICENSE, NOTICE, README.md, SECURITY.md |
+| `k10s-V-x86_64-unknown-linux-gnu.tar.gz` | the same, linked against glibc (built on Ubuntu 24.04) |
+| `k10s-examples-V.tar.gz` | [examples/](examples/): Ten sources, the compiled `.k10` modules, `app.k10s` (`k10s apply app.k10s`) |
+| `k10s-metal-V-x86_64.tar.gz` | the bare-metal kernel ([metal/](metal/)): `k10-metal.elf`, `k10-metal-embedded.elf` (test bundle baked in), `bundle.k10b` (18 test services), `mkbundle` (static; pass `--ten-dir examples` or `--no-ten`), `examples/*.ten`, metal README |
+| `k10s-bench-V-linux-amd64.tar.gz` | [bench/](bench/) tools, static Go: workloads `echo` `compute` `chain` `counter` `compute-purego`, and `loadgen` |
+| `k10s-V-src.tar.gz` | the sources of the commit, stamped with its version (`.k10s-version`) for builds without git |
+| `SHA256SUMS` | `sha256sum -c SHA256SUMS --ignore-missing` |
+
+The benchmark workloads are also container images, `ghcr.io/bzzdevlabs/k10s-bench-<workload>:V` (`echo`, `compute`,
+`chain`, `counter`; moving tags `latest` = last stable release, `dev` = last `main` build). The Kubernetes benchmark
+loads `k10s-bench/<workload>:v1` (and `echo:v2`) into kind: `docker tag` a pulled image to that name, or build them
+with `bench/workloads/build.sh`. Boot the kernel with the QEMU command of [metal/run.sh](metal/run.sh)
+(`-kernel k10-metal-embedded.elf` needs no `-initrd`).
+
+**Versions** follow [SemVer](https://semver.org). [scripts/version.sh](scripts/version.sh) computes them from the
+Cargo workspace version `X.Y.Z` (`[workspace.package]` in [Cargo.toml](Cargo.toml) and
+[metal/Cargo.toml](metal/Cargo.toml); the build fails if the two differ) and git:
+- a commit tagged `vX.Y.Z` is the **stable release** `X.Y.Z`;
+- any other commit is the **development build** `X.Y.Z-dev.N`, where `N` = `git rev-list --count HEAD` (the build
+  number: it grows with every commit on `main` and is reproducible from the commit). Once `vX.Y.Z` is released, and
+  until the Cargo version is bumped, dev builds are `X.Y.(Z+1)-dev.N`, so they always sort after the last release;
+- binaries add the commit as build metadata: `k10s 0.1.0+1a2b3c4`, `k10s 0.1.1-dev.45+1a2b3c4`; `.dirty` marks a
+  build from a modified tree (`+1a2b3c4.dirty`), and a build without git says `X.Y.Z-dev.0+unknown`. Docker image
+  tags drop the `+…` part.
+
+The version is reported by `k10s --version` (also `k10s version`, `-V`), the node's startup line, the `"version"`
+field of `GET /_k10s/status` (hosted node and bare-metal kernel), the kernel's boot banner (`k10.verbose`),
+`mkbundle --version`, and `-version` of the Go tools. `scripts/version.sh --full`, `--tag`, `--number`, … print its
+parts.
+
+**Cutting a release** (from `main`): run `scripts/set-version.sh X.Y.Z` (both manifests and their lock files) and
+commit; tag that commit `vX.Y.Z` and push the tag. The release workflow checks the tag against the Cargo version,
+builds, tests and publishes `vX.Y.Z`. Then set the next version (`scripts/set-version.sh X.Y.(Z+1)`, or a minor or
+major bump) so that dev builds carry it. `scripts/dist.sh` builds the same archives locally, into `dist/`.
 
 ## Repository
 

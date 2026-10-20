@@ -11,6 +11,7 @@
 //!             [--backend jit|interp] [--memory SIZE] [--config STR] [--cpu-ms N]
 //! k10s status [--node HOST:PORT] [--json]
 //! k10s logs   SERVICE [--node HOST:PORT]
+//! k10s version                       (also `--version`, `-V`)
 //! ```
 //! Argument parsing is hand-written (no dependencies beyond the workspace). The default backend is `K10S_BACKEND`
 //! (`jit` | `interp`) if set, else the JIT.
@@ -43,9 +44,13 @@ const USAGE: &str = "usage:
               (runs one request in-process, no node needed: body on stdout, status and logs on stderr)
   k10s status [--node HOST:PORT] [--json]
   k10s logs   SERVICE [--node HOST:PORT]
+  k10s version                                    (also --version, -V)
 
 The default node address is 127.0.0.1:8080. In a cluster, `apply` and HTTP requests work on any node.
 The default backend is $K10S_BACKEND (jit|interp) if set, else jit.";
+
+/// Build version, e.g. `0.1.1-dev.45+1a2b3c4` (scripts/version.sh via build.rs).
+const VERSION: &str = env!("K10S_VERSION_FULL");
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -61,6 +66,10 @@ fn main() -> ExitCode {
         "run" => cmd_run(rest),
         "status" => cmd_status(rest),
         "logs" => cmd_logs(rest),
+        "version" | "--version" | "-V" => {
+            println!("k10s {VERSION}");
+            Ok(())
+        }
         "help" | "--help" | "-h" => {
             println!("{USAGE}");
             Ok(())
@@ -189,6 +198,7 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
     cfg.log_stderr = a.has("log-stderr");
     cfg.pin_threads = a.has("pin");
     let cluster_cfg = cluster_config(&a)?;
+    k10_node::admin::set_build_version(VERSION);
     // Block SIGINT/SIGTERM in every thread (inherited by the threads the node spawns) and wait for them here.
     let set = signal_set();
     // SAFETY: plain libc calls on a properly initialized sigset_t.
@@ -208,7 +218,7 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
         }
     };
     eprintln!(
-        "k10s: node `{}` listening on http://{} ({} shards, backend {}, data {})",
+        "k10s {VERSION}: node `{}` listening on http://{} ({} shards, backend {}, data {})",
         node.shared().cfg.name,
         node.http_addr(),
         shards,

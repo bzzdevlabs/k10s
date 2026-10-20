@@ -4,6 +4,7 @@
 //! mkbundle [-o out/bundle.k10b] [--version N] [--services a,b,...] [--replicate NAME:COUNT] [--mem-log2 K]
 //!          [--max-instances N] [--ten-dir DIR | --no-ten]
 //! mkbundle --list
+//! mkbundle --version | -V            (alone: build version; `--version N` sets the manifest version)
 //! ```
 //!
 //! Services built as TIR with `k10_ir::builder` (all import only what they use; memory layout: data at 0..,
@@ -405,7 +406,7 @@ const DEFS: &[Def] = &[
 fn usage() -> ! {
     eprintln!(
         "usage: mkbundle [-o FILE] [--version N] [--services a,b,..] [--replicate NAME:COUNT] [--mem-log2 K] \
-         [--max-instances N] [--ten-dir DIR | --no-ten] | --list"
+         [--max-instances N] [--ten-dir DIR | --no-ten] | --list | --version"
     );
     exit(2)
 }
@@ -420,6 +421,10 @@ fn main() {
     let mut ten_dir = Some(std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples")));
     let mut list = false;
     let mut args = std::env::args().skip(1);
+    if args.len() == 1 && matches!(std::env::args().nth(1).as_deref(), Some("--version" | "-V")) {
+        println!("mkbundle {}", env!("K10S_VERSION_FULL"));
+        return;
+    }
     while let Some(a) = args.next() {
         let mut val = || args.next().unwrap_or_else(|| usage());
         match a.as_str() {

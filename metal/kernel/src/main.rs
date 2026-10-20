@@ -114,7 +114,8 @@ extern "C" fn kmain() -> ! {
     let ncpu = smp::start_aps(bi.arg("k10.smp").and_then(|v| v.parse().ok()).unwrap_or(percpu::MAX_CPUS));
     runtime::set_cpus(ncpu);
     if verbose { kprintln!(
-        "k10-metal: {} KiB RAM ({} KiB usable), kernel image {} KiB, TSC {} MHz ({:?}), timer: {}, NX {}, engine {}, cmdline \"{}\"",
+        "k10-metal {}: {} KiB RAM ({} KiB usable), kernel image {} KiB, TSC {} MHz ({:?}), timer: {}, NX {}, engine {}, cmdline \"{}\"",
+        env!("K10S_VERSION_FULL"),
         total_ram() >> 10,
         fs.usable >> 10,
         (kernel.1 - kernel.0) >> 10,
