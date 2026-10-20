@@ -9,8 +9,17 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// [`sfi::Layout`] of a compiled blob.
-pub fn layout(b: &k10_jit::CodeBlob) -> sfi::Layout {
+/// The verifier's [`sfi::Mode`] for an indirect-branch option.
+pub fn mode(i: k10_jit::IndirectBranch) -> sfi::Mode {
+    match i {
+        k10_jit::IndirectBranch::Jump => sfi::Mode::Jump,
+        k10_jit::IndirectBranch::Lfence => sfi::Mode::Lfence,
+        k10_jit::IndirectBranch::Retpoline => sfi::Mode::Retpoline,
+    }
+}
+
+/// [`sfi::Layout`] of a blob compiled with `indirect`.
+pub fn layout(b: &k10_jit::CodeBlob, indirect: k10_jit::IndirectBranch) -> sfi::Layout {
     let m = b.meta();
     sfi::Layout {
         funcs: m.funcs().iter().map(|f| (f.offset, f.params)).collect(),
@@ -18,15 +27,20 @@ pub fn layout(b: &k10_jit::CodeBlob) -> sfi::Layout {
         num_helpers: m.num_helpers(),
         num_imports: m.num_imports(),
         min_mem_log2: m.min_mem_log2(),
+        mode: mode(indirect),
     }
 }
 
-/// Verifies compiled blobs and checks that all their preludes are identical.
-pub fn verify_compiled(objdump: &std::path::Path, blobs: &[&k10_jit::CodeBlob]) -> Result<sfi::Stats, String> {
-    let mut bs: Vec<sfi::Blob> = blobs.iter().map(|b| sfi::Blob::new(b.code(), layout(b))).collect();
+/// Verifies compiled blobs (each with its indirect-branch option); preludes must be identical within a mode.
+pub fn verify_compiled(objdump: &std::path::Path, blobs: &[(&k10_jit::CodeBlob, k10_jit::IndirectBranch)]) -> Result<sfi::Stats, String> {
+    let mut bs: Vec<sfi::Blob> = blobs.iter().map(|(b, i)| sfi::Blob::new(b.code(), layout(b, *i))).collect();
     let (stats, preludes) = sfi::verify_blobs(objdump, &mut bs)?;
-    if let Some(i) = preludes.iter().position(|p| p != &preludes[0]) {
-        return Err(format!("prelude of blob {i} differs from blob 0's"));
+    let mut first: std::collections::HashMap<sfi::Mode, usize> = Default::default();
+    for (k, (_, i)) in blobs.iter().enumerate() {
+        let r = *first.entry(mode(*i)).or_insert(k);
+        if preludes[k] != preludes[r] {
+            return Err(format!("prelude of blob {k} differs from blob {r}'s ({:?} mode)", mode(*i)));
+        }
     }
     Ok(stats)
 }

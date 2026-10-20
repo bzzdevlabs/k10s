@@ -1,24 +1,30 @@
 //! SFI verifier (VeriWasm-style) for k10-jit output, independent of the codegen: checks the docs/JIT-ABI.md
-//! invariants on objdump's decoding, knowing only the blob metadata. Every function instruction must satisfy:
+//! invariants on objdump's decoding, knowing only the blob metadata and the [`Mode`]. Every function instruction must
+//! satisfy:
 //! * whitelisted instructions only (integer/SSE2 ops, moves, lea, cmov/setcc, jmp/jcc/call/ret, rep stos, lfence,
 //!   int3 as unreachable padding); never syscall/sysenter/int/rdtsc(p)/rdpmc/cpuid/port I/O/far or privileged ops;
 //! * r13 (mask), r14 (vmctx), r15 (heap base) never written; rsp only by the prologue's `sub rsp,F` and an
 //!   `add rsp,F` right before `ret`; no push/pop;
 //! * entry safepoint: `rsp-F` compared with vmctx.stack_limit (`cmp rax,[r14+0x10]; jb`) before `sub rsp,F`, same F;
 //! * memory accesses (≤ 8 bytes): guest `[r15+R*1]` with R from `and R,r13` unclobbered on the straight-line path
-//!   (state resets at branch targets and calls) or `[r15+c]`, 0 ≤ c < 2^min(min_mem_log2,31); frame `[rsp+d]` in
-//!   [0,F) or the parameters [F+8, F+8+8*params), never the return address; `rep stos` as `lea rdi,[rsp+X]; mov
-//!   ecx,N` inside [0,F); vmctx reads of +0x10/+0x20/+0x30 only; nothing else (no other base, rip or absolute data);
-//! * calls: direct to function entries or prelude stubs; `call [R+8k]` with R = `mov R,[r14+0x20]`, k < imports;
-//!   `call [rip+X]` with X in the helper table; nothing else indirect;
-//! * jumps: direct targets inside the function or prelude stubs (blocks after an unconditional jmp/ret: trap stubs,
-//!   safepoint); no fall-through past the end; indirect only `jmp R` with R = sext(table[R]) + r11,
-//!   r11 = `lea [rip+T]`, the n rel32 entries right after the jmp (int3 padding), each a boundary of the function,
-//!   and R proven < n (unsigned) on the straight-line path by `cmp R,n`+`jae` (or `cmp R,n-1`+`ja`), a branchless
-//!   clamp `cmp R,n`+`cmovae R,S` (or n-1/`cmova`) with S a known constant < n (`mov`/`xor`), `cmp R,n`+`sbb M,M`+
-//!   `and R,M`, or `and R,imm` with imm < n; the proven bound must equal n (Spectre clamps match these shapes).
+//!   (state resets at branch targets, calls and after jmp/ret) or `[r15+c]`, 0 ≤ c < 2^min(min_mem_log2,31); frame
+//!   `[rsp+d]` in [0,F) or the parameters [F+8, F+8+8*params), never the return address; `rep stos` as `lea
+//!   rdi,[rsp+X]; mov ecx,N` inside [0,F); vmctx reads of +0x10/+0x20/+0x30 only; reads of a host-function slot
+//!   (`[H+8k]`, H = `mov H,[r14+0x20]`, k < imports) or a helper slot (`[rip+X]`, X in the helper table); nothing else;
+//! * calls: direct to function entries or prelude stubs; indirect host/helper calls only, in the mode's form:
+//!   Jump `call [H+8k]` / `call [rip+X]`, Lfence `lfence; call r11`, Retpoline `call thunk`, r11 loaded from such a slot;
+//! * jumps: direct targets inside the function or prelude trap stubs; no fall-through past the end; a jump table only
+//!   as `cmp`-proven index → `movsxd R,[r11+R*4]` (r11 = `lea [rip+T]`) → Jump `add R,r11; jmp R` | Lfence
+//!   `add r11,R; lfence; jmp r11` | Retpoline `add r11,R; jmp thunk`, the entries right after the jump (int3 padding),
+//!   each a boundary of the function; the proven bound must equal the entry count. Bounds: `cmp R,n`+`jae` (or
+//!   `cmp R,n-1`+`ja`), `cmp R,n`+`cmovae R,S` (`cmp R,n-1`+`cmova`) with S a known constant c (bound max(n, c+1):
+//!   the codegen's `mov r11d,n; cmp R,r11; cmovae R,r11` gives n+1 = its table of n cases + default),
+//!   `cmp R,n`+`sbb M,M`+`and R,M`, or `and R,imm` (bound imm+1);
+//! * the retpoline thunk (`call 1f; pause; lfence; jmp .-2; 1: mov [rsp],r11; ret`) exists, byte-exact and 16-aligned
+//!   in the prelude, in Retpoline mode only; functions reach it only by the calls and table jumps above.
 //!
-//! Trusted, not covered: the prelude (checked identical for every module), the bulk-memory helpers, host functions.
+//! Trusted, not covered: the prelude (checked identical per mode, its indirect branches in the mode's form), the
+//! bulk-memory helpers, host functions.
 
 use super::Insn;
 use std::collections::{BTreeSet, HashMap};
@@ -26,8 +32,21 @@ use std::collections::{BTreeSet, HashMap};
 pub const OFF_STACK_LIMIT: i64 = 0x10;
 pub const OFF_HOST_FNS: i64 = 0x20;
 pub const OFF_TRAP_REQUEST: i64 = 0x30;
+pub const OFF_INTERRUPT: i64 = 0x28;
+pub const OFF_SAVED_RSP: i64 = 0x40;
 
-/// What the verifier needs to know about a blob (from `k10_jit::BlobMeta`).
+/// The retpoline thunk of docs/JIT-ABI.md.
+pub const THUNK: [u8; 17] = [0xE8, 7, 0, 0, 0, 0xF3, 0x90, 0x0F, 0xAE, 0xE8, 0xEB, 0xF9, 0x4C, 0x89, 0x1C, 0x24, 0xC3];
+
+/// Indirect-branch form the blob was compiled with (`k10_jit::IndirectBranch`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Mode {
+    Jump,
+    Lfence,
+    Retpoline,
+}
+
+/// What the verifier needs to know about a blob (from `k10_jit::BlobMeta` and the compile options).
 #[derive(Clone, Debug)]
 pub struct Layout {
     /// `(offset, params)` of every defined function, in order.
@@ -36,6 +55,13 @@ pub struct Layout {
     pub num_helpers: usize,
     pub num_imports: usize,
     pub min_mem_log2: u8,
+    pub mode: Mode,
+}
+
+impl Layout {
+    fn first_func(&self) -> u64 {
+        self.funcs.first().map(|f| f.0 as u64).unwrap_or(self.helper_table as u64)
+    }
 }
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -52,6 +78,8 @@ pub struct Stats {
     pub tables: u64,
     pub table_entries: u64,
     pub direct_branches: u64,
+    /// Indirect calls/jumps behind an lfence or through the retpoline thunk.
+    pub hardened: u64,
 }
 
 impl Stats {
@@ -68,6 +96,7 @@ impl Stats {
         self.tables += o.tables;
         self.table_entries += o.table_entries;
         self.direct_branches += o.direct_branches;
+        self.hardened += o.hardened;
     }
 }
 
@@ -264,28 +293,55 @@ fn forbidden(m: &str) -> bool {
 
 // ------------------------------------------------------------------------------------------------ the prelude
 
-/// Prelude entry points usable by functions: blocks right after an unconditional jmp/ret (not padding).
+/// Prelude entry points usable by functions.
 #[derive(Default)]
 pub struct Stubs {
-    /// Call targets: every stub.
+    /// Call targets: blocks right after an unconditional jmp/ret (not padding, not inside the thunk).
     pub all: BTreeSet<u64>,
-    /// Jump targets: trap stubs only (they restore the invoke frame, `mov rsp,[r14+0x40]`, before any `ret`);
-    /// a returning stub (the safepoint thunk) reached by a jump would `ret` into frame data.
+    /// Jump targets: trap stubs only (a jump to a returning stub would `ret` into frame data).
     pub trap: BTreeSet<u64>,
+    /// The retpoline thunk (Retpoline mode).
+    pub thunk: Option<u64>,
 }
 
-/// Checks the prelude `[0, first function)` for forbidden instructions and classifies its stubs.
-pub fn prelude_stubs(prelude: &[Insn]) -> Result<Stubs, String> {
-    let mut st = Stubs::default();
+/// The retpoline thunk's offset: exactly one 16-aligned copy in the prelude in Retpoline mode, none otherwise.
+pub fn find_thunk(code: &[u8], lay: &Layout) -> Result<Option<u64>, String> {
+    let first = (lay.first_func() as usize).min(code.len());
+    let hits: Vec<usize> = code[..first].windows(THUNK.len()).enumerate().filter(|(_, w)| *w == THUNK).map(|(p, _)| p).collect();
+    match (lay.mode, hits.as_slice()) {
+        (Mode::Retpoline, [p]) if p % 16 == 0 => Ok(Some(*p as u64)),
+        (Mode::Retpoline, _) => Err(format!("prelude: retpoline thunk missing, misaligned or duplicated (at {hits:?})")),
+        (_, []) => Ok(None),
+        (m, _) => Err(format!("prelude: retpoline thunk present in {m:?} mode")),
+    }
+}
+
+/// Checks the prelude (forbidden instructions, indirect branches in the mode's form) and classifies its stubs.
+pub fn prelude_stubs(prelude: &[Insn], mode: Mode, thunk: Option<u64>) -> Result<Stubs, String> {
+    let in_thunk = |a: u64| thunk.is_some_and(|t| a >= t && a < t + THUNK.len() as u64);
+    let mut st = Stubs { thunk, ..Stubs::default() };
     let mut after_uncond = false;
+    let mut prev = "";
     for i in prelude {
         if forbidden(&i.mnemonic) {
             return Err(format!("prelude: forbidden instruction `{}` at {:#x}", i.text, i.addr));
         }
-        if after_uncond && i.mnemonic != "int3" {
+        let m = i.mnemonic.as_str();
+        if (m == "call" || m == "jmp") && !i.operands.starts_with("0x") {
+            let ok = match mode {
+                Mode::Jump => m == "call" && (i.operands == "rsi" || i.operands == "QWORD PTR [r14+0x28]"),
+                Mode::Lfence => m == "call" && i.operands == "r11" && prev == "lfence",
+                Mode::Retpoline => false,
+            };
+            if !ok {
+                return Err(format!("prelude: indirect branch `{}` at {:#x} not in {mode:?} form", i.text, i.addr));
+            }
+        }
+        if after_uncond && m != "int3" && !in_thunk(i.addr) {
             st.all.insert(i.addr);
         }
-        after_uncond = matches!(i.mnemonic.as_str(), "jmp" | "ret");
+        after_uncond = matches!(m, "jmp" | "ret");
+        prev = m;
     }
     let at: HashMap<u64, usize> = prelude.iter().enumerate().map(|(k, i)| (i.addr, k)).collect();
     for &s0 in &st.all {
@@ -295,7 +351,7 @@ pub fn prelude_stubs(prelude: &[Insn]) -> Result<Stubs, String> {
             if i.mnemonic == "ret" {
                 break;
             }
-            if i.mnemonic == "mov" && i.operands == "rsp,QWORD PTR [r14+0x40]" {
+            if i.mnemonic == "mov" && i.operands == format!("rsp,QWORD PTR [r14+{OFF_SAVED_RSP:#x}]") {
                 st.trap.insert(s0);
                 break;
             }
@@ -312,9 +368,9 @@ pub fn prelude_stubs(prelude: &[Insn]) -> Result<Stubs, String> {
     Ok(st)
 }
 
-// ------------------------------------------------------------------------------------- phase A: table discovery
+// ------------------------------------------------------------------------------------------- straight-line facts
 
-/// A `br_table` jump table found while decoding: `n` rel32 entries at `at`.
+/// A jump table found while decoding: `n` rel32 entries at `at`, used by the jump at `jmp_at`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Table {
     pub jmp_at: u64,
@@ -322,47 +378,13 @@ pub struct Table {
     pub n: u64,
 }
 
-/// Jump table used by `jmp R` at `insns[k]` (`lea r11,[rip+T]` and closest `cmp R,imm` before it): only locates
-/// the table bytes so decoding can resume after them; [`verify_function`] proves the bound and requires it to be `n`.
-pub fn table_at(insns: &[Insn], k: usize) -> Option<Table> {
-    let j = &insns[k];
-    if j.mnemonic != "jmp" {
-        return None;
-    }
-    let Op::Reg(r, 64) = parse_operand(&j.operands) else { return None };
-    let mut target = None;
-    let mut n = None;
-    for i in insns[..k].iter().rev().take(24) {
-        if i.mnemonic == "lea" && i.operands.starts_with("r11,[rip+") && target.is_none() {
-            target = i.comment_target;
-        }
-        if n.is_none() {
-            let ops = operands(i);
-            if i.mnemonic == "cmp" {
-                if let [Op::Reg(x, 64), Op::Imm(v)] = ops.as_slice() {
-                    if *x == r {
-                        n = Some(*v);
-                    }
-                }
-            }
-        }
-        if target.is_some() && n.is_some() {
-            break;
-        }
-    }
-    let at = target?;
-    let mut n = n?;
-    // `cmp R, n-1` + `ja`/`cmova` shapes bound by n.
-    let uses_above = insns[..k].iter().rev().take(24).any(|i| i.mnemonic == "ja" || i.mnemonic == "cmova");
-    if uses_above && !insns[..k].iter().rev().take(24).any(|i| i.mnemonic == "jae" || i.mnemonic == "cmovae") {
-        n += 1;
-    }
-    (at >= j.end() && n > 0 && n < (1 << 31)).then_some(Table { jmp_at: j.addr, at, n })
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Callee {
+    Host,
+    Helper,
 }
 
-// ------------------------------------------------------------------------------------------ phase B: verification
-
-/// Abstract state of the straight-line path (reset at branch targets and after calls).
+/// Facts on the straight-line path (reset at branch targets, calls, after jmp/ret).
 #[derive(Clone, Default)]
 struct State {
     /// `and R, r13` result, unchanged since.
@@ -374,17 +396,18 @@ struct State {
     rsp_rel: [Option<i64>; 16],
     /// Holds `vmctx.host_fns`.
     host_fns: u16,
-    /// Flags hold `cmp R, imm`.
+    /// Holds a host-function or helper pointer read from its slot.
+    callee: [Option<Callee>; 16],
+    /// Flags hold `cmp R, v` (an immediate or a register of known value).
     flags: Option<(u8, u64)>,
     /// `sbb M,M` after `cmp R,n`: M = (R < n) ? !0 : 0.
     lt_mask: [Option<(u8, u64)>; 16],
     /// `lea R,[rip+T]`: a jump table address.
     table_addr: [Option<u64>; 16],
-    /// `movsxd R,[r11+R*4]` (table T) / then `add R, r11` (target from table T).
-    table_entry: [Option<u64>; 16],
-    table_target: [Option<u64>; 16],
-    /// Last instruction was `add rsp, F`.
-    rsp_restored: bool,
+    /// `movsxd R,[r11+R*4]` from table (T, bound of the index).
+    table_entry: [Option<(u64, u64)>; 16],
+    /// Entry + table address: a target from table (T, bound).
+    table_target: [Option<(u64, u64)>; 16],
 }
 
 impl State {
@@ -395,6 +418,7 @@ impl State {
         self.bound[i] = None;
         self.rsp_rel[i] = None;
         self.host_fns &= !(1 << r);
+        self.callee[i] = None;
         self.lt_mask[i] = None;
         self.table_addr[i] = None;
         self.table_entry[i] = None;
@@ -409,6 +433,166 @@ impl State {
         }
     }
 }
+
+fn writes_op0(m: &str) -> bool {
+    !reads_only(m) && !matches!(m, "rep stos" | "lfence" | "int3" | "call" | "jmp" | "ret") && !is_jcc(m)
+}
+
+fn sets_flags(m: &str) -> bool {
+    !matches!(m, "mov" | "movabs" | "movzx" | "movsx" | "movsxd" | "lea" | "movq" | "not" | "lfence" | "rep stos")
+        && !m.starts_with("cmov")
+        && !m.starts_with("set")
+        && !matches!(m, "cvtsi2sd" | "cvttsd2si" | "xorpd" | "addsd" | "subsd" | "mulsd" | "divsd" | "sqrtsd")
+        && !(m.starts_with("cmp") && m.ends_with("sd"))
+}
+
+/// Registers written implicitly.
+fn implicit_writes(m: &str, nops: usize) -> &'static [u8] {
+    match (m, nops) {
+        ("mul" | "div" | "idiv", _) | ("imul", 1) => &[RAX, RDX],
+        ("cqo", _) => &[RDX],
+        ("rep stos", _) => &[RDI, RCX],
+        _ => &[],
+    }
+}
+
+/// Explicit destination register.
+fn dst_reg(m: &str, ops: &[Op]) -> Option<(u8, u8)> {
+    match ops.first() {
+        Some(Op::Reg(r, bits)) if writes_op0(m) && !matches!(m, "mul" | "div" | "idiv") && !(m == "imul" && ops.len() == 1) => {
+            Some((*r, *bits))
+        }
+        _ => None,
+    }
+}
+
+/// A host-function slot (`[H+8k]`, k < imports) or a helper slot (`[rip+X]`) read as a 64-bit value.
+fn callee_slot(lay: &Layout, st: &State, mm: &MemOp, rip_target: Option<u64>) -> Option<Callee> {
+    if mm.size != 8 || mm.seg.is_some() || mm.index.is_some() {
+        return None;
+    }
+    match mm.base {
+        Some(Base::Reg(b)) if st.host_fns & (1 << b) != 0 => {
+            (mm.disp >= 0 && mm.disp % 8 == 0 && ((mm.disp / 8) as usize) < lay.num_imports).then_some(Callee::Host)
+        }
+        Some(Base::Rip) => {
+            let t = rip_target?;
+            let h0 = lay.helper_table as u64;
+            (t >= h0 && t < h0 + 8 * lay.num_helpers as u64 && (t - h0).is_multiple_of(8)).then_some(Callee::Helper)
+        }
+        _ => None,
+    }
+}
+
+fn tighten(b: &mut Option<u64>, v: u64) {
+    *b = Some(b.map_or(v, |o| o.min(v)));
+}
+
+/// The facts after `i` (no checks: those are in [`verify_function`]). Shared by table discovery and verification.
+fn transfer(lay: &Layout, st: &State, i: &Insn, ops: &[Op]) -> State {
+    let m = i.mnemonic.as_str();
+    if matches!(m, "call" | "jmp" | "ret") {
+        return State::default();
+    }
+    let mut new = st.clone();
+    if is_jcc(m) {
+        // Fall-through facts of a bounds check.
+        if let Some((r, n)) = st.flags {
+            match m {
+                "jae" => tighten(&mut new.bound[r as usize], n),
+                "ja" => {
+                    if let Some(b) = n.checked_add(1) {
+                        tighten(&mut new.bound[r as usize], b)
+                    }
+                }
+                _ => {}
+            }
+        }
+        return new;
+    }
+    for &r in implicit_writes(m, ops.len()) {
+        new.write(r);
+    }
+    if let Some((r, bits)) = dst_reg(m, ops) {
+        let ri = r as usize;
+        new.write(r);
+        match (m, ops) {
+            ("and", [_, Op::Reg(R13, 64)]) if bits == 64 => new.masked |= 1 << r,
+            ("and", [_, Op::Imm(v)]) => {
+                let v = if bits == 32 { *v & 0xffff_ffff } else { *v };
+                if v < (1 << 40) {
+                    new.bound[ri] = Some(v + 1);
+                }
+            }
+            ("and", [_, Op::Reg(mreg, 64)]) => {
+                if let Some((x, n)) = st.lt_mask[*mreg as usize] {
+                    if x == r {
+                        new.bound[ri] = Some(n);
+                    }
+                }
+            }
+            ("mov", [_, Op::Imm(v)]) => new.konst[ri] = Some(if bits == 32 { *v & 0xffff_ffff } else { *v }),
+            ("movabs", [_, Op::Imm(v)]) => new.konst[ri] = Some(*v),
+            ("xor", [Op::Reg(a, _), Op::Reg(b, _)]) if a == b => new.konst[ri] = Some(0),
+            ("lea", [_, Op::Mem(MemOp { base: Some(Base::Reg(RSP)), index: None, disp, .. })]) => new.rsp_rel[ri] = Some(*disp),
+            ("lea", [_, Op::Mem(MemOp { base: Some(Base::Rip), .. })]) if r == R11 => new.table_addr[ri] = i.comment_target,
+            ("mov", [_, Op::Mem(mm)]) if bits == 64 => {
+                if mm.base == Some(Base::Reg(R14)) && mm.index.is_none() && mm.disp == OFF_HOST_FNS {
+                    new.host_fns |= 1 << r;
+                }
+                new.callee[ri] = callee_slot(lay, st, mm, i.comment_target);
+            }
+            // M = (R < n) ? !0 : 0, valid while R is unchanged (and R is not M itself).
+            ("sbb", [Op::Reg(a, 64), Op::Reg(b, 64)]) if a == b => new.lt_mask[ri] = st.flags.filter(|&(x, n)| x != r && n > 0),
+            ("movsxd", [_, Op::Mem(MemOp { base: Some(Base::Reg(R11)), index: Some((x, 4)), disp: 0, size: 4, seg: None })]) => {
+                if let (Some(t), Some(b), true) = (st.table_addr[R11 as usize], st.bound[*x as usize], *x == r) {
+                    new.table_entry[ri] = Some((t, b));
+                }
+            }
+            ("add", [_, Op::Reg(src, 64)]) if bits == 64 => {
+                // Jump form `add R, r11`, or Lfence/Retpoline form `add r11, R`.
+                let entry = if *src == R11 { st.table_entry[ri] } else if r == R11 { st.table_entry[*src as usize] } else { None };
+                if let (Some((t, n)), Some(t2)) = (entry, st.table_addr[R11 as usize]) {
+                    if t == t2 {
+                        new.table_target[ri] = Some((t, n));
+                    }
+                }
+            }
+            (c, [_, Op::Reg(s, 64)]) if c.starts_with("cmov") && bits == 64 => {
+                // R stays or becomes cv: max(bound, cv+1); after `cmp R,n` a cmovae (cmova: n+1) gives max(n, cv+1).
+                let mut cands = Vec::new();
+                if let Some(cv1) = st.konst[*s as usize].and_then(|cv| cv.checked_add(1)) {
+                    if let Some(b) = st.bound[ri] {
+                        cands.push(b.max(cv1));
+                    }
+                    if let Some((x, n)) = st.flags.filter(|&(x, _)| x == r) {
+                        let lim = match c {
+                            "cmovae" => Some(n),
+                            "cmova" => n.checked_add(1),
+                            _ => None,
+                        };
+                        let _ = x;
+                        if let Some(lim) = lim {
+                            cands.push(lim.max(cv1));
+                        }
+                    }
+                }
+                new.bound[ri] = cands.into_iter().min();
+            }
+            _ => {}
+        }
+    }
+    if sets_flags(m) {
+        new.flags = match (m, ops) {
+            ("cmp", [Op::Reg(r, 64), Op::Imm(v)]) => Some((*r, *v)),
+            ("cmp", [Op::Reg(r, 64), Op::Reg(s, 64)]) => st.konst[*s as usize].map(|v| (*r, v)),
+            _ => None,
+        };
+    }
+    new
+}
+
+// ------------------------------------------------------------------------------------------------ verification
 
 struct Fn<'a> {
     lay: &'a Layout,
@@ -476,11 +660,16 @@ impl<'a> Fn<'a> {
                 self.stats.vmctx += 1;
                 Ok(())
             }
-            // Jump-table load.
-            (Some(Base::Reg(R11)), Some((x, 4))) if m.disp == 0 && m.size == 4 => {
-                let t = st.table_addr[R11 as usize].ok_or_else(|| self.err(i, "r11 is not a jump table address"))?;
-                let _ = (t, x);
-                Ok(()) // the bound is checked by the caller (movsxd rule)
+            // Jump-table load (its bound is checked by the movsxd rule).
+            (Some(Base::Reg(R11)), Some((_, 4))) if m.disp == 0 && m.size == 4 => {
+                st.table_addr[R11 as usize].map(|_| ()).ok_or_else(|| self.err(i, "r11 is not a jump table address"))
+            }
+            // Host-function slot.
+            (Some(Base::Reg(b)), None) if st.host_fns & (1 << b) != 0 => {
+                if write || callee_slot(self.lay, st, m, None).is_none() {
+                    return Err(self.err(i, "host-function table access outside the imports"));
+                }
+                Ok(())
             }
             _ => Err(self.err(i, "memory operand outside guest memory, frame and vmctx")),
         }
@@ -491,6 +680,25 @@ impl<'a> Fn<'a> {
             self.entries.contains(&t) || self.stubs.all.contains(&t)
         } else {
             (t >= self.start && t < self.end && boundaries.contains(&t)) || self.stubs.trap.contains(&t)
+        }
+    }
+
+    /// The table jump at `i` through `target` (its table, bound, padding).
+    fn table_jump(&mut self, i: &Insn, code: &[u8], table_of: &HashMap<u64, Table>, target: Option<(u64, u64)>) -> Result<(), String> {
+        let t = table_of.get(&i.addr).ok_or_else(|| self.err(i, "indirect jump without a recognized jump table"))?;
+        if target != Some((t.at, t.n)) {
+            return Err(self.err(i, "indirect jump target not computed from its jump table with a proven bound"));
+        }
+        if !code[i.end() as usize..t.at as usize].iter().all(|&b| b == 0xCC) {
+            return Err(self.err(i, "bytes between the indirect jump and its table are not int3 padding"));
+        }
+        Ok(())
+    }
+
+    fn count_callee(&mut self, c: Callee) {
+        match c {
+            Callee::Host => self.stats.host_calls += 1,
+            Callee::Helper => self.stats.helper_calls += 1,
         }
     }
 }
@@ -569,24 +777,21 @@ pub fn verify_function(
 
     // ---- the prologue: entry safepoint, then `sub rsp, F`.
     let k;
-    let op = |i: &Insn| operands(i);
-    let checked_frame: u64;
     {
         let i0 = insns.first().ok_or("empty function")?;
-        let ops0 = op(i0);
-        let (after_rax, fsz) = match (i0.mnemonic.as_str(), ops0.as_slice()) {
+        let (after_rax, fsz) = match (i0.mnemonic.as_str(), operands(i0).as_slice()) {
             ("lea", [Op::Reg(RAX, 64), Op::Mem(MemOp { base: Some(Base::Reg(RSP)), index: None, disp, .. })]) if *disp <= 0 => {
                 (1, (-*disp) as u64)
             }
             ("mov", [Op::Reg(RAX, 64), Op::Reg(RSP, 64)]) => {
                 let i1 = insns.get(1).ok_or("truncated prologue")?;
                 let i2 = insns.get(2).ok_or("truncated prologue")?;
-                match (i1.mnemonic.as_str(), op(i1).as_slice(), i2.mnemonic.as_str()) {
+                match (i1.mnemonic.as_str(), operands(i1).as_slice(), i2.mnemonic.as_str()) {
                     ("sub", [Op::Reg(RAX, 64), Op::Imm(v)], "jb") => {
-                        // jb → stack overflow trap (rsp - F wrapped)
+                        // jb: stack overflow trap (rsp - F wrapped)
                         let Op::Imm(t) = parse_operand(&i2.operands) else { return Err(f.err(i2, "bad jb")) };
                         if !stubs.trap.contains(&t) {
-                            return Err(f.err(i2, "wrap check must go to a prelude stub"));
+                            return Err(f.err(i2, "wrap check must go to a prelude trap stub"));
                         }
                         (3, *v)
                     }
@@ -597,23 +802,25 @@ pub fn verify_function(
         };
         let c = insns.get(after_rax).ok_or("truncated prologue")?;
         let ok_cmp = c.mnemonic == "cmp"
-            && matches!(op(c).as_slice(), [Op::Reg(RAX, 64), Op::Mem(MemOp { base: Some(Base::Reg(R14)), index: None, disp: OFF_STACK_LIMIT, size: 8, seg: None })]);
+            && matches!(operands(c).as_slice(), [Op::Reg(RAX, 64), Op::Mem(MemOp { base: Some(Base::Reg(R14)), index: None, disp: OFF_STACK_LIMIT, size: 8, seg: None })]);
         let jb = insns.get(after_rax + 1).ok_or("truncated prologue")?;
         let s = insns.get(after_rax + 2).ok_or("truncated prologue")?;
         if !ok_cmp || jb.mnemonic != "jb" {
             return Err(f.err(c, "entry safepoint must compare rax with vmctx.stack_limit then jb"));
         }
-        match (s.mnemonic.as_str(), op(s).as_slice()) {
-            ("sub", [Op::Reg(RSP, 64), Op::Imm(v)]) if *v == fsz => checked_frame = fsz,
+        match (s.mnemonic.as_str(), operands(s).as_slice()) {
+            ("sub", [Op::Reg(RSP, 64), Op::Imm(v)]) if *v == fsz => f.frame = Some(fsz),
             _ => return Err(f.err(s, &format!("expected `sub rsp,{fsz:#x}` right after the entry safepoint"))),
         }
-        f.frame = Some(checked_frame);
         k = after_rax + 3;
         f.stats.instructions += k as u64;
         f.stats.vmctx += 1;
     }
+    let mode = lay.mode;
     let mut st = State::default();
     let mut prev_uncond = false;
+    let mut prev_lfence = false;
+    let mut restored = false;
     for (idx, i) in insns.iter().enumerate() {
         let m = i.mnemonic.as_str();
         if forbidden(m) {
@@ -623,6 +830,8 @@ pub fn verify_function(
         if is_target {
             st = State::default();
         }
+        let was_lfence = std::mem::replace(&mut prev_lfence, m == "lfence");
+        let was_restored = std::mem::replace(&mut restored, false);
         // int3: padding only (never reached by fall-through, never a target).
         if m == "int3" {
             if !prev_uncond || is_target {
@@ -632,11 +841,9 @@ pub fn verify_function(
         }
         if idx < k {
             // Prologue (matched above): rax/flags clobbered, branch targets checked.
-            if is_jcc(m) {
-                if let Op::Imm(t) = parse_operand(&i.operands) {
-                    if !f.target_ok(t, false, &boundaries) {
-                        return Err(f.err(i, "prologue branch target"));
-                    }
+            if let ("jb", Op::Imm(t)) = (m, parse_operand(&i.operands)) {
+                if !f.target_ok(t, false, &boundaries) {
+                    return Err(f.err(i, "prologue branch target"));
                 }
             }
             st.write(RAX);
@@ -645,89 +852,73 @@ pub fn verify_function(
             continue;
         }
         f.stats.instructions += 1;
-        let ops = op(i);
-        let restored = std::mem::replace(&mut st.rsp_restored, false);
+        let ops = operands(i);
         // ---------------- control flow
         if m == "ret" {
-            if !restored {
+            if !was_restored {
                 return Err(f.err(i, "ret without the matching `add rsp,F` right before it"));
             }
             prev_uncond = true;
+            st = State::default();
             continue;
         }
         if m == "jmp" || is_jcc(m) || m == "call" {
             match ops.as_slice() {
+                [Op::Imm(t)] if Some(*t) == stubs.thunk => match m {
+                    // Retpoline call: r11 holds a host/helper pointer.
+                    "call" => {
+                        let c = st.callee[R11 as usize].ok_or_else(|| f.err(i, "retpoline call with r11 not a host/helper pointer"))?;
+                        f.count_callee(c);
+                        f.stats.hardened += 1;
+                    }
+                    // Retpoline table jump: r11 = entry + table.
+                    "jmp" => {
+                        f.table_jump(i, code, &table_of, st.table_target[R11 as usize])?;
+                        f.stats.hardened += 1;
+                    }
+                    _ => return Err(f.err(i, "conditional branch to the retpoline thunk")),
+                },
                 [Op::Imm(t)] => {
                     if !f.target_ok(*t, m == "call", &boundaries) {
                         return Err(f.err(i, "direct branch/call target outside the function, the function entries and the prelude stubs"));
                     }
                     f.stats.direct_branches += 1;
-                    if m == "call" {
-                        st = State::default();
-                    } else if is_jcc(m) {
-                        // Fall-through facts for the bounds check.
-                        if let Some((r, n)) = st.flags {
-                            if m == "jae" {
-                                st.bound[r as usize] = Some(n);
-                            } else if m == "ja" {
-                                st.bound[r as usize] = n.checked_add(1);
-                            }
-                        }
-                    }
-                    prev_uncond = m == "jmp";
-                    continue;
                 }
                 [Op::Reg(r, 64)] if m == "jmp" => {
-                    let t = table_of.get(&i.addr).ok_or_else(|| f.err(i, "indirect jump without a recognized jump table"))?;
-                    if st.table_target[*r as usize] != Some(t.at) {
-                        return Err(f.err(i, "indirect jump target not computed from its jump table"));
+                    match mode {
+                        Mode::Jump if *r != R11 => {}
+                        Mode::Lfence if *r == R11 && was_lfence => f.stats.hardened += 1,
+                        _ => return Err(f.err(i, &format!("indirect jump not in {mode:?} form"))),
                     }
-                    // Padding up to the table.
-                    if !code[i.end() as usize..t.at as usize].iter().all(|&b| b == 0xCC) {
-                        return Err(f.err(i, "bytes between the indirect jump and its table are not int3 padding"));
-                    }
-                    prev_uncond = true;
-                    continue;
+                    f.table_jump(i, code, &table_of, st.table_target[*r as usize])?;
                 }
-                [Op::Mem(mm)] if m == "call" => {
-                    match (&mm.base, mm.index, mm.disp) {
-                        (Some(Base::Reg(b)), None, d) if st.host_fns & (1 << b) != 0 => {
-                            if d < 0 || d % 8 != 0 || (d / 8) as usize >= lay.num_imports {
-                                return Err(f.err(i, "host call outside the import table"));
-                            }
-                            f.stats.host_calls += 1;
-                        }
-                        (Some(Base::Rip), None, _) => {
-                            let t = i.comment_target.ok_or_else(|| f.err(i, "rip operand without target"))?;
-                            let h0 = lay.helper_table as u64;
-                            if !(t >= h0 && t < h0 + 8 * lay.num_helpers as u64 && (t - h0).is_multiple_of(8)) {
-                                return Err(f.err(i, "indirect call through memory other than the helper table"));
-                            }
-                            f.stats.helper_calls += 1;
-                        }
-                        _ => return Err(f.err(i, "indirect call other than a host or helper call")),
-                    }
-                    if mm.size != 8 || mm.seg.is_some() {
-                        return Err(f.err(i, "bad indirect call operand"));
-                    }
-                    st = State::default();
-                    prev_uncond = false;
-                    continue;
+                [Op::Reg(R11, 64)] if m == "call" && mode == Mode::Lfence && was_lfence => {
+                    let c = st.callee[R11 as usize].ok_or_else(|| f.err(i, "call r11 with r11 not a host/helper pointer"))?;
+                    f.count_callee(c);
+                    f.stats.hardened += 1;
                 }
-                _ => return Err(f.err(i, "indirect control transfer")),
+                [Op::Mem(mm)] if m == "call" && mode == Mode::Jump => {
+                    let c = callee_slot(lay, &st, mm, i.comment_target)
+                        .ok_or_else(|| f.err(i, "indirect call other than a host or helper call"))?;
+                    f.count_callee(c);
+                }
+                _ => return Err(f.err(i, &format!("indirect control transfer not allowed in {mode:?} mode"))),
             }
+            prev_uncond = m == "jmp";
+            st = transfer(lay, &st, i, &ops);
+            continue;
         }
         prev_uncond = false;
         if !known(m) {
             return Err(f.err(i, "instruction not in the whitelist"));
         }
         // ---------------- rsp
-        let writes_op0 = !reads_only(m) && m != "rep stos" && m != "lfence";
         if let Some(Op::Reg(RSP, _)) = ops.first() {
-            if writes_op0 {
+            if writes_op0(m) {
                 match (m, ops.as_slice()) {
                     ("add", [_, Op::Imm(v)]) if Some(*v) == f.frame => {
-                        st.rsp_restored = true;
+                        restored = true;
+                        st.flags = None;
                         continue;
                     }
                     _ => return Err(f.err(i, "rsp modified outside the prologue/epilogue")),
@@ -736,7 +927,7 @@ pub fn verify_function(
         }
         // ---------------- memory operands
         if m == "rep stos" {
-            // rep stos QWORD PTR es:[rdi],rax — local zeroing.
+            // rep stos QWORD PTR es:[rdi],rax: local zeroing.
             let x = st.rsp_rel[RDI as usize].ok_or_else(|| f.err(i, "rep stos with rdi not frame-relative"))?;
             let n = st.konst[RCX as usize].ok_or_else(|| f.err(i, "rep stos with unknown count"))? as i64;
             let fr = f.frame.unwrap() as i64;
@@ -744,142 +935,47 @@ pub fn verify_function(
                 return Err(f.err(i, "rep stos outside the frame"));
             }
             f.stats.frame += 1;
-            st.write(RDI);
-            st.write(RCX);
-            continue;
-        }
-        for (pos, o) in ops.iter().enumerate() {
-            if let Op::Mem(mm) = o {
-                if m == "lea" {
-                    continue;
+        } else {
+            for (pos, o) in ops.iter().enumerate() {
+                if let Op::Mem(mm) = o {
+                    if m == "lea" {
+                        continue;
+                    }
+                    if mm.base == Some(Base::Rip) {
+                        // Only a helper slot read into a register.
+                        if !(m == "mov" && pos == 1 && callee_slot(lay, &st, mm, i.comment_target) == Some(Callee::Helper)) {
+                            return Err(f.err(i, "RIP-relative data access"));
+                        }
+                        continue;
+                    }
+                    f.access(i, mm, &st, pos == 0 && writes_op0(m))?;
                 }
-                let write = pos == 0 && writes_op0;
-                if mm.base == Some(Base::Rip) {
-                    return Err(f.err(i, "RIP-relative data access"));
+                if let Op::Other(s) = o {
+                    return Err(f.err(i, &format!("unknown operand `{s}`")));
                 }
-                f.access(i, mm, &st, write)?;
-            }
-            if let Op::Other(s) = o {
-                return Err(f.err(i, &format!("unknown operand `{s}`")));
             }
         }
-        // ---------------- register effects
-        // Implicit writes.
-        let implicit: &[u8] = match (m, ops.len()) {
-            ("mul" | "div" | "idiv", _) | ("imul", 1) => &[RAX, RDX],
-            ("cqo", _) => &[RDX],
-            _ => &[],
-        };
-        for &r in implicit {
-            st.write(r);
-        }
-        let dst = match ops.first() {
-            Some(Op::Reg(r, bits)) if writes_op0 && !(m == "mul" || m == "div" || m == "idiv" || (m == "imul" && ops.len() == 1)) => {
-                Some((*r, *bits))
-            }
-            Some(Op::Reg(r, bits)) if matches!(m, "not" | "neg") => Some((*r, *bits)),
-            _ => None,
-        };
-        if let Some((r, _)) = dst {
+        // ---------------- pinned registers
+        let written = dst_reg(m, &ops).map(|(r, _)| r).into_iter().chain(implicit_writes(m, ops.len()).iter().copied());
+        for r in written {
             if r == R13 || r == R14 || r == R15 {
                 return Err(f.err(i, "write to a pinned register (r13 mask, r14 vmctx, r15 heap base)"));
             }
         }
-        for &r in implicit {
-            if r == R13 || r == R14 || r == R15 {
-                return Err(f.err(i, "implicit write to a pinned register"));
+        // ---------------- bound proof at the table load
+        if let ("movsxd", [_, Op::Mem(MemOp { base: Some(Base::Reg(R11)), index: Some((x, 4)), .. })]) = (m, ops.as_slice()) {
+            let t = st.table_addr[R11 as usize].ok_or_else(|| f.err(i, "table load without lea r11"))?;
+            let tab = tables.iter().find(|tb| tb.at == t).ok_or_else(|| f.err(i, "table load from an unknown table"))?;
+            if dst_reg(m, &ops).map(|d| d.0) != Some(*x) {
+                return Err(f.err(i, "table load: index and destination differ"));
+            }
+            match st.bound[*x as usize] {
+                Some(b) if b == tab.n => {}
+                Some(b) => return Err(f.err(i, &format!("table index bound {b} != table length {}", tab.n))),
+                None => return Err(f.err(i, "table index not proven below the table length")),
             }
         }
-        // Flags.
-        let sets_flags = !matches!(m, "mov" | "movabs" | "movzx" | "movsx" | "movsxd" | "lea" | "movq" | "not" | "lfence")
-            && !m.starts_with("cmov")
-            && !m.starts_with("set")
-            && !matches!(m, "cvtsi2sd" | "cvttsd2si" | "xorpd" | "addsd" | "subsd" | "mulsd" | "divsd" | "sqrtsd")
-            && !(m.starts_with("cmp") && m.ends_with("sd"));
-        let old_flags = st.flags;
-        // Semantic transfer.
-        let mut new = st.clone();
-        if let Some((r, bits)) = dst {
-            new.write(r);
-            match (m, ops.as_slice()) {
-                ("and", [_, Op::Reg(R13, 64)]) if bits == 64 => new.masked |= 1 << r,
-                ("and", [_, Op::Imm(v)]) => {
-                    let v = if bits == 32 { *v & 0xffff_ffff } else { *v };
-                    if v < (1 << 40) {
-                        new.bound[r as usize] = Some(v + 1);
-                    }
-                }
-                ("and", [_, Op::Reg(mreg, 64)]) => {
-                    if let Some((x, n)) = st.lt_mask[*mreg as usize] {
-                        if x == r {
-                            new.bound[r as usize] = Some(n);
-                        }
-                    }
-                }
-                ("mov", [_, Op::Imm(v)]) => new.konst[r as usize] = Some(if bits == 32 { *v & 0xffff_ffff } else { *v }),
-                ("movabs", [_, Op::Imm(v)]) => new.konst[r as usize] = Some(*v),
-                ("xor", [Op::Reg(a, _), Op::Reg(b, _)]) if a == b => new.konst[r as usize] = Some(0),
-                ("lea", [_, Op::Mem(MemOp { base: Some(Base::Reg(RSP)), index: None, disp, .. })]) => new.rsp_rel[r as usize] = Some(*disp),
-                ("lea", [_, Op::Mem(MemOp { base: Some(Base::Rip), .. })]) => {
-                    if r == R11 {
-                        new.table_addr[R11 as usize] = i.comment_target;
-                    }
-                }
-                ("mov", [_, Op::Mem(MemOp { base: Some(Base::Reg(R14)), index: None, disp: OFF_HOST_FNS, .. })]) if bits == 64 => {
-                    new.host_fns |= 1 << r
-                }
-                ("sbb", [Op::Reg(a, 64), Op::Reg(b, 64)]) if a == b => {
-                    if let Some((x, n)) = old_flags {
-                        new.lt_mask[r as usize] = Some((x, n));
-                    }
-                }
-                ("movsxd", [_, Op::Mem(MemOp { base: Some(Base::Reg(R11)), index: Some((x, 4)), disp: 0, size: 4, .. })]) => {
-                    let t = st.table_addr[R11 as usize].ok_or_else(|| f.err(i, "table load without lea r11"))?;
-                    let tab = tables.iter().find(|tb| tb.at == t).ok_or_else(|| f.err(i, "table load from an unknown table"))?;
-                    if *x != r {
-                        return Err(f.err(i, "table load: index and destination differ"));
-                    }
-                    match st.bound[*x as usize] {
-                        Some(b) if b == tab.n => {}
-                        Some(b) => return Err(f.err(i, &format!("table index bound {b} != table length {}", tab.n))),
-                        None => return Err(f.err(i, "table index not proven below the table length")),
-                    }
-                    new.table_entry[r as usize] = Some(t);
-                }
-                ("add", [_, Op::Reg(R11, 64)]) => {
-                    if let (Some(t), Some(t2)) = (st.table_entry[r as usize], st.table_addr[R11 as usize]) {
-                        if t == t2 {
-                            new.table_target[r as usize] = Some(t);
-                        }
-                    }
-                }
-                (c, [_, Op::Reg(s, 64)]) if c == "cmovae" || c == "cmovnb" || c == "cmova" => {
-                    // Branchless clamp: cmp R,n; cmovae R,S (S const < n), or cmp R,n-1; cmova R,S.
-                    if let (Some((x, n)), Some(cv)) = (old_flags, st.konst[*s as usize]) {
-                        let n = if c == "cmova" { n.checked_add(1) } else { Some(n) };
-                        if let Some(n) = n {
-                            if x == r && cv < n {
-                                new.bound[r as usize] = Some(n);
-                            }
-                        }
-                    }
-                    // An existing bound survives if the source satisfies it too.
-                    if let (Some(b), Some(cv)) = (st.bound[r as usize], st.konst[*s as usize]) {
-                        if cv < b && new.bound[r as usize].is_none() {
-                            new.bound[r as usize] = Some(b);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        if sets_flags {
-            new.flags = match (m, ops.as_slice()) {
-                ("cmp", [Op::Reg(r, 64), Op::Imm(v)]) => Some((*r, *v)),
-                _ => None,
-            };
-        }
-        st = new;
+        st = transfer(lay, &st, i, &ops);
     }
     if !prev_uncond {
         return Err(format!("function at {start:#x}: falls through its end"));
@@ -893,6 +989,7 @@ pub fn verify_function(
 pub struct Blob<'a> {
     pub code: &'a [u8],
     pub lay: Layout,
+    thunk: Result<Option<u64>, String>,
     insns: Vec<Insn>,
     tables: Vec<Table>,
     /// Next segment to decode `[from, to)`, if any.
@@ -902,7 +999,8 @@ pub struct Blob<'a> {
 impl<'a> Blob<'a> {
     pub fn new(code: &'a [u8], lay: Layout) -> Blob<'a> {
         let end = lay.helper_table as u64;
-        Blob { code, lay, insns: Vec::new(), tables: Vec::new(), next: Some((0, end)) }
+        let thunk = find_thunk(code, &lay);
+        Blob { code, lay, thunk, insns: Vec::new(), tables: Vec::new(), next: Some((0, end)) }
     }
 
     /// Bytes of the pending segment.
@@ -910,7 +1008,7 @@ impl<'a> Blob<'a> {
         self.next.map(|(a, b)| &self.code[a as usize..b as usize])
     }
 
-    /// Feeds the pending segment's decoding (segment-relative addresses); a jump table schedules the next segment.
+    /// Feeds the pending segment's decoding; a jump through a jump table ends the segment, the next starts after it.
     pub fn feed(&mut self, mut seg: Vec<Insn>) {
         let (from, to) = self.next.take().unwrap();
         for i in seg.iter_mut() {
@@ -929,27 +1027,49 @@ impl<'a> Blob<'a> {
         }
         let base = self.insns.len();
         self.insns.extend(seg);
+        let first = self.lay.first_func();
+        let entries: BTreeSet<u64> = self.lay.funcs.iter().map(|&(o, _)| o as u64).collect();
+        let thunk = self.thunk.clone().ok().flatten();
+        let mut st = State::default();
         for k in base..self.insns.len() {
-            if let Some(t) = table_at(&self.insns, k) {
-                if t.at + 4 * t.n <= to {
-                    self.insns.truncate(self.insns.iter().position(|i| i.addr >= t.at).unwrap_or(self.insns.len()));
-                    self.tables.push(t);
-                    if t.at + 4 * t.n < to {
-                        self.next = Some((t.at + 4 * t.n, to));
+            let i = &self.insns[k];
+            if i.addr < first {
+                continue;
+            }
+            if entries.contains(&i.addr) {
+                st = State::default();
+            }
+            let ops = operands(i);
+            if i.mnemonic == "jmp" {
+                let tt = match ops.as_slice() {
+                    [Op::Reg(r, 64)] => st.table_target[*r as usize],
+                    [Op::Imm(t)] if Some(*t) == thunk => st.table_target[R11 as usize],
+                    _ => None,
+                };
+                if let Some((at, n)) = tt {
+                    if at >= i.end() && n > 0 && n < (1 << 31) && at + 4 * n <= to {
+                        let t = Table { jmp_at: i.addr, at, n };
+                        self.insns.truncate(self.insns.iter().position(|i| i.addr >= at).unwrap_or(self.insns.len()));
+                        self.tables.push(t);
+                        if at + 4 * n < to {
+                            self.next = Some((at + 4 * n, to));
+                        }
+                        return;
                     }
-                    return;
                 }
             }
+            st = transfer(&self.lay, &st, i, &ops);
         }
     }
 
-    /// Runs the checks once decoding is complete.
+    /// Runs the checks once decoding is complete; returns the stats and the prelude bytes.
     pub fn verify(&self) -> Result<(Stats, Vec<u8>), String> {
         assert!(self.next.is_none());
         let lay = &self.lay;
-        let first = lay.funcs.first().map(|f| f.0 as u64).unwrap_or(lay.helper_table as u64);
+        let thunk = self.thunk.clone()?;
+        let first = lay.first_func();
         let prelude: Vec<Insn> = self.insns.iter().filter(|i| i.addr < first).cloned().collect();
-        let stubs = prelude_stubs(&prelude)?;
+        let stubs = prelude_stubs(&prelude, lay.mode, thunk)?;
         let mut stats = Stats { modules: 1, ..Stats::default() };
         for (fi, &(off, params)) in lay.funcs.iter().enumerate() {
             let start = off as u64;

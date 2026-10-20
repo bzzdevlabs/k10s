@@ -454,7 +454,7 @@ fn gen(a: &mut Asm, g: &mut Rng, labels: &[Label]) -> Expect {
             a.push_m(m);
             Expect { rip: rip_of(RM::M(m)), ..x(format!("push_m({m:?})"), format!("push {}", sized("QWORD", m))) }
         }
-        39 => match g.below(4) {
+        39 => match g.below(6) {
             0 => {
                 a.ret();
                 x("ret()".into(), "ret".into())
@@ -466,6 +466,14 @@ fn gen(a: &mut Asm, g: &mut Rng, labels: &[Label]) -> Expect {
             2 => {
                 a.ud2();
                 x("ud2()".into(), "ud2".into())
+            }
+            3 => {
+                a.lfence();
+                x("lfence()".into(), "lfence".into())
+            }
+            4 => {
+                a.pause();
+                x("pause()".into(), "pause".into())
             }
             _ => {
                 a.rep_stosq();

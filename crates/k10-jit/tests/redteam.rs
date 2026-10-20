@@ -42,7 +42,7 @@ fn sfi_check(m: &Module, opts: &CompileOptions) {
         return;
     }
     let b = k10_jit::compile_blob(m, opts).unwrap();
-    xdis::verify_compiled(&od, &[&b]).unwrap_or_else(|e| panic!("SFI verifier: {e}"));
+    xdis::verify_compiled(&od, &[(&b, opts.indirect)]).unwrap_or_else(|e| panic!("SFI verifier ({opts:?}): {e}"));
     SEEN.lock().unwrap().push(key);
 }
 

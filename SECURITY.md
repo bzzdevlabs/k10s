@@ -32,10 +32,14 @@ bulk-memory helpers, the host API and the runtime's `unsafe` code. Two further l
   entry stack check before `sub rsp`; direct branches inside the function or to prelude trap stubs; calls only to
   functions, host functions (`[host_fns + 8k]`, `k < imports`) and helpers; indirect jumps only through a bounded
   `br_table` (bound proven by `cmp`+`jae`, a `cmp`+`cmov` clamp or an `sbb`/`and` mask; it must equal the table
-  length); no `syscall`/`int`/`rdtsc`/`cpuid`/privileged instructions. It runs over random modules, `br_table`
-  modules, the Ten examples and every red-team module, and rejects hand-made violations. The full rule list is at the
-  top of `tests/xdis/sfi.rs`. It could become a load-time check (decode with an in-tree length decoder, verify,
-  then seal the code) at the cost of a disassembler in the TCB-adjacent path.
+  length); no `syscall`/`int`/`rdtsc`/`cpuid`/privileged instructions. It knows each `--jit-indirect` mode (below):
+  indirect calls and table jumps must have that mode's exact form (`lfence` before `call/jmp r11`, or the retpoline
+  thunk, reached only with `r11` loaded from a host/helper slot or a table), the thunk must be byte-exact in the
+  prelude in retpoline mode only, and preludes must be identical per mode. It runs over random modules, `br_table`
+  modules (trees and tables) and the Ten examples in every mode and lowering, and every red-team module, and rejects
+  hand-made violations and mutated real code. The full rule list is at the top of `tests/xdis/sfi.rs`. It could
+  become a load-time check (decode with an in-tree length decoder, verify, then seal the code) at the cost of a
+  disassembler in the TCB-adjacent path.
 
 **2. Process sandbox of `k10s node` (Linux, `--sandbox on|log|off`, default `on`, or `$K10S_SANDBOX`).**
 - At start: inherited descriptors ≥ 3 are closed, `PR_SET_NO_NEW_PRIVS` is set.
