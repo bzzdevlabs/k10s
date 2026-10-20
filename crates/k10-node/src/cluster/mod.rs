@@ -658,6 +658,7 @@ pub struct ClusterSetup {
     listener: sys::Fd,
     store: Store,
     id: NodeId,
+    incarnation: u64,
 }
 
 impl ClusterSetup {
@@ -672,10 +673,12 @@ impl ClusterSetup {
         }
         let id = store::node_id(data)?;
         let store = Store::open(data)?;
+        // A restarted node keeps its id: start above any incarnation it used before (refutes stale Dead records).
+        let incarnation = store.next_incarnation(sys::wall_ms())?;
         let udp = UdpSocket::bind(cfg.gossip_bind).map_err(|e| io::Error::new(e.kind(), format!("gossip {}: {e}", cfg.gossip_bind)))?;
         let listener =
             sys::tcp_listen(&cfg.rpc_bind, 1024).map_err(|e| io::Error::new(e.kind(), format!("rpc {}: {e}", cfg.rpc_bind)))?;
-        Ok(ClusterSetup { cfg, inbox: Arc::new(MeshInbox::new()?), udp, listener, store, id })
+        Ok(ClusterSetup { cfg, inbox: Arc::new(MeshInbox::new()?), udp, listener, store, id, incarnation })
     }
 
     pub fn id(&self) -> NodeId {
@@ -689,7 +692,7 @@ impl ClusterSetup {
 
     /// Starts the applier and the mesh thread (joins the seeds). The node must run with this setup's router.
     pub fn start(self, node: Arc<NodeShared>) -> io::Result<Cluster> {
-        let ClusterSetup { cfg, inbox, udp, listener, store, id } = self;
+        let ClusterSetup { cfg, inbox, udp, listener, store, id, incarnation } = self;
         let gossip_bound = udp.local_addr()?;
         let rpc_bound = sys::local_addr(listener.raw())?;
         let http_bound = *node.http_addr.get().expect("node started");
@@ -704,8 +707,7 @@ impl ClusterSetup {
         };
         let capacity = Capacity { mem_bytes: node.cfg.mem_limit, cores: node.shards.len() as u32 };
         let mut me = Member::new(id, adv(gossip_bound), adv(rpc_bound), adv(http_bound), capacity);
-        // A restarted node keeps its id: start above any incarnation it used before (refutes stale Dead records).
-        me.incarnation = store.next_incarnation(sys::wall_ms())?;
+        me.incarnation = incarnation;
         let cs = Arc::new(ClusterShared {
             node: node.clone(),
             cfg: cfg.clone(),

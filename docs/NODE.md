@@ -355,8 +355,8 @@ changes. Code: `cluster/mod.rs` (config, applier, operator apply, status), `clus
 It refuses to start without `--cluster-key-file FILE` (the same `k10s keygen` key on every node) unless
 `--insecure-unauthenticated-cluster` is given (see "Cluster authentication").
 `ClusterSetup::bind` (sockets, store, id) → `Node::start_with_router(cfg, setup.router())` → `setup.start(node)`.
-- Identity: a random `NodeId` persisted in `DATA/node-id`; the incarnation starts at the wall clock in ms, so a
-  restarted node (same id) refutes the Dead/Left records of its previous life.
+- Identity: a random `NodeId` persisted in `DATA/node-id`; each life starts at a higher incarnation (see below), so
+  a restarted node (same id) refutes the Dead/Left records of its previous life.
 - The member advertises its gossip, rpc and http addresses (IP: `--advertise`, else the bind IP, else — wildcard bind —
   the source address of the default route, else 127.0.0.1) and its capacity: `mem_bytes = --mem`, `cores = --shards`.
 - Tuning: `--probe-ms N` (gossip protocol period, default 200; probe timeout = 0.4 N), `--suspicion-mult N` (default 4),
@@ -386,7 +386,8 @@ the larger hash wins on every node. Blobs no longer referenced by the current ma
 younger than 60 s and those of the manifest being fetched, which are pinned).
 
 **Placement.** Members advertise their placement version; `place` uses the lowest live one (version 2 charges
-`2^memory + 4 KiB` per replica, version 1 `2^memory`), so mixed-version clusters agree during a rolling upgrade.
+`2^memory + 4 KiB` per replica, version 1 `2^memory`), so mixed-version clusters agree during a rolling upgrade
+(the version rides in the top byte of `cores`: older nodes show newer members with an inflated core count).
 On every desired-state change and on every change of the live member set (ids + capacity + placement version; Alive and
 Suspect count, like in `place`), batched in a 50 ms window (`ClusterConfig::debounce`; bounds the delay, not
 extended by later events), the applier computes `place(manifest, live members)` and calls
