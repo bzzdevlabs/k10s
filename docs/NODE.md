@@ -193,11 +193,11 @@ status ≥ 0, −1 unknown service, −2 unavailable (crash backoff with nothing
   `mprotect` (not W+X), `clone` (threads only, no namespaces; `clone3` → `ENOSYS` so glibc falls back to `clone`),
   `socket` (IPv4/IPv6), `prctl`, `ioctl`, `tgkill` (own pid), `prlimit64` (read only), `sched_setaffinity` (self).
 - Library users (`Node::start` in tests, `k10s run`, benchmarks) get no sandbox.
-- Cost (i7-7820HQ, Linux 6.1 with IBRS: a bare syscall ≈ 600 ns; shared machine, load 11–35, so medians of 4
+- Cost (i7-7820HQ, Linux 6.1 with IBRS: a bare syscall ≈ 600 ns; shared machine, load 10–35, so medians of 8
   interleaved runs): `getpid` best-of-20 +0–30 ns with the filter, +80 ns when the action cache is defeated
-  (`sandbox::tests::syscall_overhead`); node CPU per request unchanged, on/baseline 1.005 echo, 0.98 chain, 1.00
-  compute at 64 conns (17.8 / 19.0 / 1406 µs); rps and p50 of echo, chain, compute (1 and 64 conns), a forwarded
-  3-node request and apply → first answer all within run-to-run noise of the pre-sandbox binary. After the filter a
+  (`sandbox::tests::syscall_overhead`); node CPU per request unchanged, on/baseline 1.01 echo, 0.99 chain, 1.00
+  compute at 64 conns (17.8 / 19.1 / 1404 µs); rps and p50 of echo, chain, compute (1 and 64 conns), a forwarded
+  3-node request and apply → first answer (18.3 vs 19.2 ms) all within run-to-run noise of the pre-sandbox binary. After the filter a
   request costs ≈ 1 `read`, 1 `writev`, 0.24 `epoll_wait` (+1 `madvise` per `fresh` request); `mmap`/`mprotect`
   happen only on instance, fiber or thread creation (≈ 1 per 7000 requests).
 
