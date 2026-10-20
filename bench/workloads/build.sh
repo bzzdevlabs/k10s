@@ -3,13 +3,16 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 BIN=../bin; mkdir -p "$BIN"
+# `-version` output: K10S_VERSION_FULL (set by scripts/dist.sh), else scripts/version.sh.
+VERSION=${K10S_VERSION_FULL:-$(../../scripts/version.sh --full 2>/dev/null || echo dev)}
+LDFLAGS="-s -w -X main.version=$VERSION"
 for w in echo compute chain counter; do
-  CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$BIN/$w" "./$w"
+  CGO_ENABLED=0 go build -trimpath -ldflags="$LDFLAGS" -o "$BIN/$w" "./$w"
 done
 # fairness extra (native only): compute with Go's portable SHA-256 (no hand-written assembly), to separate the
 # language/codegen gap from the platform gap when comparing with Ten's portable SHA-256
-CGO_ENABLED=0 go build -tags purego -trimpath -ldflags="-s -w" -o "$BIN/compute-purego" ./compute
-( cd ../loadgen && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$BIN/loadgen" . )
+CGO_ENABLED=0 go build -tags purego -trimpath -ldflags="$LDFLAGS" -o "$BIN/compute-purego" ./compute
+( cd ../loadgen && CGO_ENABLED=0 go build -trimpath -ldflags="$LDFLAGS" -o "$BIN/loadgen" . )
 [ "${NO_DOCKER:-0}" = 1 ] && exit 0
 for w in echo compute chain counter; do
   ctx=$(mktemp -d); cp "$BIN/$w" "$ctx/app"
