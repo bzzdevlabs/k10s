@@ -3,6 +3,7 @@
 //! ```text
 //! k10s node   [--http ADDR] [--data DIR] [--shards N] [--backend jit|interp] [--name NAME] [--mem SIZE]
 //!             [--snapshots fresh|all] [--idle-timeout SECS] [--idle-spin-us N] [--log-stderr] [--pin]
+//!             [--timer-res-us N] [--jit-indirect jump|lfence|retpoline]
 //!             cluster mode (any of): [--gossip ADDR] [--rpc ADDR] [--join HOST:PORT[,…]] [--advertise HOST]
 //!             tuning: [--probe-ms N] [--suspicion-mult N] [--leave-grace-ms N]
 //! k10s apply  FILE.k10s [--node HOST:PORT]
@@ -33,6 +34,8 @@ const USAGE: &str = "usage:
               [--kv-max SIZE] (per-service KV quota, default 256MiB, 0 = unlimited)
               [--conn-buffer-max SIZE] (bytes buffered in HTTP connections node-wide, default max(--mem/8, 64MiB))
               [--snapshots fresh|all] [--idle-timeout SECS] [--idle-spin-us N] [--log-stderr] [--pin]
+              [--timer-res-us N] (guest clock resolution, default 100; 0 = full, trusted tenants only)
+              [--jit-indirect jump|lfence|retpoline] (Spectre v2 hardening of JIT code, default jump)
               cluster mode (any of these flags turns it on):
               [--gossip ADDR] (UDP, default 0.0.0.0:7946)  [--rpc ADDR] (TCP, default 0.0.0.0:7947)
               [--join HOST:PORT,...] (gossip addresses of members)  [--advertise HOST] (IP given to peers)
@@ -158,6 +161,7 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
     a.check_known(&[
         "http", "data", "shards", "backend", "name", "mem", "kv-max", "conn-buffer-max", "snapshots", "idle-timeout", "idle-spin-us", "log-stderr",
         "pin", "rpc", "gossip", "join", "advertise", "probe-ms", "suspicion-mult", "leave-grace-ms",
+        "timer-res-us", "jit-indirect",
     ])?;
     if !a.positional.is_empty() {
         return Err(format!("unexpected argument `{}`", a.positional[0]));
@@ -197,6 +201,13 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
     }
     cfg.log_stderr = a.has("log-stderr");
     cfg.pin_threads = a.has("pin");
+    if let Some(s) = a.get("timer-res-us") {
+        cfg.timer_res = Duration::from_micros(s.parse().map_err(|_| "invalid --timer-res-us")?);
+    }
+    if let Some(s) = a.get("jit-indirect") {
+        cfg.jit_indirect =
+            k10_node::IndirectBranch::parse(s).ok_or_else(|| format!("invalid --jit-indirect `{s}` (jump|lfence|retpoline)"))?;
+    }
     let cluster_cfg = cluster_config(&a)?;
     k10_node::admin::set_build_version(VERSION);
     // Block SIGINT/SIGTERM in every thread (inherited by the threads the node spawns) and wait for them here.

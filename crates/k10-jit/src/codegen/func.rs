@@ -25,11 +25,12 @@
 //! * Every load/store addresses `[r15 + t]` with `t = (addr + off) & r13` computed in 64-bit, or `[r15 + c]` for
 //!   a constant `c = addr + off < min(2^min_mem_log2, 2^31)` (`invoke` rejects masks below `2^min_mem_log2 - 1`).
 //!   Widths are ≤ 8, so accesses stay in `[base, base + S + 7]`.
-//! * Bulk operations call helpers that do the TIR range checks; `br_table` bounds-checks before its table load.
+//! * Bulk operations call helpers that do the TIR range checks (speculation-safe). `br_table` is a compare tree or a
+//!   jump table whose index is clamped by `cmovae`, not a branch (Spectre v1).
 //! * Frame accesses use compile-time offsets inside the frame checked by the entry safepoint.
 //! * Exits are host calls (through `ctx.host_fns`), the interrupt hook, helpers, returns and the trap path.
 
-use super::{CompileOptions, Shared};
+use super::{indirect_call, CompileOptions, IndirectBranch, Shared};
 use crate::abi::*;
 use crate::cpu::CpuFeatures;
 use crate::helpers::Helper;
@@ -151,6 +152,8 @@ pub(crate) struct Scratch {
     stubs: Vec<(Label, Label, StubKind)>,
     /// Per label id: bit 7 = target of a branch, bits 0..6 = pinned locals dirty on some incoming branch.
     label_state: Vec<u8>,
+    /// `br_table` runs `(first index, depth)` of the table being lowered to a compare tree.
+    runs: Vec<(u32, u32)>,
 }
 
 #[inline]
@@ -165,6 +168,8 @@ struct Fc<'a> {
     f: &'a Func,
     fi: &'a FuncInfo,
     feat: CpuFeatures,
+    /// `br_table`s with at most this many target runs become compare trees.
+    tree_max: usize,
     s: &'a mut Scratch,
     nparams: u32,
     frame: i32,
@@ -220,6 +225,7 @@ pub(crate) fn compile_func(
         f,
         fi,
         feat: opts.features,
+        tree_max: opts.br_tree_max as usize,
         s,
         nparams,
         frame: frame as i32,
@@ -993,36 +999,77 @@ impl<'a> Fc<'a> {
         }
         let r = self.take_reg(ii, 1, RegSet::EMPTY);
         self.drop_n(1); // `r` stays valid: nothing is allocated below
-        if n <= 4 {
-            for (k, &d) in tab[..n].iter().enumerate() {
-                if d != def {
-                    self.a.alu_ri(Alu::Cmp, RM::R(r), k as i32);
-                    let l = self.target(d);
-                    self.jcc_to(Cond::E, l);
-                }
+        assert!(n < i32::MAX as usize);
+        // Runs: maximal index ranges sharing a target; the last (default) is [k, 2^64).
+        let mut runs = core::mem::take(&mut self.s.runs);
+        runs.clear();
+        for (k, &d) in tab.iter().enumerate() {
+            if runs.last().is_none_or(|&(_, last)| last != d) {
+                runs.push((k as u32, d));
             }
-            let l = self.target(def);
-            self.jmp_to(l);
-        } else {
-            assert!(n <= i32::MAX as usize);
-            self.a.alu_ri(Alu::Cmp, RM::R(r), n as i32);
-            let l = self.target(def);
-            self.jcc_to(Cond::Ae, l); // unsigned: index >= n (including "negative") → default
-            let table = self.a.new_label();
-            self.a.lea(TMP, Mem::rip(table));
-            self.a.movsxd(r, RM::M(Mem::bi(TMP, r, 2, 0)));
-            self.a.alu(Alu::Add, r, RM::R(TMP));
-            self.a.jmp_rm(RM::R(r));
-            self.a.align(4, 0xCC);
-            self.a.bind(table);
-            let base = self.a.pos();
-            for &d in &tab[..n] {
-                let l = self.target(d);
-                self.branch_to(l);
-                self.a.rel32_entry(l, base);
-            }
-            self.reachable = false;
         }
+        if runs.len() <= self.tree_max.max(1) {
+            self.br_tree(r, &runs);
+        } else {
+            self.br_jump_table(r, tab);
+        }
+        self.s.runs = runs;
+    }
+
+    /// Binary search over `runs` (`(first index, depth)`, sorted): unsigned compares and direct jumps only.
+    fn br_tree(&mut self, r: Reg, runs: &[(u32, u32)]) {
+        if runs.len() == 1 {
+            let l = self.target(runs[0].1);
+            self.jmp_to(l);
+            return;
+        }
+        let mid = runs.len() / 2;
+        self.a.alu_ri(Alu::Cmp, RM::R(r), runs[mid].0 as i32);
+        if mid == 1 {
+            let l = self.target(runs[0].1);
+            self.jcc_to(Cond::B, l);
+        } else {
+            let right = self.a.new_label();
+            self.a.jcc(Cond::Ae, right);
+            self.br_tree(r, &runs[..mid]);
+            self.a.bind(right);
+        }
+        self.br_tree(r, &runs[mid..]);
+    }
+
+    /// Jump table of `n + 1` entries (last = default), index clamped by `cmovae`, not a branch (Spectre v1).
+    fn br_jump_table(&mut self, r: Reg, tab: &[u32]) {
+        let n = tab.len() - 1;
+        self.a.mov_ri(TMP, n as i64);
+        self.a.alu(Alu::Cmp, r, RM::R(TMP));
+        self.a.cmov(Cond::Ae, r, RM::R(TMP)); // unsigned index >= n (incl. negative) → default slot n
+        let table = self.a.new_label();
+        self.a.lea(TMP, Mem::rip(table));
+        self.a.movsxd(r, RM::M(Mem::bi(TMP, r, 2, 0)));
+        match self.sh.indirect {
+            IndirectBranch::Jump => {
+                self.a.alu(Alu::Add, r, RM::R(TMP));
+                self.a.jmp_rm(RM::R(r));
+            }
+            IndirectBranch::Lfence => {
+                self.a.alu(Alu::Add, TMP, RM::R(r));
+                self.a.lfence();
+                self.a.jmp_rm(RM::R(TMP));
+            }
+            IndirectBranch::Retpoline => {
+                self.a.alu(Alu::Add, TMP, RM::R(r));
+                self.a.jmp(self.sh.retpoline);
+            }
+        }
+        self.a.align(4, 0xCC);
+        self.a.bind(table);
+        let base = self.a.pos();
+        for &d in tab {
+            let l = self.target(d);
+            self.branch_to(l);
+            self.a.rel32_entry(l, base);
+        }
+        self.reachable = false;
     }
 
     // ================================================================================== locals
@@ -1132,19 +1179,20 @@ impl<'a> Fc<'a> {
         debug_assert!(self.in_use == RegSet::EMPTY);
         match target {
             ExtTarget::Host(imp) => {
+                // `imp` is a validated compile-time constant: no guest-indexed table.
                 self.a.load(Size::S64, Rax, Mem::b(R14, OFF_HOST_FNS));
                 let disp = 8 * imp as i64;
                 if fits_i32(disp) {
-                    self.a.call_rm(RM::M(Mem::b(Rax, disp as i32)));
+                    indirect_call(self.a, self.sh, RM::M(Mem::b(Rax, disp as i32)));
                 } else {
                     self.a.mov_ri(TMP, disp);
-                    self.a.call_rm(RM::M(Mem::bi(Rax, TMP, 0, 0)));
+                    indirect_call(self.a, self.sh, RM::M(Mem::bi(Rax, TMP, 0, 0)));
                 }
                 self.a.alu_ri32(Alu::Cmp, RM::M(Mem::b(R14, OFF_TRAP_REQUEST)), 0);
                 self.a.jcc(Cond::Ne, self.sh.host_trap);
             }
             ExtTarget::Helper(h) => {
-                self.a.call_rm(RM::M(Mem::rip(self.sh.helpers[h as usize])));
+                indirect_call(self.a, self.sh, RM::M(Mem::rip(self.sh.helpers[h as usize])));
                 self.a.test32(Rax, Rax);
                 self.a.jcc(Cond::Ne, self.sh.trap_common);
             }

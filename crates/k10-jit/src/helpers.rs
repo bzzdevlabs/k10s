@@ -2,9 +2,9 @@
 //!
 //! They receive the memory base and mask from `r15`/`r13` (not from `VmCtx`) so that they operate on exactly the
 //! memory the generated code uses. They perform the TIR range checks themselves (docs/TIR.md §2) and return 0 or
-//! a trap code; they never panic.
+//! a trap code; they never panic. Checks are speculation-safe (`check_span`: length 0 behind a misprediction).
 
-use k10_ir::sem::check_range;
+use k10_ir::sem::check_span;
 use k10_ir::Trap;
 
 /// Index of each helper in the blob's address table.
@@ -29,11 +29,12 @@ pub fn helper_addresses() -> [u64; NUM_HELPERS] {
 /// `invoke` before any JIT code runs).
 pub unsafe extern "C" fn mem_copy(base: *mut u8, mask: u64, dst: i64, src: i64, n: i64) -> u32 {
     let size = mask.wrapping_add(1);
-    match (check_range(dst, n, size), check_range(src, n, size)) {
-        (Ok(d), Ok(s)) => {
-            // SAFETY: check_range guarantees d + n <= S and s + n <= S, and the caller guarantees that `base`
+    match (check_span(dst, n, size), check_span(src, n, size)) {
+        (Ok((d, nd)), Ok((s, ns))) => {
+            // `nd & ns`: n, or 0 behind a mispredicted check.
+            // SAFETY: check_span guarantees d + n <= S and s + n <= S, and the caller guarantees that `base`
             // is valid for S bytes; `copy` has memmove semantics.
-            unsafe { core::ptr::copy(base.add(s), base.add(d), n as usize) };
+            unsafe { core::ptr::copy(base.add(s), base.add(d), nd & ns) };
             0
         }
         _ => Trap::MemOutOfBounds.code(),
@@ -46,10 +47,10 @@ pub unsafe extern "C" fn mem_copy(base: *mut u8, mask: u64, dst: i64, src: i64, 
 /// As for [`mem_copy`].
 pub unsafe extern "C" fn mem_fill(base: *mut u8, mask: u64, dst: i64, byte: i64, n: i64) -> u32 {
     let size = mask.wrapping_add(1);
-    match check_range(dst, n, size) {
-        Ok(d) => {
-            // SAFETY: d + n <= S (check_range) and `base` is valid for S bytes.
-            unsafe { core::ptr::write_bytes(base.add(d), byte as u8, n as usize) };
+    match check_span(dst, n, size) {
+        Ok((d, n)) => {
+            // SAFETY: d + n <= S (check_span) and `base` is valid for S bytes.
+            unsafe { core::ptr::write_bytes(base.add(d), byte as u8, n) };
             0
         }
         Err(_) => Trap::MemOutOfBounds.code(),

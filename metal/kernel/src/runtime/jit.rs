@@ -27,7 +27,7 @@ use core::ffi::c_void;
 use core::sync::atomic::AtomicUsize;
 
 use k10_ir::{Module, Trap};
-use k10_jit::{BlobMeta, CompileOptions, VmCtx};
+use k10_jit::{BlobMeta, CompileOptions, IndirectBranch, VmCtx};
 
 use super::engine::HostCalls;
 use super::host::{HostFn, TABLE};
@@ -91,11 +91,20 @@ pub struct JitModule {
     pub compile_ns: u64,
 }
 
+/// JIT indirect-branch form (`k10.jit_indirect=jump|lfence|retpoline`).
+static INDIRECT: IrqLock<IndirectBranch> = IrqLock::new(IndirectBranch::Jump);
+
+/// Sets the indirect-branch form; call at boot, before any compile.
+pub fn set_indirect(mode: IndirectBranch) {
+    *INDIRECT.lock() = mode;
+}
+
 /// Code generation options: the defaults, with this CPU's optional instructions (CPUID exits to the hypervisor,
-/// so it is asked once).
+/// so it is asked once) and the boot-time indirect-branch form.
 fn options() -> CompileOptions {
     static OPTS: IrqLock<Option<CompileOptions>> = IrqLock::new(None);
-    *OPTS.lock().get_or_insert_with(CompileOptions::default)
+    let indirect = *INDIRECT.lock();
+    *OPTS.lock().get_or_insert_with(|| CompileOptions { indirect, ..CompileOptions::default() })
 }
 
 /// Compiles `m` (validated by the caller; `compile_blob` validates again) and loads it into executable memory.

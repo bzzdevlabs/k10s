@@ -773,6 +773,16 @@ impl Asm {
         self.bytes_(&[0x0F, 0x0B]);
     }
 
+    /// `lfence` (`0F AE E8`): later instructions do not execute until all earlier ones have completed.
+    pub fn lfence(&mut self) {
+        self.bytes_(&[0x0F, 0xAE, 0xE8]);
+    }
+
+    /// `pause` (`F3 90`).
+    pub fn pause(&mut self) {
+        self.bytes_(&[0xF3, 0x90]);
+    }
+
     /// `rep stosq` (stores rax to [rdi], rcx times; DF must be clear).
     pub fn rep_stosq(&mut self) {
         self.bytes_(&[0xF3, 0x48, 0xAB]);

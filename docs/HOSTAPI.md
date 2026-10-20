@@ -74,7 +74,12 @@ buffer, `kv_cas`; on 0 another instance changed it meanwhile, so read again.
 | name | params | returns |
 |---|---|---|
 | `log` | (ptr, len) | 0; appends a line to the service log |
-| `now_ns` | () | monotonic nanoseconds |
+| `now_ns` | () | monotonic nanoseconds, in steps of the node's guest-clock resolution (default 100 µs) |
 | `time_ms` | () | wall-clock Unix milliseconds |
+
+The guest clock is coarse on purpose (SECURITY.md, "CPU side channels"): `now_ns` advances in steps of the
+resolution (`k10s node --timer-res-us`, k10-metal `k10.timer_res_us`; 0 = full nanosecond resolution), each step
+landing at a random point of its interval, so it is monotonic and at most one step ahead of real time; `time_ms`
+gets the same treatment at 1 ms (or the resolution, if coarser).
 | `random` | () | 64 random bits |
 | `config` | (dst, max) | copies the service's config bytes (from the manifest); returns the full length |

@@ -4,17 +4,20 @@
 use super::*;
 use k10_ir::gen::{gen_args, gen_module, DiffHost, GenConfig, GenImport, Rng};
 use k10_ir::{new_memory, Interp, Module};
-use k10_jit::{compile_with, CompileOptions, CpuFeatures};
+use k10_jit::{compile_with, CompileOptions, CpuFeatures, IndirectBranch};
 
-/// Compiler options rotated over seeds: detected/baseline CPU features × pinned-register budgets.
+/// Options rotated over seeds: CPU features × pinned registers × indirect-branch mode × `br_table` lowering.
 pub fn opts_for(seed: u64) -> CompileOptions {
     let det = CpuFeatures::detect();
-    match seed % 5 {
-        0 | 4 => CompileOptions { features: det, max_pinned: 6 },
-        1 => CompileOptions { features: CpuFeatures::BASELINE, max_pinned: 6 },
-        2 => CompileOptions { features: det, max_pinned: 0 },
-        _ => CompileOptions { features: CpuFeatures::BASELINE, max_pinned: 2 },
-    }
+    let (features, max_pinned) = match seed % 5 {
+        0 | 4 => (det, 6),
+        1 => (CpuFeatures::BASELINE, 6),
+        2 => (det, 0),
+        _ => (CpuFeatures::BASELINE, 2),
+    };
+    let indirect = [IndirectBranch::Jump, IndirectBranch::Jump, IndirectBranch::Lfence, IndirectBranch::Retpoline][(seed / 30) as usize % 4];
+    let br_tree_max = if (seed / 120) % 2 == 0 { k10_jit::DEFAULT_BR_TREE_MAX } else { 0 };
+    CompileOptions { features, max_pinned, indirect, br_tree_max }
 }
 
 /// Generator configurations rotated over seeds (`budget_scale` shrinks loop/cost budgets for debug runs).

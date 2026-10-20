@@ -4,14 +4,18 @@
 //! `extern "C" fn(*mut VmCtx, a0..a4) -> i64` adapters calling [`HostCtx::dispatch`] (a trap result becomes
 //! `VmCtx.trap_request`).
 //!
-//! Range rule: every `(ptr, len)` pair is checked with `k10_ir::sem::check_range` (masked start, `len ≤ S`,
+//! Range rule: every `(ptr, len)` pair is checked with `k10_ir::sem::check_span` (masked start, `len ≤ S`,
 //! `start + len ≤ S`), exactly like `mem.copy`; violations trap `MemOutOfBounds`. Lengths are interpreted as `u64`,
 //! so negative lengths trap. Copy-out functions (`input_read`, `call_resp_read`) check the whole destination range
 //! `(dst, n)` and then copy `min(n, available)` bytes.
+//!
+//! Spectre v1 rule: never index with a raw guest value after a check; clamp it branch-free (`check_span` for ranges,
+//! `nospec::min*` for offsets/lengths into host buffers and arrays).
 
 use crate::kv::{KvError, KvNs, MAX_KEY, MAX_VALUE};
 use crate::logs::LogRing;
-use k10_ir::sem::check_range;
+use k10_ir::nospec;
+use k10_ir::sem::check_span;
 use k10_ir::Trap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -152,21 +156,19 @@ fn arg(a: &[i64], i: usize) -> i64 {
 /// Copies `data[off .. off+n]` (clamped) to `dst` after checking `(dst, n)`. Returns the number of bytes copied.
 #[inline]
 fn copy_out(mem: &mut [u8], size: u64, dst: i64, data: &[u8], off: i64, n: i64) -> Result<i64, Trap> {
-    let d = check_range(dst, n, size)?;
-    let off = off as u64;
-    if off >= data.len() as u64 {
-        return Ok(0);
-    }
-    let cnt = (n as u64).min(data.len() as u64 - off) as usize;
-    let off = off as usize;
+    let (d, n) = check_span(dst, n, size)?;
+    // Branch-free: an offset past the end becomes `len` (nothing copied).
+    let len = data.len();
+    let off = nospec::min(off as u64, len as u64) as usize;
+    let cnt = nospec::min_usize(n, len - off);
     mem[d..d + cnt].copy_from_slice(&data[off..off + cnt]);
     Ok(cnt as i64)
 }
 
 #[inline]
 fn range(mem: &[u8], size: u64, p: i64, n: i64) -> Result<&[u8], Trap> {
-    let s = check_range(p, n, size)?;
-    Ok(&mem[s..s + n as usize])
+    let (s, n) = check_span(p, n, size)?;
+    Ok(&mem[s..s + n])
 }
 
 fn kv_trap(e: KvError) -> Trap {
@@ -202,10 +204,9 @@ impl HostCtx<'_> {
             HostFn::InputLen => Ok(self.req.body.len() as i64),
             HostFn::InputRead => copy_out(mem, size, arg(a, 0), &self.req.body, arg(a, 1), arg(a, 2)),
             HostFn::ReqPath => {
-                let max = arg(a, 1);
-                let d = check_range(arg(a, 0), max, size)?;
+                let (d, max) = check_span(arg(a, 0), arg(a, 1), size)?;
                 let p = &self.req.path;
-                let cnt = p.len().min(max as usize);
+                let cnt = nospec::min_usize(p.len(), max);
                 mem[d..d + cnt].copy_from_slice(&p[..cnt]);
                 Ok(p.len() as i64)
             }
@@ -246,20 +247,19 @@ impl HostCtx<'_> {
             HostFn::CallRespLen => Ok(self.call_body.len() as i64),
             HostFn::CallRespRead => copy_out(mem, size, arg(a, 0), &self.call_body, arg(a, 1), arg(a, 2)),
             HostFn::KvGet => {
-                let klen = arg(a, 1);
-                let k = check_range(arg(a, 0), klen, size)?;
-                let max = arg(a, 3);
-                let d = check_range(arg(a, 2), max, size)?;
-                if klen as usize > MAX_KEY {
+                let (k, klen) = check_span(arg(a, 0), arg(a, 1), size)?;
+                let (d, max) = check_span(arg(a, 2), arg(a, 3), size)?;
+                if klen > MAX_KEY {
                     return Err(Trap::Host(TRAP_KV_LIMIT));
                 }
                 let mut kbuf = [0u8; MAX_KEY];
-                let klen = klen as usize;
+                // Branch-free too: a mispredicted check must not overflow `kbuf`.
+                let klen = nospec::min_usize(klen, MAX_KEY);
                 kbuf[..klen].copy_from_slice(&mem[k..k + klen]);
                 Ok(self.kv.get_with(&kbuf[..klen], |v| match v {
                     None => -1,
                     Some(v) => {
-                        let cnt = v.len().min(max as usize);
+                        let cnt = nospec::min_usize(v.len(), max);
                         mem[d..d + cnt].copy_from_slice(&v[..cnt]);
                         v.len() as i64
                     }
@@ -303,7 +303,7 @@ impl HostCtx<'_> {
                 if key.len() > MAX_KEY || e as usize > MAX_VALUE || n as usize > MAX_VALUE {
                     return Err(Trap::Host(TRAP_KV_LIMIT));
                 }
-                let (exp, new) = buf.split_at(e as usize);
+                let (exp, new) = buf.split_at(nospec::min_usize(e as usize, buf.len()));
                 let exp = (exp_len >= 0).then_some(exp);
                 let new = (new_len >= 0).then_some(new);
                 self.kv.cas(key, exp, new).map(i64::from).map_err(kv_trap)
@@ -313,14 +313,13 @@ impl HostCtx<'_> {
                 self.log.push(s);
                 Ok(0)
             }
-            HostFn::NowNs => Ok(crate::sys::mono_ns() as i64),
-            HostFn::TimeMs => Ok(crate::sys::wall_ms() as i64),
+            HostFn::NowNs => Ok(crate::clock::now_ns() as i64),
+            HostFn::TimeMs => Ok(crate::clock::time_ms() as i64),
             HostFn::Random => Ok(wyrand(&mut self.rng) as i64),
             HostFn::Config => {
-                let max = arg(a, 1);
-                let d = check_range(arg(a, 0), max, size)?;
+                let (d, max) = check_span(arg(a, 0), arg(a, 1), size)?;
                 let c = self.config;
-                let cnt = c.len().min(max as usize);
+                let cnt = nospec::min_usize(c.len(), max);
                 mem[d..d + cnt].copy_from_slice(&c[..cnt]);
                 Ok(c.len() as i64)
             }

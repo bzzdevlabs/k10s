@@ -109,6 +109,23 @@ extern "C" fn kmain() -> ! {
     // Execution engine: the JIT unless `k10.engine=interp`. JIT frames live on the coroutine stacks.
     let jit = bi.arg("k10.engine") != Some("interp");
     runtime::engine::set_jit(jit);
+    // Side-channel knobs (SECURITY.md): JIT indirect-branch form, guest clock resolution.
+    let indirect = match bi.arg("k10.jit_indirect") {
+        None => k10_jit::IndirectBranch::Jump,
+        Some(v) => k10_jit::IndirectBranch::parse(v).unwrap_or_else(|| {
+            kprintln!("k10-metal: unknown k10.jit_indirect={v} (jump|lfence|retpoline), using retpoline");
+            k10_jit::IndirectBranch::Retpoline
+        }),
+    };
+    runtime::jit::set_indirect(indirect);
+    let clock_res_ns = bi
+        .arg("k10.timer_res_us")
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or(k10_ir::clock::DEFAULT_RES_NS, |us| us.saturating_mul(1000));
+    time::set_guest_clock(clock_res_ns);
+    if verbose {
+        kprintln!("k10-metal: jit indirect branches: {}, guest clock resolution: {} ns", indirect.name(), clock_res_ns);
+    }
     coro::set_stack_size(if jit { coro::STACK_SIZE_JIT } else { coro::STACK_SIZE_INTERP });
     // Application processors (`-smp N`; `k10.smp=N` limits how many are used).
     let ncpu = smp::start_aps(bi.arg("k10.smp").and_then(|v| v.parse().ok()).unwrap_or(percpu::MAX_CPUS));

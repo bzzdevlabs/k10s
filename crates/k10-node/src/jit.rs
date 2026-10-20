@@ -44,11 +44,18 @@ pub const HOST_RESERVE: usize = 128 << 10;
 #[derive(Default)]
 pub struct JitBackend {
     counters: Arc<CodeCounters>,
+    /// `NodeConfig::jit_indirect`.
+    indirect: k10_jit::IndirectBranch,
 }
 
 impl JitBackend {
     pub fn new() -> Self {
         JitBackend::default()
+    }
+
+    /// A backend emitting indirect branches as `indirect`.
+    pub fn with_indirect(indirect: k10_jit::IndirectBranch) -> Self {
+        JitBackend { indirect, ..JitBackend::default() }
     }
 }
 
@@ -71,7 +78,8 @@ impl Backend for JitBackend {
 
     fn prepare(&self, m: &Module, _info: &k10_ir::ModuleInfo, imports: &[HostFn]) -> Result<Arc<dyn Code>, String> {
         let t0 = crate::sys::mono_ns();
-        let module = k10_jit::compile(m).map_err(|e| format!("jit: {e}"))?;
+        let opts = k10_jit::CompileOptions { indirect: self.indirect, ..k10_jit::CompileOptions::default() };
+        let module = k10_jit::compile_with(m, &opts).map_err(|e| format!("jit: {e}"))?;
         let host_fns: Box<[k10_jit::HostFn]> = imports.iter().map(|&f| ADAPTERS[f as usize]).collect();
         let code = module.code_bytes();
         let ticket = self.counters.register(code as u64, page_round(code) as u64, crate::sys::mono_ns() - t0);

@@ -7,7 +7,7 @@ use crate::abi::*;
 use crate::blob::{BlobMeta, CodeBlob, FuncEntry};
 use crate::cpu::CpuFeatures;
 use crate::helpers::NUM_HELPERS;
-use crate::x64::{Alu, Asm, AsmError, Cond, Label, Mem, Reg, Shift, Size};
+use crate::x64::{Alu, Asm, AsmError, Cond, Label, Mem, Reg, Shift, Size, RM};
 use alloc::vec::Vec;
 use core::fmt;
 use k10_ir::{validate, Module, ValidateError};
@@ -19,11 +19,58 @@ pub struct CompileOptions {
     pub features: CpuFeatures,
     /// Maximum number of locals kept in registers per function, `0..=6` (default 6).
     pub max_pinned: u8,
+    /// Indirect-branch form (Spectre v2 hardening; default [`IndirectBranch::Jump`]).
+    pub indirect: IndirectBranch,
+    /// `br_table`s with at most this many target runs (ranges of indices sharing a target, default included) become
+    /// compare trees, larger ones jump tables (default [`DEFAULT_BR_TREE_MAX`]; 0: tables unless a single target).
+    pub br_tree_max: u16,
 }
+
+/// Default [`CompileOptions::br_tree_max`] (at most 3 compare levels).
+pub const DEFAULT_BR_TREE_MAX: u16 = 8;
 
 impl Default for CompileOptions {
     fn default() -> Self {
-        CompileOptions { features: CpuFeatures::detect(), max_pinned: func::MAX_PINNED as u8 }
+        CompileOptions {
+            features: CpuFeatures::detect(),
+            max_pinned: func::MAX_PINNED as u8,
+            indirect: IndirectBranch::Jump,
+            br_tree_max: DEFAULT_BR_TREE_MAX,
+        }
+    }
+}
+
+/// Form of every indirect branch the JIT emits (jump tables, host/helper calls, interrupt hook, entry trampoline).
+/// Only prediction differs: plain branches use the branch target buffer, which other workloads on the core can
+/// train (Spectre v2). Sequences in docs/JIT-ABI.md.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum IndirectBranch {
+    /// Plain `jmp reg` / `call [mem]` (default, no overhead).
+    #[default]
+    Jump,
+    /// Target in `r11`, then `lfence; jmp/call r11`: narrows the speculation window, does not close it.
+    Lfence,
+    /// Through a retpoline thunk: a `ret` predicted from the return stack (a `pause; lfence` trap), never the BTB.
+    Retpoline,
+}
+
+impl IndirectBranch {
+    /// `jump` | `lfence` | `retpoline`.
+    pub fn parse(s: &str) -> Option<IndirectBranch> {
+        match s {
+            "jump" => Some(IndirectBranch::Jump),
+            "lfence" => Some(IndirectBranch::Lfence),
+            "retpoline" => Some(IndirectBranch::Retpoline),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            IndirectBranch::Jump => "jump",
+            IndirectBranch::Lfence => "lfence",
+            IndirectBranch::Retpoline => "retpoline",
+        }
     }
 }
 
@@ -74,6 +121,34 @@ pub(crate) struct Shared {
     pub helpers: [Label; NUM_HELPERS],
     /// `(params, results)` of each import.
     pub imports: Vec<(u8, u8)>,
+    pub indirect: IndirectBranch,
+    /// Retpoline thunk (target in `r11`, entered by `call` or `jmp`); bound in retpoline mode only.
+    pub retpoline: Label,
+}
+
+/// Indirect `call target` in the configured [`IndirectBranch`] form (clobbers `r11` except in `Jump` mode).
+pub(crate) fn indirect_call(a: &mut Asm, sh: &Shared, target: RM) {
+    match sh.indirect {
+        IndirectBranch::Jump => a.call_rm(target),
+        IndirectBranch::Lfence => {
+            load_r11(a, target);
+            a.lfence();
+            a.call_rm(RM::R(Reg::R11));
+        }
+        IndirectBranch::Retpoline => {
+            load_r11(a, target);
+            a.call(sh.retpoline);
+        }
+    }
+}
+
+/// `r11 ← target`.
+pub(crate) fn load_r11(a: &mut Asm, target: RM) {
+    match target {
+        RM::R(Reg::R11) => {}
+        RM::R(r) => a.mov_rr(Reg::R11, r),
+        RM::M(m) => a.load(Size::S64, Reg::R11, m),
+    }
 }
 
 /// Compiles a module to a position-independent [`CodeBlob`] (validates it first).
@@ -91,6 +166,8 @@ pub fn compile_blob(m: &Module, opts: &CompileOptions) -> Result<CodeBlob, Compi
         safepoint: a.new_label(),
         helpers: [a.new_label(), a.new_label()],
         imports: m.imports.iter().map(|i| (i.params, i.results)).collect(),
+        indirect: opts.indirect,
+        retpoline: a.new_label(),
     };
     for _ in 0..m.funcs.len() {
         let l = a.new_label();
@@ -167,7 +244,7 @@ fn emit_prelude(a: &mut Asm, sh: &Shared) -> u32 {
     a.alu_ri(Alu::Sub, Rcx.into(), 1);
     a.jcc(Cond::Ne, copy);
     a.bind(call);
-    a.call_rm(Rsi.into());
+    indirect_call(a, sh, Rsi.into());
     // Normal return: rax = result.
     a.load(Size::S64, Rsp, Mem::b(R14, OFF_SAVED_RSP));
     a.load(Size::S64, Rcx, Mem::b(Rsp, 8));
@@ -211,7 +288,7 @@ fn emit_prelude(a: &mut Asm, sh: &Shared) -> u32 {
     }
     a.alu_ri(Alu::Sub, Rsp.into(), 8); // 9 pushes + 8 = 80 bytes: aligned
     a.mov_rr(Rdi, R14);
-    a.call_rm(Mem::b(R14, OFF_INTERRUPT).into());
+    indirect_call(a, sh, Mem::b(R14, OFF_INTERRUPT).into()); // r11 saved above
     a.test32(Rax, Rax); // u32 result: only eax is defined
     a.jcc(Cond::Ne, sh.trap_common);
     a.alu_ri(Alu::Add, Rsp.into(), 8);
@@ -221,5 +298,21 @@ fn emit_prelude(a: &mut Asm, sh: &Shared) -> u32 {
     a.mov_rr(Rsp, Rbp);
     a.pop(Rbp);
     a.ret();
+
+    // ---- retpoline thunk: `call/jmp thunk` = `call/jmp r11`; the `ret` is predicted to the pause/lfence trap.
+    if sh.indirect == IndirectBranch::Retpoline {
+        a.align(16, 0xCC);
+        a.bind(sh.retpoline);
+        let set = a.new_label();
+        let spin = a.new_label();
+        a.call(set);
+        a.bind(spin);
+        a.pause();
+        a.lfence();
+        a.jmp(spin);
+        a.bind(set);
+        a.store(Size::S64, Mem::b(Rsp, 0), R11);
+        a.ret();
+    }
     entry
 }

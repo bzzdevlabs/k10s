@@ -5,7 +5,7 @@
 mod common;
 use common::*;
 use k10_ir::{new_memory, FuncBuilder, Host, Interp, Module, ModuleBuilder, Op, Trap};
-use k10_jit::{compile_with, CompileOptions, CpuFeatures};
+use k10_jit::{compile_with, CompileOptions, CpuFeatures, IndirectBranch};
 
 struct NoHost;
 impl Host for NoHost {
@@ -17,10 +17,12 @@ impl Host for NoHost {
 fn configs() -> Vec<CompileOptions> {
     let det = CpuFeatures::detect();
     vec![
-        CompileOptions { features: det, max_pinned: 6 },
-        CompileOptions { features: CpuFeatures::BASELINE, max_pinned: 6 },
-        CompileOptions { features: det, max_pinned: 0 },
-        CompileOptions { features: CpuFeatures::BASELINE, max_pinned: 1 },
+        CompileOptions { features: det, max_pinned: 6, ..CompileOptions::default() },
+        // Jump tables for every br_table (tree_max 0) through each indirect-branch mode, and all-trees.
+        CompileOptions { features: CpuFeatures::BASELINE, max_pinned: 6, indirect: IndirectBranch::Retpoline, br_tree_max: 0 },
+        CompileOptions { features: det, max_pinned: 0, indirect: IndirectBranch::Lfence, br_tree_max: 0 },
+        CompileOptions { features: CpuFeatures::BASELINE, max_pinned: 1, indirect: IndirectBranch::Jump, br_tree_max: 0 },
+        CompileOptions { features: det, max_pinned: 6, indirect: IndirectBranch::Jump, br_tree_max: u16::MAX },
     ]
 }
 
