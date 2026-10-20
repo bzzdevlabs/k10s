@@ -68,6 +68,7 @@ impl Poly1305 {
         self.h = [h0, h1, h2];
     }
 
+    #[inline(never)]
     pub fn update(&mut self, mut data: &[u8]) {
         if self.buf_len > 0 {
             let take = (16 - self.buf_len).min(data.len());

@@ -6,27 +6,34 @@ use super::poly1305::Poly1305;
 
 pub const TAG_LEN: usize = 16;
 
-/// What the fused loop does with each chunk.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Dir {
-    Seal,
-    Open,
-}
-
-fn run(c: &ChaCha20, aad: &[u8], data: &mut [u8], dir: Dir) -> [u8; 16] {
+/// The fused loop, one instance per direction with a single call site per primitive (small i-cache footprint: peer
+/// links mostly seal short records, often with cold caches).
+#[inline(never)]
+fn run<const OPEN: bool>(c: &ChaCha20, aad: &[u8], data: &mut [u8]) -> [u8; 16] {
     let mut ks = [0u8; BATCH];
     c.blocks(0, &mut ks);
     let mut poly = Poly1305::new(ks[..32].try_into().unwrap());
     poly.update(aad);
     poly.pad16();
-    let first = data.len().min(BATCH - 64);
-    let (head, rest) = data.split_at_mut(first);
-    step(&mut poly, head, &ks[64..64 + first], dir);
-    let mut counter = 4u32;
-    for chunk in rest.chunks_mut(BATCH) {
-        c.blocks(counter, &mut ks);
-        step(&mut poly, chunk, &ks, dir);
-        counter = counter.wrapping_add(4);
+    // Block 0 is the Poly1305 key; the data's keystream starts at block 1.
+    let (mut pos, mut counter, mut i) = (64, 4u32, 0);
+    while i < data.len() {
+        if pos == BATCH {
+            c.blocks(counter, &mut ks);
+            counter = counter.wrapping_add(4);
+            pos = 0;
+        }
+        let n = (BATCH - pos).min(data.len() - i);
+        let chunk = &mut data[i..i + n];
+        if OPEN {
+            poly.update(chunk);
+            xor_into(chunk, &ks[pos..pos + n]);
+        } else {
+            xor_into(chunk, &ks[pos..pos + n]);
+            poly.update(chunk);
+        }
+        i += n;
+        pos += n;
     }
     poly.pad16();
     let mut lens = [0u8; 16];
@@ -34,17 +41,6 @@ fn run(c: &ChaCha20, aad: &[u8], data: &mut [u8], dir: Dir) -> [u8; 16] {
     lens[8..].copy_from_slice(&(data.len() as u64).to_le_bytes());
     poly.update(&lens);
     poly.finalize()
-}
-
-#[inline(always)]
-fn step(poly: &mut Poly1305, chunk: &mut [u8], ks: &[u8], dir: Dir) {
-    if dir == Dir::Open {
-        poly.update(chunk);
-        xor_into(chunk, ks);
-    } else {
-        xor_into(chunk, ks);
-        poly.update(chunk);
-    }
 }
 
 /// A ChaCha20-Poly1305 key, parsed once (frames on a peer link reuse it with a counter nonce).
@@ -60,13 +56,13 @@ impl Key {
 
     /// Encrypts `data` in place and returns the tag.
     pub fn seal(&self, nonce: &[u8; 12], aad: &[u8], data: &mut [u8]) -> [u8; TAG_LEN] {
-        run(&ChaCha20::new(&self.key, nonce), aad, data, Dir::Seal)
+        run::<false>(&ChaCha20::new(&self.key, nonce), aad, data)
     }
 
     /// Verifies and decrypts `data` in place; on a bad tag zeroes it and returns false.
     #[must_use]
     pub fn open(&self, nonce: &[u8; 12], aad: &[u8], data: &mut [u8], tag: &[u8; TAG_LEN]) -> bool {
-        let t = run(&ChaCha20::new(&self.key, nonce), aad, data, Dir::Open);
+        let t = run::<true>(&ChaCha20::new(&self.key, nonce), aad, data);
         if ct_eq(&t, tag) {
             true
         } else {
