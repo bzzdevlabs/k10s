@@ -77,7 +77,7 @@ impl Default for Opts {
 }
 
 fn spawn_node(name: &str, data: &Path, join: Option<&str>, o: &Opts) -> NodeProc {
-    let bin = env!("CARGO_BIN_EXE_k10s");
+    let bin = common::k10s_bin();
     let mut args: Vec<String> = [
         "node", "--name", name, "--http", "127.0.0.1:0", "--gossip", "127.0.0.1:0", "--rpc", "127.0.0.1:0", "--leave-grace-ms", "300",
     ]
@@ -237,7 +237,7 @@ fn member_state(status: &str, id: &str) -> Option<String> {
 fn apply(dir: &Path, via: &NodeProc, manifest: &str) -> String {
     let path = dir.join(format!("app-{}.k10s", k10_node::sys::mono_ns()));
     std::fs::write(&path, manifest).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_k10s"))
+    let out = Command::new(common::k10s_bin())
         .args(["apply", path.to_str().unwrap(), "--node", &via.http])
         .output()
         .unwrap();
@@ -399,12 +399,12 @@ fn three_nodes_join_apply_route_and_call() {
     let served: i64 = nodes.iter().map(|n| cluster_num(&n.status(), "served_for_peers").unwrap()).sum();
     assert!(served > 0);
     // The CLI shows the cluster view.
-    let out = Command::new(env!("CARGO_BIN_EXE_k10s")).args(["status", "--node", &nodes[0].http]).output().unwrap();
+    let out = Command::new(common::k10s_bin()).args(["status", "--node", &nodes[0].http]).output().unwrap();
     let txt = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success());
     assert!(txt.contains("members: 3 live / 3 known") && txt.contains("applied v1") && txt.contains("(this node)"), "{txt}");
     assert!(txt.contains("auth: cluster key id "), "{txt}");
-    let out = Command::new(env!("CARGO_BIN_EXE_k10s")).args(["status", "--json", "--node", &nodes[0].http]).output().unwrap();
+    let out = Command::new(common::k10s_bin()).args(["status", "--json", "--node", &nodes[0].http]).output().unwrap();
     assert!(String::from_utf8_lossy(&out.stdout).contains("\"cluster\":{"));
     // A stale explicit version is refused; re-applying the same content is a no-op.
     let out = apply(&dir, &nodes[2], &manifest("v1", 6));
@@ -664,7 +664,7 @@ fn reapply_under_load_five_nodes() {
         std::thread::spawn(move || {
             let path = d.join(format!("race-{cfg}.k10s"));
             std::fs::write(&path, manifest(cfg, 4)).unwrap();
-            let out = Command::new(env!("CARGO_BIN_EXE_k10s")).args(["apply", path.to_str().unwrap(), "--node", &h]).output().unwrap();
+            let out = Command::new(common::k10s_bin()).args(["apply", path.to_str().unwrap(), "--node", &h]).output().unwrap();
             assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
         })
     };
@@ -819,7 +819,7 @@ fn measure_apply_convergence() {
             std::fs::write(&path, m(&cfg)).unwrap();
             let via = &nodes[v % n];
             let t0 = Instant::now();
-            let out = Command::new(env!("CARGO_BIN_EXE_k10s")).args(["apply", path.to_str().unwrap(), "--node", &via.http]).output().unwrap();
+            let out = Command::new(common::k10s_bin()).args(["apply", path.to_str().unwrap(), "--node", &via.http]).output().unwrap();
             assert!(out.status.success());
             let mut clients: Vec<Client> = nodes.iter().map(|x| Client::connect(&x.http, Duration::from_secs(10)).unwrap()).collect();
             let mut done = vec![false; n];

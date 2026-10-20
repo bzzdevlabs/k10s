@@ -7,6 +7,12 @@ use k10_node::http::Client;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// The binary under test: `K10S_BIN` (e.g. a release archive's), else this build's.
+pub fn k10s_bin() -> &'static str {
+    static BIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BIN.get_or_init(|| std::env::var("K10S_BIN").unwrap_or_else(|_| env!("CARGO_BIN_EXE_k10s").into()))
+}
+
 pub fn examples_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples").canonicalize().expect("examples/ directory")
 }

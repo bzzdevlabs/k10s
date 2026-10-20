@@ -1,6 +1,8 @@
 //! Runs the real `k10s` binary: `node` as a child process, then `apply`, `status`, `logs`, HTTP traffic, SIGTERM;
 //! `build` and `run` on Ten sources. The node's backend is the binary's default (`K10S_BACKEND`, else jit).
 
+mod common;
+
 use k10_node::demo;
 use k10_node::http;
 use std::process::{Command, Stdio};
@@ -19,7 +21,7 @@ fn tmpdir(tag: &str) -> std::path::PathBuf {
 
 #[test]
 fn node_apply_status_logs_and_restart() {
-    let bin = env!("CARGO_BIN_EXE_k10s");
+    let bin = common::k10s_bin();
     let dir = tmpdir("e2e");
     let data = dir.join("data");
     std::fs::write(dir.join("echo.k10"), k10_ir::encode(&demo::echo())).unwrap();
@@ -99,7 +101,7 @@ fn node_apply_status_logs_and_restart() {
 
 #[test]
 fn usage_errors() {
-    let bin = env!("CARGO_BIN_EXE_k10s");
+    let bin = common::k10s_bin();
     let out = Command::new(bin).output().unwrap();
     assert!(!out.status.success());
     let out = Command::new(bin).args(["node", "--bogus", "1"]).output().unwrap();
@@ -117,7 +119,7 @@ fn usage_errors() {
 /// `k10s build`: writes TIR next to the source (or `-o`), rendered diagnostics and exit code 1 on errors.
 #[test]
 fn build_ten() {
-    let bin = env!("CARGO_BIN_EXE_k10s");
+    let bin = common::k10s_bin();
     let dir = tmpdir("build");
     let src = dir.join("svc.ten");
     std::fs::write(&src, "export fn handle() {\n    out_str(\"built\");\n}\n").unwrap();
@@ -146,7 +148,7 @@ fn build_ten() {
 /// `k10s run`: one request in-process, body on stdout, on both backends.
 #[test]
 fn run_ten() {
-    let bin = env!("CARGO_BIN_EXE_k10s");
+    let bin = common::k10s_bin();
     let ex = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
     let dir = tmpdir("run");
     for backend in ["jit", "interp"] {
