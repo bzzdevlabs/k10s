@@ -24,9 +24,7 @@
 //! `deadline_ms` is the caller's remaining time budget, relative (clocks are not synchronized). `method` is the
 //! host API's `req_method` code (0 GET, 1 POST, 2 PUT, 3 DELETE, 4 other); it is carried as is.
 //!
-//! On an authenticated link (a cluster key is configured) each side first sends `Auth` in clear, then every frame
-//! is sealed: `len:u32 | ChaCha20-Poly1305(kind | request_id | payload) | tag:[16]`, `len` counting the tag. The
-//! decoder opens frames once [`FrameDecoder::set_opener`] has been called. See [`crate::secure`].
+//! With a cluster key, `Auth` goes first in clear, then frames are sealed: `len | AEAD(kind | id | payload) | tag[16]`.
 
 use crate::codec::{put_u16, put_u32, put_u64, DecodeError, Reader};
 use crate::member::Member;
@@ -82,8 +80,7 @@ pub enum WireError {
     FrameTooShort { len: u32 },
     UnknownKind(u8),
     Malformed(&'static str),
-    /// A sealed frame failed authentication: another cluster key, or a forged, replayed, reordered or corrupted
-    /// frame.
+    /// A sealed frame failed authentication (other key, forged, replayed, reordered).
     Unauthenticated,
 }
 
@@ -192,8 +189,7 @@ impl<'a> Msg<'a> {
         }
     }
 
-    /// An upper bound of the encoded frame size (header included, before any sealing tag): lets a sender check a
-    /// buffer cap before encoding.
+    /// Upper bound of the encoded frame size (header included, tag excluded), to check caps before encoding.
     pub fn frame_len_bound(&self) -> usize {
         HEADER_LEN
             + match self {
@@ -287,8 +283,7 @@ impl FrameDecoder {
         FrameDecoder { buf: Vec::new(), start: 0, max_frame: max_frame.max(9), error: None, opener: None }
     }
 
-    /// From now on, frames are sealed: each is authenticated and decrypted in place before it is returned (a
-    /// failure is a sticky [`WireError::Unauthenticated`]). `max_frame` replaces the cap (it counts the tag).
+    /// Frames are sealed from now on (opened in place; failure is sticky); `max_frame` (tag included) replaces the cap.
     pub fn set_opener(&mut self, opener: Opener, max_frame: usize) {
         self.opener = Some(opener);
         self.max_frame = max_frame.max(9 + crate::crypto::TAG_LEN);

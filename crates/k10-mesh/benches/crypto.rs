@@ -1,6 +1,4 @@
-//! Throughput of the cluster-authentication primitives (`cargo bench -p k10-mesh --bench crypto`): ChaCha20-
-//! Poly1305 seal/open per message size (the peer-link frame path), XChaCha20-Poly1305 (gossip datagrams),
-//! Poly1305 and ChaCha20 alone, and SHA-256 for comparison (content hashes).
+//! Crypto throughput (`cargo bench -p k10-mesh --bench crypto`): peer frames, gossip datagrams, primitives, SHA-256.
 
 use k10_mesh::crypto::aead::{xseal, Key};
 use k10_mesh::crypto::chacha20::ChaCha20;
@@ -10,7 +8,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 fn bench(name: &str, bytes: usize, mut f: impl FnMut()) {
-    // Calibrate to ~200 ms per sample, keep the best of 5 samples.
+    // ~200 ms per sample, best of 5.
     let mut iters = 1u64;
     loop {
         let t = Instant::now();

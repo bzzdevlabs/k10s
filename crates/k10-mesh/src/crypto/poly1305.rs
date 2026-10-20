@@ -37,8 +37,7 @@ impl Poly1305 {
         }
     }
 
-    /// Absorbs full 16-byte blocks (`data.len()` is a multiple of 16); `hibit` is 2^128 (as `1 << 40` in the top
-    /// limb) for message blocks and 0 for the padded final block of a non-AEAD message.
+    /// Absorbs whole 16-byte blocks; `hibit` is 2^128 (`1 << 40` in the top limb), 0 for a padded final block.
     #[inline]
     fn blocks(&mut self, data: &[u8], hibit: u64) {
         let [r0, r1, r2] = self.r;
@@ -89,8 +88,7 @@ impl Poly1305 {
         self.buf_len = rest.len();
     }
 
-    /// Zero-pads the pending partial block to 16 bytes and absorbs it as a full block (the AEAD construction's
-    /// `pad16`, §2.8).
+    /// AEAD `pad16`: zero-pads the pending partial block and absorbs it as a full block.
     pub fn pad16(&mut self) {
         if self.buf_len > 0 {
             self.buf[self.buf_len..].fill(0);
@@ -206,13 +204,12 @@ mod tests {
         k[0] = 1;
         let m = hex("ffffffffffffffffffffffffffffffff f0ffffffffffffffffffffffffffffff 11000000000000000000000000000000");
         assert_eq!(poly1305(&k, &m).to_vec(), hex("05000000000000000000000000000000"));
-        // #11: r = 1 (s = 0), message ff.. (16), fb fe.. (16), 01 01.. (16) → tag 0 ... modulus edge case.
+        // #11: r = 1, three blocks hitting a modulus edge case → tag 0.
         let m = hex("fffffffffffffffffffffffffffffffffbfefefefefefefefefefefefefefefe01010101010101010101010101010101");
         assert_eq!(poly1305(&k, &m).to_vec(), hex("00000000000000000000000000000000"));
     }
 
-    /// Differential check: SHA-256 over the tags of 300 key/message pairs (lengths 0..300), computed with Python's
-    /// `cryptography` 38 (`poly1305.Poly1305.generate_tag`).
+    /// Differential check: SHA-256 of 300 tags, computed with Python `cryptography` 38 on the same inputs.
     #[test]
     fn matches_python_cryptography() {
         let mut h = crate::sha256::Sha256::new();

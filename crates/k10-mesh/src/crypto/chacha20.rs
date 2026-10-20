@@ -1,9 +1,4 @@
-//! ChaCha20 (RFC 8439 §2.1–2.4) and HChaCha20 (draft-irtf-cfrg-xchacha §2.2).
-//!
-//! The keystream is produced four blocks at a time, one lane per block. On x86-64 with SSE2 (every hosted build) the
-//! lanes are 128-bit registers driven with intrinsics (LLVM does not vectorize the 32-bit rotations of the portable
-//! code by itself on plain SSE2); elsewhere — the bare-metal kernel is built without SSE — the same four interleaved
-//! blocks run as scalar code (more instruction-level parallelism than one block at a time).
+//! ChaCha20 (RFC 8439) and HChaCha20 (XChaCha draft); 4 blocks per batch: SSE2 on x86-64, scalar lanes elsewhere.
 
 const SIGMA: [u32; 4] = [0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574];
 
@@ -103,8 +98,7 @@ impl ChaCha20 {
         self.blocks_portable(counter, out)
     }
 
-    /// [`ChaCha20::blocks`] in portable code: four interleaved blocks (instruction-level parallelism even where
-    /// nothing is vectorized; LLVM does not vectorize the rotations with plain SSE2 on its own).
+    /// Portable [`ChaCha20::blocks`]: four interleaved scalar blocks (LLVM does not vectorize SSE2 rotations).
     pub fn blocks_portable(&self, counter: u32, out: &mut [u8; BATCH]) {
         let s = &self.state;
         let mut i12 = [0u32; LANES];
@@ -172,8 +166,7 @@ impl ChaCha20 {
     }
 }
 
-/// The four-block keystream with SSE2 (one 128-bit register per state word, one lane per block), for hosted x86-64
-/// builds. The only unsafe code of the crate: SSE2 intrinsics and two unaligned 16-byte stores per row.
+/// SSE2 keystream, one register per state word and one lane per block: the crate's only unsafe code.
 #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 #[allow(unsafe_code)]
 mod sse2 {
@@ -188,8 +181,7 @@ mod sse2 {
 
     #[inline]
     pub fn keystream(state: &[u32; 16], counter: u32, out: &mut [u8; BATCH]) {
-        // SAFETY: `blocks` only requires SSE2, which this module is compiled for (cfg on the module; every x86-64
-        // CPU has it).
+        // SAFETY: needs only SSE2, which this module is compiled for (every x86-64 CPU has it).
         unsafe { blocks(state, counter, out) }
     }
 
@@ -313,8 +305,7 @@ mod tests {
              d2826446079faa0914c2d705d98b02a2b5129cd1de164eb9cbd083e8a2503c4e",
         );
         assert_eq!(c.block(1).to_vec(), want);
-        // The 4-lane paths (SIMD where available, and portable) agree with the single-block one, including across a
-        // counter wrap.
+        // SIMD and portable 4-lane paths match the single-block reference, also across a counter wrap.
         for start in [0u32, 1, 7, 1000, u32::MAX - 1] {
             let mut ks = [0u8; BATCH];
             let mut ks2 = [0u8; BATCH];

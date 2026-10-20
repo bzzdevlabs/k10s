@@ -1,35 +1,5 @@
-//! Cluster authentication: every member holds the same 32-byte secret, the *cluster key* (`k10s keygen`). Holders
-//! are fully trusted (there is no per-node identity yet); everyone else can neither join, forge or replay gossip,
-//! nor open, inject into or read a peer link.
-//!
-//! **Key schedule.** `PRK = HKDF-Extract(salt = "k10s cluster key v1", key)`; the gossip key, the peer-link key and a
-//! public 8-byte key id (shown in status, to check that nodes share a key without revealing it) are
-//! `HKDF-Expand(PRK, label)` with distinct labels.
-//!
-//! **Gossip datagrams** ([`GossipCipher`]) are sealed with XChaCha20-Poly1305 under the gossip key:
-//! ```text
-//! sealed = 0x4b 'K' | 0x01 | nonce:[24] | ciphertext(gossip datagram) | tag:[16]       (42 bytes of overhead)
-//! nonce  = boot:[8] (random per process) | ctr:u64 LE (per datagram) | ts:u64 LE (sender's Unix time, ms)
-//! ```
-//! The first two bytes are the associated data; the nonce is authenticated by construction. A receiver drops a
-//! datagram before decoding anything in it when the tag fails, when `ts` is further than `max_skew` from its own
-//! clock (old datagrams cannot be replayed to a node that restarted), or when it is a replay: per sender (the id in
-//! the authenticated datagram) it remembers the newest boot and a 64-entry sliding window of counters, and an older
-//! boot (smaller `ts`) is refused. SWIM incarnations and desired-state versions are monotonic on top of that, so a
-//! datagram that slipped through could not roll anything back anyway.
-//!
-//! **Peer links** ([`SecureLink`]): both sides first send an `Auth` frame in clear (`KIND_AUTH`: version, node id,
-//! 32-byte fresh random nonce). Each side then derives one key per direction,
-//! `k(A→B) = HKDF-Expand(HKDF-Extract("k10s link v1", peer key), id_A | id_B | nonce_A | nonce_B)`, and every later
-//! frame is sealed with ChaCha20-Poly1305 under the sender's direction key, nonce = 64-bit frame counter:
-//! ```text
-//! sealed frame = len:u32 LE | ciphertext(kind | request_id | payload) | tag:[16]       (len counts the tag)
-//! ```
-//! The first sealed frame each side sends is its `Hello`; opening it proves the peer holds the cluster key and
-//! agrees on both nonces and ids (key confirmation) — a challenge–response on each side's fresh nonce. Fresh nonces
-//! make the keys unique per connection (counter nonces never repeat); per-direction keys stop reflection; the
-//! implicit counter stops replay, reordering, dropping and injection (a failure closes the link). A link refuses a
-//! peer that claims this node's own id.
+//! Cluster authentication with one shared 32-byte key: HKDF subkeys, sealed gossip ([`GossipCipher`]) and
+//! authenticated, encrypted peer links ([`SecureLink`]). Protocol and threat model: docs/NODE.md, SECURITY.md.
 
 use crate::codec::put_u64;
 use crate::crypto::aead::{self, xopen, xseal, TAG_LEN};
@@ -103,19 +73,19 @@ const GOSSIP_HEADER: usize = 2 + 24;
 pub const GOSSIP_OVERHEAD: usize = GOSSIP_HEADER + TAG_LEN;
 /// Default bound on `|sender clock − receiver clock|` for gossip datagrams.
 pub const DEFAULT_MAX_SKEW_MS: u64 = 300_000;
-/// Senders tracked for replay protection (more than `Config::max_members`; the oldest is forgotten first).
+/// Senders tracked for replay protection (above `Config::max_members`; oldest evicted first).
 const MAX_SEEN: usize = 32_768;
 
 /// Why a datagram was dropped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reject {
-    /// Not a sealed datagram (wrong magic/version, too short): e.g. a node without the key, or an old version.
+    /// Not a sealed datagram (e.g. from a node without the key).
     Malformed,
-    /// Authentication failed: another cluster key, or a forged / corrupted datagram.
+    /// Another cluster key, or forged / corrupted.
     BadTag,
-    /// Authentic, but its timestamp is too far from this node's clock (an old datagram, or clock skew).
+    /// Authentic, but stamped too far from this node's clock.
     Stale,
-    /// Authentic, but already received (or older than what the sender sent since).
+    /// Authentic, but already received (or from an older boot of the sender).
     Replay,
 }
 
@@ -158,7 +128,7 @@ struct Seen {
     last_ms: u64,
 }
 
-/// Seals outgoing and opens incoming gossip datagrams (sans-IO; see the module docs for the format and rules).
+/// Seals and opens gossip datagrams: `'K' | 1 | nonce[24] = boot[8] ctr[8] ts_ms[8] | ciphertext | tag[16]`.
 pub struct GossipCipher {
     key: [u8; 32],
     boot: [u8; 8],
@@ -170,8 +140,7 @@ pub struct GossipCipher {
 }
 
 impl GossipCipher {
-    /// `boot`: 8 random bytes, fresh for every process (the nonce prefix: it must never repeat under one key).
-    /// `max_skew_ms`: 0 disables the clock check (replays of recent datagrams are still refused).
+    /// `boot`: 8 fresh random bytes per process (nonce prefix); `max_skew_ms` 0 disables the clock check.
     pub fn new(key: &ClusterKey, boot: [u8; 8], max_skew_ms: u64) -> GossipCipher {
         GossipCipher { key: key.gossip, boot, ctr: 0, max_skew_ms, seen: BTreeMap::new(), next_gc: 0, stats: GossipCipherStats::default() }
     }
@@ -199,12 +168,11 @@ impl GossipCipher {
         self.stats.sealed += 1;
     }
 
-    /// Authenticates and decrypts a datagram in place; returns the gossip datagram inside it. `now_ms`: Unix time
-    /// in milliseconds. Nothing of a rejected datagram is decoded.
+    /// Authenticates, decrypts in place and replay-checks a datagram; returns the gossip datagram inside.
     pub fn open<'a>(&mut self, d: &'a mut [u8], now_ms: u64) -> Result<&'a [u8], Reject> {
         if now_ms >= self.next_gc {
             self.next_gc = now_ms + 10_000;
-            // Forget senders silent for longer than the clock check admits (their old datagrams are stale by then).
+            // Forget senders silent longer than the skew bound: their old datagrams are stale by then.
             let ttl = if self.max_skew_ms == 0 { 3_600_000 } else { self.max_skew_ms + 60_000 };
             self.seen.retain(|_, s| s.last_ms.saturating_add(ttl) > now_ms);
         }
@@ -306,8 +274,7 @@ pub struct Sealer {
 }
 
 impl Sealer {
-    /// Seals one frame in place. `frame` = `len:u32 | kind | request_id | payload | 16 bytes for the tag`, with
-    /// `len` already counting the tag.
+    /// Seals `len:u32 | kind | id | payload | tag space` in place (`len` counts the tag).
     pub fn seal(&mut self, frame: &mut [u8]) {
         let n = frame_nonce(self.ctr);
         self.ctr += 1;
@@ -318,15 +285,14 @@ impl Sealer {
     }
 }
 
-/// Opens the frames of the other direction (installed in the link's [`crate::wire::FrameDecoder`]).
+/// Opens the other direction's frames (installed in the link's [`crate::wire::FrameDecoder`]).
 pub struct Opener {
     key: aead::Key,
     ctr: u64,
 }
 
 impl Opener {
-    /// Authenticates and decrypts one frame in place (`len:u32 | ciphertext | tag`). A failure is final: the frame
-    /// was forged, replayed, reordered or corrupted, and the stream cannot be trusted any more.
+    /// Authenticates and decrypts one frame in place; false (forged, replayed, reordered) is final.
     #[must_use]
     pub fn open(&mut self, frame: &mut [u8]) -> bool {
         if frame.len() < 4 + TAG_LEN {
@@ -348,11 +314,11 @@ impl Opener {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthError {
     Malformed,
-    /// The peer claims this node's own id (a connection to ourselves, or a reflected handshake).
+    /// The peer claims this node's id (self-connection or reflected handshake).
     SelfLink,
-    /// A dialed link reached another node than the one dialed (it restarted with a new id, or the address moved).
+    /// A dialed link reached another node than the one dialed.
     WrongPeer(NodeId),
-    /// No `Auth` frame was expected (plain link, or already authenticated).
+    /// No `Auth` expected (plain link, or already authenticated).
     Unexpected,
 }
 
@@ -369,21 +335,18 @@ impl fmt::Display for AuthError {
 
 enum LinkState {
     Plain,
-    /// Our `Auth` is sent; frames queued meanwhile wait (unsealed, with room for their tag) at the end of the write
-    /// buffer.
+    /// `Auth` sent; frames queued meanwhile wait unsealed (tag space reserved) at the end of the buffer.
     Awaiting { peer_key: [u8; 32], me: NodeId, nonce: [u8; 32], held: usize },
     Up { tx: Sealer },
 }
 
-/// The sending half of a peer link's protection, plus the handshake (see the module docs). The link's owner keeps
-/// one write buffer `out`: [`SecureLink::start`] puts the `Auth` frame in it, [`SecureLink::push`] appends frames
-/// (sealed, or held until the handshake completes), and only `out[..len − held()]` may be written to the socket.
+/// Handshake and sending side of a peer link; only `out[..len − held()]` of its write buffer may be sent.
 pub struct SecureLink {
     state: LinkState,
 }
 
 impl SecureLink {
-    /// No protection: today's plaintext protocol (`--insecure-unauthenticated-cluster`).
+    /// No protection (`--insecure-unauthenticated-cluster`).
     pub fn plain() -> SecureLink {
         SecureLink { state: LinkState::Plain }
     }
@@ -397,7 +360,7 @@ impl SecureLink {
         matches!(self.state, LinkState::Plain)
     }
 
-    /// Waiting for the peer's `Auth` frame (the only frame accepted until then).
+    /// Waiting for the peer's `Auth` (the only frame accepted until then).
     pub fn awaiting_auth(&self) -> bool {
         matches!(self.state, LinkState::Awaiting { .. })
     }
@@ -411,7 +374,7 @@ impl SecureLink {
         }
     }
 
-    /// Appends this side's `Auth` frame (nothing on a plain link). Call once, before any [`SecureLink::push`].
+    /// Appends our `Auth` frame (plain links: nothing); call once, first.
     pub fn start(&self, out: &mut Vec<u8>) {
         if let LinkState::Awaiting { me, nonce, .. } = &self.state {
             encode_header(out, KIND_AUTH, 0, AUTH_PAYLOAD_LEN);
@@ -421,7 +384,7 @@ impl SecureLink {
         }
     }
 
-    /// Unsealed bytes at the end of the write buffer (frames queued before the handshake completed).
+    /// Unsealed bytes at the end of the write buffer (queued before the handshake completed).
     pub fn held(&self) -> usize {
         match self.state {
             LinkState::Awaiting { held, .. } => held,
@@ -429,7 +392,7 @@ impl SecureLink {
         }
     }
 
-    /// Appends one frame to `out`. Nothing is written when encoding fails (a field over the wire limits).
+    /// Appends one frame (sealed, or held during the handshake); nothing is written on an encoding error.
     pub fn push(&mut self, m: &Msg<'_>, request_id: u64, out: &mut Vec<u8>) -> Result<(), WireError> {
         if self.is_plain() {
             return m.encode(request_id, out);
@@ -451,9 +414,7 @@ impl SecureLink {
         Ok(())
     }
 
-    /// Handles the peer's `Auth` frame payload: derives the session keys, seals the held frames at the end of
-    /// `out`, and returns the peer's id and the [`Opener`] to install in the link's decoder (every later incoming
-    /// frame is sealed). `expect`: the node a dialed link is meant to reach.
+    /// Peer's `Auth`: derives the session keys, seals held frames, returns the peer id and the decoder's [`Opener`].
     pub fn on_auth(&mut self, payload: &[u8], expect: Option<NodeId>, out: &mut Vec<u8>) -> Result<(NodeId, Opener), AuthError> {
         let LinkState::Awaiting { peer_key, me, nonce, held } = &self.state else { return Err(AuthError::Unexpected) };
         if payload.len() != AUTH_PAYLOAD_LEN || payload[0] != AUTH_VERSION {

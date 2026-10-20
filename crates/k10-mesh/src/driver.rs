@@ -1,8 +1,7 @@
 //! Real-socket integration (std only).
 //!
 //! * [`UdpDriver`]: a non-blocking `UdpSocket` + [`Gossip`], driven by the caller's own event loop
-//!   (`raw_fd` → epoll; `on_readable` when readable; `on_tick` at `next_deadline`). With a [`GossipCipher`]
-//!   ([`UdpDriver::set_cipher`]) every datagram is sealed on the way out and authenticated on the way in.
+//!   (`raw_fd` → epoll; `on_readable` when readable; `on_tick` at `next_deadline`); optionally sealed ([`UdpDriver::set_cipher`]).
 //! * [`MeshThread`]: a self-contained thread running a `UdpDriver` (tests, examples, tools).
 
 use crate::gossip::{Config, DesiredState, Event, Gossip, Output};
@@ -27,7 +26,7 @@ pub struct IoStats {
     pub packets_received: u64,
     pub bytes_received: u64,
     pub send_errors: u64,
-    /// Datagrams dropped by the [`GossipCipher`] (not authentic, stale or replayed); not passed to gossip.
+    /// Datagrams dropped by the [`GossipCipher`] (not authentic, stale or replayed).
     pub rejected: u64,
 }
 
@@ -76,8 +75,7 @@ impl UdpDriver {
         })
     }
 
-    /// Seals every datagram sent from now on and drops every received one that the cipher rejects (cluster
-    /// authentication; see [`crate::secure`]).
+    /// Seals every datagram from now on and drops received ones the cipher rejects.
     pub fn set_cipher(&mut self, cipher: GossipCipher) {
         self.cipher = Some(cipher);
     }
@@ -86,7 +84,7 @@ impl UdpDriver {
         self.cipher.as_ref().map(|c| c.stats())
     }
 
-    /// Source and reason of the last rejected datagram since the previous call (for rate-limited logging).
+    /// Source and reason of the last rejected datagram since the previous call.
     pub fn take_last_reject(&mut self) -> Option<(Addr, Reject)> {
         self.last_reject.take()
     }

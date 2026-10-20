@@ -1,9 +1,4 @@
-//! ChaCha20-Poly1305 AEAD (RFC 8439 §2.8) and XChaCha20-Poly1305 (draft-irtf-cfrg-xchacha §2.3), in place with a
-//! detached 16-byte tag.
-//!
-//! Encryption and authentication run fused over 256-byte chunks (one batch of four ChaCha blocks), so a large
-//! message is read and written once while it is in L1. The first batch also yields the one-time Poly1305 key
-//! (block 0) and the keystream of the first 192 bytes (blocks 1..3): a short message costs a single batch.
+//! ChaCha20-Poly1305 (RFC 8439) and XChaCha20-Poly1305 in place, detached tag, cipher and MAC fused per batch.
 
 use super::chacha20::{hchacha20, xor_into, ChaCha20, BATCH};
 use super::ct_eq;
@@ -68,8 +63,7 @@ impl Key {
         run(&ChaCha20::new(&self.key, nonce), aad, data, Dir::Seal)
     }
 
-    /// Verifies and decrypts `data` in place. On a tag mismatch `data` is zeroed (no unauthenticated plaintext is
-    /// left behind) and `false` is returned.
+    /// Verifies and decrypts `data` in place; on a bad tag zeroes it and returns false.
     #[must_use]
     pub fn open(&self, nonce: &[u8; 12], aad: &[u8], data: &mut [u8], tag: &[u8; TAG_LEN]) -> bool {
         let t = run(&ChaCha20::new(&self.key, nonce), aad, data, Dir::Open);
@@ -149,9 +143,7 @@ mod tests {
         assert!(text.ends_with("other than as /\u{201c}work in progress./\u{201d}"), "{text}");
     }
 
-    /// Differential check against an independent implementation: the SHA-256 of `ciphertext || tag` for messages
-    /// of every length class around the batch boundaries, computed with Python's `cryptography` 38
-    /// (`ChaCha20Poly1305(key).encrypt(nonce, pt, aad)`, inputs as below).
+    /// Differential check: SHA-256 of every `ct || tag`, computed with Python `cryptography` 38 on the same inputs.
     #[test]
     fn matches_python_cryptography() {
         let key: [u8; 32] = core::array::from_fn(|i| (i * 11 + 3) as u8);

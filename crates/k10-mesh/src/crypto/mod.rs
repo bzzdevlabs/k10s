@@ -1,9 +1,4 @@
-//! Hand-written primitives for cluster authentication (no dependencies, `no_std`): ChaCha20, Poly1305, the
-//! ChaCha20-Poly1305 and XChaCha20-Poly1305 AEADs, HMAC-SHA256, HKDF-SHA256 and a constant-time comparison.
-//! Each is checked against its RFC / draft test vectors. How they are used: [`crate::secure`].
-//!
-//! Timing: nothing here branches on secret data or indexes memory with it (ChaCha20 and Poly1305 are
-//! add-rotate-xor and 64×64-bit multiplications; tags are compared with [`ct_eq`]).
+//! Hand-written `no_std` crypto for [`crate::secure`], RFC-vector tested; no secret-dependent branches or indexing.
 
 pub mod aead;
 pub mod chacha20;
