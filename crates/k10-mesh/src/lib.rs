@@ -34,6 +34,6 @@ pub mod sim;
 pub use bundle::Bundle;
 pub use codec::DecodeError;
 pub use gossip::{Config, DesiredState, Event, Gossip, Output, Stats};
-pub use manifest::{Manifest, ServiceSpec};
+pub use manifest::{Calls, Manifest, ServiceSpec};
 pub use member::{Addr, Capacity, Member, MemberState, NodeId};
 pub use placement::{instance_bytes, place, Placement};

@@ -9,7 +9,7 @@
 //! instances are destroyed.
 
 use crate::exec::{Backend, Code};
-use crate::host::{resolve_imports, Request};
+use crate::host::{resolve_imports, HostFn, Request};
 use crate::kv::KvNs;
 use crate::logs::LogRing;
 use crate::slot::Reservation;
@@ -71,6 +71,8 @@ pub struct ServiceRt {
     pub init_fn: Option<u32>,
     /// The module's `min_mem_log2`.
     pub min_mem_log2: u8,
+    /// The module imports the `call` host function.
+    pub imports_call: bool,
     /// Data segments `(offset, bytes)`.
     pub data: Vec<(usize, Vec<u8>)>,
     pub kv: Arc<KvNs>,
@@ -125,6 +127,7 @@ impl ServiceRt {
             handle_fn,
             init_fn,
             min_mem_log2: 12,
+            imports_call: false,
             data,
             kv,
             log,
@@ -158,6 +161,13 @@ impl ServiceRt {
 
     pub fn cpu_budget_ns(&self) -> u64 {
         self.spec.cpu_ms as u64 * 1_000_000
+    }
+
+    /// The module imports `call` but the manifest grants it nothing (e.g. a manifest written before `calls`).
+    pub fn call_warning(&self) -> Option<String> {
+        (self.imports_call && self.spec.calls.is_none()).then(|| {
+            format!("service `{}` imports `call` but its manifest grants no `calls`: every call it makes fails (-1)", self.name())
+        })
     }
 
     /// Reserves capacity for one more instance (node-wide `max_instances`, crash backoff).
@@ -312,6 +322,7 @@ pub struct Prepared {
     pub init_fn: Option<u32>,
     pub data: Vec<(usize, Vec<u8>)>,
     pub min_mem_log2: u8,
+    pub imports_call: bool,
 }
 
 /// Decodes, validates and prepares one code blob: imports must be known host functions, `handle` must be exported
@@ -333,5 +344,6 @@ pub fn prepare_blob(backend: &dyn Backend, blob: &[u8]) -> Result<Prepared, Stri
     let init_fn = check_export("init")?;
     let code = backend.prepare(&m, &info, &imports)?;
     let data = m.data.iter().filter(|d| !d.bytes.is_empty()).map(|d| (d.offset as usize, d.bytes.clone())).collect();
-    Ok(Prepared { code, handle_fn, init_fn, data, min_mem_log2: m.min_mem_log2 })
+    let imports_call = imports.contains(&HostFn::Call);
+    Ok(Prepared { code, handle_fn, init_fn, data, min_mem_log2: m.min_mem_log2, imports_call })
 }

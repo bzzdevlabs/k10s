@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::process::exit;
 
 use k10_ir::{FuncBuilder, Module, ModuleBuilder};
-use k10_mesh::{sha256::sha256, Bundle, Manifest, ServiceSpec};
+use k10_mesh::{sha256::sha256, Bundle, Calls, Manifest, ServiceSpec};
 
 /// Imports declared on demand, in a fixed order per module.
 struct Host {
@@ -462,6 +462,7 @@ fn main() {
     }
 
     let mut services = Vec::new();
+    let mut grants: Vec<&[&str]> = Vec::new();
     let mut blobs: Vec<Vec<u8>> = Vec::new();
     let mut add = |name: String, d: &Svc| {
         let m = &d.1;
@@ -480,8 +481,9 @@ fn main() {
             cpu_ms: d.2,
             fresh: d.3,
             config: d.4.clone(),
-            calls: k10_mesh::manifest::canonical_calls(d.6),
+            calls: Calls::none(),
         });
+        grants.push(d.6);
     };
     if let Some((name, count)) = &replicate {
         let d = all.iter().find(|d| &d.0 == name).unwrap_or_else(|| usage());
@@ -496,12 +498,13 @@ fn main() {
             add(d.0.clone(), d);
         }
     }
-    services.sort_by(|a, b| a.name.cmp(&b.name));
     // Callees must be in the manifest: drop those left out by `--services` / `--replicate`.
     let names: Vec<String> = services.iter().map(|s| s.name.clone()).collect();
-    for s in &mut services {
-        s.calls.retain(|c| names.binary_search(c).is_ok());
+    for (s, wanted) in services.iter_mut().zip(grants) {
+        let present: Vec<&str> = wanted.iter().copied().filter(|c| names.iter().any(|n| n == c)).collect();
+        s.calls = Calls::from_list(&present).expect("valid callees");
     }
+    services.sort_by(|a, b| a.name.cmp(&b.name));
     let manifest = Manifest { version, services };
     manifest.validate().unwrap_or_else(|e| panic!("manifest: {e}"));
     let n = manifest.services.len();

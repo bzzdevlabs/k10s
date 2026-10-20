@@ -145,6 +145,11 @@ status ≥ 0, −1 unknown service, −2 unavailable (crash backoff with nothing
   allocation. A denied call gets −1 and an empty response, exactly like an unknown service, without looking the
   name up, so whether such a service exists changes neither the result nor the path taken. HTTP ingress is not
   restricted (any client of the node reaches any service).
+- **Upgrade (breaking change)**: a manifest written before `calls` grants nothing, so after an upgrade its callers'
+  calls fail with −1 until it is re-applied with `calls`. Every apply and every reload of a stored state reports each
+  service whose module imports `call` but is granted nothing: a `k10s: warning:` log line, `warnings` in the apply
+  report and `manifest.warnings` in `/_k10s/status` (metal: a serial line and the apply report). A manifest that uses
+  `calls` is encoded as format 2, which nodes built before `calls` cannot decode: upgrade every node first.
 - **Deadlines**: each call gets `min(now + call_timeout (5 s), caller's deadline)`; ingress requests 30 s. A timed-out
   waiter is resumed with −3 and removed from the wait queue; a late reply is dropped (token gone). This breaks call
   cycles that exhaust instances (A→B→A with `max_instances = 1`): the inner call times out and everything unwinds.

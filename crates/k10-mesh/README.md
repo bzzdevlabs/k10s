@@ -102,10 +102,11 @@ vectored writes of large blobs.
 
 ## Manifest
 
-The binary format is canonical: services are sorted by name, so `hash = sha256(encode())`. The decoder is
-strict and bounded. Format 2 adds each service's `calls` list; a manifest without any is encoded as format 1 (the
-original bytes, so older manifests keep their hash and decode with empty lists). The operator text format
-(`k10s apply`) looks like this:
+The binary format is canonical: services are sorted by name and varints minimal, so `hash = sha256(encode())`.
+The decoder is strict and bounded. Format 2 adds each service's `calls` grant: an "any" flag bit, or strictly
+increasing indices into the sorted service list (existing and canonical by construction, 4 bytes each in memory).
+A manifest without any grant is encoded as format 1 (the original bytes, so older manifests keep their hash and
+decode with nothing granted). The operator text format (`k10s apply`) looks like this:
 
 ```
 service echo {
