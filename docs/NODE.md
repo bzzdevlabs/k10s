@@ -141,8 +141,9 @@ status ≥ 0, −1 unknown service, −2 unavailable (crash backoff with nothing
   first byte (slowloris), a body within 10 s + 1 s per 64 KiB, idle keep-alive 60 s, stalled writes 30 s.
   At most `max_conns / shards` connections per shard.
 - Routing: `/<service>/<rest>` → service (404 if unknown). Error mapping: −1 → 404, −2 → 503, −3 → 504, −4 → 500.
-- Admin (`/_k10s/`): `GET status` (JSON: node, manifest version/hash, per service: instances live/idle/peak, queue,
-  snapshot, requests/ok/errors/traps/interrupted/created/destroyed/reclaimed, CPU, backoff, KV keys; memory: RSS,
+- Admin (`/_k10s/`): `GET status` (JSON: node, build version, manifest version/hash, per service: instances
+  live/idle/peak, queue, snapshot, requests/ok/errors/traps/interrupted/created/destroyed/reclaimed, CPU, backoff,
+  KV keys; memory: RSS,
   slots used, slot bytes, reserved, snapshot-mapped; HTTP, execution and KV counters; per shard), `GET metrics`
   (Prometheus text), `GET logs/<svc>`, `GET health`, `POST apply`.
 
