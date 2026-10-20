@@ -6,15 +6,18 @@
 //! * [`placement`] — `place(manifest, members)`: a pure, deterministic, capacity-aware weighted rendezvous hash.
 //! * [`wire`] — framing codec for the TCP peer protocol (the node runtime owns the sockets).
 //! * [`sha256`] — content addressing.
+//! * [`crypto`] / [`secure`] — cluster authentication: ChaCha20-Poly1305, HKDF, sealed gossip, authenticated peer links.
 //! * `driver` / `sim` (feature `std`) — a UDP driver for real sockets and a deterministic network simulator.
 //!
 //! The core is `no_std + alloc`; see README.md for the protocol.
 #![cfg_attr(not(feature = "std"), no_std)]
-#![forbid(unsafe_code)]
+// No unsafe code except the SSE2 ChaCha20 kernel (`crypto::chacha20::sse2`, intrinsics only; hosted x86-64).
+#![deny(unsafe_code)]
 extern crate alloc;
 
 mod codec;
 pub mod bundle;
+pub mod crypto;
 pub mod gossip;
 pub mod manifest;
 pub mod member;
