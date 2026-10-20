@@ -3,6 +3,7 @@
 //! ```text
 //! k10s node   [--http ADDR] [--data DIR] [--shards N] [--backend jit|interp] [--name NAME] [--mem SIZE]
 //!             [--snapshots fresh|all] [--idle-timeout SECS] [--idle-spin-us N] [--log-stderr] [--pin]
+//!             [--sandbox on|log|off] [--user USER[:GROUP]]
 //!             cluster mode (any of): [--gossip ADDR] [--rpc ADDR] [--join HOST:PORT[,…]] [--advertise HOST]
 //!             tuning: [--probe-ms N] [--suspicion-mult N] [--leave-grace-ms N]
 //! k10s apply  FILE.k10s [--node HOST:PORT]
@@ -20,6 +21,7 @@ use k10_mesh::sha256::sha256;
 use k10_mesh::{Bundle, Manifest, ServiceSpec};
 use k10_node::cluster::{ClusterConfig, ClusterSetup};
 use k10_node::http;
+use k10_node::sandbox;
 use k10_node::{BackendKind, Node, NodeConfig, SnapshotPolicy};
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
@@ -32,6 +34,8 @@ const USAGE: &str = "usage:
               [--kv-max SIZE] (per-service KV quota, default 256MiB, 0 = unlimited)
               [--conn-buffer-max SIZE] (bytes buffered in HTTP connections node-wide, default max(--mem/8, 64MiB))
               [--snapshots fresh|all] [--idle-timeout SECS] [--idle-spin-us N] [--log-stderr] [--pin]
+              [--sandbox on|log|off] (process sandbox: Landlock + seccomp, default on or $K10S_SANDBOX)
+              [--user USER[:GROUP]] (started as root: run as USER once the listeners are bound)
               cluster mode (any of these flags turns it on):
               [--gossip ADDR] (UDP, default 0.0.0.0:7946)  [--rpc ADDR] (TCP, default 0.0.0.0:7947)
               [--join HOST:PORT,...] (gossip addresses of members)  [--advertise HOST] (IP given to peers)
@@ -148,8 +152,17 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
     let a = Args::parse(args, &["log-stderr", "pin"])?;
     a.check_known(&[
         "http", "data", "shards", "backend", "name", "mem", "kv-max", "conn-buffer-max", "snapshots", "idle-timeout", "idle-spin-us", "log-stderr",
-        "pin", "rpc", "gossip", "join", "advertise", "probe-ms", "suspicion-mult", "leave-grace-ms",
+        "pin", "rpc", "gossip", "join", "advertise", "probe-ms", "suspicion-mult", "leave-grace-ms", "sandbox", "user",
     ])?;
+    // Process sandbox (k10-node/src/sandbox.rs): early() here, Landlock before the first thread, seccomp after start.
+    let sandbox_mode = match a.get("sandbox") {
+        None => sandbox::Mode::from_env()?,
+        Some(m) => sandbox::Mode::parse(m).ok_or_else(|| format!("invalid --sandbox `{m}` (on|log|off)"))?,
+    };
+    if sandbox_mode != sandbox::Mode::Off {
+        sandbox::early().map_err(|e| format!("sandbox: {e} (use --sandbox off to run without it)"))?;
+    }
+    let user = a.get("user").map(sandbox::User::resolve).transpose()?;
     if !a.positional.is_empty() {
         return Err(format!("unexpected argument `{}`", a.positional[0]));
     }
@@ -196,6 +209,13 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
     let shards = cfg.shards;
     let backend = cfg.backend;
     let data = cfg.data_dir.clone();
+    let policy = sandbox::Policy {
+        data_dir: data.clone(),
+        write_dirs: std::env::var_os("K10_JIT_DUMP").filter(|d| !d.is_empty()).map(PathBuf::from).into_iter().collect(),
+        read_paths: Vec::new(),
+        tcp_bind_ports: [Some(cfg.http.port()), cluster_cfg.as_ref().map(|c| c.rpc_bind.port())].into_iter().flatten().collect(),
+    };
+    let sandbox_setup = sandbox::before_threads(sandbox_mode, user, &policy)?;
     let (node, cluster) = match cluster_cfg {
         None => (Node::start(cfg).map_err(|e| format!("cannot start node: {e}"))?, None),
         Some(cc) => {
@@ -207,6 +227,7 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
             (node, Some(cluster))
         }
     };
+    eprintln!("{}", sandbox::after_start(sandbox_setup)?);
     eprintln!(
         "k10s: node `{}` listening on http://{} ({} shards, backend {}, data {})",
         node.shared().cfg.name,
