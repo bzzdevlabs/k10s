@@ -22,13 +22,12 @@ step 8, never experiment with namespaces/privileges on this machine.
 1. DONE (merged 93ada5f) — **Calls allowlist**: index-based `calls` format 2, canonical `Calls`, strict decode bounded
    by service count, warnings at apply/reload, `Fiber::caller` nulled in `finish`; status shows per-service grants as
    `may_call` (`calls` stays the call counter). All suites both backends, metal test (294) and cluster-test (114) green.
-2. **Reservations / rejoin** — `worktree-agent-ab0b13f5d4325918b` (3f742c3, committed; final verification pending). Review
-   items: reload never comes up empty (H1); cluster mode installs all reservations (M2); bounded `--mem` overshoot with a
-   "retiring" counter, no queued-waiters exception (M3); stranded waiters fail fast (M4); no 250 ms relief polling;
-   placement-algorithm version in gossip, lowest live version used (M1); rejoin = tombstone addresses + per-address
-   backoff + DATA/peers as fallback seeds (no `lost` map, no `trim_seeds`), DATA/peers stamped with key id, random fill,
-   tmp cleanup; persisted monotonic incarnation; chaos static-restart decided from DATA/peers. Check each is done; run
-   suites, chaos_short ×3 seeds, chaos_long ≥ 20 min, metal; merge.
+2. DONE (merged e1888a7) — **Reservations / rejoin**: degraded (over-committed) reload and cluster installs, retiring
+   units, fail-fast waiters, relief list, placement version in gossip, reconnect set with per-address backoff and
+   DATA/peers fallback seeds, persisted incarnation (decided at bind). `k10-mesh` is built at opt-level 2 in debug
+   (unoptimized crypto missed gossip deadlines in mesh_abuse). All suites both backends, chaos_short ×3 seeds,
+   chaos_long 20 min (1631 rounds), metal test (294; needs `bench/bin/loadgen`, else its loadgen checks are skipped)
+   and cluster-test (110; varies with placement) green.
 3. **Release pipeline** — `worktree-agent-abc9097adc759323d` (d857328, committed; final validation pending). Review
    items: fail on dev-tag collision; never republish/move `:dev` backwards; stable tags must be on main; skip dev publish
    when HEAD has v$base; metal/test.sh non-blocking in PR CI; build provenance attestations; `--latest=false` backports,
@@ -99,7 +98,7 @@ step 8, never experiment with namespaces/privileges on this machine.
    roadmap) and refresh `README.md` numbers; commit; push.
 
 ## Conventions
-- Commit as `Quentin Gerard <quentin.gerard@telespazio.com>` via `git -c user.name=… -c user.email=…`, trailer
+- Commit as `Quentin Gerard <quentingerard8@gmail.com>` via `git -c user.name=… -c user.email=…`, NO trailer
   `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`; push `main` to `origin` after each verified commit.
 - Use separate cargo target dirs per concurrent agent (`target/node`, `target/chaos`, …) to avoid lock contention.
 - Never touch Docker containers/images not created by k10s scripts (the machine has the user's own).
