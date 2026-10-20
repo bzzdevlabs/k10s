@@ -5,6 +5,7 @@
 #   campaign        chaos_short + soak_short_* on both backends (minutes long, noise-sensitive)
 #   metal-selftest  kernel self tests (k10.selftest) under QEMU/KVM on 1 and 4 CPUs
 #   metal           metal/test.sh end-to-end (TEST_PORT, default 18090)
+#   dist            the k10s integration tests against the static k10s of dist/ (K10S_BIN), both backends
 # env: CARGO_TEST_ARGS (extra cargo test args), K10S_VERSION_FULL (metal-selftest checks the banner)
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -22,6 +23,21 @@ run() {
 unit() { # [--target TRIPLE]
     run env K10S_BACKEND=jit cargo test --release --locked "$@" "${EXTRA[@]}" "${CRATES[@]}" -- "${SKIP[@]}"
     run env K10S_BACKEND=interp cargo test --release --locked "$@" "${EXTRA[@]}" -p k10-node -p k10s -- "${SKIP[@]}"
+}
+
+dist() {
+    local tgz=(dist/k10s-*-x86_64-unknown-linux-musl.tar.gz) tmp
+    if [[ ${#tgz[@]} != 1 || ! -f ${tgz[0]} ]]; then
+        echo "ci-test.sh: want one dist/k10s-*-x86_64-unknown-linux-musl.tar.gz (scripts/dist.sh)" >&2
+        return 1
+    fi
+    tmp=$(mktemp -d)
+    tar -xzf "${tgz[0]}" -C "$tmp" --strip-components 1
+    "$tmp/k10s" --version
+    for b in jit interp; do
+        run env K10S_BIN="$tmp/k10s" K10S_BACKEND=$b cargo test --release --locked "${EXTRA[@]}" -p k10s --tests -- "${SKIP[@]}"
+    done
+    rm -rf "$tmp"
 }
 
 campaign() {
@@ -55,6 +71,7 @@ for suite in "$@"; do
     unit) unit ;;
     musl) unit --target x86_64-unknown-linux-musl ;;
     campaign) campaign ;;
+    dist) dist ;;
     metal-selftest)
         run env -u CARGO_TARGET_DIR metal/build.sh
         qemu_selftest 1

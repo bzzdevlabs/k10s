@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds all release archives into dist/ (locally and in CI), versioned once by scripts/version.sh.
-# usage: dist.sh [--dev|--stable] [--only k10s,musl,examples,metal,bench,src]   env: DIST, K10S_BUILD_VERSION/_COMMIT
+# usage: dist.sh [--dev|--stable] [--only k10s,musl,examples,metal,bench,src]
+# env: DIST, K10S_BUILD_VERSION/_COMMIT, GLIBC_MAX (highest glibc symbol version the gnu k10s may need, 2.34)
 # Needs cargo (targets x86_64-unknown-linux-musl, x86_64-unknown-none), go, git, binutils, GNU tar.
 # Output (V = version without +build): k10s-V-x86_64-unknown-linux-{gnu,musl}.tar.gz, k10s-examples-V.tar.gz,
 #   k10s-metal-V-x86_64.tar.gz, k10s-bench-V-linux-amd64.tar.gz, k10s-V-src.tar.gz, SHA256SUMS (see README.md).
@@ -58,6 +59,7 @@ check_version() { # <binary and args> <expected line>
     echo "   $got"
 }
 DOCS=(LICENSE NOTICE README.md SECURITY.md)
+GLIBC_MAX=${GLIBC_MAX:-2.34}
 
 # k10s for one target triple.
 build_k10s() {
@@ -68,6 +70,15 @@ build_k10s() {
     strip --strip-debug -o "$STAGE/$name/k10s" "target/$triple/release/k10s"
     cp "${DOCS[@]}" "$STAGE/$name/"
     check_version "$STAGE/$name/k10s" --version "k10s $K10S_VERSION_FULL"
+    if [[ $triple == *-gnu ]]; then
+        local glibc
+        glibc=$(objdump -T "$STAGE/$name/k10s" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)
+        echo "   needs glibc >= $glibc"
+        if [[ $(printf '%s\n' "$glibc" "$GLIBC_MAX" | sort -V | tail -1) != "$GLIBC_MAX" ]]; then
+            echo "dist.sh: the gnu k10s needs glibc $glibc > GLIBC_MAX=$GLIBC_MAX (README.md promises $GLIBC_MAX)" >&2
+            exit 1
+        fi
+    fi
     pack "$name"
 }
 if want k10s; then build_k10s x86_64-unknown-linux-gnu; fi
