@@ -1,0 +1,101 @@
+---
+title: Quick start
+description: Run a k10s node, deploy the example services and call them, in about two minutes.
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+import Terminal from '~/components/Terminal.astro';
+
+This page runs one node on your machine, deploys the eight example services of the repository and calls them.
+You need the `k10s` binary ([Installation](/k10s/start/installation/)) and a checkout of the repository for
+`examples/`.
+
+<Steps>
+
+1. **Start a node.** It listens for HTTP on `127.0.0.1:8080` and keeps its state in the data directory.
+
+   <Terminal
+   	title="node"
+   	session={`
+   $ k10s node --http 127.0.0.1:8080 --data /tmp/k10s-data
+   «dim:k10s: sandbox on: no_new_privs, inherited fds closed; landlock ABI 2: files = data dir rw + /proc/self ro, tcp bind not restricted (needs ABI 4 / Linux 6.7, and fixed ports); seccomp: 83 syscalls allowed on every thread, anything else kills the process»
+   «dim:k10s: admin API on the ingress: loopback clients only (health and metrics open)»
+   k10s 0.1.0: node \`laptop\` listening on «teal:http://127.0.0.1:8080» (8 shards, backend jit, data /tmp/k10s-data)
+   `}
+   />
+
+2. **Deploy.** In another terminal, apply the manifest. The CLI compiles every `.ten` file it references and sends
+   one bundle; the node validates and JIT-compiles every module before it switches over.
+
+   <Terminal
+   	session={`
+   $ k10s apply examples/app.k10s
+   {"ok":true,"version":1,"added":["chain","compute","counter","echo","hello","nbody","sort","todo"],
+    "updated":[],"removed":[],"unchanged":[],"warnings":[]}
+   `}
+   />
+
+3. **Call the services.** Every node routes `/<service>/<rest>` to a service.
+
+   <Terminal
+   	session={`
+   $ curl 127.0.0.1:8080/hello/
+   hello
+   $ curl '127.0.0.1:8080/compute/?n=1000'
+   cc2cbdc008d39ef7d46c8f4bd213c400cf60059acb1f0b409f7116b2912f2c9a
+   $ curl 127.0.0.1:8080/chain/
+   hello
+   $ curl -X POST 127.0.0.1:8080/counter/ && curl -X POST 127.0.0.1:8080/counter/
+   1
+   2
+   $ curl --data 'ship the docs' 127.0.0.1:8080/todo/
+   {"id":1,"title":"ship the docs"}
+   `}
+   />
+
+   `compute` runs a chain of SHA-256 hashes, `chain` calls `echo` through the host API, and `counter` and `todo`
+   keep durable state in the node's key-value store: restart the node and they continue where they were.
+
+4. **Look inside.** `status` reports every service, its instances, memory and counters as JSON.
+
+   <Terminal
+   	session={`
+   $ k10s status | jq -c '.services[] | {name, instances, requests, mem_used}'
+   {"name":"chain","instances":{"live":1,"idle":1,"peak":1},"requests":1,"mem_used":69632}
+   {"name":"compute","instances":{"live":1,"idle":1,"peak":1},"requests":1,"mem_used":69632}
+   {"name":"counter","instances":{"live":1,"idle":1,"peak":1},"requests":2,"mem_used":69632}
+   {"name":"echo","instances":{"live":1,"idle":1,"peak":1},"requests":1,"mem_used":1052672}
+   {"name":"hello","instances":{"live":1,"idle":1,"peak":1},"requests":1,"mem_used":69632}
+   {"name":"nbody","instances":{"live":0,"idle":0,"peak":0},"requests":0,"mem_used":0}
+   {"name":"sort","instances":{"live":0,"idle":0,"peak":0},"requests":0,"mem_used":0}
+   {"name":"todo","instances":{"live":1,"idle":1,"peak":1},"requests":1,"mem_used":1052672}
+   `}
+   />
+
+   A service that has served nothing has no instance at all: `nbody` and `sort` show `"live": 0` and use no memory
+   until their first request.
+
+</Steps>
+
+## Run one request without a node
+
+`k10s run` compiles a file and runs a single request in-process. The response body goes to stdout, the status and
+logs to stderr: it is the fastest edit-run loop.
+
+<Terminal
+	session={`
+$ k10s run examples/echo.ten --method POST --body hi
+hi«dim:k10s: HTTP 200 (2 bytes, 0.106 ms)»
+`}
+/>
+
+<Aside type="note" title="Admin access">
+	`apply`, `status` and `logs` use the node's admin API under `/_k10s/`. Without a token it only answers loopback
+	clients. To administer a node remotely, start it with `--admin-token-file FILE` and pass the same file to the CLI;
+	see [Production setup](/k10s/guides/production/).
+</Aside>
+
+## Next
+
+- [Your first service](/k10s/start/first-service/): write one in Ten.
+- [A cluster in five minutes](/k10s/start/cluster/): three nodes, no control plane.

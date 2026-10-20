@@ -1,0 +1,65 @@
+---
+title: Architecture
+description: The parts of a k10s node, the crates that implement them, and the path of a request.
+---
+
+import NodeAnatomy from '~/components/NodeAnatomy.astro';
+import Pipeline from '~/components/Pipeline.astro';
+
+One `k10s node` per machine replaces kubelet, containerd, shims, kube-proxy, the CNI plugin, CoreDNS and
+sidecars, and together with its peers, the whole control plane.
+
+<NodeAnatomy />
+
+## The path of a request
+
+1. **Ingress.** Every shard owns its own `SO_REUSEPORT` HTTP listener, its `epoll` instance and the connections it
+   accepted. A request for `/<service>/<rest>` is routed to the service; `<rest>` and the query string become
+   the request path the service sees.
+2. **Dispatch.** The shard takes an idle instance of the service (last in, first out, so caches stay warm) or
+   creates one in microseconds if the service is below `max_instances` and memory allows. Otherwise the request
+   waits in the service's node-wide queue and the first shard to free an instance serves it.
+3. **Run.** The invocation runs on a pooled fiber: a 1 MiB lazily committed stack, switched in 21 ns. Machine
+   code checks a preemption word at every function entry and loop header; a 1 ms ticker preempts anything that ran
+   longer than its 2 ms slice.
+4. **Exit through the host API.** Reading the body, writing the response, calling another service, using the
+   key-value store: all go through host functions, the only way out of the slot.
+5. **Answer.** The response is written with one `writev`. The instance goes back to the shard's idle list, or is
+   reset to its snapshot for `fresh` services.
+
+A call to another service follows the same path without the network: the caller's fiber suspends, the callee runs
+(on the same shard when it has capacity), and the caller resumes with the response. Same-shard calls take
+**0.45 µs**.
+
+## From source to machine code
+
+<Pipeline />
+
+Code is content-addressed: a module is identified by its SHA-256, compiled once per node and shared by every
+instance on every shard. Re-applying a manifest reuses the prepared code of unchanged modules, and services whose
+spec did not change keep their warm instances and counters.
+
+## Crates
+
+| Crate | Role |
+|---|---|
+| `k10-ir` | TIR types, binary codec, validator, reference interpreter, random program generator (`no_std`) |
+| `k10-lang` | the Ten compiler and its standard prelude |
+| `k10-jit` | single-pass TIR → x86-64 compiler: the isolation boundary |
+| `k10-mesh` | SWIM gossip, manifests, bundles, placement, the peer wire protocol (`no_std`, sans-IO) |
+| `k10-node` | the hosted runtime: shards, fibers, instance pools, host API, ingress, KV, peers, sandbox |
+| `k10s` | the single CLI and daemon binary |
+| `metal/` | the same runtime booting as its own kernel |
+
+## Threads of a node
+
+| Thread | Job |
+|---|---|
+| shards (`--shards`, one per core) | everything on the hot path, shared-nothing: listener, connections, instances, fibers, run queue, timers |
+| ticker | preempts invocations over their 2 ms slice; parks when idle |
+| KV flusher | group commit of the key-value logs, every 2 ms when dirty |
+| apply helper | prepares modules for `apply` so shards keep serving |
+| mesh, applier | cluster mode: gossip, peer links, desired-state fetching, placement installs |
+
+The node's specification, with every limit and measurement, is
+[docs/NODE.md](https://github.com/bzzdevlabs/k10s/blob/main/docs/NODE.md).

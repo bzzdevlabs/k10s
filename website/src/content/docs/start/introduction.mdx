@@ -1,0 +1,59 @@
+---
+title: Why k10s
+description: What k10s is, the one design decision behind it, and what it deliberately does not do yet.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import LayerCompare from '~/components/LayerCompare.astro';
+import Pipeline from '~/components/Pipeline.astro';
+
+k10s runs services on a fleet of machines: each service gets its share of resources, a fault in one cannot hurt
+another, services can call each other, the outside world can reach them, and the whole thing keeps running and can
+be updated. That is the job Kubernetes does. k10s does it with far fewer layers.
+
+## One decision
+
+Kubernetes isolates workloads with **processes**. Processes are expensive (page tables, kernel stacks, syscalls,
+context switches), opaque (hence probes and sidecars), and can only talk through the kernel (hence overlay
+networks, kube-proxy and iptables). Almost every layer of a cluster exists to manage that choice.
+
+k10s isolates workloads with the **compiler**. Each node validates a service's code and compiles it to x86-64 with
+*software fault isolation*: every memory access is masked into the instance's own slot, control flow cannot leave
+generated code, and the only exits are a closed table of host functions. Once isolation is free, the rest follows:
+
+- **No containers.** An instance is a memory slot plus machine code shared by every instance of the module. It
+  costs kilobytes and starts in microseconds, so idle services scale to zero.
+- **No kernel in the hot path.** Thousands of instances share one address space and one OS thread per core;
+  switching between them is a function call.
+- **No network stack between services.** A call to another service on the same node is a function call plus one
+  copy of the payload. Across nodes there is one multiplexed connection per peer.
+- **No control plane.** Desired state spreads by gossip, membership is SWIM, and placement is a pure function
+  every node evaluates on its own.
+- **No probes.** The runtime runs the code, so it sees every trap, timeout and CPU overrun as it happens.
+
+<LayerCompare />
+
+## How a service gets deployed
+
+Services are written in [Ten](/k10s/ten/overview/), a small C-like language, or in anything that targets
+[TIR](/k10s/reference/tir/), the compact intermediate representation that nodes accept.
+
+<Pipeline />
+
+## What it is not (yet)
+
+k10s is a research prototype with honest limits:
+
+- **Trust model:** workloads on one node belong to one organization. Spectre-class side channels between
+  co-located workloads are only partly mitigated; use one node per mutually distrustful tenant.
+- **Cluster identity:** one shared cluster key authenticates and encrypts gossip and peer links. There is no
+  per-node identity and bundles are not signed yet.
+- **Storage:** the key-value store is durable but node-local. No replication, no consensus for singletons.
+- **Workloads:** written in Ten or compiled to TIR. No Wasm or LLVM front end yet, and no existing containers.
+- **Platforms:** the JIT targets x86-64; other architectures run on the interpreter.
+
+<Aside type="tip" title="Read further">
+	The full design rationale is in [docs/DESIGN.md](https://github.com/bzzdevlabs/k10s/blob/main/docs/DESIGN.md),
+	and the evidence from the literature in
+	[docs/research.md](https://github.com/bzzdevlabs/k10s/blob/main/docs/research.md).
+</Aside>

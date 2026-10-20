@@ -1,0 +1,42 @@
+---
+title: Benchmarks
+description: k10s against Kubernetes and against the same services as bare Linux processes, on one laptop, with method and caveats.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Bench from '~/components/Bench.astro';
+
+Three systems ran equivalent services on the same machine: Kubernetes v1.34 (kind), the same Go services as bare
+processes, and k10s. Each suite started on an idle machine (`bench/run-final.sh`).
+
+<Bench />
+
+## Against bare processes
+
+k10s also outruns the same services run as plain Linux processes: echo serves 180 k req/s against 109 k, because a
+request costs about one `read`, one `writev` and a quarter of an `epoll_wait`, with no context switch between the
+ingress and the service.
+
+It is slower on CPU-bound code: Ten's SHA-256 takes 2.5× as long as Go's hand-written assembly, and 1.1–1.6× as
+long as portable Go. The baseline JIT keeps at most six locals in registers and every memory access pays the mask;
+register allocation is on the [roadmap](/k10s/project/roadmap/).
+
+## Bare metal
+
+In QEMU/KVM, the 694 KB `k10-metal` kernel is ready about 3 ms after kernel entry and serves HTTP in 3 MiB of RAM;
+a Linux guest in the same setup needs 1.4 s and 88 MiB. See [Bare metal](/k10s/guides/bare-metal/).
+
+## Method
+
+- **Machine:** one Intel i7-7820HQ laptop, 4 cores / 8 threads, Linux 6.1. The load generator
+  (`bench/bin/loadgen`, closed loop) ran on the same machine.
+- **Kubernetes:** kind under Docker Desktop. The VM's kernel and port forwarder are not counted, which favours
+  Kubernetes on fixed overhead.
+- **Units:** "replica" means a pod, a process or an instance respectively. Medians over repeats; each suite's
+  summary has min–max ranges, and runs on a busy machine are flagged.
+
+<Aside type="tip" title="Reproduce">
+	Everything is in [bench/](https://github.com/bzzdevlabs/k10s/tree/main/bench): the workloads, the harness and
+	the raw results. The generated comparison with every metric and caveat is
+	[bench/results/COMPARISON.md](https://github.com/bzzdevlabs/k10s/blob/main/bench/results/COMPARISON.md).
+</Aside>

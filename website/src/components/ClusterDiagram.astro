@@ -1,0 +1,167 @@
+---
+// Three nodes, no control plane: gossip, the same placement everywhere, at most one forwarding hop.
+const nodes = [
+	{ id: 'node-1', x: 40, y: 34, svc: ['echo', 'todo'] },
+	{ id: 'node-2', x: 500, y: 34, svc: ['chain', 'compute', 'counter'] },
+	{ id: 'node-3', x: 270, y: 236, svc: ['echo', 'hello', 'nbody', 'sort'] },
+];
+const W = 200;
+const H = 104;
+const c = (n: (typeof nodes)[number]) => [n.x + W / 2, n.y + H / 2] as const;
+const edges = [
+	[nodes[0], nodes[1]],
+	[nodes[1], nodes[2]],
+	[nodes[2], nodes[0]],
+].map(([a, b]) => `M${c(a).join(' ')} L${c(b).join(' ')}`);
+const hop = `M${nodes[0].x + W / 2 + 30} ${nodes[0].y + H} L${nodes[2].x + 60} ${nodes[2].y}`;
+---
+
+<figure class="k-figure not-content">
+	<svg viewBox="0 0 740 372" role="img" aria-labelledby="cl-t">
+		<title id="cl-t">Three k10s nodes exchanging gossip and computing the same placement</title>
+		<defs>
+			<marker id="cl-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+				<path d="M0 0 10 5 0 10z" class="ah" />
+			</marker>
+		</defs>
+		{edges.map((d) => <path d={d} class="gossip" />)}
+		{
+			edges.map((d, i) => (
+				<circle r="3.5" class="pkt">
+					<animateMotion dur={`${2.4 + i * 0.5}s`} repeatCount="indefinite" path={d} />
+				</circle>
+			))
+		}
+		<path d={hop} class="hop" marker-end="url(#cl-arrow)" />
+		<text x="370" y="76" class="mid halo" text-anchor="middle">gossip (SWIM, UDP, sealed)</text>
+		{
+			nodes.map((n) => (
+				<g transform={`translate(${n.x} ${n.y})`}>
+					<rect width={W} height={H} rx="12" class="node" />
+					<text x="14" y="24" class="nid">
+						{n.id}
+					</text>
+					<text x={W - 14} y="24" class="fn" text-anchor="end">
+						place(…) ✓
+					</text>
+					{n.svc.map((s, i) => (
+						<g transform={`translate(${14 + (i % 3) * 60} ${40 + Math.floor(i / 3) * 28})`}>
+							<rect width="54" height="22" rx="6" class:list={['svc', { hot: s === 'hello' }]} />
+							<text x="27" y="15" class="sn" text-anchor="middle">
+								{s}
+							</text>
+						</g>
+					))}
+				</g>
+			))
+		}
+		<g transform="translate(8 300)">
+			<rect width="190" height="58" rx="10" class="actor" />
+			<text x="14" y="24" class="an">client</text>
+			<text x="14" y="44" class="ac">GET node-1/hello/</text>
+		</g>
+		<path d="M110 300 L150 140" class="req" marker-end="url(#cl-arrow)" />
+		<g transform="translate(542 300)">
+			<rect width="190" height="58" rx="10" class="actor" />
+			<text x="14" y="24" class="an">operator</text>
+			<text x="14" y="44" class="ac">k10s apply app.k10s</text>
+		</g>
+		<path d="M640 300 L610 140" class="req" marker-end="url(#cl-arrow)" />
+		<text x="236" y="222" class="hopl halo" text-anchor="end">one hop: peer link</text>
+	</svg>
+	<figcaption>
+		Every node runs the same pure function over the same gossip state, so all of them agree where each service
+		runs, with no scheduler, no leader and no consensus.
+	</figcaption>
+</figure>
+
+<style>
+	svg {
+		width: 100%;
+		height: auto;
+		font-family: var(--sl-font);
+	}
+	.gossip {
+		fill: none;
+		stroke: var(--k-amber);
+		stroke-width: 1.5;
+		stroke-dasharray: 3 7;
+		opacity: 0.75;
+	}
+	.pkt {
+		fill: var(--k-amber);
+	}
+	.node {
+		fill: var(--k-surface);
+		stroke: var(--k-line);
+		stroke-width: 1.2;
+	}
+	.nid {
+		font: 700 13px var(--sl-font-mono);
+		fill: var(--k-ink);
+	}
+	.fn {
+		font: 10px var(--sl-font-mono);
+		fill: var(--k-teal);
+	}
+	.svc {
+		fill: color-mix(in srgb, var(--k-teal) 16%, var(--k-surface-2));
+		stroke: color-mix(in srgb, var(--k-teal) 55%, transparent);
+	}
+	.svc.hot {
+		fill: color-mix(in srgb, var(--k-teal) 45%, var(--k-surface-2));
+		stroke: var(--k-teal);
+		stroke-width: 1.6;
+	}
+	.sn {
+		font: 600 10px var(--sl-font-mono);
+		fill: var(--k-ink);
+	}
+	.mid,
+	.hopl {
+		font: 600 10.5px var(--sl-font-mono);
+		fill: var(--k-ink-dim);
+	}
+	.hopl {
+		fill: var(--k-teal);
+	}
+	.halo {
+		paint-order: stroke;
+		stroke: var(--sl-color-bg);
+		stroke-width: 5px;
+		stroke-linejoin: round;
+	}
+	.hop {
+		fill: none;
+		stroke: var(--k-teal);
+		stroke-width: 2;
+	}
+	.req {
+		fill: none;
+		stroke: var(--k-ink-dim);
+		stroke-width: 1.4;
+		stroke-dasharray: 5 4;
+	}
+	.ah {
+		fill: var(--k-ink-dim);
+	}
+	.actor {
+		fill: var(--k-surface-2);
+		stroke: var(--k-line);
+	}
+	.an {
+		font: 700 10px var(--sl-font-mono);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		fill: var(--k-ink-dim);
+	}
+	.ac {
+		font: 600 12px var(--sl-font-mono);
+		fill: var(--k-ink);
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.pkt {
+			display: none;
+		}
+	}
+</style>

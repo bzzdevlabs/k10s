@@ -1,0 +1,88 @@
+---
+title: Isolation by the compiler
+description: How software fault isolation keeps thousands of instances apart inside one address space, and how that claim is tested.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import SlotDiagram from '~/components/SlotDiagram.astro';
+
+For code that may be buggy but is not hostile, isolation needs three guarantees: a workload cannot touch memory
+that is not its own, cannot jump to code that is not its own, and cannot call anything it was not granted. A
+compiler can guarantee all three, with no help from the MMU.
+
+## Memory: every access is masked
+
+Each instance owns one linear memory of `S = 2^k` bytes (4 KiB to 64 GiB, chosen in the manifest), followed by a
+small tail. The JIT compiles every load and store to the same shape:
+
+```asm
+; r15 = slot base, r13 = S - 1
+mov  rax, rdi
+add  rax, 24            ; address + immediate offset, wrapping
+and  rax, r13           ; the mask
+mov  rcx, [r15 + rax]   ; the access
+```
+
+<SlotDiagram />
+
+- There are no out-of-bounds traps on loads and stores: masking makes every address valid, inside the slot.
+- The mask is **data flow, not a branch**, so it also holds on mispredicted, speculative paths.
+- The slot size *is* the memory limit. There is nothing to account on the page-fault path, and physical memory is
+  only the pages an instance actually touched.
+- Bulk operations (`mem.copy`, `mem.fill`) and host functions check their ranges and trap `MemOutOfBounds`.
+
+## Control flow: structured, direct
+
+TIR has only structured control flow (`block`, `loop`, `if`, `br`, `br_table`) and direct calls by index. There
+are no function pointers, no computed jumps and no returns to arbitrary addresses, so no jump can leave the code
+the node itself generated. Bounded `br_table` dispatch is the only indirect jump, and its index is clamped
+branch-free before the table load.
+
+## Authority: a closed host API
+
+The only way out of a slot is a fixed table of [host functions](/k10s/reference/host-api/): request and response,
+`call`, the key-value store, `log`, time, `random`, `config`. There are no syscalls, no files, no sockets and no
+PIDs: a workload cannot even *name* something it was not given.
+
+Other services are names, so the manifest grants them explicitly. A service may call only the services in its
+`calls` allowlist (none by default). A denied call returns `-1` with an empty body, exactly like a call to a
+service that does not exist, so names cannot be probed.
+
+```k10s
+service chain { code = "chain.ten" calls = ["echo"] }
+```
+
+## Preemption and budgets
+
+The compiler inserts a safepoint at every function entry and loop header: one compare of the stack pointer with
+a limit in the instance context. It doubles as the stack-overflow check and the preemption point. To preempt, the
+ticker stores `usize::MAX` into the limit; the next safepoint calls into the runtime, which charges CPU time to the
+request (`cpu_ms` budget, then trap `Interrupted`) or yields the slice. Infinite loops cannot hold a core.
+
+## How the claim is tested
+
+The trusted base is the validator, the code generator, the x86-64 encoder, the bulk-memory helpers, the host API
+and the runtime's `unsafe` code. It is attacked from several sides:
+
+- **Differential testing** of the JIT against the reference interpreter on 1,000,000 random modules and
+  2 M invocations: zero mismatches, with canary regions around every instance proving no write leaves its slot.
+- **800,000 adversarial memory programs** and a **red-team suite** of 14 attack classes (offsets, wrap-around,
+  straddling, bulk operations, `br_table` bounds, stack clash, register state across calls, host-argument
+  shuffles…). Every attack is a regression test.
+- **A machine-code verifier**, independent of the code generator (in the spirit of VeriWasm), decodes every
+  generated function and re-checks the invariants: guest accesses only through `[r15 + (x & r13)]`, `r13`–`r15`
+  never written, stack checks before frames grow, calls only to functions, host functions and helpers, no
+  `syscall`, `int`, `rdtsc`, `cpuid` or privileged instruction.
+- **Encoder fuzzing** against GNU objdump on random instruction forms.
+
+<Aside type="caution" title="Side channels">
+	Masking closes the cheap Spectre gaps, but instances on a node share caches and branch predictors. Workloads on
+	one node are assumed to belong to one organization; put mutually distrustful tenants on separate machines or VMs.
+	Details: [Security model](/k10s/concepts/security/).
+</Aside>
+
+## Defense in depth
+
+A bug in the trusted base would still meet the process sandbox of `k10s node`: seccomp (83 allowed syscalls; no
+`execve`, no new sockets or ports, no executable `mmap`) and Landlock (files limited to the data directory). See
+[Production setup](/k10s/guides/production/).
