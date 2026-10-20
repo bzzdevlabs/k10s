@@ -241,8 +241,8 @@ cluster, speaking the hosted node's protocols (docs/NODE.md "Cluster mode", crat
   waits on a `CallSlot`) — become `Forward`s: a placed replica (Alive, least outstanding), then down the ranking
   (this node included: then it runs here), then a Suspect replica; at most `replicas + 3` peers; re-sent only when
   known not to have run (bytes never handed to the TCP socket, or `NOT_HERE`). A peer's `Call` runs here whatever
-  the placement (one hop at most) and without a `calls` check (the calling node did it); an unknown service
-  answers `NOT_HERE`.
+  the placement (one hop at most) and without a `calls` check (the calling peer is trusted to have done it); an
+  unknown service answers `NOT_HERE`.
 * *NAT*: the guest is 10.0.2.15 behind QEMU's slirp. `hostfwd` rules expose its gossip (UDP), rpc and http ports
   on the host; it advertises those host addresses (`127.0.0.1:<port>`), and every loopback address it sends to —
   hosted members, or other guests, advertising `127.0.0.1:<port>` — is reached through the slirp host alias

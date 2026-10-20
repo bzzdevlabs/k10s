@@ -338,8 +338,8 @@ mesh inbox. Candidates: (1) placed replicas that are Alive and not backed off �
 link, round-robin on ties; (2) the service's rendezvous ranking (Alive members, at most `replicas + 3` attempts in
 total); if this node comes up in the ranking it runs the service itself (`NodeShared::serve_local`); (3) Suspect
 replicas. `Call` frames carry the remaining deadline in ms and the request method (`req_method` code). The peer runs the call locally whatever its own
-placement says — a request takes at most one hop — without checking any `calls` allowlist (the calling node did;
-peers are trusted, like the rest of the peer protocol), and answers `CallResult` (or `NOT_HERE` = −100, a peer-protocol
+placement says — a request takes at most one hop — without checking any `calls` allowlist (the calling node did:
+the peer is trusted to have checked, one more reason peer links must be authenticated), and answers `CallResult` (or `NOT_HERE` = −100, a peer-protocol
 status that never reaches services, if the service is unknown there or the node is leaving).
 **Retry semantics (at most once):** a request goes to the next candidate only when it is known not to have run — its
 bytes never reached the socket (connect failure or timeout, connection lost before they were written; tracked with
@@ -371,7 +371,8 @@ or forwarded, methods preserved), `call` across nodes, 3 replicas on 3 distinct 
 while it is down, restart with the same data directory → same id, higher incarnation, catches up; graceful leave
 and a join under load (4 → 3 → 4 nodes): 0 failed requests, services whose placement did not change keep their
 runtime; re-applies under load on 5 nodes (0 failed requests) and two concurrent applies on two nodes (one winner
-everywhere); the origin of a desired state crashes and a node joining later fetches it from the other members.
+everywhere); the origin of a desired state crashes and a node joining later fetches it from the other members; a
+call the caller's `calls` does not grant is answered −1 locally and never forwarded.
 Unit tests: store (persist/reload/corruption/gc/pinning, node id), ranking vs `place`; node test:
 `apply_cluster` ordering and placement-only updates. `cargo test -p k10s --test cluster` takes ≈ 2–4 s.
 `crates/k10s/tests/mesh_abuse.rs`: a hostile non-UTF-8 call path; a fake peer that requests ≈ 1 GB of replies and
