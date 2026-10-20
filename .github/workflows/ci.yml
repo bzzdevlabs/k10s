@@ -1,0 +1,94 @@
+# Pull requests: the builds and tests of release.yml, no publishing. On main only the non-blocking chaos/soak campaigns.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    name: Tests (${{ matrix.suite }})
+    if: github.event_name != 'push'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [unit, musl]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the build scripts derive the version from history
+          persist-credentials: false
+      - uses: ./.github/actions/toolchains
+      - name: scripts/ci-test.sh ${{ matrix.suite }}
+        run: scripts/ci-test.sh "$SUITE"
+        env:
+          SUITE: ${{ matrix.suite }}
+
+  metal:
+    name: Bare-metal kernel (QEMU/KVM)
+    if: github.event_name != 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/toolchains
+        with:
+          go: "true"
+          qemu: "true"
+      - name: scripts/ci-test.sh metal-selftest metal
+        run: scripts/ci-test.sh metal-selftest metal
+
+  dist:
+    name: Build artifacts
+    if: github.event_name != 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/toolchains
+        with:
+          go: "true"
+      - name: scripts/dist.sh
+        run: scripts/dist.sh --dev
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  campaign:
+    name: Chaos and soak campaigns (non-blocking)
+    # Zero-error windows and flat resource trends over minutes: too sensitive to runner noise to gate.
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/toolchains
+      - name: scripts/ci-test.sh campaign
+        run: scripts/ci-test.sh campaign
