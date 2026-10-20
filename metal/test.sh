@@ -11,7 +11,8 @@
 #   5. keep-alive load with bench/bin/loadgen (if present): no errors;
 #   6. the same functional checks with a tiny guest (MEM_SMALL, default 8M).
 #   Then: embedded bundle, qboot firmware, no panic in any serial log.
-# Environment: TEST_PORT (default 18090), MEM (64M), MEM_SMALL (8M), BIOS (firmware, empty = SeaBIOS), ENGINES.
+# Environment: TEST_PORT (default 18090), MEM (64M), MEM_SMALL (8M), BIOS (firmware, empty = SeaBIOS), ENGINES,
+# EXTRA_CMDLINE (appended to the engine suites' kernel command line).
 set -uo pipefail
 cd "$(dirname "$0")"
 PORT="${TEST_PORT:-18090}"
@@ -130,7 +131,7 @@ grep -E "  (ok|FAIL|info) " "$OUT/selftest.log" | sed 's/^/    /'
 [[ $st == 33 ]] && ok "selftest (exit $st)" || ko "selftest (exit $st)"
 
 engine_suite() { # $1 = engine (jit | interp); NCPU = CPUs
-local E=$1 CMD="k10.engine=$1"
+local E=$1 CMD="k10.engine=$1${EXTRA_CMDLINE:+ $EXTRA_CMDLINE}"
 ((NCPU > 1)) && E="$1 smp$NCPU"
 echo "== [$E] functional ($MEM)"
 if boot "$MEM" out/bundle.k10b "$OUT/serial-${E// /-}.log" "$CMD"; then

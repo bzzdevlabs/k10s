@@ -138,6 +138,29 @@ pub fn unix_ms() -> u64 {
     BOOT_UNIX_MS.load(Ordering::Relaxed) + now_ms()
 }
 
+/// Guest clock resolution in ns (`k10.timer_res_us`; 0 = full).
+static GUEST_RES_NS: AtomicU64 = AtomicU64::new(k10_ir::clock::DEFAULT_RES_NS);
+/// Secret key of the guest clock's fuzzy edges.
+static GUEST_KEY: AtomicU64 = AtomicU64::new(0);
+
+/// Sets the guest clock resolution (`k10_ir::clock`; 0 = full) and draws its key.
+pub fn set_guest_clock(res_ns: u64) {
+    GUEST_RES_NS.store(res_ns, Ordering::Relaxed);
+    let key = arch::rdrand().unwrap_or_else(|| rdtsc().wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29));
+    GUEST_KEY.store(key | 1, Ordering::Relaxed);
+}
+
+/// `now_ns` for guests: monotonic, coarsened with fuzzy edges.
+pub fn guest_now_ns() -> u64 {
+    k10_ir::clock::coarsen(now_ns(), GUEST_RES_NS.load(Ordering::Relaxed), GUEST_KEY.load(Ordering::Relaxed))
+}
+
+/// `time_ms` for guests: Unix ms with fuzzy edges (exact at full resolution).
+pub fn guest_unix_ms() -> u64 {
+    let ns = BOOT_UNIX_MS.load(Ordering::Relaxed).saturating_mul(1_000_000).saturating_add(now_ns());
+    k10_ir::clock::coarsen_ms(ns, GUEST_RES_NS.load(Ordering::Relaxed), GUEST_KEY.load(Ordering::Relaxed))
+}
+
 /// Timer interrupt: request preemption if this CPU's running invocation's slice/budget deadline has passed.
 pub fn on_timer_irq() {
     TIMER_IRQS.fetch_add(1, Ordering::Relaxed);
