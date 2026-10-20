@@ -174,7 +174,7 @@ fn svc_json(s: &ServiceRt, now: u64) -> String {
             "\"instances\":{{\"live\":{},\"idle\":{},\"peak\":{}}},\"queue\":{},\"snapshot\":{},",
             "\"requests\":{},\"ok\":{},\"errors\":{},\"traps\":{},\"interrupted\":{},\"created\":{},\"destroyed\":{},",
             "\"reclaimed\":{},\"queued\":{},\"cpu_ms_total\":{:.3},\"init_ms_total\":{:.3},\"backoff_ms\":{},",
-            "\"consecutive_traps\":{},\"kv_keys\":{},\"retired\":{}}}"
+            "\"consecutive_traps\":{},\"kv_keys\":{},\"kv_durable\":{},\"retired\":{}}}"
         ),
         json_str(s.name()),
         s.id,
@@ -217,6 +217,7 @@ fn svc_json(s: &ServiceRt, now: u64) -> String {
         s.backoff_remaining_ns(now) / 1_000_000,
         s.consecutive_traps(),
         s.kv.len(),
+        s.kv.durable(),
         s.retired.load(Relaxed),
     )
 }
@@ -274,7 +275,7 @@ pub fn status_json(node: &NodeShared) -> String {
             "\"backlog\":{},\"preempt_requests\":{},\"yields\":{},\"calls\":{},\"calls_failed\":{},\"timeouts\":{},",
             "\"queued_served\":{},\"cross_shard_replies\":{}}},",
             "\"kv\":{{\"namespaces\":{},\"keys\":{},\"live_bytes\":{},\"log_bytes\":{},\"flushes\":{},\"compactions\":{},",
-            "\"errors\":{}}},",
+            "\"errors\":{},\"degraded\":{}}},",
             "\"applies\":{},\"apply_errors\":{},\"per_shard\":[{}]{}}}"
         ),
         json_str(&node.cfg.name),
@@ -336,6 +337,7 @@ pub fn status_json(node: &NodeShared) -> String {
         kv.flushes,
         kv.compactions,
         kv.errors,
+        kv.degraded,
         node.counters.applies.load(Relaxed),
         node.counters.apply_errors.load(Relaxed),
         per_shard.join(","),
@@ -370,6 +372,9 @@ pub fn metrics(node: &NodeShared) -> String {
         }),
         ("k10s_service_memory_bytes", "gauge", "Memory of the service's live instances (slots)", |s| {
             s.live.load(Relaxed) as u64 * s.instance_bytes()
+        }),
+        ("k10s_service_kv_durable", "gauge", "1 if KV writes reach disk (0: memory-only store or degraded log)", |s| {
+            s.kv.durable() as u64
         }),
     ];
     for (name, ty, help, get) in per_svc {
@@ -418,6 +423,8 @@ pub fn metrics(node: &NodeShared) -> String {
     let kv = node.kv.stats();
     gauge(&mut o, "k10s_kv_keys", "gauge", "Keys in the KV store", kv.keys as u64);
     gauge(&mut o, "k10s_kv_log_bytes", "gauge", "Size of the KV logs", kv.log_bytes);
+    gauge(&mut o, "k10s_kv_errors_total", "counter", "Failed KV log writes, fsyncs, rewrites and compactions", kv.errors);
+    gauge(&mut o, "k10s_kv_degraded", "gauge", "KV namespaces whose log is being rewritten after an I/O error", kv.degraded as u64);
     o
 }
 

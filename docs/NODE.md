@@ -186,7 +186,7 @@ status ≥ 0, −1 unknown service, −2 unavailable (crash backoff with nothing
 - Routing: `/<service>/<rest>` → service (404 if unknown). Error mapping: −1 → 404, −2 → 503, −3 → 504, −4 → 500.
 - Admin (`/_k10s/`): `GET status` (JSON: node, build version, manifest version/hash, per service: instances
   live/idle/peak, queue, snapshot, requests/ok/errors/traps/interrupted/created/destroyed/reclaimed, CPU, backoff,
-  KV keys; memory: RSS,
+  KV keys and durability; memory: RSS,
   slots used, slot bytes, reserved, snapshot-mapped; HTTP, execution and KV counters; per shard), `GET metrics`
   (Prometheus text), `GET logs/<svc>`, `GET health`, `POST apply`.
 - **Admin access** (`admin::gate`, decided on the request head before any body is read or reserved; a refusal
@@ -225,11 +225,20 @@ status ≥ 0, −1 unknown service, −2 unavailable (crash backoff with nothing
   is done in place); a torn/corrupt tail is truncated at the last good
   record. **Group commit**: `kv_put`/`kv_del` return once the record is buffered; the flusher batches for 2 ms, writes
   every dirty log and `fdatasync`s them. **Durability window**: an acknowledged write can be lost if the process or
-  machine dies within ≈ 2 ms + write + fsync time. Compaction rewrites a log from the map when it exceeds 2× the live
-  size (and 1 MiB). Without `--data` the store is memory-only. **Per-service quota**: a `kv_put` that would push a
-  namespace past its live-bytes quota (default 256 MiB, `--kv-max`, 0 = unlimited) traps `Host(3)` and stores nothing,
-  so one service cannot fill the node's memory/disk (it bounds live bytes; the log is then bounded at ~2× that by
-  compaction). Deleting entries frees room.
+  machine dies within ≈ 2 ms + write + fsync time; a restart recovers a prefix of the writes in the order they were
+  made (appends and compactions go through one lock), never an older value over a newer one. Compaction rewrites a
+  log from the map when it exceeds 2× the live size (and 1 MiB): `<svc>.log.tmp`, fsync, rename over the log, fsync
+  of the directory (a new log's directory entry is fsynced too); a failed compaction leaves the log as it was and is
+  retried once the log has grown by another live size (at least 1 MiB). **I/O errors**: after a failed write, fsync
+  or directory sync the log is not trusted (the kernel may have dropped the pages): the namespace is *degraded*
+  (`kv_durable: false` in status, `k10s_service_kv_durable 0`, `kv.degraded`, `kv.errors`), stops appending, and the
+  flusher rewrites the whole log from memory the same way, retrying with backoff (10 ms doubling to 5 s) until a
+  rewrite and its directory sync succeed; entering and leaving that state is logged once each. Shutdown tries once
+  more; if that fails too, the writes made since the log degraded are lost (logged). Without `--data` the store is
+  memory-only. **Per-service quota**: a
+  `kv_put` that would push a namespace past its live-bytes quota (default 256 MiB, `--kv-max`, 0 = unlimited) traps
+  `Host(3)` and stores nothing, so one service cannot fill the node's memory/disk (it bounds live bytes; the log is
+  then bounded at ~2× that by compaction). Deleting entries frees room.
 - `log`: per-service ring (1000 lines / 256 KiB, lines ≤ 4 KiB), optionally echoed to stderr (`--log-stderr`).
 
 ## Process sandbox (`k10s node` only; `crates/k10-node/src/sandbox.rs`, SECURITY.md "Defense in depth")
