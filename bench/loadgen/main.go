@@ -238,6 +238,9 @@ func cpuTime() (float64, float64) {
 	return float64(ru.Utime.Sec) + float64(ru.Utime.Usec)/1e6, float64(ru.Stime.Sec) + float64(ru.Stime.Usec)/1e6
 }
 
+// version is set at build time: -ldflags "-X main.version=..." (bench/workloads/build.sh).
+var version = "dev"
+
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "host:port")
 	path := flag.String("path", "/", "request path (with query)")
@@ -249,7 +252,12 @@ func main() {
 	warm := flag.Duration("warmup", 2*time.Second, "warmup (not recorded)")
 	timeout := flag.Duration("timeout", 5*time.Second, "per-request timeout")
 	label := flag.String("label", "", "free-form label copied to output")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println("loadgen", version)
+		return
+	}
 
 	var rb bytes.Buffer
 	fmt.Fprintf(&rb, "%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: k10s-loadgen\r\nAccept: */*\r\n", *method, *path, *addr)

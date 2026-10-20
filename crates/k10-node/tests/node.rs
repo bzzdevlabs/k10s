@@ -18,9 +18,9 @@ fn status(node: &k10_node::Node) -> String {
 fn call_same_shard_and_cross_shard() {
     let node = start(config(2));
     node.apply(bundle(vec![
-        svc("a", &demo::caller("b")),
+        svc("a", &demo::caller("b")).calls(&["b"]),
         svc("b", &demo::path_echo()).max(1),
-        svc("c", &demo::caller("e")),
+        svc("c", &demo::caller("e")).calls(&["e"]),
         svc("e", &demo::echo()),
     ]))
     .unwrap();
@@ -44,9 +44,90 @@ fn call_same_shard_and_cross_shard() {
     let r = post(&node, "/a/over/http?q=1", b"body");
     assert_eq!((r.status, r.text().as_str()), (200, "method:1 path:/over/http?q=1"));
     // Unknown target → 502 with code -1.
-    node.apply(bundle(vec![svc("u", &demo::caller("nosuch"))])).unwrap();
+    node.apply(bundle(vec![svc("u", &demo::caller("nosuch")).calls(&["*"])])).unwrap();
     let r = get(&node, "/u");
     assert_eq!((r.status, r.text().as_str()), (502, "call error -1"));
+    node.shutdown();
+}
+
+/// `GET /<prober>/<target>` with body `n` (see `demo::call_probe`) → (status, response length, ns per call).
+fn probe(node: &k10_node::Node, prober: &str, target: &str, n: u32) -> (i64, i64, f64) {
+    let mut c = client(node);
+    let r = c.request("POST", &format!("/{prober}/{target}"), n.to_string().as_bytes()).unwrap();
+    assert_eq!(r.status, 200, "{prober} -> {target}: {}", r.text());
+    let t = r.text();
+    let v: Vec<i64> = t.split(' ').map(|x| x.parse().unwrap()).collect();
+    (v[0], v[1], v[2] as f64 / n as f64)
+}
+
+/// `calls` allowlist (both backends): granted calls work; any other call gets exactly what an unknown service gets.
+#[test]
+fn call_allowlist_denied_call_is_indistinguishable_from_unknown() {
+    let node = start(config(1));
+    node.apply(bundle(vec![
+        svc("echo", &demo::echo()),
+        svc("other", &demo::echo()),
+        svc("probe", &demo::call_probe()).calls(&["echo"]),
+        svc("none", &demo::call_probe()),
+        svc("me", &demo::call_probe()).calls(&["me"]),
+        svc("any", &demo::call_probe()).calls(&["*"]),
+    ]))
+    .unwrap();
+    let st = |p: &str, t: &str| {
+        let (s, l, _) = probe(&node, p, t, 1);
+        (s, l)
+    };
+    // Granted (echo answers "hello\n").
+    assert_eq!(st("probe", "echo"), (200, 6));
+    assert_eq!(st("probe", "echo/sub/path"), (200, 6));
+    assert_eq!(st("any", "other"), (200, 6), "the wildcard reaches every service");
+    // A truly unknown service (only a wildcard caller gets that far) and every denied call look the same.
+    let unknown = st("any", "nosuch");
+    assert_eq!(unknown, (-1, 0));
+    for (p, t) in [("probe", "other"), ("probe", "probe"), ("probe", "none"), ("probe", "nosuch"), ("probe", "echo2")] {
+        assert_eq!(st(p, t), unknown, "{p} -> {t}");
+    }
+    for t in ["echo", "none", "nosuch"] {
+        assert_eq!(st("none", t), unknown, "no `calls`: nothing, not even itself (none -> {t})");
+    }
+    // Self-calls need an entry: `me` lists itself (its inner call to echo is then denied, hence status 200).
+    let mut c = client(&node);
+    let r = c.request("POST", "/me/me/echo", b"1").unwrap();
+    assert!(r.text().starts_with("200 "), "{}", r.text());
+    // Denied calls reached no service.
+    let s = status(&node);
+    assert_eq!(svc_stat(&s, "echo", "requests"), 2);
+    assert_eq!(svc_stat(&s, "other", "requests"), 1);
+    // Same timing class, denied existing vs. missing name: interleaved rounds of 10 000 calls, best of 7; the loose
+    // bound absorbs machine noise (identical paths; a forwarded or executed call is orders of magnitude slower).
+    let cases = [("probe", "other"), ("probe", "no-such-service"), ("any", "nosuch"), ("probe", "echo")];
+    let mut best = [f64::MAX; 4];
+    for _ in 0..7 {
+        for (k, (p, t)) in cases.iter().enumerate() {
+            best[k] = best[k].min(probe(&node, p, t, 10_000).2);
+        }
+    }
+    let [exists, missing, wild, granted] = best;
+    eprintln!("ns/call: denied {exists:.0} (exists) {missing:.0} (missing), wildcard unknown {wild:.0}, granted {granted:.0}");
+    assert!(exists < 2.5 * missing && missing < 2.5 * exists, "denied timings differ: {exists:.0} vs {missing:.0} ns");
+    node.shutdown();
+}
+
+/// A callee that is not in the manifest is refused at apply time (typos are caught, nothing changes).
+#[test]
+fn apply_rejects_calls_to_services_not_in_the_manifest() {
+    let node = start(config(1));
+    node.apply(bundle(vec![svc("echo", &demo::echo())])).unwrap();
+    let typo = bundle(vec![svc("echo", &demo::echo()), svc("c", &demo::caller("echo")).calls(&["ehco"])]);
+    let e = node.apply(typo).unwrap_err();
+    assert!(e.contains("calls `ehco`"), "{e}");
+    // Over HTTP the bundle does not even decode (the decoder checks callees too).
+    let b = bundle(vec![svc("c", &demo::caller("echo")).calls(&["echo"])]).encode();
+    let mut c = client(&node);
+    let r = c.request("POST", "/_k10s/apply", &b).unwrap();
+    assert_eq!(r.status, 400, "{}", r.text());
+    assert_eq!(get(&node, "/echo").status, 200, "the running state is unchanged");
+    assert_eq!(get(&node, "/c").status, 404);
     node.shutdown();
 }
 
@@ -184,8 +265,8 @@ fn cpu_budget_trap_and_fairness() {
 fn call_cycle_times_out_instead_of_deadlocking() {
     let node = start(k10_node::NodeConfig { call_timeout: Duration::from_millis(500), ..config(2) });
     node.apply(bundle(vec![
-        svc("a", &demo::caller("b")).max(1),
-        svc("b", &demo::caller("a")).max(1),
+        svc("a", &demo::caller("b")).calls(&["b"]).max(1),
+        svc("b", &demo::caller("a")).calls(&["a"]).max(1),
         svc("echo", &demo::echo()),
     ]))
     .unwrap();
@@ -570,7 +651,10 @@ fn pipelined_requests_respect_backpressure() {
 #[test]
 fn stress_calls_through_small_pools_across_shards_with_reapply() {
     let node = start(k10_node::NodeConfig { call_timeout: Duration::from_secs(10), ..config(4) });
-    let mk = |cfg: &str| bundle(vec![svc("front", &demo::caller("back")).max(8), svc("back", &demo::burn()).config(cfg).max(3)]);
+    let mk = |cfg: &str| {
+        let front = svc("front", &demo::caller("back")).calls(&["back"]).max(8);
+        bundle(vec![front, svc("back", &demo::burn()).config(cfg).max(3)])
+    };
     node.apply(mk("1")).unwrap();
     let addr = node.http_addr().to_string();
     let ok = AtomicU64::new(0);
@@ -641,7 +725,7 @@ fn remote_placement_goes_through_the_router() {
         }
     }
     let node = k10_node::Node::start_with_router(config(2), std::sync::Arc::new(Fake)).unwrap();
-    let b = bundle(vec![svc("far", &demo::echo()), svc("near", &demo::caller("far"))]);
+    let b = bundle(vec![svc("far", &demo::echo()), svc("near", &demo::caller("far")).calls(&["far"])]);
     node.shared()
         .apply_with(b, false, &|s| if s.name == "far" { Placement::Remote { nodes: vec![k10_mesh::NodeId(7)] } } else { Placement::Local })
         .unwrap();

@@ -3,6 +3,7 @@
 // Every request calls the backend service with an empty body and returns the backend's response body, like
 // chain/main.go does with an HTTP GET to BACKEND_URL. The backend is the service named by this service's
 // config bytes (the manifest's equivalent of BACKEND_URL), or `echo` by default; echo.ten answers "hello".
+// The manifest must grant the call (`calls = ["echo"]`), else it fails with -1 like an unknown service.
 // Errors map like the Go version: a failed call or a non-200 backend status answers 502 with a short message.
 // No HTTP client, no DNS, no connection pool: `call` is a host function (a function call on the same node).
 // `read_config()` copies the config into the heap, so every request starts with heap_reset() (a per-request arena;

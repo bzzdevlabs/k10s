@@ -36,7 +36,7 @@ fn example_svcs(variant: u64) -> Vec<Svc> {
     let ex = |f: &str| ten_file(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples").join(f));
     let mut v = vec![
         echo_svc().replicas(3),
-        Svc::new("chain", ex("chain.ten")).mem(16).config(b"echo").replicas(2),
+        Svc::new("chain", ex("chain.ten")).mem(16).config(b"echo").calls(&["echo"]).replicas(2),
         Svc::new("compute", ex("compute.ten")).mem(16).cpu(60000).replicas(2),
         Svc::new("counter", ex("counter.ten")).mem(16).replicas(1),
         Svc::new("todo", ex("todo.ten")).mem(20).replicas(1),

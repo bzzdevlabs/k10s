@@ -4,7 +4,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use k10_ir::sem::check_range;
+use k10_ir::nospec;
+use k10_ir::sem::check_span;
 use k10_ir::{Module, Trap};
 
 use super::engine::HostCalls;
@@ -82,25 +83,28 @@ const TRAP_KV_QUOTA: Trap = Trap::Host(3);
 const TRAP_KV_NOT_INT: Trap = Trap::Host(4);
 const MAX_LOG_LINE: usize = 4096;
 
-/// `[ptr, ptr + len)` of instance memory, with the `mem.copy` range rule.
+/// `[ptr, ptr + len)` of instance memory, `mem.copy` range rule; empty behind a mispredicted check (Spectre v1).
+/// Offsets/lengths into host buffers are clamped with `nospec::min*`.
 fn range(mem: &[u8], ptr: i64, len: i64) -> Result<core::ops::Range<usize>, Trap> {
     let size = (mem.len() - k10_ir::TAIL_BYTES) as u64;
-    let s = check_range(ptr, len, size)?;
-    Ok(s..s + len as usize)
+    let (s, n) = check_span(ptr, len, size)?;
+    Ok(s..s + n)
 }
 
 /// Copies `src[off..off+n]` (clamped) to memory at `dst`; returns bytes copied.
 fn copy_out(mem: &mut [u8], src: &[u8], dst: i64, off: i64, n: i64) -> Result<i64, Trap> {
-    let off = off as u64;
-    let avail = (src.len() as u64).saturating_sub(off);
-    let n = (n as u64).min(avail) as i64;
+    // Branch-free: an offset past the end becomes `len` (nothing copied).
+    let len = src.len() as u64;
+    let off = nospec::min(off as u64, len);
+    let n = nospec::min(n as u64, len - off) as i64;
     if n <= 0 {
         return Ok(0);
     }
     let r = range(mem, dst, n)?;
     let off = off as usize;
-    mem[r].copy_from_slice(&src[off..off + n as usize]);
-    Ok(n)
+    let n = r.len();
+    mem[r].copy_from_slice(&src[off..off + n]);
+    Ok(n as i64)
 }
 
 fn kv_trap(e: super::KvRefused) -> Trap {
@@ -135,7 +139,7 @@ impl HostCalls for Level<'_> {
             HostFn::InputRead => copy_out(mem, &self.req.body, arg(0), arg(1), arg(2)),
             HostFn::ReqPath => {
                 let p = &self.req.path;
-                let n = (p.len() as u64).min(arg(1).max(0) as u64) as i64;
+                let n = nospec::min(p.len() as u64, arg(1).max(0) as u64) as i64;
                 copy_out(mem, p, arg(0), 0, n)?;
                 Ok(p.len() as i64)
             }
@@ -173,10 +177,11 @@ impl HostCalls for Level<'_> {
                 }
                 let Some(v) = super::kv_get(&self.svc.name, &mem[kr]) else { return Ok(-1) };
                 let len = v.len() as i64;
-                let n = len.min(arg(3).max(0));
+                let n = nospec::min(len as u64, arg(3).max(0) as u64) as i64;
                 if n > 0 {
                     let dr = range(mem, arg(2), n)?;
-                    mem[dr].copy_from_slice(&v[..n as usize]);
+                    let n = dr.len();
+                    mem[dr].copy_from_slice(&v[..n]);
                 }
                 Ok(len)
             }
@@ -218,7 +223,8 @@ impl HostCalls for Level<'_> {
                 if kr.len() > MAX_KEY || e as usize > MAX_VALUE || n as usize > MAX_VALUE {
                     return Err(TRAP_KV_LIMIT);
                 }
-                let (exp, new) = mem[br].split_at(e as usize);
+                let e = nospec::min_usize(e as usize, br.len());
+                let (exp, new) = mem[br].split_at(e);
                 let (exp, new) = ((exp_len >= 0).then_some(exp), (new_len >= 0).then_some(new));
                 super::kv_cas(&self.svc.name, &mem[kr], exp, new).map(i64::from).map_err(kv_trap)
             }
@@ -228,12 +234,12 @@ impl HostCalls for Level<'_> {
                 super::log(&self.svc.name, line);
                 Ok(0)
             }
-            HostFn::NowNs => Ok(time::now_ns() as i64),
-            HostFn::TimeMs => Ok(time::unix_ms() as i64),
+            HostFn::NowNs => Ok(time::guest_now_ns() as i64),
+            HostFn::TimeMs => Ok(time::guest_unix_ms() as i64),
             HostFn::Random => Ok(rand64() as i64),
             HostFn::Config => {
                 let c = &self.svc.spec.config;
-                let n = (c.len() as u64).min(arg(1).max(0) as u64) as i64;
+                let n = nospec::min(c.len() as u64, arg(1).max(0) as u64) as i64;
                 copy_out(mem, c, arg(0), 0, n)?;
                 Ok(c.len() as i64)
             }

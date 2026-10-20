@@ -365,9 +365,9 @@ fn call_cycles_and_recursion_bombs_unwind() {
         &node.http,
         &[
             echo_svc(),
-            Svc::new("selfcall", ten(SELF_CALL)).mem(16).max(64),
-            Svc::new("cyclea", ten(CYCLE_A)).mem(16).max(1),
-            Svc::new("cycleb", ten(CYCLE_B)).mem(16).max(1),
+            Svc::new("selfcall", ten(SELF_CALL)).mem(16).max(64).calls(&["selfcall"]),
+            Svc::new("cyclea", ten(CYCLE_A)).mem(16).max(1).calls(&["cycleb"]),
+            Svc::new("cycleb", ten(CYCLE_B)).mem(16).max(1).calls(&["cyclea"]),
         ],
     );
     // self-call: depth limit → the deepest call returns -2, bubbling up; the top request completes (200).

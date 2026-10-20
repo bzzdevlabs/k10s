@@ -39,7 +39,7 @@ service spin    { code = "spin.k10"    memory = 4KiB  cpu_ms = 100 }
 service burn    { code = "burn.k10"    memory = 64KiB config = "20" }
 service dense   { code = "dense.k10"   memory = 64KiB max_instances = 100000 }
 service logger  { code = "logger.k10"  memory = 64KiB }
-service chain   { code = "chain.k10"   memory = 64KiB }
+service chain   { code = "chain.k10"   memory = 64KiB calls = ["echo"] }
 "#;
     std::fs::write(format!("{dir}/app.k10s"), manifest).unwrap();
     println!("wrote {} modules and {dir}/app.k10s", mods.len());

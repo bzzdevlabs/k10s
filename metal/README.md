@@ -35,7 +35,9 @@ tools/cluster_measure.py   # cluster measurements with a metal member -> out/res
 
 Kernel command line (`APPEND=` for run.sh): `k10.verbose` (boot banner, phases, apply log), `k10.selftest` (run the
 in-kernel tests, then exit QEMU with status 33 on success), `k10.exit_on_ready`, `k10.spin_us=N` (busy-poll window
-before halting, default 50), `k10.engine=jit|interp` (default jit), `k10.smp=N` (use at most N CPUs). Cluster
+before halting, default 50), `k10.engine=jit|interp` (default jit), `k10.smp=N` (use at most N CPUs),
+`k10.jit_indirect=jump|lfence|retpoline` (Spectre v2 hardening of JIT indirect branches, default jump),
+`k10.timer_res_us=N` (resolution of the guests' `now_ns`/`time_ms`, default 100, 0 = full; SECURITY.md). Cluster
 mode: `k10.join=HOST:PORT[,…]`, `k10.gossip=`, `k10.rpc=`, `k10.http=` (advertised addresses), `k10.node_id=HEX`,
 `k10.probe_ms=N`, `k10.suspicion_mult=N`, `k10.mem=BYTES`, `k10.host_alias=IP` (see "Cluster mode" below).
 
@@ -187,7 +189,9 @@ preemption, so network I/O and short requests wait microseconds, not
 slices, behind any number of CPU hogs. On budget exhaustion the invocation traps `Interrupted`, the request gets a
 500 and the instance is discarded.
 
-A service-to-service `call` runs the callee on one of its instances inside the caller's coroutine. Nesting is
+A service-to-service `call` first checks the caller's manifest `calls` allowlist: a call it does not grant returns
+-1 at once, like an unknown service, before any lookup or forwarding. The callee runs on one of its instances inside
+the caller's coroutine. Nesting is
 limited to depth 8. The callee gets its own budget, capped by the caller's remaining one. When the callee's
 service is at `max_instances`, the caller yields until an instance is released (or -3 after 5 s). Callee traps
 return -4. `fresh` services restore the post-`init` snapshot before each request.
@@ -239,7 +243,8 @@ cluster, speaking the hosted node's protocols (docs/NODE.md "Cluster mode", crat
   waits on a `CallSlot`) — become `Forward`s: a placed replica (Alive, least outstanding), then down the ranking
   (this node included: then it runs here), then a Suspect replica; at most `replicas + 3` peers; re-sent only when
   known not to have run (bytes never handed to the TCP socket, or `NOT_HERE`). A peer's `Call` runs here whatever
-  the placement (one hop at most); an unknown service answers `NOT_HERE`.
+  the placement (one hop at most) and without a `calls` check (the calling peer is trusted to have done it); an
+  unknown service answers `NOT_HERE`.
 * *NAT*: the guest is 10.0.2.15 behind QEMU's slirp. `hostfwd` rules expose its gossip (UDP), rpc and http ports
   on the host; it advertises those host addresses (`127.0.0.1:<port>`), and every loopback address it sends to —
   hosted members, or other guests, advertising `127.0.0.1:<port>` — is reached through the slirp host alias

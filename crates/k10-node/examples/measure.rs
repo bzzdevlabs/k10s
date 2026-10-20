@@ -25,6 +25,7 @@ fn spec(name: &str, code: &[u8], mem_log2: u8, max: u32) -> ServiceSpec {
         cpu_ms: 10_000,
         fresh: false,
         config: Vec::new(),
+        calls: Vec::new(),
     }
 }
 
@@ -39,6 +40,13 @@ fn bundle(svcs: &[(&str, k10_ir::Module, u8, u32)]) -> Bundle {
         }
     }
     Bundle::new(Manifest { version: 0, services: specs }, blobs)
+}
+
+/// Lets `caller` call `callees` (its `calls` allowlist in the manifest).
+fn grant(mut b: Bundle, caller: &str, callees: &[&str]) -> Bundle {
+    let s = b.manifest.services.iter_mut().find(|s| s.name == caller).expect("caller in the bundle");
+    s.calls = k10_mesh::manifest::canonical_calls(callees);
+    b
 }
 
 fn node(shards: usize, snapshots: SnapshotPolicy) -> Node {
@@ -116,14 +124,14 @@ fn prims() {
 
 fn invoke() {
     let nd = node(2, SnapshotPolicy::Fresh);
-    nd.apply(bundle(&[
+    let b = bundle(&[
         ("empty", demo::empty(), 12, 64),
         ("empty1", demo::empty(), 12, 1),
         ("cl-local", demo::call_loop("empty"), 16, 64),
         ("cl-cross", demo::call_loop("empty1"), 16, 64),
         ("echo", demo::echo(), 16, 64),
-    ]))
-    .unwrap();
+    ]);
+    nd.apply(grant(grant(b, "cl-local", &["empty"]), "cl-cross", &["empty1"])).unwrap();
     nd.bench_invoke(0, "empty", 100_000);
     let n = 2_000_000;
     let ns = nd.bench_invoke(0, "empty", n);
@@ -164,7 +172,8 @@ fn invoke() {
         ..NodeConfig::default()
     })
     .unwrap();
-    nd.apply(bundle(&[("empty1", demo::empty(), 12, 1), ("cl-cross", demo::call_loop("empty1"), 16, 64)])).unwrap();
+    let b = bundle(&[("empty1", demo::empty(), 12, 1), ("cl-cross", demo::call_loop("empty1"), 16, 64)]);
+    nd.apply(grant(b, "cl-cross", &["empty1"])).unwrap();
     nd.invoke(1, "empty1", Method::Get, "", Vec::new());
     nd.invoke(0, "cl-cross", Method::Post, "", b"1000".to_vec());
     let t = Instant::now();

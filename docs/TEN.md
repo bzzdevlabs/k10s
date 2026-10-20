@@ -214,7 +214,8 @@ Source: `crates/k10-lang/src/std.ten`.
   integer value; `delta = 0` reads; traps `Host(4)` on a value that is not 8 bytes, e.g. one written by
   `kv_put_int`), `kv_cas_bytes(key, exp, exp_len, new, new_len) -> 1 | 0` (atomic compare-and-swap; `exp_len = -1`:
   the key must be absent, `new_len = -1`: delete; copies `exp` and `new` into one heap buffer unless `new` directly
-  follows the expected bytes), `call_svc(name: str, req, n) -> status | error`, `call_read() -> *u8`,
+  follows the expected bytes), `call_svc(name: str, req, n) -> status | error` (`name` must be in the manifest's
+  `calls` for this service, else -1), `call_read() -> *u8`,
   `out_call_resp()`, `log_str(s: str)`. A `kv_read` then `kv_write` is not atomic: instances of a service run
   concurrently, so read-modify-writes use `kv_add_int` or a `kv_cas_bytes` retry loop (examples/todo.ten).
 - **Misc**: `min`, `max`, `abs`, `fmin`, `fmax`, `align_up(x, a)`.

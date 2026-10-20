@@ -259,12 +259,12 @@ fn manifest(cfg: &str, pairs: usize) -> String {
     let mut m = String::from(
         "service echo { code = \"echo.k10\" memory = 64KiB }\n\
          service path { code = \"path.k10\" memory = 64KiB replicas = 3 }\n\
-         service chain { code = \"caller.k10\" memory = 64KiB }\n",
+         service chain { code = \"caller.k10\" memory = 64KiB calls = [\"echo\"] }\n",
     );
     m.push_str(&format!("service cfg {{ code = \"config.k10\" memory = 64KiB config = \"{cfg}\" }}\n"));
     for i in 0..pairs {
         m.push_str(&format!("service e{i} {{ code = \"echo.k10\" memory = 64KiB }}\n"));
-        m.push_str(&format!("service c{i} {{ code = \"c{i}.k10\" memory = 64KiB }}\n"));
+        m.push_str(&format!("service c{i} {{ code = \"c{i}.k10\" memory = 64KiB calls = [\"e{i}\"] }}\n"));
     }
     m
 }
@@ -410,6 +410,55 @@ fn three_nodes_join_apply_route_and_call() {
     for n in &nodes {
         assert!(n.log().contains("fetched desired state") || n.log().contains("announced"), "{}", n.log());
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `num_after(key)` within the entry of service `name` in a status document.
+fn svc_num(status: &str, name: &str, key: &str) -> Option<i64> {
+    let at = status.find(&format!("{{\"name\":\"{name}\""))?;
+    num_after(&status[at..], key)
+}
+
+/// A denied call is answered like an unknown service by the calling node and never forwarded; the same call
+/// granted (same code, other service) is.
+#[test]
+fn denied_call_is_not_forwarded() {
+    let (dir, nodes) = start_cluster("deny", 3, &Opts::default());
+    write_modules(&dir, 0);
+    std::fs::write(dir.join("nosuch.k10"), k10_ir::encode(&demo::caller("nosuch"))).unwrap();
+    // `granted` and `denied` run the same code (call `echo`) on every node; `echo` has a single replica.
+    let man = "service echo { code = \"echo.k10\" memory = 64KiB }\n\
+               service granted { code = \"caller.k10\" memory = 64KiB replicas = 3 calls = [\"echo\"] }\n\
+               service denied { code = \"caller.k10\" memory = 64KiB replicas = 3 }\n\
+               service wild { code = \"nosuch.k10\" memory = 64KiB replicas = 3 calls = [\"*\"] }\n";
+    apply(&dir, &nodes[0], man);
+    wait_applied(&nodes, 1, Duration::from_secs(30));
+    let p = placement(&nodes[0].status());
+    let host = nodes.iter().position(|n| n.id == p["echo"][0]).expect("echo placed");
+    let (h, via) = (&nodes[host], &nodes[(host + 1) % 3]);
+    assert!(p["denied"].contains(&via.id) && p["granted"].contains(&via.id), "{p:?}");
+    let counters = || {
+        let (vs, hs) = (via.status(), h.status());
+        (cluster_num(&vs, "forwarded"), cluster_num(&hs, "served_for_peers"), svc_num(&hs, "echo", "requests"))
+    };
+    let before = counters();
+    let mut c = Client::connect(&via.http, Duration::from_secs(10)).unwrap();
+    for _ in 0..20 {
+        let r = c.request("POST", "/denied", b"x").unwrap();
+        assert_eq!((r.status, r.text().as_str()), (502, "call error -1"), "denied call");
+        // Exactly what a call to a service that exists nowhere gets.
+        let r = c.request("POST", "/wild", b"x").unwrap();
+        assert_eq!((r.status, r.text().as_str()), (502, "call error -1"), "unknown service");
+    }
+    assert_eq!(counters(), before, "a denied call must not be forwarded nor reach echo");
+    // Control: the granted call crosses the mesh to echo's node.
+    for _ in 0..5 {
+        let r = c.request("POST", "/granted", b"via mesh").unwrap();
+        assert_eq!((r.status, r.text().as_str()), (200, "via mesh"));
+    }
+    let after = counters();
+    assert!(after.0 >= before.0.map(|n| n + 5), "granted calls are forwarded: {before:?} -> {after:?}");
+    assert!(after.1 >= before.1.map(|n| n + 5) && after.2 >= before.2.map(|n| n + 5), "{before:?} -> {after:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -872,7 +921,8 @@ fn measure_latency() {
     write_modules(&dir, 12);
     let mut man = String::new();
     for i in 0..12 {
-        man.push_str(&format!("service e{i} {{ code = \"echo.k10\" memory = 64KiB }}\nservice c{i} {{ code = \"c{i}.k10\" memory = 64KiB }}\n"));
+        man.push_str(&format!("service e{i} {{ code = \"echo.k10\" memory = 64KiB }}\n"));
+        man.push_str(&format!("service c{i} {{ code = \"c{i}.k10\" memory = 64KiB calls = [\"e{i}\"] }}\n"));
     }
     apply(&dir, &nodes[0], &man);
     wait_applied(&nodes, 1, Duration::from_secs(30));

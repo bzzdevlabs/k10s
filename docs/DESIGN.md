@@ -12,8 +12,10 @@ without assuming that processes, containers, VMs, Linux, TCP or any existing lan
 
 Constraints chosen with the user:
 - Workloads are compiled for the new platform (no obligation to run existing container images).
-- Trust model: same organization. A workload must never crash, corrupt or starve another; CPU side channels
-  (Spectre-class) between co-located workloads are out of scope (a hardware boundary per *tenant* covers that).
+- Trust model: same organization. A workload must never crash, corrupt or starve another. CPU side channels
+  (Spectre-class) between co-located workloads are only partly mitigated — masking by data flow, branch-free clamps
+  in host code, a coarse guest clock, optional retpolines (SECURITY.md); shared caches and predictors remain, so a
+  hardware boundary per *tenant* (one node per tenant) is the real answer.
 
 ## 1. Where Kubernetes spends resources, and why
 
@@ -40,10 +42,14 @@ its own, cannot jump to code that is not its own, and cannot call anything it wa
 guarantee all three:
 - **Memory**: every access compiles to `base + ((addr + off) & mask)` — one `and` per access, no bounds checks,
   no guard pages, no page tables. The workload's memory is a power-of-two slot inside one shared address space.
+  The mask is data flow, not a branch, so it holds even on mispredicted (speculative) paths.
 - **Control flow**: the IR has only structured control flow and direct calls, so no jump can leave the code the
   platform itself generated.
 - **Authority**: the only way out is a closed table of host calls. No syscalls, no filesystem, no sockets, no PIDs:
-  a workload cannot even *name* anything it was not given (capability model; replaces namespaces).
+  a workload cannot even *name* anything it was not given (capability model; replaces namespaces). Other services
+  are named, so the manifest grants them explicitly: a service may `call` only the services in its `calls`
+  allowlist (default: none). The calling node enforces it, and a denied call looks exactly like a call to a service
+  that does not exist.
 
 Result: thousands of workloads share **one** address space and one OS thread per core. Switching between them is a
 function call. This is the decisive change; every other gain follows from it.
@@ -135,7 +141,10 @@ Crates:
 - `k10-metal` (later) — the node runtime booting without Linux.
 
 ## 4. Out of scope for v0 (deliberately)
-- Hostile multi-tenancy (side channels): answer is one node per tenant on a hardware boundary.
+- Hostile multi-tenancy (side channels): the cheap Spectre gaps are closed (SECURITY.md, "CPU side channels": no
+  bounds-check branch on guest memory, clamped `br_table` and host-function indices, 100 µs fuzzy clock, opt-in
+  retpolines), but the runtime's own indirect branches, the return stack, speculative store bypass, shared caches
+  and SMT are not; the answer stays one node per tenant on a hardware boundary.
 - Running unmodified Linux binaries/containers.
 - Strongly consistent singletons / leader election; replicated storage (KV is node-local + durable in v0).
 

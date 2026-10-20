@@ -1,5 +1,7 @@
-//! Links the kernel with `linker.ld` (fixed load address, PVH note kept) and optionally embeds a bundle.
+//! Links the kernel with `linker.ld` (fixed load address, PVH note kept), optionally embeds a bundle; build version.
 use std::{env, fs, path::PathBuf};
+
+include!("../../scripts/buildinfo.rs");
 
 fn main() {
     let dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -20,4 +22,6 @@ fn main() {
         _ => Vec::new(),
     };
     fs::write(out, bytes).unwrap();
+
+    buildinfo::emit();
 }

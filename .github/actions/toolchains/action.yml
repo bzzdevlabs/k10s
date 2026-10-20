@@ -1,0 +1,46 @@
+# Toolchain pins for every workflow: Rust (+musl, +x86_64-unknown-none), optional Go and QEMU/KVM.
+name: k10s toolchains
+description: Pinned Rust toolchain with the musl and x86_64-unknown-none targets; optional Go and QEMU/KVM
+inputs:
+  rust:
+    description: Rust toolchain
+    default: "1.98.1"
+  go:
+    description: Install Go (benchmark tools) ("true" / "false")
+    default: "false"
+  go-version:
+    description: Go version (bench/workloads/go.mod and bench/loadgen/go.mod need 1.25)
+    default: "1.25.1"
+  qemu:
+    description: Install qemu-system-x86 and make /dev/kvm usable ("true" / "false")
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - name: Rust ${{ inputs.rust }}
+      shell: bash
+      env:
+        RUST: ${{ inputs.rust }}
+      run: |
+        rustup toolchain install "$RUST" --profile minimal --no-self-update
+        rustup target add --toolchain "$RUST" x86_64-unknown-linux-musl x86_64-unknown-none
+        rustup default "$RUST"
+        rustc -Vv
+    - name: Go ${{ inputs.go-version }}
+      if: inputs.go == 'true'
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ inputs.go-version }}
+        cache: false
+    - name: QEMU and KVM
+      if: inputs.qemu == 'true'
+      shell: bash
+      run: |
+        sudo apt-get update -q
+        sudo apt-get install -y -q --no-install-recommends qemu-system-x86
+        # Let the runner user open /dev/kvm.
+        echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --name-match=kvm
+        ls -l /dev/kvm
+        qemu-system-x86_64 --version

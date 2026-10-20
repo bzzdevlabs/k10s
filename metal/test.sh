@@ -11,7 +11,8 @@
 #   5. keep-alive load with bench/bin/loadgen (if present): no errors;
 #   6. the same functional checks with a tiny guest (MEM_SMALL, default 8M).
 #   Then: embedded bundle, qboot firmware, no panic in any serial log.
-# Environment: TEST_PORT (default 18090), MEM (64M), MEM_SMALL (8M), BIOS (firmware, empty = SeaBIOS), ENGINES.
+# Environment: TEST_PORT (default 18090), MEM (64M), MEM_SMALL (8M), BIOS (firmware, empty = SeaBIOS), ENGINES,
+# EXTRA_CMDLINE (appended to the engine suites' kernel command line).
 set -uo pipefail
 cd "$(dirname "$0")"
 PORT="${TEST_PORT:-18090}"
@@ -89,6 +90,11 @@ functional() {
     expect "counter 1" "$U/counter" 200 '^1$'
     expect "counter 2 (kv persisted)" "$U/counter" 200 '^2$'
     expect "chain (call echo)" "$U/chain" 200 '^chain -> ping from chain$'
+    # `calls` allowlist: probe may call hello only; anything else fails like an unknown service.
+    expect "probe -> hello (granted)" "$U/probe/hello/" 200 '^probe -> hello from k10-metal$'
+    expect "probe -> echo (denied: exists, not granted)" "$U/probe/echo/x" 502 '^call failed: -1$'
+    expect "probe -> probe (denied: self)" "$U/probe/probe/hello/" 502 '^call failed: -1$'
+    expect "probe -> nosuch (unknown)" "$U/probe/nosuch" 502 '^call failed: -1$'
     expect "trap -> 500" "$U/trap" 500 'Unreachable'
     expect "instcount (init ran)" "$U/instcount" 200 '^1001$'
     expect "instcount (instance state kept)" "$U/instcount" 200 '^1002$'
@@ -130,7 +136,7 @@ grep -E "  (ok|FAIL|info) " "$OUT/selftest.log" | sed 's/^/    /'
 [[ $st == 33 ]] && ok "selftest (exit $st)" || ko "selftest (exit $st)"
 
 engine_suite() { # $1 = engine (jit | interp); NCPU = CPUs
-local E=$1 CMD="k10.engine=$1"
+local E=$1 CMD="k10.engine=$1${EXTRA_CMDLINE:+ $EXTRA_CMDLINE}"
 ((NCPU > 1)) && E="$1 smp$NCPU"
 echo "== [$E] functional ($MEM)"
 if boot "$MEM" out/bundle.k10b "$OUT/serial-${E// /-}.log" "$CMD"; then
@@ -165,7 +171,7 @@ if boot "$MEM" out/bundle.k10b "$OUT/serial-${E// /-}.log" "$CMD"; then
     expect "older version refused" "$U/_k10s/apply" 400 'older' -X POST --data-binary @out/bundle.k10b
     expect "garbage refused" "$U/_k10s/apply" 400 'apply failed' -X POST --data-binary 'not a bundle'
     target/release/mkbundle -o "$OUT/v3.k10b" --version 3 2>/dev/null
-    expect "apply v3 (all services back)" "$U/_k10s/apply" 200 '"version":3,"services":18' -X POST --data-binary "@$OUT/v3.k10b"
+    expect "apply v3 (all services back)" "$U/_k10s/apply" 200 '"version":3,"services":19' -X POST --data-binary "@$OUT/v3.k10b"
     expect "counter state kept across redeploys" "$U/counter" 200 '^3$'
 
     echo "== [$E] call waiting for a busy callee (max_instances = 1)"
@@ -187,7 +193,7 @@ if boot "$MEM" out/bundle.k10b "$OUT/serial-${E// /-}.log" "$CMD"; then
     fi
     expect "spin instance replaced after traps" "$U/_k10s/status" 200 '"name":"spin"[^}]*"instances":0[^}]*"interrupted":2'
     target/release/mkbundle -o "$OUT/v5.k10b" --version 5 2>/dev/null
-    expect "apply v5 (back to all services)" "$U/_k10s/apply" 200 '"version":5,"services":18' -X POST --data-binary "@$OUT/v5.k10b"
+    expect "apply v5 (back to all services)" "$U/_k10s/apply" 200 '"version":5,"services":19' -X POST --data-binary "@$OUT/v5.k10b"
 
     if [[ -x $LOADGEN ]]; then
         echo "== [$E] keep-alive load (loadgen, 64 connections, 3 s)"

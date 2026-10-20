@@ -112,6 +112,7 @@ mod tests {
             cpu_ms: 50,
             fresh: false,
             config: vec![],
+            calls: vec![],
         };
         Bundle::new(Manifest { version: 7, services: vec![spec] }, vec![code])
     }

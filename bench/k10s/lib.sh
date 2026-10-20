@@ -143,7 +143,7 @@ apply_text() {
   rm -f "$f"
 }
 REF_MANIFEST='service echo    { code = "echo.k10" memory = 64KiB }
-service chain   { code = "chain.k10" memory = 64KiB config = "echo" }
+service chain   { code = "chain.k10" memory = 64KiB config = "echo" calls = ["echo"] }
 service compute { code = "compute.k10" memory = 64KiB cpu_ms = 60000 }
 service counter { code = "counter.k10" memory = 64KiB }
 '

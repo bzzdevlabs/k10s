@@ -75,7 +75,9 @@ fn hostile_nonutf8_call_path_does_not_crash_the_mesh() {
     let (dir, nodes) = cluster("meshabuse", 3);
     // echo has ONE replica, so reaching it from the other two ingresses forwards over the mesh: a dead mesh thread
     // would make this time out (the regression's symptom), not silently pass.
-    let mut svcs = vec![echo_svc().replicas(1), Svc::new("relay", ten(RELAY)).mem(16).replicas(1)];
+    let sinks: Vec<String> = (0..10).map(|i| format!("sink{i}")).collect();
+    let sinks: Vec<&str> = sinks.iter().map(String::as_str).collect();
+    let mut svcs = vec![echo_svc().replicas(1), Svc::new("relay", ten(RELAY)).mem(16).replicas(1).calls(&sinks)];
     for i in 0..10 {
         svcs.push(Svc::new(&format!("sink{i}"), ten(ECHO_TEN)).mem(16).replicas(1));
     }

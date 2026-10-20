@@ -6,7 +6,7 @@ mod common;
 use common::*;
 use k10_ir::gen::Rng;
 use k10_ir::{new_memory, FuncBuilder, Host, Interp, Module, ModuleBuilder, Op, Trap};
-use k10_jit::{compile_with, CompileOptions, CpuFeatures};
+use k10_jit::{compile_with, CompileOptions, CpuFeatures, IndirectBranch};
 
 struct NoHost;
 impl Host for NoHost {
@@ -177,7 +177,12 @@ fn run_adversarial(seeds: std::ops::Range<u64>) -> (u64, u64) {
         let min_log2 = if seed % 4 == 3 { 16 } else { 12 };
         let m = adversarial_module(seed, min_log2);
         let it = Interp::new(&m).unwrap();
-        let opts = CompileOptions { features: det, max_pinned: [0, 3, 6][seed as usize % 3] };
+        let opts = CompileOptions {
+            features: det,
+            max_pinned: [0, 3, 6][seed as usize % 3],
+            indirect: [IndirectBranch::Jump, IndirectBranch::Lfence, IndirectBranch::Retpoline][(seed / 3) as usize % 3],
+            br_tree_max: [0, k10_jit::DEFAULT_BR_TREE_MAX][(seed / 9) as usize % 2],
+        };
         let jit = compile_with(&m, &opts).unwrap();
         let mut rng = Rng::new(seed ^ 77);
         for _ in 0..4 {

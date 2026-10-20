@@ -25,9 +25,13 @@ An instance handles one request at a time (actor semantics); the runtime runs ma
 ## Service-to-service calls
 | name | params | returns |
 |---|---|---|
-| `call` | (name_ptr, name_len, req_ptr, req_len) | Invokes service `name` (optionally `name/path`) with the given body. Suspends the caller until the response arrives. Returns the callee's status (≥ 0) or an error: -1 unknown service, -2 unavailable, -3 timeout, -4 callee trapped |
+| `call` | (name_ptr, name_len, req_ptr, req_len) | Invokes service `name` (optionally `name/path`) with the given body. Suspends the caller until the response arrives. Returns the callee's status (≥ 0) or an error: -1 unknown service (or not granted), -2 unavailable, -3 timeout, -4 callee trapped |
 | `call_resp_len` | () | length of the last call's response body |
 | `call_resp_read` | (dst, off, n) | copies bytes of the last call's response; returns bytes copied |
+
+A service may call only the services listed in its manifest `calls` allowlist (`calls = ["echo"]`; none by default,
+not even itself; `["*"]` = any, discouraged). Any other call returns -1 with an empty response, exactly like a
+service that does not exist, so names cannot be probed.
 
 ## Durable key-value store (namespace = the service; node-local in v1)
 | name | params | returns |
@@ -70,7 +74,12 @@ buffer, `kv_cas`; on 0 another instance changed it meanwhile, so read again.
 | name | params | returns |
 |---|---|---|
 | `log` | (ptr, len) | 0; appends a line to the service log |
-| `now_ns` | () | monotonic nanoseconds |
+| `now_ns` | () | monotonic nanoseconds, in steps of the node's guest-clock resolution (default 100 µs) |
 | `time_ms` | () | wall-clock Unix milliseconds |
+
+The guest clock is coarse on purpose (SECURITY.md, "CPU side channels"): `now_ns` advances in steps of the
+resolution (`k10s node --timer-res-us`, k10-metal `k10.timer_res_us`; 0 = full nanosecond resolution), each step
+landing at a random point of its interval, so it is monotonic and at most one step ahead of real time; `time_ms`
+gets the same treatment at 1 ms (or the resolution, if coarser).
 | `random` | () | 64 random bits |
 | `config` | (dst, max) | copies the service's config bytes (from the manifest); returns the full length |

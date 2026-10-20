@@ -12,7 +12,7 @@ mod common;
 mod xdis;
 use common::*;
 use k10_ir::{new_memory, FuncBuilder, Host, Interp, Module, ModuleBuilder, Op, Trap};
-use k10_jit::{compile_with, CompileOptions, CpuFeatures};
+use k10_jit::{compile_with, CompileOptions, CpuFeatures, IndirectBranch};
 use Op::*;
 
 struct NoHost;
@@ -25,10 +25,11 @@ impl Host for NoHost {
 fn configs() -> Vec<CompileOptions> {
     let det = CpuFeatures::detect();
     vec![
-        CompileOptions { features: det, max_pinned: 6 },
-        CompileOptions { features: CpuFeatures::BASELINE, max_pinned: 6 },
-        CompileOptions { features: det, max_pinned: 0 },
-        CompileOptions { features: CpuFeatures::BASELINE, max_pinned: 2 },
+        CompileOptions { features: det, max_pinned: 6, ..CompileOptions::default() },
+        CompileOptions { features: CpuFeatures::BASELINE, max_pinned: 6, indirect: IndirectBranch::Retpoline, br_tree_max: 0 },
+        CompileOptions { features: det, max_pinned: 0, indirect: IndirectBranch::Lfence, br_tree_max: 0 },
+        CompileOptions { features: CpuFeatures::BASELINE, max_pinned: 2, indirect: IndirectBranch::Jump, br_tree_max: 0 },
+        CompileOptions { features: det, max_pinned: 6, indirect: IndirectBranch::Retpoline, br_tree_max: u16::MAX },
     ]
 }
 
@@ -426,8 +427,8 @@ fn big_frame_recursion_overflows_cleanly() {
     let m = mb.build();
     // A deep recursion on a modest stack: expect StackOverflow, canaries intact.
     let det = CpuFeatures::detect();
-    let jit = compile_with(&m, &CompileOptions { features: det, max_pinned: 6 }).unwrap();
-    sfi_check(&m, &CompileOptions { features: det, max_pinned: 6 });
+    let jit = compile_with(&m, &CompileOptions { features: det, max_pinned: 6, ..CompileOptions::default() }).unwrap();
+    sfi_check(&m, &CompileOptions { features: det, max_pinned: 6, ..CompileOptions::default() });
     on_thread(2 << 20, || {
         let (lo, _) = stack_bounds();
         let mut gm = GuardedMem::for_module(&m, 12);
@@ -568,7 +569,10 @@ fn run_on_big_stack(m: &Module, func: u32, args: &[i64]) -> Result<Option<i64>, 
         let it = Interp::new(&m).unwrap();
         let k = m.min_mem_log2;
         let mut res = None;
-        for opts in [CompileOptions { features: det, max_pinned: 6 }, CompileOptions { features: det, max_pinned: 0 }] {
+        for opts in [
+            CompileOptions { features: det, max_pinned: 6, ..CompileOptions::default() },
+            CompileOptions { features: det, max_pinned: 0, indirect: IndirectBranch::Retpoline, br_tree_max: 0 },
+        ] {
             let jit = compile_with(&m, &opts).unwrap();
             sfi_check(&m, &opts);
             let mut im = new_memory(&m, k);

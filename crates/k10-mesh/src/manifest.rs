@@ -4,10 +4,14 @@
 //!
 //! Binary format (canonical: services sorted by name, so equal manifests have equal hashes):
 //! ```text
-//! "K10M" | format:u8=1 | version:u64 LE | count:varint | service*
+//! "K10M" | format:u8 (1 or 2) | version:u64 LE | count:varint | service*
 //! service = name_len:u8 name | code_hash:[32] | replicas:varint | mem_log2:u8 | max_instances:varint
 //!           | cpu_ms:varint | flags:u8 (bit0 fresh) | config_len:varint config
+//!           | calls_count:varint (call_len:u8 call)*            -- format 2 only
 //! ```
+//!
+//! Format 2 adds the `calls` allowlists. A manifest without any encodes as format 1 (the original bytes): one encoding
+//! per manifest, older manifests keep their hash, and format 1 decodes to empty lists (deny by default).
 
 use crate::codec::{put_u64, put_varint, DecodeError, Reader};
 use crate::sha256::sha256;
@@ -28,9 +32,16 @@ pub const MAX_REPLICAS: u32 = 100_000;
 /// Smallest / largest memory slot (log2 bytes): 4 KiB .. 64 GiB.
 pub const MIN_MEM_LOG2: u8 = 12;
 pub const MAX_MEM_LOG2: u8 = 36;
+/// Maximum `calls` entries in one manifest (bounds what [`Manifest::decode`] allocates).
+pub const MAX_CALL_ENTRIES: usize = 1 << 20;
+/// `calls = ["*"]`: may call any service (discouraged: ambient authority again); valid only alone.
+pub const CALL_ANY: &str = "*";
 
 const MAGIC: &[u8; 4] = b"K10M";
-const FORMAT: u8 = 1;
+/// The original format (no `calls`): used whenever no service may call anything.
+const FORMAT_V1: u8 = 1;
+/// Format 1 + a `calls` list per service.
+const FORMAT_CALLS: u8 = 2;
 const MIN_SERVICE_BYTES: usize = 1 + 1 + 32 + 1 + 1 + 1 + 1 + 1 + 1;
 
 /// One service of the desired state.
@@ -52,12 +63,25 @@ pub struct ServiceSpec {
     pub fresh: bool,
     /// Opaque bytes returned by the `config` host call.
     pub config: Vec<u8>,
+    /// Services this one may `call`; empty = none, not even itself. Canonical: sorted, unique services of this
+    /// manifest, or exactly `["*"]` ([`CALL_ANY`]).
+    pub calls: Vec<String>,
 }
 
 impl ServiceSpec {
     /// Slot size of one instance in bytes.
     pub fn mem_bytes(&self) -> u64 {
         1u64 << self.mem_log2.min(63)
+    }
+
+    /// Whether `name` (a call target's name part) is granted: binary search, no allocation, no hashing.
+    #[inline]
+    pub fn may_call(&self, name: &[u8]) -> bool {
+        match self.calls.first() {
+            None => false,
+            Some(first) if first.as_str() == CALL_ANY => true,
+            Some(_) => self.calls.binary_search_by(|c| c.as_bytes().cmp(name)).is_ok(),
+        }
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -76,8 +100,38 @@ impl ServiceSpec {
         if self.config.len() > MAX_CONFIG_BYTES {
             return Err(format!("service `{}`: config larger than 1 MiB", self.name));
         }
-        Ok(())
+        check_calls(&self.calls).map_err(|e| format!("service `{}`: {e}", self.name))
     }
+}
+
+/// Checks that a `calls` list is canonical: valid names, strictly sorted, `*` alone (existence: per manifest).
+fn check_calls(calls: &[String]) -> Result<(), String> {
+    if calls.len() == 1 && calls[0] == CALL_ANY {
+        return Ok(());
+    }
+    if calls.len() > MAX_SERVICES {
+        return Err("`calls` lists more services than a manifest can hold".to_string());
+    }
+    for (i, c) in calls.iter().enumerate() {
+        if c == CALL_ANY {
+            return Err("`\"*\"` (any service) must be the only entry of `calls`".to_string());
+        }
+        if !valid_name(c) {
+            return Err(format!("invalid service name `{c}` in `calls`"));
+        }
+        if i > 0 && calls[i - 1] >= *c {
+            return Err("`calls` must be sorted and without duplicates (see `canonical_calls`)".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Sorts and deduplicates a `calls` list.
+pub fn canonical_calls<S: AsRef<str>>(names: &[S]) -> Vec<String> {
+    let mut v: Vec<String> = names.iter().map(|n| n.as_ref().to_string()).collect();
+    v.sort_unstable();
+    v.dedup();
+    v
 }
 
 /// The desired state of the cluster.
@@ -98,8 +152,9 @@ impl Manifest {
     pub fn encode_into(&self, out: &mut Vec<u8>) {
         let mut order: Vec<&ServiceSpec> = self.services.iter().collect();
         order.sort_by(|a, b| a.name.cmp(&b.name));
+        let format = if order.iter().any(|s| !s.calls.is_empty()) { FORMAT_CALLS } else { FORMAT_V1 };
         out.extend_from_slice(MAGIC);
-        out.push(FORMAT);
+        out.push(format);
         put_u64(out, self.version);
         put_varint(out, order.len() as u64);
         for s in order {
@@ -115,6 +170,21 @@ impl Manifest {
             out.push(s.fresh as u8);
             put_varint(out, s.config.len() as u64);
             out.extend_from_slice(&s.config);
+            if format == FORMAT_CALLS {
+                // Canonical bytes even from an unsorted list (which `validate` rejects anyway).
+                let mut calls: Vec<&str> = s.calls.iter().map(String::as_str).collect();
+                if !calls.windows(2).all(|w| w[0] < w[1]) {
+                    calls.sort_unstable();
+                    calls.dedup();
+                }
+                put_varint(out, calls.len() as u64);
+                for c in calls {
+                    let c = c.as_bytes();
+                    let n = c.len().min(255);
+                    out.push(n as u8);
+                    out.extend_from_slice(&c[..n]);
+                }
+            }
         }
     }
 
@@ -128,7 +198,8 @@ impl Manifest {
         if r.bytes(4)? != MAGIC {
             return Err(DecodeError::Invalid("manifest magic"));
         }
-        if r.u8()? != FORMAT {
+        let format = r.u8()?;
+        if format != FORMAT_V1 && format != FORMAT_CALLS {
             return Err(DecodeError::Invalid("manifest format"));
         }
         let version = r.u64()?;
@@ -137,9 +208,11 @@ impl Manifest {
             return Err(DecodeError::TooLarge("service count"));
         }
         let count = count as usize;
-        if count > r.remaining() / MIN_SERVICE_BYTES {
+        let min_service = MIN_SERVICE_BYTES + (format == FORMAT_CALLS) as usize;
+        if count > r.remaining() / min_service {
             return Err(DecodeError::Truncated);
         }
+        let mut call_entries = 0usize;
         let mut services: Vec<ServiceSpec> = Vec::with_capacity(count);
         for _ in 0..count {
             let n = r.u8()? as usize;
@@ -166,6 +239,24 @@ impl Manifest {
                 return Err(DecodeError::TooLarge("config"));
             }
             let config = r.bytes(clen as usize)?.to_vec();
+            let mut calls = Vec::new();
+            if format == FORMAT_CALLS {
+                let n = r.varint()?;
+                // Entries take >= 2 bytes: bound the count before allocating.
+                if n > (r.remaining() / 2) as u64 {
+                    return Err(DecodeError::Truncated);
+                }
+                call_entries += n as usize;
+                if call_entries > MAX_CALL_ENTRIES {
+                    return Err(DecodeError::TooLarge("calls"));
+                }
+                calls.reserve_exact(n as usize);
+                for _ in 0..n {
+                    let len = r.u8()? as usize;
+                    let c = core::str::from_utf8(r.bytes(len)?).map_err(|_| DecodeError::Invalid("calls entry"))?;
+                    calls.push(c.to_string());
+                }
+            }
             let s = ServiceSpec {
                 name: name.to_string(),
                 code_hash,
@@ -175,12 +266,25 @@ impl Manifest {
                 cpu_ms,
                 fresh: flags & 1 != 0,
                 config,
+                calls,
             };
             s.validate().map_err(|_| DecodeError::Invalid("service field"))?;
             services.push(s);
         }
         if !r.is_empty() {
             return Err(DecodeError::Invalid("trailing bytes"));
+        }
+        if format == FORMAT_CALLS && services.iter().all(|s| s.calls.is_empty()) {
+            // Without any `calls` the canonical encoding is format 1.
+            return Err(DecodeError::Invalid("manifest format (2 without calls)"));
+        }
+        // Every callee must be a service of this manifest (services are sorted).
+        for s in &services {
+            for c in &s.calls {
+                if c != CALL_ANY && services.binary_search_by(|t| t.name.as_str().cmp(c)).is_err() {
+                    return Err(DecodeError::Invalid("calls entry (not a service of the manifest)"));
+                }
+            }
         }
         Ok(Manifest { version, services })
     }
@@ -203,6 +307,19 @@ impl Manifest {
         names.sort_unstable();
         if let Some(w) = names.windows(2).find(|w| w[0] == w[1]) {
             return Err(format!("duplicate service `{}`", w[0]));
+        }
+        // The manifest is the complete desired state: an undeclared callee is a mistake.
+        let mut entries = 0usize;
+        for s in &self.services {
+            entries += s.calls.len();
+            for c in &s.calls {
+                if c != CALL_ANY && names.binary_search(&c.as_str()).is_err() {
+                    return Err(format!("service `{}` calls `{c}`, which is not a service of this manifest", s.name));
+                }
+            }
+        }
+        if entries > MAX_CALL_ENTRIES {
+            return Err(format!("too many `calls` entries ({entries} > {MAX_CALL_ENTRIES})"));
         }
         Ok(())
     }
@@ -233,6 +350,8 @@ pub struct ServiceDecl {
     pub cpu_ms: u32,
     pub fresh: bool,
     pub config: Vec<u8>,
+    /// `calls = [...]`, canonical (sorted, unique; every name declared in the same text).
+    pub calls: Vec<String>,
     /// Line of the `service` keyword (for diagnostics).
     pub line: u32,
 }
@@ -248,6 +367,7 @@ impl ServiceDecl {
             cpu_ms: self.cpu_ms,
             fresh: self.fresh,
             config: self.config.clone(),
+            calls: self.calls.clone(),
         }
     }
 }
@@ -274,6 +394,9 @@ enum Tok {
     Str(Vec<u8>),
     LBrace,
     RBrace,
+    LBracket,
+    RBracket,
+    Comma,
     Eq,
     Semi,
 }
@@ -336,6 +459,18 @@ impl<'a> Lexer<'a> {
             b'}' => {
                 self.pos += 1;
                 Tok::RBrace
+            }
+            b'[' => {
+                self.pos += 1;
+                Tok::LBracket
+            }
+            b']' => {
+                self.pos += 1;
+                Tok::RBracket
+            }
+            b',' => {
+                self.pos += 1;
+                Tok::Comma
             }
             b'=' => {
                 self.pos += 1;
@@ -407,6 +542,9 @@ fn describe(t: &Tok) -> String {
         Tok::Str(_) => "a string".to_string(),
         Tok::LBrace => "`{`".to_string(),
         Tok::RBrace => "`}`".to_string(),
+        Tok::LBracket => "`[`".to_string(),
+        Tok::RBracket => "`]`".to_string(),
+        Tok::Comma => "`,`".to_string(),
         Tok::Eq => "`=`".to_string(),
         Tok::Semi => "`;`".to_string(),
     }
@@ -461,11 +599,45 @@ fn parse_memory(lx: &mut Lexer<'_>, word: &str, line: u32) -> Result<u8, ParseEr
     Ok(log2)
 }
 
-/// Parses the operator text format into service declarations (defaults applied, names validated and unique).
+/// Parses a `calls` list after its `[`: quoted names, comma-separated (trailing comma allowed); returns it canonical.
+fn parse_calls(lx: &mut Lexer<'_>, line: u32) -> Result<Vec<String>, ParseError> {
+    let unterminated = || err(line, "unterminated `calls` list (missing `]`)");
+    let mut list: Vec<String> = Vec::new();
+    loop {
+        match lx.next()? {
+            Some((Tok::RBracket, _)) => break,
+            Some((Tok::Str(s), l)) => {
+                let name = String::from_utf8(s).or_else(|_| err(l, "`calls` entry is not UTF-8"))?;
+                if name != CALL_ANY && !valid_name(&name) {
+                    let want = "want [a-z0-9-], 1..=63 chars, or \"*\"";
+                    return err(l, format!("invalid service name `{name}` in `calls` ({want})"));
+                }
+                list.push(name);
+                match lx.next()? {
+                    Some((Tok::Comma, _)) => {}
+                    Some((Tok::RBracket, _)) => break,
+                    Some((t, l)) => return err(l, format!("expected `,` or `]` in `calls`, found {}", describe(&t))),
+                    None => return unterminated(),
+                }
+            }
+            Some((t, l)) => return err(l, format!("`calls` expects quoted service names, found {}", describe(&t))),
+            None => return unterminated(),
+        }
+    }
+    let list = canonical_calls(&list);
+    if list.len() > 1 && list[0] == CALL_ANY {
+        return err(line, "`\"*\"` (any service) must be the only entry of `calls`");
+    }
+    Ok(list)
+}
+
+/// Parses the operator text format into service declarations (defaults applied, names unique, callees declared).
 pub fn parse_text(src: &str) -> Result<Vec<ServiceDecl>, ParseError> {
     let mut lx = Lexer::new(src);
     let mut out: Vec<ServiceDecl> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
+    // (declaration index, `calls` line): callees are checked once every service is known.
+    let mut calls_at: Vec<(usize, u32)> = Vec::new();
     while let Some((tok, line)) = lx.next()? {
         match tok {
             Tok::Semi => continue,
@@ -498,6 +670,7 @@ pub fn parse_text(src: &str) -> Result<Vec<ServiceDecl>, ParseError> {
             cpu_ms: 1000,
             fresh: false,
             config: Vec::new(),
+            calls: Vec::new(),
             line,
         };
         let mut seen: Vec<String> = Vec::new();
@@ -557,15 +730,21 @@ pub fn parse_text(src: &str) -> Result<Vec<ServiceDecl>, ParseError> {
                         _ => return err(vline, format!("`fresh` expects true or false, got `{w}`")),
                     }
                 }
+                ("calls", Tok::LBracket) => {
+                    d.calls = parse_calls(&mut lx, vline)?;
+                    calls_at.push((out.len(), vline));
+                }
                 ("code" | "config", t) => return err(vline, format!("`{key}` expects a quoted string, found {}", describe(&t))),
+                ("calls", t) => {
+                    let found = describe(&t);
+                    return err(vline, format!("`calls` expects a list like [\"echo\", \"kv-store\"], found {found}"));
+                }
                 ("replicas" | "max_instances" | "cpu_ms" | "memory" | "fresh", t) => {
                     return err(vline, format!("bad value for `{key}`: {}", describe(&t)))
                 }
                 (_, _) => {
-                    return err(
-                        kline,
-                        format!("unknown key `{key}` (expected code, replicas, memory, max_instances, cpu_ms, fresh, config)"),
-                    )
+                    let keys = "code, replicas, memory, max_instances, cpu_ms, fresh, config, calls";
+                    return err(kline, format!("unknown key `{key}` (expected {keys})"));
                 }
             }
             seen.push(key);
@@ -574,6 +753,13 @@ pub fn parse_text(src: &str) -> Result<Vec<ServiceDecl>, ParseError> {
             return err(d.line, format!("service `{}` has no `code`", d.name));
         }
         out.push(d);
+    }
+    // The text is the complete desired state: an undeclared callee is a mistake (typo).
+    for (i, line) in calls_at {
+        let d = &out[i];
+        if let Some(c) = d.calls.iter().find(|c| c.as_str() != CALL_ANY && !seen.contains(c.as_str())) {
+            return err(line, format!("service `{}` calls `{c}`, which is not declared in this manifest", d.name));
+        }
     }
     Ok(out)
 }
@@ -593,7 +779,170 @@ mod tests {
             cpu_ms: 50,
             fresh: false,
             config: b"k=v".to_vec(),
+            calls: Vec::new(),
         }
+    }
+
+    fn calling(name: &str, calls: &[&str]) -> ServiceSpec {
+        ServiceSpec { calls: canonical_calls(calls), ..spec(name, 1) }
+    }
+
+    /// Format 1 encoding, written exactly as the pre-`calls` encoder did.
+    fn legacy_encode(m: &Manifest) -> Vec<u8> {
+        let mut order: Vec<&ServiceSpec> = m.services.iter().collect();
+        order.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut out = b"K10M\x01".to_vec();
+        put_u64(&mut out, m.version);
+        put_varint(&mut out, order.len() as u64);
+        for s in order {
+            out.push(s.name.len() as u8);
+            out.extend_from_slice(s.name.as_bytes());
+            out.extend_from_slice(&s.code_hash);
+            put_varint(&mut out, s.replicas as u64);
+            out.push(s.mem_log2);
+            put_varint(&mut out, s.max_instances as u64);
+            put_varint(&mut out, s.cpu_ms as u64);
+            out.push(s.fresh as u8);
+            put_varint(&mut out, s.config.len() as u64);
+            out.extend_from_slice(&s.config);
+        }
+        out
+    }
+
+    #[test]
+    fn calls_roundtrip_format_and_canonical_hash() {
+        let a = Manifest {
+            version: 3,
+            services: vec![
+                calling("web", &["kv-store", "echo"]),
+                spec("echo", 1),
+                calling("kv-store", &["kv-store"]),
+                calling("gateway", &["*"]),
+            ],
+        };
+        a.validate().unwrap();
+        let bytes = a.encode();
+        assert_eq!(bytes[4], 2, "a manifest with calls is format 2");
+        let back = Manifest::decode(&bytes).unwrap();
+        assert_eq!(sha256(&bytes), back.hash());
+        assert_eq!(back.hash(), a.hash());
+        let web = back.service("web").unwrap();
+        assert_eq!(web.calls, ["echo", "kv-store"]);
+        assert!(web.may_call(b"echo") && web.may_call(b"kv-store"));
+        assert!(!web.may_call(b"web") && !web.may_call(b"gateway") && !web.may_call(b"nosuch") && !web.may_call(b""));
+        assert!(!back.service("echo").unwrap().may_call(b"echo"), "no calls = none, not even itself");
+        assert!(back.service("kv-store").unwrap().may_call(b"kv-store"), "self-calls need an entry");
+        let gw = back.service("gateway").unwrap();
+        assert!(gw.may_call(b"web") && gw.may_call(b"nosuch"));
+        // The hash covers the allowlist, not the order it was written in.
+        let mut b = a.clone();
+        b.services[0].calls = vec!["kv-store".into(), "echo".into(), "echo".into()];
+        assert_eq!(b.hash(), a.hash(), "encoding sorts and deduplicates");
+        assert!(b.validate().is_err(), "but the in-memory list must be canonical (binary search)");
+        let mut c = a.clone();
+        c.services[0].calls = vec!["echo".into()];
+        assert_ne!(c.hash(), a.hash());
+        // Bit flips and truncations: never a panic.
+        for n in 0..bytes.len() {
+            assert!(Manifest::decode(&bytes[..n]).is_err());
+        }
+        for i in 0..bytes.len() {
+            for bit in 0..8 {
+                let mut x = bytes.clone();
+                x[i] ^= 1 << bit;
+                if let Ok(m) = Manifest::decode(&x) {
+                    assert_eq!(m.hash(), sha256(&x), "every accepted encoding is canonical");
+                    m.validate().unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn format1_still_decodes_and_keeps_its_hash() {
+        let m = Manifest { version: 9, services: vec![spec("web", 2), spec("echo", 1)] };
+        let legacy = legacy_encode(&m);
+        // Without calls: the same bytes as before; a stored format-1 manifest decodes to deny-all.
+        assert_eq!(m.encode(), legacy);
+        let back = Manifest::decode(&legacy).unwrap();
+        assert_eq!(back, Manifest { version: 9, services: vec![spec("echo", 1), spec("web", 2)] });
+        assert!(back.services.iter().all(|s| s.calls.is_empty() && !s.may_call(b"echo")));
+        assert_eq!(back.hash(), sha256(&legacy));
+        // Format 2 with only empty lists is not canonical; unknown formats are refused.
+        let mut f2 = b"K10M\x02".to_vec();
+        put_u64(&mut f2, 9);
+        put_varint(&mut f2, 2);
+        for s in [spec("echo", 1), spec("web", 2)] {
+            let one = legacy_encode(&Manifest { version: 0, services: vec![s] });
+            f2.extend_from_slice(&one[5 + 8 + 1..]); // the service record (after magic, format, version, count)
+            f2.push(0);
+        }
+        assert_eq!(Manifest::decode(&f2), Err(DecodeError::Invalid("manifest format (2 without calls)")));
+        let mut f3 = legacy;
+        f3[4] = 3;
+        assert!(Manifest::decode(&f3).is_err());
+    }
+
+    #[test]
+    fn calls_validation() {
+        let ok = |svcs: Vec<ServiceSpec>| Manifest { version: 1, services: svcs }.validate();
+        assert!(ok(vec![calling("a", &["b"]), spec("b", 1)]).is_ok());
+        let e = ok(vec![calling("a", &["b", "typo"]), spec("b", 1)]).unwrap_err();
+        assert!(e.contains("calls `typo`") && e.contains("not a service"), "{e}");
+        assert!(ok(vec![calling("a", &["*", "b"]), spec("b", 1)]).unwrap_err().contains("only entry"));
+        assert!(ok(vec![calling("a", &["B"])]).unwrap_err().contains("invalid service name"));
+        let unsorted = ServiceSpec { calls: vec!["b".into(), "a".into()], ..spec("a", 1) };
+        assert!(ok(vec![unsorted, spec("b", 1)]).unwrap_err().contains("sorted"));
+        // The decoder refuses what validate refuses.
+        let typo = Manifest { version: 1, services: vec![calling("a", &["nosuch"])] };
+        assert!(Manifest::decode(&typo.encode()).is_err());
+        let mixed = Manifest { version: 1, services: vec![calling("a", &["*", "a"])] };
+        assert!(Manifest::decode(&mixed.encode()).is_err());
+        // A huge calls count with no data: clean error, no allocation.
+        let mut evil = Manifest { version: 1, services: vec![calling("a", &["a"])] }.encode();
+        let n = evil.len();
+        evil.truncate(n - 3); // drop count=1, len=1, "a"
+        evil.extend_from_slice(&[0xff, 0xff, 0xff, 0x0f]);
+        assert!(Manifest::decode(&evil).is_err());
+    }
+
+    #[test]
+    fn text_calls() {
+        let src = r#"
+service echo { code = "e.ten" }
+service chain {
+  code = "c.ten"
+  calls = ["kv-store", "echo", "echo",]   # sorted + deduplicated
+}
+service kv-store { code = "k.ten" calls = [] }
+service gw { code = "g.ten" calls = ["*"] }
+"#;
+        let d = parse_text(src).unwrap();
+        assert!(d[0].calls.is_empty());
+        assert_eq!(d[1].calls, ["echo", "kv-store"]);
+        assert!(d[2].calls.is_empty());
+        assert_eq!(d[3].calls, ["*"]);
+        let m = Manifest { version: 1, services: d.iter().map(|d| d.to_spec([0; 32])).collect() };
+        m.validate().unwrap();
+        assert_eq!(Manifest::decode(&m.encode()).unwrap().hash(), m.hash());
+        let cases: &[(&str, u32, &str)] = &[
+            ("service a {\n code = \"a\"\n calls = [\"b\"]\n}", 3, "calls `b`, which is not declared"),
+            ("service a { code = \"a\" }\nservice b {\n code = \"b\"\n calls = [\"a\", \"ehco\"]\n}", 4, "`ehco`"),
+            ("service a {\n code = \"a\"\n calls = [\"*\", \"a\"]\n}", 3, "only entry"),
+            ("service a {\n code = \"a\"\n calls = [a]\n}", 3, "quoted service names"),
+            ("service a {\n code = \"a\"\n calls = \"a\"\n}", 3, "expects a list"),
+            ("service a {\n code = \"a\"\n calls = [\"A\"]\n}", 3, "invalid service name"),
+            ("service a {\n code = \"a\"\n calls = [\"a\" \"a\"]\n}", 3, "expected `,` or `]`"),
+            ("service a {\n code = \"a\"\n calls = [\"a\",\n", 3, "missing `]`"),
+            ("service a {\n code = \"a\"\n calls = [\"a\"]\n calls = []\n}", 4, "duplicate key"),
+        ];
+        for (src, line, needle) in cases {
+            let e = parse_text(src).unwrap_err();
+            assert_eq!(e.line, *line, "{src:?} -> {e}");
+            assert!(e.msg.contains(needle), "{src:?} -> {e}");
+        }
+        // A service may list itself (self-calls follow the same rule).
+        assert_eq!(parse_text("service a { code = \"a\" calls = [\"a\"] }").unwrap()[0].calls, ["a"]);
     }
 
     #[test]

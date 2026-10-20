@@ -21,7 +21,7 @@ pub fn examples_manifest() -> String {
             "service hello   {{ code = \"{}\" memory = 64KiB }}\n",
             "service echo    {{ code = \"{}\" memory = 1MiB }}\n",
             "service compute {{ code = \"{}\" memory = 64KiB cpu_ms = 60000 }}\n",
-            "service chain   {{ code = \"{}\" memory = 64KiB config = \"echo\" }}\n",
+            "service chain   {{ code = \"{}\" memory = 64KiB config = \"echo\" calls = [\"echo\"] }}\n",
             "service counter {{ code = \"{}\" memory = 64KiB }}\n",
             "service todo    {{ code = \"{}\" memory = 1MiB }}\n",
             "service nbody   {{ code = \"{}\" memory = 64KiB cpu_ms = 60000 }}\n",

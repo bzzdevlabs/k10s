@@ -549,8 +549,12 @@ impl Level<'_> {
     fn call_service(&mut self, name_path: &[u8], body: Vec<u8>) -> i64 {
         self.last_call.clear();
         let split = name_path.iter().position(|&c| c == b'/').unwrap_or(name_path.len());
-        let Ok(name) = core::str::from_utf8(&name_path[..split]) else { return -1 };
-        let Some(svc) = NODE.lock().services.get(name).cloned() else { return -1 };
+        // `calls` allowlist: denied = unknown, decided before any lookup or forwarding (existence changes nothing).
+        if !self.svc.spec.may_call(&name_path[..split]) {
+            return CALL_UNKNOWN;
+        }
+        let Ok(name) = core::str::from_utf8(&name_path[..split]) else { return CALL_UNKNOWN };
+        let Some(svc) = NODE.lock().services.get(name).cloned() else { return CALL_UNKNOWN };
         svc.here().stats.calls += 1;
         if let Placement::Remote(nodes) = &svc.placement {
             return self.call_remote(&svc, nodes.clone(), name_path[split..].to_vec(), body);
@@ -1374,7 +1378,8 @@ fn status_json() -> String {
     let l = |a: &AtomicU64| a.load(Ordering::Relaxed);
     let _ = write!(
         s,
-        "{{\"node\":\"k10-metal\",\"engine\":\"{}\",\"uptime_ms\":{},\"boot_ms\":{:.3},\"manifest_version\":{},\"cpu\":{{\"halted_ms\":{},\"polling_ms\":{},\"steal_ms\":{}}},",
+        "{{\"node\":\"k10-metal\",\"version\":\"{}\",\"engine\":\"{}\",\"uptime_ms\":{},\"boot_ms\":{:.3},\"manifest_version\":{},\"cpu\":{{\"halted_ms\":{},\"polling_ms\":{},\"steal_ms\":{}}},",
+        env!("K10S_VERSION_FULL"),
         if engine::jit_enabled() { "jit" } else { "interp" },
         time::now_ms(),
         crate::boot_ms(),

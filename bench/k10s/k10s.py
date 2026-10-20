@@ -10,7 +10,7 @@ Subcommands (all print JSON on stdout):
   idle <snapA> <snapB>                   idle report between two snapshots (window, RSS/PSS/working set, CPU cores)
   delta <snapA> <snapB> <n>              per-unit memory delta (RSS/PSS/working set/status RSS per unit)
   cpu <pid,pid,...>                      summed CPU µs (cgroup usage_usec if in a k10sbench scope, else ticks)
-  manifest <prefix> <n> <code> [key=value ...]   manifest text: services <prefix>0..<prefix>(n-1)
+  manifest <prefix> <n> <code> [key=value ...]   manifest text: services <prefix>0..<prefix>(n-1) (calls=a,b -> calls = ["a", "b"])
   get-many <addr> <paths-file|@prefix:n> [conns] [depth]   pipelined keep-alive GETs, status histogram
   serve-time <k10s-bin> <manifest> <addr,...> <prefix> <n> [timeout_s]   apply -> every service answers 200 on every addr
   cold <addr> <prefix> <n> [query]       first request to never-instantiated services vs. second request (fresh conns)
@@ -439,7 +439,13 @@ def med(xs):
 
 
 def manifest(prefix, n, code, kv):
-    attrs = " ".join(f'{k} = "{v}"' if k in ("code", "config") else f"{k} = {v}" for k, v in kv)
+    def val(k, v):
+        if k in ("code", "config"):
+            return f'"{v}"'
+        if k == "calls":  # calls=a,b -> ["a", "b"]
+            return "[" + ", ".join(f'"{x}"' for x in v.split(",") if x) + "]"
+        return v
+    attrs = " ".join(f"{k} = {val(k, v)}" for k, v in kv)
     return "".join(f'service {prefix}{i} {{ code = "{code}" {attrs} }}\n' for i in range(n))
 
 

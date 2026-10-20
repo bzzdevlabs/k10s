@@ -3,6 +3,7 @@
 //! ```text
 //! k10s node   [--http ADDR] [--data DIR] [--shards N] [--backend jit|interp] [--name NAME] [--mem SIZE]
 //!             [--snapshots fresh|all] [--idle-timeout SECS] [--idle-spin-us N] [--log-stderr] [--pin]
+//!             [--timer-res-us N] [--jit-indirect jump|lfence|retpoline]
 //!             [--sandbox on|log|off] [--user USER[:GROUP]]
 //!             cluster mode (any of): [--gossip ADDR] [--rpc ADDR] [--join HOST:PORT[,…]] [--advertise HOST]
 //!             tuning: [--probe-ms N] [--suspicion-mult N] [--leave-grace-ms N]
@@ -12,6 +13,7 @@
 //!             [--backend jit|interp] [--memory SIZE] [--config STR] [--cpu-ms N]
 //! k10s status [--node HOST:PORT] [--json]
 //! k10s logs   SERVICE [--node HOST:PORT]
+//! k10s version                       (also `--version`, `-V`)
 //! ```
 //! Argument parsing is hand-written (no dependencies beyond the workspace). The default backend is `K10S_BACKEND`
 //! (`jit` | `interp`) if set, else the JIT.
@@ -34,6 +36,8 @@ const USAGE: &str = "usage:
               [--kv-max SIZE] (per-service KV quota, default 256MiB, 0 = unlimited)
               [--conn-buffer-max SIZE] (bytes buffered in HTTP connections node-wide, default max(--mem/8, 64MiB))
               [--snapshots fresh|all] [--idle-timeout SECS] [--idle-spin-us N] [--log-stderr] [--pin]
+              [--timer-res-us N] (guest clock resolution, default 100; 0 = full, trusted tenants only)
+              [--jit-indirect jump|lfence|retpoline] (Spectre v2 hardening of JIT code, default jump)
               [--sandbox on|log|off] (process sandbox: Landlock + seccomp, default on or $K10S_SANDBOX)
               [--user USER[:GROUP]] (started as root: run as USER once the listeners are bound)
               cluster mode (any of these flags turns it on):
@@ -47,9 +51,13 @@ const USAGE: &str = "usage:
               (runs one request in-process, no node needed: body on stdout, status and logs on stderr)
   k10s status [--node HOST:PORT] [--json]
   k10s logs   SERVICE [--node HOST:PORT]
+  k10s version                                    (also --version, -V)
 
 The default node address is 127.0.0.1:8080. In a cluster, `apply` and HTTP requests work on any node.
 The default backend is $K10S_BACKEND (jit|interp) if set, else jit.";
+
+/// Build version, e.g. `0.1.1-dev.45+1a2b3c4` (scripts/version.sh via build.rs).
+const VERSION: &str = env!("K10S_VERSION_FULL");
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -65,6 +73,10 @@ fn main() -> ExitCode {
         "run" => cmd_run(rest),
         "status" => cmd_status(rest),
         "logs" => cmd_logs(rest),
+        "version" | "--version" | "-V" => {
+            println!("k10s {VERSION}");
+            Ok(())
+        }
         "help" | "--help" | "-h" => {
             println!("{USAGE}");
             Ok(())
@@ -152,7 +164,8 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
     let a = Args::parse(args, &["log-stderr", "pin"])?;
     a.check_known(&[
         "http", "data", "shards", "backend", "name", "mem", "kv-max", "conn-buffer-max", "snapshots", "idle-timeout", "idle-spin-us", "log-stderr",
-        "pin", "rpc", "gossip", "join", "advertise", "probe-ms", "suspicion-mult", "leave-grace-ms", "sandbox", "user",
+        "pin", "rpc", "gossip", "join", "advertise", "probe-ms", "suspicion-mult", "leave-grace-ms",
+        "timer-res-us", "jit-indirect", "sandbox", "user",
     ])?;
     // Process sandbox (k10-node/src/sandbox.rs): early() here, Landlock before the first thread, seccomp after start.
     let sandbox_mode = match a.get("sandbox") {
@@ -201,7 +214,15 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
     }
     cfg.log_stderr = a.has("log-stderr");
     cfg.pin_threads = a.has("pin");
+    if let Some(s) = a.get("timer-res-us") {
+        cfg.timer_res = Duration::from_micros(s.parse().map_err(|_| "invalid --timer-res-us")?);
+    }
+    if let Some(s) = a.get("jit-indirect") {
+        cfg.jit_indirect =
+            k10_node::IndirectBranch::parse(s).ok_or_else(|| format!("invalid --jit-indirect `{s}` (jump|lfence|retpoline)"))?;
+    }
     let cluster_cfg = cluster_config(&a)?;
+    k10_node::admin::set_build_version(VERSION);
     // Block SIGINT/SIGTERM in every thread (inherited by the threads the node spawns) and wait for them here.
     let set = signal_set();
     // SAFETY: plain libc calls on a properly initialized sigset_t.
@@ -229,7 +250,7 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
     };
     eprintln!("{}", sandbox::after_start(sandbox_setup)?);
     eprintln!(
-        "k10s: node `{}` listening on http://{} ({} shards, backend {}, data {})",
+        "k10s {VERSION}: node `{}` listening on http://{} ({} shards, backend {}, data {})",
         node.shared().cfg.name,
         node.http_addr(),
         shards,
@@ -459,6 +480,8 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         cpu_ms,
         fresh: false,
         config: a.get("config").unwrap_or("").as_bytes().to_vec(),
+        // The only service: nothing to call.
+        calls: Vec::new(),
     };
     let cfg = NodeConfig {
         http: "127.0.0.1:0".parse().unwrap(),
