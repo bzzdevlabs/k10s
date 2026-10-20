@@ -1847,17 +1847,13 @@ impl Shard {
                     } else {
                         match http::parse_head(&c.rbuf, &lim) {
                             Parse::Complete(h) => {
-                                // Admin access control, before the body is read or reserved.
-                                let fd = c.fd.raw();
-                                let deny = crate::admin::gate(&self.node, c.admin, &h, &c.rbuf, || {
-                                    sys::peer_addr(fd).is_ok_and(|a| match a.ip() {
-                                        std::net::IpAddr::V4(ip) => ip.is_loopback(),
-                                        std::net::IpAddr::V6(ip) => ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback()),
-                                    })
-                                });
-                                if let Some((st, msg)) = deny {
-                                    self.conn_error(idx, st, msg);
-                                    return;
+                                // Admin access control (admin listener, `/_k10s` targets), before the body is read.
+                                if c.admin || h.target.starts_with("/_k10s") {
+                                    let fd = c.fd.raw();
+                                    if let Some((st, msg)) = crate::admin::gate(&self.node, c.admin, &h, &c.rbuf, || sys::peer_is_loopback(fd)) {
+                                        self.conn_error(idx, st, msg);
+                                        return;
+                                    }
                                 }
                                 let c = self.conns[idx as usize].as_mut().unwrap();
                                 // The body is buffered until the response is produced: reserve it in the node-wide
