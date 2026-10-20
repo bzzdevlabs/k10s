@@ -7,8 +7,8 @@
 //! ```
 //!
 //! Services built as TIR with `k10_ir::builder` (all import only what they use; memory layout: data at 0..,
-//! scratch at 1024.., buffers at 4096..): hello, echo, compute, counter, chain, spin, callspin, trap, instcount,
-//! freshcount, config, log, time, random.
+//! scratch at 1024.., buffers at 4096..): hello, echo, compute, counter, chain, spin, callspin, probe, trap,
+//! instcount, freshcount, config, log, time, random. Granted calls: chain → echo, callspin → spin, probe → hello.
 //!
 //! Services compiled from Ten sources with `k10_lang::compile_file` (from `--ten-dir`, default the repository's
 //! `examples/`): sha (compute.ten, SHA-256 chain), nbody (nbody.ten, f64), sort (sort.ten, 2 MiB memory),
@@ -219,6 +219,40 @@ fn call_to(name: &'static [u8]) -> Module {
     mb.into_module()
 }
 
+/// Calls the service named by the request path (`/probe/<name>[/<path>]`) and answers like `chain`; it may call
+/// only hello, so other targets exercise denied calls.
+fn probe() -> Module {
+    let mut mb = ModuleBuilder::new();
+    mb.mem_log2(16);
+    let imports = ["req_path", "call", "call_resp_len", "call_resp_read", "output_write", "output_status"];
+    let h = Host::new(&mut mb, &imports);
+    let dec = out_dec(&mut mb, &h);
+    let prefix = b"probe -> ";
+    let fail = b"call failed: -";
+    mb.data(64, prefix).data(96, fail);
+    let f = mb.func(0, 0, |f| {
+        let (s, n) = (f.new_local(), f.new_local());
+        // Target = request path without its leading '/' (at 1024, at most 256 bytes).
+        f.const_(1024).const_(256).call(h.f("req_path")).local_set(n);
+        f.local_get(n).const_(256).gt_u().if_().const_(256).local_set(n).end();
+        f.local_get(n).eqz().if_().const_(1).local_set(n).end();
+        f.const_(1025).local_get(n).const_(1).sub().const_(0).const_(0).call(h.f("call")).local_set(s);
+        f.local_get(s).const_(0).lt_s().if_();
+        f.const_(502).call(h.f("output_status")).drop();
+        write_const(f, &h, 96, fail.len());
+        f.const_(0).local_get(s).sub().call(dec);
+        f.return_();
+        f.end();
+        write_const(f, &h, 64, prefix.len());
+        f.call(h.f("call_resp_len")).local_set(n);
+        f.local_get(n).const_(32768).gt_u().if_().const_(32768).local_set(n).end();
+        f.const_(4096).const_(0).local_get(n).call(h.f("call_resp_read")).drop();
+        f.const_(4096).local_get(n).call(h.f("output_write")).drop();
+    });
+    mb.export("handle", f);
+    mb.into_module()
+}
+
 /// Never returns: exercises preemption and the CPU budget.
 fn spin() -> Module {
     let mut mb = ModuleBuilder::new();
@@ -321,6 +355,8 @@ struct Def {
     cpu_ms: u32,
     fresh: bool,
     config: &'static [u8],
+    /// Services it may `call` (dropped when not in the bundle).
+    calls: &'static [&'static str],
 }
 
 /// Services compiled from Ten sources: (service name, file in the Ten directory, cpu_ms, memory log2 if larger
@@ -342,20 +378,28 @@ fn compile_ten(dir: &std::path::Path, file: &str) -> Module {
 }
 
 const DEFS: &[Def] = &[
-    Def { name: "hello", build: hello, cpu_ms: 1000, fresh: false, config: b"" },
-    Def { name: "echo", build: echo, cpu_ms: 1000, fresh: false, config: b"" },
-    Def { name: "compute", build: compute, cpu_ms: 5000, fresh: false, config: b"" },
-    Def { name: "counter", build: counter, cpu_ms: 1000, fresh: false, config: b"" },
-    Def { name: "chain", build: chain, cpu_ms: 1000, fresh: false, config: b"" },
-    Def { name: "spin", build: spin, cpu_ms: 100, fresh: false, config: b"" },
-    Def { name: "callspin", build: callspin, cpu_ms: 1000, fresh: false, config: b"" },
-    Def { name: "trap", build: trap, cpu_ms: 1000, fresh: false, config: b"" },
-    Def { name: "instcount", build: instcount, cpu_ms: 1000, fresh: false, config: b"" },
-    Def { name: "freshcount", build: instcount, cpu_ms: 1000, fresh: true, config: b"" },
-    Def { name: "config", build: config, cpu_ms: 1000, fresh: false, config: b"greeting=hello from the manifest\n" },
-    Def { name: "log", build: log, cpu_ms: 1000, fresh: false, config: b"" },
-    Def { name: "time", build: time, cpu_ms: 1000, fresh: false, config: b"" },
-    Def { name: "random", build: random, cpu_ms: 1000, fresh: false, config: b"" },
+    Def { name: "hello", build: hello, cpu_ms: 1000, fresh: false, config: b"", calls: &[] },
+    Def { name: "echo", build: echo, cpu_ms: 1000, fresh: false, config: b"", calls: &[] },
+    Def { name: "compute", build: compute, cpu_ms: 5000, fresh: false, config: b"", calls: &[] },
+    Def { name: "counter", build: counter, cpu_ms: 1000, fresh: false, config: b"", calls: &[] },
+    Def { name: "chain", build: chain, cpu_ms: 1000, fresh: false, config: b"", calls: &["echo"] },
+    Def { name: "spin", build: spin, cpu_ms: 100, fresh: false, config: b"", calls: &[] },
+    Def { name: "callspin", build: callspin, cpu_ms: 1000, fresh: false, config: b"", calls: &["spin"] },
+    Def { name: "probe", build: probe, cpu_ms: 1000, fresh: false, config: b"", calls: &["hello"] },
+    Def { name: "trap", build: trap, cpu_ms: 1000, fresh: false, config: b"", calls: &[] },
+    Def { name: "instcount", build: instcount, cpu_ms: 1000, fresh: false, config: b"", calls: &[] },
+    Def { name: "freshcount", build: instcount, cpu_ms: 1000, fresh: true, config: b"", calls: &[] },
+    Def {
+        name: "config",
+        build: config,
+        cpu_ms: 1000,
+        fresh: false,
+        config: b"greeting=hello from the manifest\n",
+        calls: &[],
+    },
+    Def { name: "log", build: log, cpu_ms: 1000, fresh: false, config: b"", calls: &[] },
+    Def { name: "time", build: time, cpu_ms: 1000, fresh: false, config: b"", calls: &[] },
+    Def { name: "random", build: random, cpu_ms: 1000, fresh: false, config: b"", calls: &[] },
 ];
 
 fn usage() -> ! {
@@ -395,16 +439,17 @@ fn main() {
             _ => usage(),
         }
     }
-    // Every service: (name, module, cpu_ms, fresh, config, memory log2 override).
-    type Svc = (String, Module, u32, bool, Vec<u8>, Option<u8>);
-    let mut all: Vec<Svc> = DEFS.iter().map(|d| (d.name.to_string(), (d.build)(), d.cpu_ms, d.fresh, d.config.to_vec(), None)).collect();
+    // Every service: (name, module, cpu_ms, fresh, config, memory log2 override, calls).
+    type Svc = (String, Module, u32, bool, Vec<u8>, Option<u8>, &'static [&'static str]);
+    let def = |d: &Def| -> Svc { (d.name.into(), (d.build)(), d.cpu_ms, d.fresh, d.config.to_vec(), None, d.calls) };
+    let mut all: Vec<Svc> = DEFS.iter().map(def).collect();
     if let Some(dir) = &ten_dir {
         for &(name, file, cpu_ms, mem) in TEN {
-            all.push((name.to_string(), compile_ten(dir, file), cpu_ms, false, Vec::new(), mem));
+            all.push((name.to_string(), compile_ten(dir, file), cpu_ms, false, Vec::new(), mem, &[]));
         }
     }
     if list {
-        for (name, m, cpu_ms, fresh, _, _) in &all {
+        for (name, m, cpu_ms, fresh, _, _, _) in &all {
             let bytes = k10_ir::encode(m);
             println!("{:<11} {:>5} bytes  cpu_ms={:<5} fresh={}", name, bytes.len(), cpu_ms, fresh);
         }
@@ -430,7 +475,7 @@ fn main() {
             cpu_ms: d.2,
             fresh: d.3,
             config: d.4.clone(),
-            calls: Vec::new(),
+            calls: k10_mesh::manifest::canonical_calls(d.6),
         });
     };
     if let Some((name, count)) = &replicate {
@@ -447,6 +492,11 @@ fn main() {
         }
     }
     services.sort_by(|a, b| a.name.cmp(&b.name));
+    // Callees must be in the manifest: drop those left out by `--services` / `--replicate`.
+    let names: Vec<String> = services.iter().map(|s| s.name.clone()).collect();
+    for s in &mut services {
+        s.calls.retain(|c| names.binary_search(c).is_ok());
+    }
     let manifest = Manifest { version, services };
     manifest.validate().unwrap_or_else(|e| panic!("manifest: {e}"));
     let n = manifest.services.len();
