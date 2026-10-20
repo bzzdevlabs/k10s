@@ -75,6 +75,8 @@ impl Store {
         let Some(dir) = &st.dir else { return Ok(st) };
         let bdir = dir.join("blobs");
         std::fs::create_dir_all(&bdir)?;
+        remove_stale_tmp(dir);
+        remove_stale_tmp(&bdir);
         for e in std::fs::read_dir(&bdir)? {
             let e = e?;
             let name = e.file_name();
@@ -206,18 +208,47 @@ impl Store {
         }
     }
 
-    /// Gossip addresses of the members last seen alive (`DATA/peers`), contacted at restart besides `--join`.
-    pub fn load_peers(&self) -> Vec<SocketAddr> {
+    /// Gossip addresses of members last seen alive (`DATA/peers`), if written for the same cluster `stamp`.
+    pub fn load_peers(&self, stamp: &str) -> Vec<SocketAddr> {
         let Some(dir) = &self.dir else { return Vec::new() };
         let Ok(s) = std::fs::read_to_string(dir.join("peers")) else { return Vec::new() };
-        s.lines().filter_map(|l| l.trim().parse().ok()).take(MAX_PEERS).collect()
+        let mut lines = s.lines();
+        if lines.next() != Some(&format!("k10s-peers {stamp}")) {
+            eprintln!("k10s: cluster: ignoring {} (written for another cluster key)", dir.join("peers").display());
+            return Vec::new();
+        }
+        lines.filter_map(|l| l.trim().parse().ok()).take(MAX_PEERS).collect()
     }
 
     /// Replaces `DATA/peers` (no fsync: a lost update only leaves a stale hint).
-    pub fn save_peers(&self, peers: &[SocketAddr]) -> io::Result<()> {
+    pub fn save_peers(&self, stamp: &str, peers: &[SocketAddr]) -> io::Result<()> {
         let Some(dir) = &self.dir else { return Ok(()) };
         let text: String = peers.iter().take(MAX_PEERS).map(|p| format!("{p}\n")).collect();
-        write_atomic(&dir.join("peers"), text.as_bytes(), false)
+        write_atomic(&dir.join("peers"), format!("k10s-peers {stamp}\n{text}").as_bytes(), false)
+    }
+
+    /// This life's incarnation: above the wall clock and every incarnation persisted before (clock steps back).
+    pub fn next_incarnation(&self, wall_ms: u64) -> io::Result<u64> {
+        let Some(dir) = &self.dir else { return Ok(wall_ms) };
+        let last = std::fs::read_to_string(dir.join("incarnation")).ok().and_then(|s| s.trim().parse::<u64>().ok());
+        let inc = wall_ms.max(last.map_or(0, |l| l + 1));
+        self.save_incarnation(inc)?;
+        Ok(inc)
+    }
+
+    pub fn save_incarnation(&self, inc: u64) -> io::Result<()> {
+        let Some(dir) = &self.dir else { return Ok(()) };
+        write_atomic(&dir.join("incarnation"), format!("{inc}\n").as_bytes(), true)
+    }
+}
+
+/// Leftovers of `write_atomic` interrupted by a crash (`NAME.tmpPID`).
+fn remove_stale_tmp(dir: &Path) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        if e.path().extension().and_then(|x| x.to_str()).is_some_and(|x| x.starts_with("tmp")) {
+            let _ = std::fs::remove_file(e.path());
+        }
     }
 }
 
@@ -314,13 +345,24 @@ mod tests {
         assert_eq!(node_id(Some(&dir)).unwrap(), id);
         assert_ne!(node_id(None).unwrap(), node_id(None).unwrap());
         // remembered peers: bounded, survive a reopen, garbage lines skipped
-        assert!(st.load_peers().is_empty());
+        assert!(st.load_peers("k1").is_empty());
         let peers: Vec<SocketAddr> = (0..20).map(|i| format!("127.0.0.1:{}", 7000 + i).parse().unwrap()).collect();
-        st.save_peers(&peers).unwrap();
-        assert_eq!(Store::open(Some(&dir)).unwrap().load_peers(), peers[..MAX_PEERS]);
-        std::fs::write(dir.join("peers"), "garbage\n10.0.0.1:7946\n").unwrap();
-        assert_eq!(st.load_peers(), vec!["10.0.0.1:7946".parse::<SocketAddr>().unwrap()]);
-        assert!(Store::open(None).unwrap().load_peers().is_empty());
+        st.save_peers("k1", &peers).unwrap();
+        assert_eq!(Store::open(Some(&dir)).unwrap().load_peers("k1"), peers[..MAX_PEERS]);
+        assert!(st.load_peers("k2").is_empty(), "another cluster key: ignored");
+        std::fs::write(dir.join("peers"), "k10s-peers k1\ngarbage\n10.0.0.1:7946\n").unwrap();
+        assert_eq!(st.load_peers("k1"), vec!["10.0.0.1:7946".parse::<SocketAddr>().unwrap()]);
+        assert!(Store::open(None).unwrap().load_peers("k1").is_empty());
+        // incarnations never go back, even when the wall clock does
+        assert_eq!(st.next_incarnation(1000).unwrap(), 1000);
+        assert_eq!(st.next_incarnation(500).unwrap(), 1001);
+        st.save_incarnation(2000).unwrap();
+        assert_eq!(st.next_incarnation(1500).unwrap(), 2001);
+        // stale temporary files are removed at open
+        std::fs::write(dir.join("peers.tmp4242"), "x").unwrap();
+        std::fs::write(dir.join("blobs").join("ab.tmp1"), "x").unwrap();
+        let _ = Store::open(Some(&dir)).unwrap();
+        assert!(!dir.join("peers.tmp4242").exists() && !dir.join("blobs").join("ab.tmp1").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

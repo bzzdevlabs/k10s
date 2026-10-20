@@ -17,7 +17,7 @@
 
 use crate::sys;
 use std::io;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::*};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering::*};
 
 /// Bytes after `S` that belong to a slot.
 pub const TAIL: usize = 4096;
@@ -43,79 +43,58 @@ pub struct MemStats {
 /// What the memory of a live instance is charged to (see [`MemBudget`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Charge {
-    /// Not accounted (tests, tools).
     #[default]
     None,
-    /// One unit of its service's [`Reservation`].
+    /// Its service's reservation.
     Reserved,
-    /// The node's shared pool (burst instances).
+    /// The shared pool (burst instances).
     Shared,
 }
 
-/// A service version's reservation of `units` instances; active from [`MemBudget::install`] to [`MemBudget::release`].
+const INACTIVE: u8 = 0;
+const FREE: u8 = 1;
+const IN_USE: u8 = 2;
+const RELEASED: u8 = 3;
+const RELEASED_IN_USE: u8 = 4;
+
+/// A service version's reservation of one instance (`bytes == 0`: none), active from install to release.
 #[derive(Debug)]
 pub struct Reservation {
-    units: u32,
-    unit_bytes: u64,
-    /// Bit 31: inactive. Low bits: units currently backing a live instance.
-    state: AtomicU32,
+    bytes: u64,
+    state: AtomicU8,
 }
-
-const RES_INACTIVE: u32 = 1 << 31;
 
 impl Reservation {
-    pub fn new(units: u32, unit_bytes: u64) -> Reservation {
-        Reservation { units: units.min(RES_INACTIVE - 1), unit_bytes, state: AtomicU32::new(RES_INACTIVE) }
+    pub fn new(bytes: u64) -> Reservation {
+        Reservation { bytes, state: AtomicU8::new(INACTIVE) }
     }
 
-    /// Instances reserved (0 = none: placed on other nodes).
-    pub fn units(&self) -> u32 {
-        self.units
-    }
-
-    /// Bytes reserved for one instance.
-    pub fn unit_bytes(&self) -> u64 {
-        self.unit_bytes
-    }
-
-    /// Bytes held for this service while the reservation is active (0 otherwise).
+    /// Bytes held while active, else 0.
     pub fn bytes(&self) -> u64 {
-        if self.state.load(Relaxed) & RES_INACTIVE != 0 {
-            0
-        } else {
-            self.units as u64 * self.unit_bytes
+        match self.state.load(Relaxed) {
+            FREE | IN_USE => self.bytes,
+            _ => 0,
         }
     }
 
-    /// Reserved units currently backing a live instance.
-    pub fn in_use(&self) -> u32 {
-        self.state.load(Relaxed) & !RES_INACTIVE
+    pub fn in_use(&self) -> bool {
+        matches!(self.state.load(Relaxed), IN_USE | RELEASED_IN_USE)
     }
 
-    /// Takes a free unit (active reservations only).
     fn take(&self) -> bool {
-        let mut cur = self.state.load(Relaxed);
-        loop {
-            if cur & RES_INACTIVE != 0 || cur >= self.units {
-                return false;
-            }
-            match self.state.compare_exchange_weak(cur, cur + 1, AcqRel, Relaxed) {
-                Ok(_) => return true,
-                Err(c) => cur = c,
-            }
-        }
+        self.bytes != 0 && self.state.compare_exchange(FREE, IN_USE, AcqRel, Relaxed).is_ok()
     }
 }
 
-/// Node-wide instance-memory budget (`--mem`): per-service [`Reservation`]s plus a shared pool for burst instances.
-/// `committed` = active reservations + shared instances + still-alive instances of released reservations; a shared
-/// instance needs `committed + size ≤ limit`, a reserved one always fits (so `committed` may briefly exceed `limit`
-/// after an apply adds reservations while the pool is full: see [`MemBudget::over`]).
+/// `--mem` with per-service reservations and a shared pool for burst instances (see docs/NODE.md, "Memory").
 #[derive(Debug, Default)]
 pub struct MemBudget {
     limit: u64,
+    /// Active reservations + shared instances + retiring instances.
     committed: AtomicU64,
     reserved: AtomicU64,
+    /// Instances of released reservations still alive: counted when admitting bursts, not by [`MemBudget::over`].
+    retiring: AtomicU64,
     refused: AtomicU64,
 }
 
@@ -128,59 +107,76 @@ impl MemBudget {
         self.limit
     }
 
-    /// Active reservations (bytes).
     pub fn reserved(&self) -> u64 {
         self.reserved.load(Relaxed)
     }
 
-    /// See the type docs.
     pub fn committed(&self) -> u64 {
         self.committed.load(Relaxed)
     }
 
-    /// Bytes committed beyond the reservations (burst instances, released versions still finishing).
-    pub fn shared_used(&self) -> u64 {
-        self.committed().saturating_sub(self.reserved())
+    pub fn retiring(&self) -> u64 {
+        self.retiring.load(Relaxed)
     }
 
-    /// Instance creations refused for lack of memory.
+    /// Bytes of burst instances.
+    pub fn shared_used(&self) -> u64 {
+        self.committed().saturating_sub(self.reserved()).saturating_sub(self.retiring())
+    }
+
+    /// Reservations beyond the limit (a reloaded or cluster state that does not fit: no bursts possible).
+    pub fn overcommit(&self) -> u64 {
+        self.reserved().saturating_sub(self.limit)
+    }
+
     pub fn refused(&self) -> u64 {
         self.refused.load(Relaxed)
     }
 
-    /// More committed than the limit: shards destroy burst instances until it is not.
+    /// Over the limit (an apply added reservations while bursts held the pool): shards destroy burst instances.
     #[inline]
     pub fn over(&self) -> bool {
-        self.committed.load(Relaxed) > self.limit
+        self.committed.load(Relaxed).saturating_sub(self.retiring.load(Relaxed)) > self.limit
     }
 
-    /// Activates `r` (once); callers check that reservations fit.
     pub fn install(&self, r: &Reservation) {
-        if r.units == 0 || r.state.fetch_and(!RES_INACTIVE, AcqRel) & RES_INACTIVE == 0 {
-            return;
+        if r.bytes != 0 && r.state.compare_exchange(INACTIVE, FREE, AcqRel, Relaxed).is_ok() {
+            self.committed.fetch_add(r.bytes, Relaxed);
+            self.reserved.fetch_add(r.bytes, Relaxed);
         }
-        let b = r.units as u64 * r.unit_bytes;
-        self.committed.fetch_add(b, Relaxed);
-        self.reserved.fetch_add(b, Relaxed);
     }
 
-    /// Deactivates `r`: unused units are uncommitted now, used ones when their instances are freed.
+    /// Ends `r`: a free unit is uncommitted now, one in use turns retiring until its instance is freed.
     pub fn release(&self, r: &Reservation) {
-        if r.units == 0 {
-            return;
+        let mut cur = r.state.load(Relaxed);
+        loop {
+            let next = match cur {
+                FREE => RELEASED,
+                IN_USE => RELEASED_IN_USE,
+                INACTIVE => RELEASED,
+                _ => return,
+            };
+            match r.state.compare_exchange_weak(cur, next, AcqRel, Relaxed) {
+                Ok(_) => break,
+                Err(c) => cur = c,
+            }
         }
-        let prev = r.state.fetch_or(RES_INACTIVE, AcqRel);
-        if prev & RES_INACTIVE != 0 {
-            return;
+        match cur {
+            FREE => {
+                self.committed.fetch_sub(r.bytes, Relaxed);
+                self.reserved.fetch_sub(r.bytes, Relaxed);
+            }
+            IN_USE => {
+                self.retiring.fetch_add(r.bytes, Relaxed);
+                self.reserved.fetch_sub(r.bytes, Relaxed);
+            }
+            _ => {}
         }
-        let unused = r.units.saturating_sub(prev) as u64;
-        self.committed.fetch_sub(unused * r.unit_bytes, Relaxed);
-        self.reserved.fetch_sub(r.units as u64 * r.unit_bytes, Relaxed);
     }
 
-    /// Charges a new instance of `bytes` to a free unit of `r`, else to the shared pool; `None`: no room.
+    /// Charges a new instance of `bytes` to `r` if free, else to the shared pool; `None`: no room.
     pub fn charge(&self, r: &Reservation, bytes: u64) -> Option<Charge> {
-        if r.units != 0 && r.take() {
+        if r.take() {
             return Some(Charge::Reserved);
         }
         let mut cur = self.committed.load(Relaxed);
@@ -204,18 +200,20 @@ impl MemBudget {
                 self.committed.fetch_sub(bytes, Relaxed);
             }
             Charge::Reserved => {
-                if r.state.fetch_sub(1, AcqRel) & RES_INACTIVE != 0 {
-                    // Released while this instance lived: uncommit its bytes now.
+                if r.state.compare_exchange(IN_USE, FREE, AcqRel, Relaxed).is_err()
+                    && r.state.compare_exchange(RELEASED_IN_USE, RELEASED, AcqRel, Relaxed).is_ok()
+                {
                     self.committed.fetch_sub(bytes, Relaxed);
+                    self.retiring.fetch_sub(bytes, Relaxed);
                 }
             }
         }
     }
 
-    /// While over-committed, uncommits a shared instance of `bytes` the caller then frees uncharged; false otherwise.
+    /// While over, uncommits a shared instance the caller then frees uncharged; false otherwise.
     pub fn reclaim_over(&self, bytes: u64) -> bool {
         let mut cur = self.committed.load(Relaxed);
-        while cur > self.limit {
+        while cur.saturating_sub(self.retiring.load(Relaxed)) > self.limit {
             match self.committed.compare_exchange_weak(cur, cur.saturating_sub(bytes), Relaxed, Relaxed) {
                 Ok(_) => return true,
                 Err(c) => cur = c,
@@ -224,14 +222,13 @@ impl MemBudget {
         false
     }
 
-    /// Moves a shared instance into a free unit of `r`; true if it is now [`Charge::Reserved`].
+    /// Moves a shared instance into `r` if free; true if it is now [`Charge::Reserved`].
     pub fn promote(&self, r: &Reservation, bytes: u64) -> bool {
-        if r.units != 0 && r.take() {
+        let ok = r.take();
+        if ok {
             self.committed.fetch_sub(bytes, Relaxed);
-            true
-        } else {
-            false
         }
+        ok
     }
 }
 
@@ -240,8 +237,6 @@ impl MemBudget {
 pub struct Slot {
     base: *mut u8,
     log2: u8,
-    /// Budget charge (in the struct's padding: no per-instance cost).
-    pub(crate) charge: Charge,
     /// Length of the prefix currently mapped from a snapshot memfd (0 = plain anonymous memory).
     pub(crate) mapped: usize,
 }
@@ -322,33 +317,12 @@ impl SlotPools {
         &self.stats
     }
 
-    /// Allocates a zeroed slot of `2^log2 + TAIL` bytes.
+    /// Allocates a zeroed slot of `2^log2 + TAIL` bytes (the node checks its [`MemBudget`] first).
     pub fn alloc(&mut self, log2: u8) -> io::Result<Slot> {
-        self.alloc_within(log2, u64::MAX)
-    }
-
-    /// Allocates a zeroed slot, but only if the node-wide address space handed to slots would stay `≤ limit`
-    /// afterwards. The limit is reserved with a single compare-exchange so concurrent shards cannot both pass the
-    /// check and overshoot `--mem` (the reservation is backed out if the slot cannot then be mapped).
-    pub fn alloc_within(&mut self, log2: u8, limit: u64) -> io::Result<Slot> {
         assert!((12..=36).contains(&log2), "slot size class out of range");
         let stats = self.stats.clone();
         let stride = (1usize << log2) as u64 + TAIL as u64;
-        // Atomic reserve against the cap (the node checks its `MemBudget` first and passes no limit).
-        if limit == u64::MAX {
-            stats.slot_bytes_used.fetch_add(stride, Relaxed);
-        } else {
-            let mut cur = stats.slot_bytes_used.load(Relaxed);
-            loop {
-                if cur + stride > limit {
-                    return Err(io::Error::new(io::ErrorKind::OutOfMemory, "node memory limit reached"));
-                }
-                match stats.slot_bytes_used.compare_exchange_weak(cur, cur + stride, Relaxed, Relaxed) {
-                    Ok(_) => break,
-                    Err(c) => cur = c,
-                }
-            }
-        }
+        stats.slot_bytes_used.fetch_add(stride, Relaxed);
         // Any early return from here on must back the reservation out.
         let backout = |stats: &MemStats| stats.slot_bytes_used.fetch_sub(stride, Relaxed);
         let c = self.classes[log2 as usize].get_or_insert_with(|| SizeClass {
@@ -384,8 +358,7 @@ impl SlotPools {
             p
         };
         stats.slots_used.fetch_add(1, Relaxed);
-        // slot_bytes_used was already reserved above.
-        Ok(Slot { base, log2: c.log2, charge: Charge::None, mapped: 0 })
+        Ok(Slot { base, log2: c.log2, mapped: 0 })
     }
 
     /// Returns a slot to its pool after resetting it to zeroed anonymous memory.
@@ -498,89 +471,87 @@ mod tests {
     }
 
     #[test]
-    fn slot_stays_small() {
-        // The charge lives in the padding: no per-instance memory.
-        assert_eq!(std::mem::size_of::<Slot>(), 24);
-    }
-
-    #[test]
     fn budget_reservations_and_shared_pool() {
         const U: u64 = 100;
         let b = MemBudget::new(1000);
-        let (a, h) = (Reservation::new(1, U), Reservation::new(1, U));
-        // Inactive: reserves nothing.
+        let (a, h) = (Reservation::new(U), Reservation::new(U));
         assert_eq!(a.bytes(), 0);
         b.install(&a);
         b.install(&h);
-        b.install(&h); // idempotent
+        b.install(&h);
         assert_eq!((b.reserved(), b.committed(), a.bytes()), (200, 200, U));
-        // The hog: its unit, then the 800-byte shared pool.
+        // The hog: its reservation, then the 800-byte shared pool.
         assert_eq!(b.charge(&h, U), Some(Charge::Reserved));
         let mut shared = 0;
         while b.charge(&h, U) == Some(Charge::Shared) {
             shared += 1;
         }
-        assert_eq!(shared, 8);
-        assert_eq!(b.refused(), 1);
-        // `a` still gets its reserved instance.
+        assert_eq!((shared, b.refused()), (8, 1));
+        // `a` still gets its reserved instance, but no burst.
         assert_eq!(b.charge(&a, U), Some(Charge::Reserved));
-        assert_eq!(b.charge(&a, U), None, "a's burst has no room left");
+        assert_eq!(b.charge(&a, U), None);
         assert_eq!((b.committed(), b.shared_used()), (1000, 800));
-        // A shared instance freed: room again.
         b.refund(&h, U, Charge::Shared);
         assert_eq!(b.charge(&a, U), Some(Charge::Shared));
-        // The hog's reserved instance dies; a shared one moves into the unit.
+        // The hog's reserved instance dies; a shared one moves into the reservation.
         b.refund(&h, U, Charge::Reserved);
-        assert_eq!(b.committed(), 1000, "an unused reservation stays committed");
+        assert_eq!(b.committed(), 1000);
         assert!(b.promote(&h, U));
         assert_eq!(b.committed(), 900);
-        assert!(!b.promote(&h, U), "one unit only");
-        // Release `a` while its reserved instance lives: uncommitted when it goes.
+        assert!(!b.promote(&h, U));
+        // Released while its instance lives: retiring until that instance is freed.
         b.release(&a);
-        assert_eq!((b.reserved(), a.bytes()), (100, 0));
-        assert_eq!(b.committed(), 900, "a's unit is still in use");
-        assert_eq!(b.charge(&a, U), Some(Charge::Shared), "a released reservation hands out no units");
+        assert_eq!((b.reserved(), b.retiring(), b.committed(), a.bytes()), (100, 100, 900, 0));
+        assert_eq!(b.charge(&a, U), Some(Charge::Shared));
         b.refund(&a, U, Charge::Shared);
         b.refund(&a, U, Charge::Reserved);
+        assert_eq!((b.committed(), b.retiring()), (800, 0));
+        b.release(&a);
         assert_eq!(b.committed(), 800);
-        b.release(&a); // idempotent
-        assert_eq!(b.committed(), 800);
-        // Over-commit: a reservation installed while the pool is full.
-        let c = Reservation::new(3, U);
-        while b.charge(&h, U).is_some() {}
-        b.install(&c);
+    }
+
+    #[test]
+    fn updates_do_not_count_twice_and_relief_claims_the_overage() {
+        const U: u64 = 100;
+        let b = MemBudget::new(500);
+        let (old, new) = (Reservation::new(U), Reservation::new(U));
+        b.install(&old);
+        assert_eq!(b.charge(&old, U), Some(Charge::Reserved));
+        while b.charge(&old, U) == Some(Charge::Shared) {}
+        // An update installs the new version before releasing the old one.
+        b.install(&new);
         assert!(b.over());
-        assert_eq!(b.charge(&c, U), Some(Charge::Reserved), "reserved instances are always allowed");
-        assert_eq!(b.charge(&h, U), None, "no burst while over-committed");
-        // Relief claims exactly the overage.
+        b.release(&old);
+        assert!(!b.over(), "the old version's live instance is retiring, not over");
+        assert_eq!(b.charge(&new, U), Some(Charge::Reserved));
+        assert_eq!(b.charge(&new, U), None, "retiring bytes still bound bursts");
+        // Reservations added while bursts hold the pool: relief claims exactly the overage.
+        b.install(&Reservation::new(3 * U));
+        assert!(b.over());
         let mut n = 0;
         while b.reclaim_over(U) {
             n += 1;
         }
         assert_eq!((n, b.over()), (3, false));
+        // State that does not fit (reload, cluster): reported as over-commit.
+        b.install(&Reservation::new(1000));
+        assert_eq!(b.overcommit(), 400 + 1000 - 500);
     }
 
     #[test]
-    fn budget_release_races_with_refunds() {
-        // Concurrent refunds and a release account every byte exactly once.
-        for _ in 0..200 {
+    fn budget_release_races_with_refund() {
+        for _ in 0..2000 {
             let b = Arc::new(MemBudget::new(1 << 20));
-            let r = Arc::new(Reservation::new(8, 10));
+            let r = Arc::new(Reservation::new(10));
             b.install(&r);
-            for _ in 0..8 {
-                assert_eq!(b.charge(&r, 10), Some(Charge::Reserved));
-            }
+            assert_eq!(b.charge(&r, 10), Some(Charge::Reserved));
             let t = {
                 let (b, r) = (b.clone(), r.clone());
-                std::thread::spawn(move || {
-                    for _ in 0..8 {
-                        b.refund(&r, 10, Charge::Reserved);
-                    }
-                })
+                std::thread::spawn(move || b.refund(&r, 10, Charge::Reserved))
             };
             b.release(&r);
             t.join().unwrap();
-            assert_eq!((b.committed(), b.reserved()), (0, 0));
+            assert_eq!((b.committed(), b.reserved(), b.retiring()), (0, 0, 0));
         }
     }
 

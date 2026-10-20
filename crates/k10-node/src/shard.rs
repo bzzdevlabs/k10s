@@ -255,7 +255,9 @@ type IdMap<V> = HashMap<u64, V, BuildHasherDefault<IdHasher>>;
 pub(crate) struct Instance {
     svc: Arc<ServiceRt>,
     slot: Slot,
+    /// 0 while running.
     idle_since: u64,
+    charge: Charge,
 }
 
 struct LocalSvc {
@@ -458,6 +460,8 @@ pub(crate) struct Shard {
     pools: SlotPools,
     instances: Vec<Option<Box<Instance>>>,
     free_instances: Vec<u32>,
+    /// `(instance, idle_since)` of burst instances made idle (validated on use): what memory relief destroys.
+    idle_shared: Vec<(u32, u64)>,
     n_instances: usize,
     local: IdMap<LocalSvc>,
     fibers: Vec<*mut Fiber>,
@@ -705,6 +709,7 @@ impl Shard {
             table_ver,
             instances: Vec::new(),
             free_instances: Vec::new(),
+            idle_shared: Vec::new(),
             n_instances: 0,
             local: IdMap::default(),
             fibers: Vec::new(),
@@ -845,37 +850,33 @@ impl Shard {
         }
     }
 
-    /// While the budget is over-committed, destroys this shard's idle burst instances.
+    /// While the budget is over, destroys this shard's idle burst instances.
     fn relieve_memory_pressure(&mut self) {
-        if !self.node.budget.over() {
-            return;
-        }
-        let ids: Vec<u64> = self.local.keys().copied().collect();
-        for id in ids {
-            let shared: Vec<u32> = {
-                let l = &self.local[&id];
-                l.idle
-                    .iter()
-                    .copied()
-                    .filter(|&ii| self.instances[ii as usize].as_ref().is_some_and(|i| i.slot.charge == Charge::Shared))
-                    .collect()
-            };
-            for ii in shared {
-                let inst = self.instances[ii as usize].as_mut().unwrap();
-                // Claim the bytes atomically (shards relieve in parallel), then free uncharged.
-                if !self.node.budget.reclaim_over(inst.svc.instance_bytes()) {
-                    return;
-                }
-                inst.slot.charge = Charge::None;
-                let l = self.local.get_mut(&id).unwrap();
-                l.idle.retain(|&x| x != ii);
-                let svc = l.svc.clone();
-                let idle = &svc.st(self.idx).idle;
-                idle.store(idle.load(Relaxed) - 1, Relaxed);
-                bump(&svc.st(self.idx).reclaimed, 1);
-                self.destroy_instance(ii);
+        while self.node.budget.over() {
+            let Some((ii, at)) = self.idle_shared.pop() else { return };
+            if !self.is_idle_shared(ii, at) {
+                continue;
             }
+            let inst = self.instances[ii as usize].as_mut().unwrap();
+            if !self.node.budget.reclaim_over(inst.svc.instance_bytes()) {
+                self.idle_shared.push((ii, at));
+                return;
+            }
+            inst.charge = Charge::None;
+            let svc = inst.svc.clone();
+            if let Some(l) = self.local.get_mut(&svc.id) {
+                l.idle.retain(|&x| x != ii);
+            }
+            let idle = &svc.st(self.idx).idle;
+            idle.store(idle.load(Relaxed) - 1, Relaxed);
+            bump(&svc.st(self.idx).reclaimed, 1);
+            self.destroy_instance(ii);
         }
+    }
+
+    /// `(ii, at)` from `idle_shared` still denotes an idle burst instance.
+    fn is_idle_shared(&self, ii: u32, at: u64) -> bool {
+        self.instances.get(ii as usize).and_then(|i| i.as_ref()).is_some_and(|i| i.idle_since == at && i.charge == Charge::Shared)
     }
 
     fn drain_inbox(&mut self) {
@@ -1244,18 +1245,22 @@ impl Shard {
             return;
         }
         let now = mono_ns();
-        match svc.try_reserve(now) {
+        match svc.try_add_live(now) {
             Ok(()) => match self.new_instance(svc) {
                 Ok(ii) => {
                     let job = self.job(ii, true, req, Some(reply), deadline, depth);
                     self.start_job(job);
                 }
                 Err(msg) => {
-                    svc.release();
-                    if svc.live.load(Acquire) > 0 {
-                        // No memory for another instance: wait for an existing one (as at `max_instances`).
-                        self.enqueue(svc, Queued { req, reply, deadline, depth });
-                    } else {
+                    svc.sub_live();
+                    if svc.live.load(SeqCst) == 0 {
+                        self.deliver(reply, CallResult::error(CALL_UNAVAILABLE, msg));
+                        return;
+                    }
+                    // No memory for another instance: wait for an existing one (as at `max_instances`)…
+                    self.enqueue(svc, Queued { req, reply, deadline, depth });
+                    // …unless the last one went meanwhile (pairs with `destroy_inner`'s `live` then `waiting`).
+                    if svc.live.load(SeqCst) == 0 && svc.remove_waiter(reply.shard, reply.token) {
                         self.deliver(reply, CallResult::error(CALL_UNAVAILABLE, msg));
                     }
                 }
@@ -1346,12 +1351,21 @@ impl Shard {
         let ii = l.idle.pop()?;
         let idle = &svc.st(self.idx).idle;
         idle.store(idle.load(Relaxed) - 1, Relaxed);
+        self.instances[ii as usize].as_mut().unwrap().idle_since = 0;
         Some(ii)
     }
 
     fn make_idle(&mut self, ii: u32, now: u64) {
         let inst = self.instances[ii as usize].as_mut().unwrap();
         inst.idle_since = now;
+        if inst.charge == Charge::Shared {
+            self.idle_shared.push((ii, now));
+            if self.idle_shared.len() > 64 + 2 * self.n_instances {
+                let list = std::mem::take(&mut self.idle_shared);
+                self.idle_shared = list.into_iter().filter(|&(i, at)| self.is_idle_shared(i, at)).collect();
+            }
+        }
+        let inst = self.instances[ii as usize].as_mut().unwrap();
         // The instance (alive and idle) keeps the service alive; clone the Arc only for a new local entry.
         let arc: *const Arc<ServiceRt> = &inst.svc;
         // SAFETY: see above.
@@ -1368,15 +1382,14 @@ impl Shard {
         let Some(charge) = self.node.budget.charge(&svc.mem_res, bytes) else {
             return Err(format!("cannot allocate instance memory: node memory budget (--mem) exhausted for `{}`", svc.name()));
         };
-        let mut slot = match self.pools.alloc(svc.mem_log2()) {
+        let slot = match self.pools.alloc(svc.mem_log2()) {
             Ok(s) => s,
             Err(e) => {
                 self.node.budget.refund(&svc.mem_res, bytes, charge);
                 return Err(format!("cannot allocate instance memory: {e}"));
             }
         };
-        slot.charge = charge;
-        let inst = Box::new(Instance { svc: svc.clone(), slot, idle_since: 0 });
+        let inst = Box::new(Instance { svc: svc.clone(), slot, idle_since: 0, charge });
         let ii = match self.free_instances.pop() {
             Some(i) => {
                 self.instances[i as usize] = Some(inst);
@@ -1409,17 +1422,13 @@ impl Shard {
                     None => false,
                 };
             }
-            // A burst instance moves into a free reservation unit; while over-committed it is destroyed (unless it
-            // is the last instance of a service with queued requests).
-            if ok && inst.slot.charge == Charge::Shared {
+            // A burst instance moves into a free reservation, or goes while the budget is over.
+            if ok && inst.charge == Charge::Shared {
                 let budget = &self.node.budget;
                 if budget.promote(&svc.mem_res, svc.instance_bytes()) {
-                    inst.slot.charge = Charge::Reserved;
-                } else if budget.over()
-                    && !(svc.waiting.load(SeqCst) > 0 && svc.live.load(Acquire) <= 1)
-                    && budget.reclaim_over(svc.instance_bytes())
-                {
-                    inst.slot.charge = Charge::None;
+                    inst.charge = Charge::Reserved;
+                } else if budget.reclaim_over(svc.instance_bytes()) {
+                    inst.charge = Charge::None;
                     ok = false;
                 }
             }
@@ -1454,12 +1463,9 @@ impl Shard {
         self.free_instances.push(ii);
         self.n_instances -= 1;
         self.me.stats.instances.store(self.n_instances as u64, Relaxed);
-        let Instance { svc, slot, .. } = *inst;
-        let charge = slot.charge;
-        self.pools.free(slot);
-        self.node.budget.refund(&svc.mem_res, svc.instance_bytes(), charge);
+        let svc = self.free_memory(*inst);
         if release {
-            svc.release();
+            svc.sub_live();
         }
         bump(&svc.st(self.idx).destroyed, 1);
         // Requests queued for this version still need an instance.
@@ -1467,7 +1473,7 @@ impl Shard {
         if svc.waiting.load(SeqCst) == 0 {
             return;
         }
-        if svc.try_reserve_draining(now) {
+        if svc.try_add_live_draining(now) {
             match self.new_instance(&svc) {
                 Ok(nii) => match svc.pop_waiter(now) {
                     Some(q) => {
@@ -1476,15 +1482,28 @@ impl Shard {
                     }
                     None => self.destroy_instance(nii),
                 },
-                Err(_) => svc.release(),
-            }
-        } else if svc.live.load(Acquire) == 0 && svc.backoff_remaining_ns(now) > 0 {
-            // Nothing alive and instance creation is backed off: fail the queue now rather than at its deadlines.
-            while let Some(q) = svc.pop_waiter(now) {
-                let msg = format!("service `{}` is crash-looping", svc.name());
-                self.deliver(q.reply, CallResult::error(CALL_UNAVAILABLE, msg));
+                Err(_) => svc.sub_live(),
             }
         }
+        if svc.live.load(SeqCst) == 0 {
+            self.fail_waiters(&svc, now);
+        }
+    }
+
+    /// Nothing alive will serve the queue (crash backoff or no memory): fail it now, not at its deadlines.
+    fn fail_waiters(&mut self, svc: &ServiceRt, now: u64) {
+        let why = if svc.backoff_remaining_ns(now) > 0 { "is crash-looping" } else { "has no memory for an instance" };
+        while let Some(q) = svc.pop_waiter(now) {
+            self.deliver(q.reply, CallResult::error(CALL_UNAVAILABLE, format!("service `{}` {why}", svc.name())));
+        }
+    }
+
+    /// Frees an instance's slot and gives back its memory charge.
+    fn free_memory(&mut self, inst: Instance) -> Arc<ServiceRt> {
+        let Instance { svc, slot, charge, .. } = inst;
+        self.pools.free(slot);
+        self.node.budget.refund(&svc.mem_res, svc.instance_bytes(), charge);
+        svc
     }
 
     // --------------------------------------------------------------------------------------------------------------
@@ -1566,13 +1585,13 @@ impl Shard {
         let deadline = now + 3600 * 1_000_000_000;
         let mut jobs = Vec::new();
         for _ in 0..n {
-            if svc.try_reserve(now).is_err() {
+            if svc.try_add_live(now).is_err() {
                 break;
             }
             let ii = match self.new_instance(&svc) {
                 Ok(ii) => ii,
                 Err(_) => {
-                    svc.release();
+                    svc.sub_live();
                     break;
                 }
             };
@@ -1612,12 +1631,12 @@ impl Shard {
                     .filter(|&ii| now.saturating_sub(self.instances[ii as usize].as_ref().unwrap().idle_since) >= idle_ns)
                     .collect();
                 // Burst instances first: the warm instance kept is the reserved one.
-                cand.sort_by_key(|&ii| self.instances[ii as usize].as_ref().unwrap().slot.charge != Charge::Shared);
+                cand.sort_by_key(|&ii| self.instances[ii as usize].as_ref().unwrap().charge != Charge::Shared);
                 (l.svc.clone(), cand)
             };
             let keep = if matches!(svc.placement, Placement::Remote { .. }) { 0 } else { keep };
             for ii in cand {
-                if !svc.release_above(keep) {
+                if !svc.sub_live_above(keep) {
                     break;
                 }
                 let l = self.local.get_mut(&id).unwrap();
@@ -1625,14 +1644,13 @@ impl Shard {
                 let idle = &svc.st(self.idx).idle;
                 idle.store(idle.load(Relaxed) - 1, Relaxed);
                 bump(&svc.st(self.idx).reclaimed, 1);
-                // `release_above` already gave the capacity back.
+                // `sub_live_above` already gave the capacity back.
                 self.destroy_inner(ii, false);
             }
             if svc.retired.load(Acquire) && self.local.get(&id).is_some_and(|l| l.idle.is_empty()) {
                 self.local.remove(&id);
             }
         }
-        self.relieve_memory_pressure();
         // Connection timeouts.
         let cfg = &self.node.cfg;
         let head_ns = cfg.header_timeout.as_nanos() as u64;
@@ -1703,11 +1721,7 @@ impl Shard {
         // Instances (fibers blocked mid-job are abandoned: their instances are freed here, their stacks below).
         for i in 0..self.instances.len() {
             if let Some(inst) = self.instances[i].take() {
-                let Instance { svc, slot, .. } = *inst;
-                let charge = slot.charge;
-                self.pools.free(slot);
-                self.node.budget.refund(&svc.mem_res, svc.instance_bytes(), charge);
-                svc.release();
+                self.free_memory(*inst).sub_live();
             }
         }
         for &f in &self.fibers {

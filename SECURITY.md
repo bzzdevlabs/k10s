@@ -173,7 +173,7 @@ Not mitigated (known gaps):
 ## Denial of service: what bounds one workload (details in `docs/NODE.md`)
 - **Memory**: every service placed on a node reserves one instance (`2^memory` + 4 KiB) of `--mem`; burst instances
   share the remainder, so a service under heavy concurrency can exhaust the shared pool but never another service's
-  reservation. Applies whose reservations do not fit are rejected; cluster placement charges the same footprint.
+  reservation. Operator applies whose reservations do not fit are rejected (reloaded and cluster states run over-committed, reported); placement charges the same footprint.
   Per service: `max_instances`, KV quota (`--kv-max`), wait queue (10 000), host copies (16 MiB).
 - **CPU**: 2 ms time slices (preemption at JIT safepoints), per-request `cpu_ms` budget, crash-loop backoff.
 - **Connections**: node-wide buffer budget (`--conn-buffer-max`), per-connection head/body limits and timeouts,

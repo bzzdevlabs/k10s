@@ -15,6 +15,10 @@ k10-mesh = { path = "crates/k10-mesh" }
 k10-node = { path = "crates/k10-node" }
 libc = "0.2"
 
+# Cluster crypto at production speed in debug builds: unoptimized it misses gossip deadlines (checks stay on).
+[profile.dev.package.k10-mesh]
+opt-level = 2
+
 [profile.release]
 opt-level = 3
 lto = "fat"

@@ -8,6 +8,7 @@ use crate::logs::Logs;
 use crate::router::{NoRemote, RemoteRouter};
 use crate::service::{prepare_blob, Placement, ServiceRt, ServiceTable};
 use crate::shard::{self, CallResult, Msg, OneShot, ServeDone, ShardShared};
+use crate::cluster::human_bytes;
 use crate::slot::{MemBudget, MemStats, Reservation};
 use crate::sys;
 use k10_mesh::{sha256::to_hex, Bundle};
@@ -205,6 +206,8 @@ enum ApplyMode {
     /// Operator apply on a single node: version 0 = current + 1; a lower version, or the same version with another
     /// hash, is stale.
     Operator,
+    /// The bundle persisted by an operator apply, at start: ordered like `Operator`, never refused for memory.
+    Reload,
     /// Desired state decided by gossip: `(version, hash)` ordered like `k10_mesh::DesiredState` (the larger hash wins
     /// a version tie); the same manifest may be re-applied with a new placement.
     Cluster,
@@ -245,6 +248,8 @@ pub struct NodeShared {
     pub conn_buffer_max: u64,
     /// Installed by the cluster layer (weak: the cluster owns the node, not the other way round).
     pub cluster: OnceLock<Weak<dyn ClusterHooks>>,
+    /// Why the persisted bundle could not be reloaded at start (the node then serves nothing).
+    pub reload_error: OnceLock<String>,
 }
 
 impl NodeShared {
@@ -315,7 +320,7 @@ impl NodeShared {
         bundle.manifest.validate()?;
         let requested = bundle.manifest.version;
         match mode {
-            ApplyMode::Operator => {
+            ApplyMode::Operator | ApplyMode::Reload => {
                 if requested == 0 {
                     bundle.manifest.version = cur.version + 1;
                 } else if requested < cur.version
@@ -348,6 +353,24 @@ impl NodeShared {
                 r.sort();
                 return Ok(r);
             }
+        }
+        // Every service placed here reserves one instance; check before preparing any code.
+        let (n, need) = bundle.manifest.services.iter().zip(&places).filter(|(_, p)| **p == Placement::Local).fold(
+            (0, 0u64),
+            |(n, b), (s, _)| (n + 1, b + k10_mesh::instance_bytes(s)),
+        );
+        let limit = self.budget.limit();
+        if need > limit {
+            let msg = format!(
+                "memory reservations do not fit: {n} service(s) placed on this node reserve {} (2^memory + 4 KiB each), \
+                 --mem is {}",
+                human_bytes(need),
+                human_bytes(limit)
+            );
+            if mode == ApplyMode::Operator {
+                return Err(format!("{msg}; lower `memory`, remove services or raise --mem"));
+            }
+            eprintln!("k10s: DEGRADED: {msg}: installed over-committed, no burst instance until it fits");
         }
         // Prepared code by code hash (reuse what is already deployed).
         let mut code_cache: HashMap<[u8; 32], Arc<ServiceRt>> = HashMap::new();
@@ -397,9 +420,7 @@ impl NodeShared {
             );
             svc.min_mem_log2 = min_mem;
             svc.imports_call = imports_call;
-            // Placed here: reserve one instance; elsewhere: fallback runs use the shared pool.
-            let units = u32::from(place == Placement::Local);
-            svc.mem_res = Reservation::new(units, svc.instance_bytes());
+            svc.mem_res = Reservation::new(if place == Placement::Local { svc.instance_bytes() } else { 0 });
             svc.placement = place;
             if cur.get(&spec.name).is_some() {
                 report.updated.push(spec.name.clone());
@@ -416,33 +437,6 @@ impl NodeShared {
             }
         }
         report.warnings = by_name.values().filter_map(|s| s.call_warning()).collect();
-        // The new table's reservations must fit in `--mem`.
-        let limit = self.budget.limit();
-        let need: u64 = by_name.values().map(|s| s.mem_res.units() as u64 * s.mem_res.unit_bytes()).sum();
-        let mut install: Vec<&Arc<ServiceRt>> = new_rts.iter().collect();
-        if need > limit {
-            let n = by_name.values().filter(|s| s.mem_res.units() > 0).count();
-            let msg = format!(
-                "memory reservations do not fit: {n} service(s) placed on this node reserve {} (one instance each: \
-                 2^memory + 4 KiB) but the node's budget (--mem) is {}; lower `memory`, remove services or raise --mem",
-                human(need),
-                human(limit)
-            );
-            if mode == ApplyMode::Operator {
-                return Err(msg);
-            }
-            // Cluster: placement already charges reservations, so only disagreeing inputs get here; never refuse
-            // the desired state, reserve in name order while it fits.
-            let mut left = limit.saturating_sub(by_name.values().map(|s| s.mem_res.bytes()).sum::<u64>());
-            install.sort_by(|a, b| a.name().cmp(b.name()));
-            install.retain(|s| {
-                let b = s.mem_res.units() as u64 * s.mem_res.unit_bytes();
-                let fits = b <= left;
-                left -= if fits { b } else { 0 };
-                fits
-            });
-            eprintln!("k10s: {msg}; {} service(s) run without a reservation", new_rts.len() - install.len());
-        }
         let table = Arc::new(ServiceTable {
             version: bundle.manifest.version,
             manifest: bundle.manifest.clone(),
@@ -455,7 +449,7 @@ impl NodeShared {
             }
         }
         // Reserve, publish, then retire and release what was replaced (live instances keep their bytes until freed).
-        for s in install {
+        for s in &new_rts {
             self.budget.install(&s.mem_res);
         }
         {
@@ -626,6 +620,7 @@ impl Node {
             conn_buffered: AtomicU64::new(0),
             conn_buffer_max,
             cluster: OnceLock::new(),
+            reload_error: OnceLock::new(),
         });
         let _ = shared.http_addr.set(addr);
         if let Some(a) = admin_addr {
@@ -635,9 +630,13 @@ impl Node {
         // Reload the last applied bundle.
         if let Some(p) = shared.persist_path().filter(|_| shared.cfg.reload_bundle) {
             if let Ok(bytes) = std::fs::read(&p) {
-                match Bundle::decode(&bytes).map_err(|e| e.to_string()).and_then(|b| shared.apply(b, false)) {
+                let reload = |b| shared.apply_inner(b, false, &|_| Placement::Local, ApplyMode::Reload);
+                match Bundle::decode(&bytes).map_err(|e| e.to_string()).and_then(reload) {
                     Ok(r) => eprintln!("k10s: reloaded bundle version {} ({} services)", r.version, r.unchanged.len() + r.added.len()),
-                    Err(e) => eprintln!("k10s: cannot reload {}: {e}", p.display()),
+                    Err(e) => {
+                        eprintln!("k10s: ERROR: cannot reload {}: {e}; serving nothing until the next apply", p.display());
+                        let _ = shared.reload_error.set(e);
+                    }
                 }
             }
         }
@@ -747,21 +746,6 @@ impl Node {
 impl Drop for Node {
     fn drop(&mut self) {
         self.stop_inner();
-    }
-}
-
-/// `12.0 MiB (…)` for messages.
-fn human(b: u64) -> String {
-    const U: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let (mut v, mut i) = (b as f64, 0);
-    while v >= 1024.0 && i < U.len() - 1 {
-        v /= 1024.0;
-        i += 1;
-    }
-    if i == 0 {
-        format!("{b} B")
-    } else {
-        format!("{v:.1} {} ({b} bytes)", U[i])
     }
 }
 

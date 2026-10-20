@@ -197,7 +197,7 @@ fn svc_json(s: &ServiceRt, now: u64) -> String {
         },
         s.mem_res.bytes(),
         live as u64 * s.instance_bytes(),
-        live.saturating_sub(s.mem_res.in_use()) as u64 * s.instance_bytes(),
+        live.saturating_sub(s.mem_res.in_use() as u32) as u64 * s.instance_bytes(),
         live,
         s.idle_total(),
         s.peak.load(Relaxed),
@@ -267,7 +267,7 @@ pub fn status_json(node: &NodeShared) -> String {
             "\"services\":[{}],",
             "\"memory\":{{\"rss_bytes\":{},\"slots_used\":{},\"slot_bytes\":{},\"reserved_bytes\":{},",
             "\"snapshot_mapped\":{},\"mem_limit\":{},\"mem_reserved\":{},\"mem_shared_used\":{},\"mem_shared_limit\":{},",
-            "\"mem_committed\":{},\"mem_refused\":{}}},",
+            "\"mem_committed\":{},\"mem_retiring\":{},\"mem_overcommit\":{},\"mem_refused\":{}}},",
             "\"http_stats\":{{\"requests\":{},\"2xx\":{},\"4xx\":{},\"5xx\":{},\"admin\":{},\"connections_open\":{},",
             "\"accepted\":{},\"rejected\":{},\"conn_timeouts\":{},\"accept_pauses\":{},\"buffered_bytes\":{},",
             "\"buffer_max\":{},\"buffer_refused\":{}}},",
@@ -276,7 +276,7 @@ pub fn status_json(node: &NodeShared) -> String {
             "\"queued_served\":{},\"cross_shard_replies\":{}}},",
             "\"kv\":{{\"namespaces\":{},\"keys\":{},\"live_bytes\":{},\"log_bytes\":{},\"flushes\":{},\"compactions\":{},",
             "\"errors\":{},\"degraded\":{}}},",
-            "\"applies\":{},\"apply_errors\":{},\"per_shard\":[{}]{}}}"
+            "\"applies\":{},\"apply_errors\":{},\"reload_error\":{},\"per_shard\":[{}]{}}}"
         ),
         json_str(&node.cfg.name),
         BUILD_VERSION.get().copied().unwrap_or(env!("CARGO_PKG_VERSION")),
@@ -303,6 +303,8 @@ pub fn status_json(node: &NodeShared) -> String {
         node.budget.shared_used(),
         node.budget.limit().saturating_sub(node.budget.reserved()),
         node.budget.committed(),
+        node.budget.retiring(),
+        node.budget.overcommit(),
         node.budget.refused(),
         shard_sum(node, |s| &s.http_requests),
         shard_sum(node, |s| &s.http_2xx),
@@ -340,6 +342,7 @@ pub fn status_json(node: &NodeShared) -> String {
         kv.degraded,
         node.counters.applies.load(Relaxed),
         node.counters.apply_errors.load(Relaxed),
+        node.reload_error.get().map(|e| json_str(e)).unwrap_or_else(|| "null".into()),
         per_shard.join(","),
         node.cluster_hooks().map(|c| format!(",\"cluster\":{}", c.status_json())).unwrap_or_default(),
     )
@@ -414,7 +417,9 @@ pub fn metrics(node: &NodeShared) -> String {
     gauge(&mut o, "k10s_memory_reserved_bytes", "gauge", "Instance memory reserved for the services placed here", b.reserved());
     gauge(&mut o, "k10s_memory_shared_used_bytes", "gauge", "Instance memory used beyond the reservations (burst instances)", b.shared_used());
     gauge(&mut o, "k10s_memory_committed_bytes", "gauge", "Reservations plus burst instances", b.committed());
+    gauge(&mut o, "k10s_memory_overcommit_bytes", "gauge", "Reservations beyond --mem (no burst instance possible)", b.overcommit());
     gauge(&mut o, "k10s_memory_refused_total", "counter", "Instance creations refused for lack of memory", b.refused());
+    gauge(&mut o, "k10s_reload_failed", "gauge", "1 if the persisted bundle could not be reloaded at start", node.reload_error.get().is_some() as u64);
     gauge(&mut o, "k10s_rss_bytes", "gauge", "Resident set size of the node process", sys::rss_bytes());
     gauge(&mut o, "k10s_manifest_version", "gauge", "Applied manifest version", table.version);
     let code = node.backend.stats();
