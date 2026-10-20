@@ -7,7 +7,7 @@
 #      (status codes and bodies), traps → 500 + instance replaced, KV, instance state vs fresh, service calls,
 #      the Ten-compiled services (SHA-256 chain, f64 n-body, merge sort in 2 MiB, KV/JSON REST API);
 #   3. isolation: CPU-bound infinite loops (spin) running while other services keep answering;
-#   4. redeploy over HTTP (POST /_k10s/apply) and check the new service set;
+#   4. redeploy over HTTP (POST /_k10s/apply with the k10.admin_token bearer token) and check the new service set;
 #   5. keep-alive load with bench/bin/loadgen (if present): no errors;
 #   6. the same functional checks with a tiny guest (MEM_SMALL, default 8M).
 #   Then: embedded bundle, qboot firmware, no panic in any serial log.
@@ -26,6 +26,10 @@ LOADGEN=../bench/bin/loadgen
 OUT=out/test
 mkdir -p "$OUT"
 [[ -f out/k10-metal.elf && -f out/bundle.k10b ]] || ./build.sh >/dev/null
+
+# Admin API bearer token (kernel command line `k10.admin_token=`); `expect` sends it to /_k10s/ URLs.
+TOKEN=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
+AUTH="Authorization: Bearer $TOKEN"
 
 pass=0
 fail=0
@@ -47,7 +51,7 @@ QPID=
 boot() { # $1 = mem, $2 = bundle, $3 = log, $4 = kernel command line
     rm -f "$3"
     # shellcheck disable=SC2046
-    qemu-system-x86_64 $(qemu_args "$1") -initrd "$2" -serial "file:$3" -append "${4:-}" &
+    qemu-system-x86_64 $(qemu_args "$1") -initrd "$2" -serial "file:$3" -append "k10.admin_token=$TOKEN ${4:-}" &
     QPID=$!
     for _ in $(seq 1 200); do
         grep -q "k10-metal ready" "$3" 2>/dev/null && return 0
@@ -64,6 +68,7 @@ expect() {
     local name=$1 url=$2 st=$3 re=$4
     shift 4
     local body code
+    [[ "$url" == */_k10s/* ]] && set -- -H "$AUTH" "$@"
     body=$(curl -sS -m 5 -o - -w '\n%{http_code}' "$@" "$url" 2>&1)
     code=${body##*$'\n'}
     body=${body%$'\n'*}
@@ -108,6 +113,15 @@ functional() {
     expect "unknown service" "$U/nope" 404 'no such service'
     expect "spin -> budget trap" "$U/spin" 500 'Interrupted'
     expect "status" "$U/_k10s/status" 200 '"services":\['
+    expect "health (no token needed)" "$U/_k10s/health" 200 '^ok$'
+    local code
+    code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$U/_k10s/status")
+    [[ "$code" == 401 ]] && ok "status without the token -> 401" || ko "status without the token: $code"
+    code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer x$TOKEN" -X POST --data-binary 'x' "$U/_k10s/apply")
+    [[ "$code" == 401 ]] && ok "apply with a wrong token -> 401" || ko "apply with a wrong token: $code"
+    code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$U/_k10s/bench/10/hello/")
+    [[ "$code" == 401 ]] && ok "bench without the token -> 401" || ko "bench without the token: $code"
+
     # Services compiled from Ten (examples/*.ten) with k10-lang.
     expect "sha (Ten: SHA-256 chain x1000)" "$U/sha/?n=1000" 200 '^cc2cbdc008d39ef7d46c8f4bd213c400cf60059acb1f0b409f7116b2912f2c9a$'
     expect "nbody (Ten: f64)" "$U/nbody/?n=1000" 200 '^-0\.169075164.-0\.169087605$'
@@ -207,7 +221,7 @@ if boot "$MEM" out/bundle.k10b "$OUT/serial-${E// /-}.log" "$CMD"; then
     fi
     expect "still healthy" "$U/_k10s/status" 200 '"5xx":[0-9]+'
     if ((NCPU > 1)); then
-        busy=$(curl -s "$U/_k10s/status" | python3 -c "import json,sys; d=json.load(sys.stdin); print(sum(1 for c in d['cpus'] if c['tasks_run'] > 0), len(d['cpus']))")
+        busy=$(curl -s -H "$AUTH" "$U/_k10s/status" | python3 -c "import json,sys; d=json.load(sys.stdin); print(sum(1 for c in d['cpus'] if c['tasks_run'] > 0), len(d['cpus']))")
         [[ "${busy% *}" -ge 2 && "${busy#* }" == "$NCPU" ]] && ok "$NCPU CPUs online, ${busy% *} ran invocations" || ko "CPUs that ran invocations / online: $busy"
     fi
 else

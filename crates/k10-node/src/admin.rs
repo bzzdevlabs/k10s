@@ -1,7 +1,8 @@
 //! Admin API under `/_k10s/`: `GET status` (JSON), `GET metrics` (Prometheus text), `GET logs/<svc>`,
 //! `POST apply` (body = encoded `k10_mesh::Bundle`), `GET health`, `GET cluster` (text, cluster mode).
+//! Access control: [`gate`].
 
-use crate::http::Method;
+use crate::http::{Method, RequestHead};
 use crate::node::{short_hash, NodeShared};
 use crate::service::ServiceRt;
 use crate::sys;
@@ -20,9 +21,82 @@ fn respond(status: u16, ctype: &'static str, body: impl Into<Vec<u8>>) -> AdminO
     AdminOut::Respond { status, ctype, body: body.into() }
 }
 
-pub fn handle(node: &Arc<NodeShared>, method: Method, target: &str, body: Vec<u8>) -> AdminOut {
+/// The admin endpoint a target names (`/_k10s/logs/x?q` → `logs/x`), `None` for service traffic.
+pub fn endpoint(target: &str) -> Option<&str> {
     let path = target.split('?').next().unwrap_or("");
-    let path = path.strip_prefix("/_k10s").unwrap_or(path).trim_start_matches('/');
+    let rest = path.strip_prefix("/_k10s")?;
+    (rest.is_empty() || rest.starts_with('/')).then(|| rest.trim_start_matches('/'))
+}
+
+/// Open endpoints: liveness and read-only counters (scrapers should not need a token that can deploy code).
+fn is_public(endpoint: &str) -> bool {
+    matches!(endpoint, "health" | "metrics")
+}
+
+/// Admin bearer token; only its SHA-256 is kept, compared in constant time.
+#[derive(Clone)]
+pub struct AdminToken([u8; 32]);
+
+impl AdminToken {
+    pub fn new(secret: &[u8]) -> AdminToken {
+        AdminToken(k10_mesh::sha256::sha256(secret))
+    }
+
+    pub fn matches(&self, presented: &[u8]) -> bool {
+        k10_mesh::crypto::ct_eq(&k10_mesh::sha256::sha256(presented), &self.0)
+    }
+}
+
+impl std::fmt::Debug for AdminToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AdminToken(..)")
+    }
+}
+
+/// Access check on a request head (body not read yet): `None` = proceed, else the status and message to close with.
+pub fn gate(
+    node: &NodeShared,
+    admin_listener: bool,
+    h: &RequestHead,
+    head: &[u8],
+    peer_is_loopback: impl FnOnce() -> bool,
+) -> Option<(u16, &'static str)> {
+    let ep = match (endpoint(&h.target), admin_listener) {
+        (None, false) => return None,
+        (None, true) => return Some((404, "this listener serves the admin API (/_k10s/) only")),
+        (Some(ep), false) if node.admin_addr.get().is_some() => {
+            return (ep != "health").then_some((404, "the admin API is served on the admin listener (--admin)"));
+        }
+        (Some(ep), _) => ep,
+    };
+    if is_public(ep) {
+        return None;
+    }
+    match &node.cfg.admin_token {
+        Some(t) => {
+            let presented = h.auth.and_then(|(a, b)| bearer(&head[a..b]));
+            match presented {
+                Some(tok) if t.matches(tok) => None,
+                _ => Some((401, "admin API: missing or invalid bearer token")),
+            }
+        }
+        None if !h.forwarded && peer_is_loopback() => None,
+        None => Some((403, "admin API: without --admin-token-file only loopback clients may use it")),
+    }
+}
+
+/// The token of an `Authorization: Bearer <token>` value.
+fn bearer(v: &[u8]) -> Option<&[u8]> {
+    let (scheme, rest) = (v.get(..6)?, &v[6..]);
+    if !scheme.eq_ignore_ascii_case(b"bearer") || !rest.first().is_some_and(|c| *c == b' ' || *c == b'\t') {
+        return None;
+    }
+    let t = rest.trim_ascii();
+    (!t.is_empty()).then_some(t)
+}
+
+pub fn handle(node: &Arc<NodeShared>, method: Method, target: &str, body: Vec<u8>) -> AdminOut {
+    let path = endpoint(target).unwrap_or("");
     match (method, path) {
         (Method::Get | Method::Head, "status") => respond(200, "application/json", status_json(node)),
         (Method::Get | Method::Head, "metrics") => respond(200, "text/plain; version=0.0.4", metrics(node)),
@@ -319,7 +393,24 @@ pub fn metrics(node: &NodeShared) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::json_str;
+    use super::{bearer, endpoint, json_str, AdminToken};
+
+    #[test]
+    fn endpoints_and_bearer() {
+        assert_eq!(endpoint("/_k10s/status?x=1"), Some("status"));
+        assert_eq!(endpoint("/_k10s//health"), Some("health"));
+        assert_eq!(endpoint("/_k10s"), Some(""));
+        assert_eq!(endpoint("/_k10sx/status"), None);
+        assert_eq!(endpoint("/echo"), None);
+        assert_eq!(bearer(b"Bearer abc"), Some(&b"abc"[..]));
+        assert_eq!(bearer(b"bearer  abc "), Some(&b"abc"[..]));
+        assert_eq!(bearer(b"Basic abc"), None);
+        assert_eq!(bearer(b"Bearerabc"), None);
+        assert_eq!(bearer(b"Bearer "), None);
+        let t = AdminToken::new(b"s3cret");
+        assert!(t.matches(b"s3cret") && !t.matches(b"s3cre") && !t.matches(b""));
+        assert_eq!(format!("{t:?}"), "AdminToken(..)");
+    }
 
     #[test]
     fn json_escape() {

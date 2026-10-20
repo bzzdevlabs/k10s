@@ -140,7 +140,9 @@ fn peer_that_never_reads_is_cut_off() {
     wait_applied(&nodes, 1);
     echo_everywhere(&nodes);
     let target = &nodes[1];
-    let s = std::net::TcpStream::connect(rpc_addr(target)).unwrap();
+    let mut s = std::net::TcpStream::connect(rpc_addr(target)).unwrap();
+    // A key holder (authenticated peers are trusted with the protocol, not with unbounded buffers).
+    let mut sec = peer_handshake(&mut s, 0xbad);
     let mut w = s.try_clone().unwrap();
     let writer = std::thread::spawn(move || {
         let mut sent = 0u64;
@@ -148,8 +150,9 @@ fn peer_that_never_reads_is_cut_off() {
             let mut reqs = Vec::new();
             for _ in 0..5 {
                 sent += 1;
-                k10_mesh::wire::Msg::GetManifest { version: 1 }.encode(sent, &mut reqs).unwrap();
+                sec.push(&k10_mesh::wire::Msg::GetManifest { version: 1 }, sent, &mut reqs).unwrap();
             }
+            sec.seal_pending(&mut reqs);
             if w.write_all(&reqs).is_err() {
                 break; // the node closed the link
             }
@@ -211,7 +214,7 @@ fn fd_exhaustion_does_not_spin() {
     let http = format!("127.0.0.1:{http_port}");
     let mut cmd = Command::new(bin());
     cmd.args(["node", "--data", dir.join("data").to_str().unwrap(), "--http", &http, "--shards", "1"])
-        .args(["--gossip", "127.0.0.1:0", "--rpc", "127.0.0.1:0"])
+        .args(["--gossip", "127.0.0.1:0", "--rpc", "127.0.0.1:0", "--cluster-key-file", key_file().to_str().unwrap()])
         .stdout(Stdio::null())
         .stderr(std::fs::File::create(&log).unwrap());
     // SAFETY: setrlimit is async-signal-safe; nothing else runs between fork and exec.

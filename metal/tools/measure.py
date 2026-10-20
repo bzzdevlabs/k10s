@@ -10,6 +10,7 @@ out/linux/*. The host is shared, so every throughput/latency figure is the media
 import json
 import os
 import re
+import secrets
 import select
 import socket
 import statistics
@@ -30,6 +31,7 @@ KERNEL = "out/k10-metal.elf"
 BUNDLE = "out/bundle.k10b"
 LINUX_KERNEL = f"/boot/vmlinuz-{os.uname().release}"
 QBOOT = "/usr/share/qemu/qboot.rom"
+TOKEN = secrets.token_hex(16)  # admin API bearer token given to every k10-metal guest
 
 
 def qemu_cmd(mem="64M", kernel=KERNEL, initrd=BUNDLE, append="", port=PORT, bios=None, net=True, debug_exit=True, smp=1):
@@ -45,6 +47,8 @@ def qemu_cmd(mem="64M", kernel=KERNEL, initrd=BUNDLE, append="", port=PORT, bios
     c += ["-kernel", kernel]
     if initrd:
         c += ["-initrd", initrd]
+    if "k10-metal" in kernel:
+        append = f"k10.admin_token={TOKEN} {append}".strip()
     if append:
         c += ["-append", append]
     return c
@@ -106,7 +110,8 @@ class Guest:
 def http(port, path, method="GET", body=b"", timeout=5.0):
     with socket.create_connection(("127.0.0.1", port), timeout=timeout) as s:
         s.settimeout(timeout)
-        s.sendall(f"{method} {path} HTTP/1.1\r\nHost: x\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode() + body)
+        s.sendall(f"{method} {path} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: {len(body)}\r\n"
+                  f"Connection: close\r\n\r\n".encode() + body)
         data = b""
         while True:
             c = s.recv(65536)

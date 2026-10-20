@@ -3,7 +3,9 @@
 //!
 //! ## Peer links
 //! One persistent TCP connection per peer pair carries everything, multiplexed by request id (`k10_mesh::wire`).
-//! Both sides start with `Hello{member}`. A node dials peers with a larger id as soon as they come up, and any peer
+//! With a cluster key both sides first exchange `Auth` frames, then send sealed records (`k10_mesh::secure`); a peer
+//! that fails to authenticate or to finish within [`HANDSHAKE_TIMEOUT_NS`] is dropped. Both sides send
+//! `Hello{member}` first. A node dials peers with a larger id as soon as they come up, and any peer
 //! lazily when it first needs it; if both ends dialed at once, the connection dialed by the smaller id wins and the
 //! other one is closed by its dialer once idle. Requests are appended to the link's write buffer and written once
 //! per loop iteration (batching); a link that fails to connect puts its peer in a short backoff (200 ms, doubling
@@ -45,8 +47,9 @@ use crate::host::{Request, CALL_TIMEOUT, CALL_UNAVAILABLE};
 use crate::router::Completion;
 use crate::sys::{self, mono_ns, Epoll, Fd};
 use k10_mesh::driver::UdpDriver;
+use k10_mesh::secure::{AuthError, SecureLink, AUTH_FRAME_LEN};
 use k10_mesh::sha256::sha256;
-use k10_mesh::wire::{FrameDecoder, Msg, DEFAULT_MAX_FRAME, HEADER_LEN};
+use k10_mesh::wire::{FrameDecoder, Msg, WireError, DEFAULT_MAX_FRAME, HEADER_LEN, KIND_AUTH};
 use k10_mesh::{DesiredState, Event, Manifest, Member, MemberState, NodeId};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
@@ -82,6 +85,8 @@ const WBUF_COMPACT: usize = 1 << 20;
 /// A dial that has not connected after this long fails (its unsent requests go to the next candidate). Without
 /// it, a peer that drops packets (powered off, partitioned) would hold them until their deadline.
 const CONNECT_TIMEOUT_NS: u64 = 1_000_000_000;
+/// Links whose peer has not sent `Auth` and `Hello` this long after creation are closed.
+pub(crate) const HANDSHAKE_TIMEOUT_NS: u64 = 5_000_000_000;
 
 struct Link {
     fd: Fd,
@@ -95,6 +100,10 @@ struct Link {
     hello_rx: bool,
     /// Superseded by the peer's other connection: close (if we dialed it) once our requests on it are answered.
     retiring: bool,
+    /// Cluster authentication of this link (plain with `--insecure-unauthenticated-cluster`).
+    sec: SecureLink,
+    /// The node id the peer proved with its `Auth` frame (its `Hello` must carry the same).
+    auth_peer: Option<NodeId>,
     dec: FrameDecoder,
     wbuf: Vec<u8>,
     wpos: usize,
@@ -231,6 +240,8 @@ pub(crate) struct Mesh {
     /// Links to close at the next safe point (write buffer overflow).
     doomed: Vec<(u32, u32)>,
     accept_pause: sys::AcceptPause,
+    auth_log: sys::RateLog,
+    gossip_log: sys::RateLog,
 }
 
 impl Mesh {
@@ -271,6 +282,8 @@ impl Mesh {
             read_again: Vec::new(),
             doomed: Vec::new(),
             accept_pause: sys::AcceptPause::default(),
+            auth_log: sys::RateLog::default(),
+            gossip_log: sys::RateLog::default(),
         })
     }
 
@@ -320,8 +333,9 @@ impl Mesh {
             if let Some(t) = self.placement_due {
                 timeout_ns = timeout_ns.min(t.saturating_sub(now));
             }
-            for l in self.links.iter().flatten().filter(|l| l.connecting) {
-                timeout_ns = timeout_ns.min((l.since + CONNECT_TIMEOUT_NS).saturating_sub(now));
+            for l in self.links.iter().flatten().filter(|l| l.connecting || !l.hello_rx) {
+                let limit = if l.connecting { CONNECT_TIMEOUT_NS } else { HANDSHAKE_TIMEOUT_NS };
+                timeout_ns = timeout_ns.min((l.since + limit).saturating_sub(now));
             }
             if let Some(f) = &self.fetch {
                 let t = if f.cur.is_some() { f.attempt_deadline } else { f.retry_at };
@@ -356,6 +370,9 @@ impl Mesh {
                         let now = self.now_ms();
                         if let Err(e) = self.udp.on_readable(now) {
                             eprintln!("k10s: mesh: gossip socket: {e}");
+                        }
+                        if let Some((from, why)) = self.udp.take_last_reject() {
+                            self.gossip_log.log(mono_ns(), || format!("k10s: mesh: dropped gossip datagram(s) from {from}: {why}"));
                         }
                     }
                     TOK_LISTEN => self.accept_all(),
@@ -693,13 +710,25 @@ impl Mesh {
                 self.fail_call(c, CALL_TIMEOUT, "deadline exceeded");
             }
         }
-        let stuck: Vec<u32> = self
+        let stuck: Vec<(u32, bool)> = self
             .links
             .iter()
             .enumerate()
-            .filter_map(|(i, l)| l.as_ref().filter(|l| l.connecting && now >= l.since + CONNECT_TIMEOUT_NS).map(|_| i as u32))
+            .filter_map(|(i, l)| {
+                let l = l.as_ref()?;
+                if l.connecting && now >= l.since + CONNECT_TIMEOUT_NS {
+                    Some((i as u32, false))
+                } else if !l.connecting && !l.hello_rx && now >= l.since + HANDSHAKE_TIMEOUT_NS {
+                    Some((i as u32, true))
+                } else {
+                    None
+                }
+            })
             .collect();
-        for li in stuck {
+        for (li, handshake) in stuck {
+            if handshake {
+                self.auth_failed(li, "handshake not completed in time");
+            }
             self.close_link(li, true, false);
         }
         if self.placement_due.is_some_and(|t| now >= t) {
@@ -909,20 +938,23 @@ impl Mesh {
         if l.doomed {
             return Err(QueueError::Overflow);
         }
-        let start = l.queued;
         let before = l.wbuf.len();
-        if let Err(e) = m.encode(id, &mut l.wbuf) {
-            eprintln!("k10s: mesh: dropping un-encodable frame: {e}");
-            return Err(QueueError::Encode);
-        }
-        if l.unsent() > LINK_HARD_CAP {
-            l.wbuf.truncate(before);
+        // Checked before encoding: a sealed frame cannot be taken back.
+        if l.unsent() + m.frame_len_bound() + l.sec.overhead() > LINK_HARD_CAP {
             l.doomed = true;
             self.doomed.push((li, l.gen));
             self.cs.stats.links_overflowed.fetch_add(1, Relaxed);
             eprintln!("k10s: mesh: link to {} holds over {} MiB unsent: closing it", fmt_peer(l.peer), LINK_HARD_CAP >> 20);
             return Err(QueueError::Overflow);
         }
+        let at = match l.sec.push(m, id, &mut l.wbuf) {
+            Ok(at) => at,
+            Err(e) => {
+                eprintln!("k10s: mesh: dropping un-encodable frame: {e}");
+                return Err(QueueError::Encode);
+            }
+        };
+        let start = l.queued + (at - before) as u64;
         l.queued += (l.wbuf.len() - before) as u64;
         if !l.dirty {
             l.dirty = true;
@@ -954,6 +986,18 @@ impl Mesh {
     }
 
     fn add_link(&mut self, fd: Fd, peer: Option<NodeId>, dialed: bool) -> io::Result<u32> {
+        let sec = match &self.cs.cfg.key {
+            Some(k) => {
+                let mut nonce = [0u8; 32];
+                sys::fill_random(&mut nonce)?;
+                SecureLink::new(k, self.me, nonce)
+            }
+            None => SecureLink::plain(),
+        };
+        // Until the peer has authenticated, accept nothing larger than its `Auth` frame.
+        let dec = if sec.is_plain() { FrameDecoder::default() } else { FrameDecoder::new(AUTH_FRAME_LEN) };
+        let mut wbuf = Vec::new();
+        sec.start(&mut wbuf);
         let li = match self.free_links.pop() {
             Some(i) => i,
             None => {
@@ -977,10 +1021,12 @@ impl Mesh {
             since: mono_ns(),
             hello_rx: false,
             retiring: false,
-            dec: FrameDecoder::default(),
-            wbuf: Vec::new(),
+            dec,
+            queued: wbuf.len() as u64,
+            sec,
+            auth_peer: None,
+            wbuf,
             wpos: 0,
-            queued: 0,
             written: 0,
             writable: !dialed,
             dirty: false,
@@ -1101,8 +1147,13 @@ impl Mesh {
     /// Writes buffered frames. Returns false if the link was closed.
     fn flush(&mut self, li: u32) -> bool {
         let l = self.links[li as usize].as_mut().unwrap();
-        while l.wpos < l.wbuf.len() {
-            match sys::writev2(l.fd.raw(), &l.wbuf[l.wpos..], &[]) {
+        // One sealed record per write; records queued during the handshake wait, unsealed, at the end of the buffer.
+        let before = l.wbuf.len();
+        l.sec.seal_pending(&mut l.wbuf);
+        l.queued += (l.wbuf.len() - before) as u64;
+        let end = l.wbuf.len() - l.sec.held();
+        while l.wpos < end {
+            match sys::writev2(l.fd.raw(), &l.wbuf[l.wpos..end], &[]) {
                 Ok(n) => {
                     l.wpos += n;
                     l.written += n as u64;
@@ -1123,10 +1174,12 @@ impl Mesh {
                 }
             }
         }
-        l.wbuf.clear();
-        l.wpos = 0;
-        if l.wbuf.capacity() > 1 << 20 {
-            l.wbuf = Vec::new();
+        if l.wpos == l.wbuf.len() {
+            l.wbuf.clear();
+            l.wpos = 0;
+            if l.wbuf.capacity() > 1 << 20 {
+                l.wbuf = Vec::new();
+            }
         }
         true
     }
@@ -1141,6 +1194,8 @@ impl Mesh {
         loop {
             let mut closed = false;
             let mut more = false;
+            let mut authed = false;
+            let mut auth_err: Option<String> = None;
             {
                 let l = self.links[li as usize].as_mut().unwrap();
                 match sys::read(l.fd.raw(), &mut self.rbuf) {
@@ -1158,6 +1213,39 @@ impl Mesh {
                 }
                 loop {
                     match l.dec.next() {
+                        Ok(Some(f)) if l.sec.awaiting_auth() => {
+                            // The first frame must be `Auth`: derive the keys, seal what we queued, open the rest.
+                            if f.kind != KIND_AUTH {
+                                auth_err = Some("peer did not authenticate (no cluster key, or an older k10s)".into());
+                                closed = true;
+                                break;
+                            }
+                            let payload = f.payload.to_vec();
+                            let expect = if l.dialed { l.peer } else { None };
+                            let before = l.wbuf.len();
+                            let r = l.sec.on_auth(&payload, expect, &mut l.wbuf);
+                            l.queued += (l.wbuf.len() - before) as u64;
+                            match r {
+                                Ok((peer, opener)) => {
+                                    l.dec.set_opener(opener, DEFAULT_MAX_FRAME);
+                                    l.auth_peer = Some(peer);
+                                    authed = true;
+                                }
+                                Err(e) => {
+                                    // A dialed address now held by another node is not an authentication failure.
+                                    if !matches!(e, AuthError::WrongPeer(_)) {
+                                        auth_err = Some(format!("handshake refused: {e}"));
+                                    }
+                                    closed = true;
+                                    break;
+                                }
+                            }
+                        }
+                        Ok(Some(f)) if f.kind == KIND_AUTH => {
+                            auth_err = Some("peer uses a cluster key; this node runs with --insecure-unauthenticated-cluster".into());
+                            closed = true;
+                            break;
+                        }
                         Ok(Some(f)) => match f.msg() {
                             Ok(m) => frames.push((f.request_id, In::from(m))),
                             Err(_) => {
@@ -1166,11 +1254,24 @@ impl Mesh {
                             }
                         },
                         Ok(None) => break,
-                        Err(_) => {
+                        Err(e) => {
+                            if e == WireError::Unauthenticated || l.sec.awaiting_auth() {
+                                auth_err = Some(e.to_string());
+                            }
                             closed = true;
                             break;
                         }
                     }
+                }
+            }
+            if let Some(e) = auth_err {
+                self.auth_failed(li, &e);
+            }
+            if authed {
+                let l = self.links[li as usize].as_mut().unwrap();
+                if !l.dirty {
+                    l.dirty = true;
+                    self.dirty.push(li);
                 }
             }
             for (id, m) in frames.drain(..) {
@@ -1225,6 +1326,11 @@ impl Mesh {
 
     fn on_hello(&mut self, li: u32, member: Member) {
         let l = self.links[li as usize].as_mut().unwrap();
+        if !l.sec.is_plain() && l.auth_peer != Some(member.id) {
+            self.auth_failed(li, "Hello does not match the authenticated node id");
+            return self.close_link(li, true, false);
+        }
+        let l = self.links[li as usize].as_mut().unwrap();
         if l.dialed && l.peer != Some(member.id) {
             // The address now belongs to another node (restarted with a new id): drop the link.
             return self.close_link(li, false, false);
@@ -1252,6 +1358,18 @@ impl Mesh {
             }
         }
         self.view_dirty = true;
+    }
+
+    /// Counts and logs (rate-limited) a peer that failed to authenticate; the caller closes the link.
+    fn auth_failed(&mut self, li: u32, why: &str) {
+        self.cs.stats.link_auth_failures.fetch_add(1, Relaxed);
+        let Some(l) = self.links[li as usize].as_ref() else { return };
+        let who = match (l.peer, sys::peer_addr(l.fd.raw())) {
+            (Some(p), Ok(a)) => format!("{p} at {a}"),
+            (None, Ok(a)) => format!("{a}"),
+            (p, Err(_)) => fmt_peer(p),
+        };
+        self.auth_log.log(mono_ns(), || format!("k10s: mesh: peer link with {who} closed: {why}"));
     }
 
     /// Closes a link. Our calls on it are re-routed if their bytes never left this process, else failed.
@@ -1321,6 +1439,7 @@ impl Mesh {
             members: g.members().cloned().collect(),
             desired: g.desired(),
             io: self.udp.io_stats(),
+            cipher: self.udp.cipher_stats(),
             gossip: g.stats(),
             links,
             fetching: self.fetch.as_ref().map(|f| {

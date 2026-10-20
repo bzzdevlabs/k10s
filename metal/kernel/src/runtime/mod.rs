@@ -1345,9 +1345,40 @@ pub enum KvRefused {
 
 // --- admin API -----------------------------------------------------------------------------------------------
 
+/// SHA-256 of `k10.admin_token`, or `None`: the admin API is then refused unless `k10.admin_insecure`.
+static ADMIN_TOKEN: crate::sync::Global<Option<[u8; 32]>> = crate::sync::Global::new(None);
+static ADMIN_OPEN: AtomicBool = AtomicBool::new(false);
+
+/// Admin access from the kernel command line (`k10.admin_token=TOKEN`, or `k10.admin_insecure`).
+pub fn admin_init(token: Option<&str>, insecure: bool) {
+    *ADMIN_TOKEN.borrow_mut() = token.map(|t| k10_mesh::sha256::sha256(t.as_bytes()));
+    ADMIN_OPEN.store(insecure, Ordering::Relaxed);
+}
+
+/// `None` if `target` may proceed, else the status to close with; all of `/_k10s/` but `health` needs the token.
+pub fn admin_gate(target: &[u8], auth: Option<&[u8]>) -> Option<u16> {
+    let path = &target[..target.iter().position(|&c| c == b'?').unwrap_or(target.len())];
+    if !(path == b"/_k10s" || path.starts_with(b"/_k10s/")) || path == b"/_k10s/health" {
+        return None;
+    }
+    let Some(want) = *ADMIN_TOKEN.borrow() else {
+        return if ADMIN_OPEN.load(Ordering::Relaxed) { None } else { Some(403) };
+    };
+    let presented = auth.and_then(|v| {
+        let (scheme, rest) = (v.get(..6)?, &v[6..]);
+        let ok = scheme.eq_ignore_ascii_case(b"bearer") && rest.first().is_some_and(|c| *c == b' ' || *c == b'\t');
+        ok.then(|| rest.trim_ascii())
+    });
+    match presented {
+        Some(t) if k10_mesh::crypto::ct_eq(&k10_mesh::sha256::sha256(t), &want) => None,
+        _ => Some(401),
+    }
+}
+
 fn admin(path: &[u8]) -> (u16, Option<&'static str>, Vec<u8>) {
     match path {
         b"/_k10s/status" => (200, Some("application/json"), status_json().into_bytes()),
+        b"/_k10s/health" => (200, Some("text/plain"), b"ok\n".to_vec()),
         p if p.starts_with(b"/_k10s/logs/") => {
             let name = core::str::from_utf8(&p[12..]).unwrap_or("");
             let mut out = String::new();
@@ -1359,7 +1390,7 @@ fn admin(path: &[u8]) -> (u16, Option<&'static str>, Vec<u8>) {
             }
             (200, Some("text/plain"), out.into_bytes())
         }
-        _ => (404, Some("text/plain"), b"unknown admin endpoint (status, apply, logs/<service>, bench/<n>/<service>/...)\n".to_vec()),
+        _ => (404, Some("text/plain"), b"unknown admin endpoint (status, health, apply, logs/<service>, bench/<n>/<service>/...)\n".to_vec()),
     }
 }
 

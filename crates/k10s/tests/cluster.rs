@@ -8,6 +8,7 @@
 //! --nocapture --test-threads 1`).
 
 mod common;
+mod support;
 
 use k10_node::demo;
 use k10_node::http::{self, Client};
@@ -91,6 +92,7 @@ fn spawn_node(name: &str, data: &Path, join: Option<&str>, o: &Opts) -> NodeProc
         args.extend(["--join".into(), j.to_string()]);
     }
     args.extend(o.extra.iter().cloned());
+    support::with_cluster_key(&mut args);
     let mut child = Command::new(bin).args(&args).stderr(Stdio::piped()).stdout(Stdio::null()).spawn().expect("spawn k10s node");
     let log = Arc::new(Mutex::new(String::new()));
     let (tx, rx) = mpsc::channel();
@@ -401,6 +403,7 @@ fn three_nodes_join_apply_route_and_call() {
     let txt = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success());
     assert!(txt.contains("members: 3 live / 3 known") && txt.contains("applied v1") && txt.contains("(this node)"), "{txt}");
+    assert!(txt.contains("auth: cluster key id "), "{txt}");
     let out = Command::new(env!("CARGO_BIN_EXE_k10s")).args(["status", "--json", "--node", &nodes[0].http]).output().unwrap();
     assert!(String::from_utf8_lossy(&out.stdout).contains("\"cluster\":{"));
     // A stale explicit version is refused; re-applying the same content is a no-op.

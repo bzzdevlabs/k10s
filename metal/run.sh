@@ -8,7 +8,7 @@
 #   SMP=1            CPUs
 #   BIOS=            firmware: empty = SeaBIOS (QEMU default), or e.g. /usr/share/qemu/qboot.rom (faster boot)
 #   APPEND="k10.verbose"   kernel command line (k10.verbose, k10.selftest, k10.exit_on_ready, k10.spin_us=N,
-#                          k10.engine=jit|interp, k10.smp=N, cluster mode: see README.md)
+#                          k10.engine=jit|interp, k10.smp=N, k10.admin_token=TOKEN, cluster mode: see README.md)
 #   KERNEL=out/k10-metal.elf
 set -euo pipefail
 cd "$(dirname "$0")"

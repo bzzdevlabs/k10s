@@ -22,6 +22,7 @@ use crate::router::RemoteRouter;
 use crate::service::Placement;
 use crate::sys;
 use k10_mesh::driver::{IoStats, UdpDriver};
+use k10_mesh::secure::{ClusterKey, GossipCipher, GossipCipherStats, GOSSIP_OVERHEAD};
 use k10_mesh::sha256::to_hex;
 use k10_mesh::{place, Bundle, Capacity, DesiredState, Gossip, Manifest, Member, MemberState, NodeId};
 use router::{MeshInbox, MeshMsg, MeshRouter};
@@ -57,6 +58,12 @@ pub struct ClusterConfig {
     pub leave_grace: Duration,
     /// A desired-state fetch from one peer that makes no progress for this long moves on to the next peer.
     pub fetch_timeout: Duration,
+    /// Shared cluster key (sealed gossip, encrypted peer links); `None` is refused by `bind` unless `insecure`.
+    pub key: Option<ClusterKey>,
+    /// Explicit opt-in to run unauthenticated (anyone reaching the gossip/rpc ports controls the cluster).
+    pub insecure: bool,
+    /// Gossip datagrams stamped further than this from the local clock are dropped (zero: no check).
+    pub gossip_max_skew: Duration,
 }
 
 impl Default for ClusterConfig {
@@ -70,6 +77,9 @@ impl Default for ClusterConfig {
             debounce: Duration::from_millis(50),
             leave_grace: Duration::from_millis(1000),
             fetch_timeout: Duration::from_secs(10),
+            key: None,
+            insecure: false,
+            gossip_max_skew: Duration::from_millis(k10_mesh::secure::DEFAULT_MAX_SKEW_MS),
         }
     }
 }
@@ -93,6 +103,8 @@ pub struct ClusterStats {
     pub accept_pauses: AtomicU64,
     pub peer_bytes_in: AtomicU64,
     pub peer_bytes_out: AtomicU64,
+    /// Peer links closed for failed or unfinished authentication.
+    pub link_auth_failures: AtomicU64,
     pub fetches: AtomicU64,
     pub blobs_fetched: AtomicU64,
     pub applies: AtomicU64,
@@ -118,6 +130,7 @@ pub struct MeshView {
     pub members: Vec<Member>,
     pub desired: Option<DesiredState>,
     pub io: IoStats,
+    pub cipher: Option<GossipCipherStats>,
     pub gossip: k10_mesh::Stats,
     pub links: Vec<LinkInfo>,
     pub fetching: Option<String>,
@@ -433,14 +446,15 @@ impl ClusterHooks for ClusterShared {
         let l = |a: &AtomicU64| a.load(Relaxed);
         format!(
             concat!(
-                "{{\"id\":\"{}\",\"incarnation\":{},\"gossip\":\"{}\",\"rpc\":\"{}\",\"http\":\"{}\",\"leaving\":{},",
+                "{{\"id\":\"{}\",\"incarnation\":{},\"gossip\":\"{}\",\"rpc\":\"{}\",\"http\":\"{}\",\"leaving\":{},\"auth\":{},",
                 "\"desired\":{},\"applied\":{},\"fetching\":{},\"last_error\":{},",
                 "\"live_members\":{},\"members\":[{}],\"placement\":{{{}}},\"unplaced\":{},\"links\":[{}],",
                 "\"stats\":{{\"gossip_packets_sent\":{},\"gossip_bytes_sent\":{},\"gossip_packets_received\":{},",
                 "\"gossip_bytes_received\":{},\"gossip_malformed\":{},\"forwarded\":{},\"forward_retries\":{},",
                 "\"forward_failed\":{},\"forward_local\":{},\"resent_unsent\":{},\"served_for_peers\":{},\"not_here\":{},",
                 "\"dial_failures\":{},\"congested_skips\":{},\"links_overflowed\":{},\"accept_pauses\":{},",
-                "\"peer_bytes_in\":{},\"peer_bytes_out\":{},\"pending_calls\":{},\"fetches\":{},",
+                "\"peer_bytes_in\":{},\"peer_bytes_out\":{},\"link_auth_failures\":{},\"gossip_rejected\":{},",
+                "\"gossip_bad_tag\":{},\"gossip_stale\":{},\"gossip_replayed\":{},\"pending_calls\":{},\"fetches\":{},",
                 "\"blobs_fetched\":{},\"blobs\":{},\"applies\":{},\"apply_errors\":{}}}}}"
             ),
             self.id,
@@ -449,6 +463,10 @@ impl ClusterHooks for ClusterShared {
             local.as_ref().map(|m| m.rpc.to_string()).unwrap_or_default(),
             local.as_ref().map(|m| m.http.to_string()).unwrap_or_default(),
             self.leaving(),
+            match &self.cfg.key {
+                Some(k) => format!("{{\"mode\":\"key\",\"key_id\":\"{}\"}}", k.id_hex()),
+                None => "{\"mode\":\"insecure\"}".to_string(),
+            },
             desired,
             applied,
             mv.fetching.as_deref().map(js).unwrap_or_else(|| "null".into()),
@@ -476,6 +494,11 @@ impl ClusterHooks for ClusterShared {
             l(&s.accept_pauses),
             l(&s.peer_bytes_in),
             l(&s.peer_bytes_out),
+            l(&s.link_auth_failures),
+            mv.io.rejected,
+            mv.cipher.map_or(0, |c| c.bad_tag + c.malformed),
+            mv.cipher.map_or(0, |c| c.stale),
+            mv.cipher.map_or(0, |c| c.replayed),
             mv.pending_calls,
             l(&s.fetches),
             l(&s.blobs_fetched),
@@ -500,6 +523,12 @@ impl ClusterHooks for ClusterShared {
             local.as_ref().map(|m| m.gossip.to_string()).unwrap_or_default(),
             local.as_ref().map(|m| m.rpc.to_string()).unwrap_or_default(),
         );
+        match &self.cfg.key {
+            Some(k) => {
+                let _ = writeln!(o, "auth: cluster key id {}", k.id_hex());
+            }
+            None => o.push_str("auth: NONE (--insecure-unauthenticated-cluster)\n"),
+        }
         match mv.desired {
             Some(d) => {
                 let _ = write!(o, "desired v{} ({}, from {})", d.version, short_hash(&d.hash), d.origin);
@@ -624,6 +653,14 @@ pub struct ClusterSetup {
 
 impl ClusterSetup {
     pub fn bind(cfg: ClusterConfig, data: Option<&Path>) -> io::Result<ClusterSetup> {
+        if cfg.key.is_none() && !cfg.insecure {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cluster mode needs a cluster key: create one with `k10s keygen -o FILE`, copy the file to every node \
+                 and pass --cluster-key-file FILE (or --insecure-unauthenticated-cluster, only where every host that can \
+                 reach the gossip and rpc ports is trusted)",
+            ));
+        }
         let id = store::node_id(data)?;
         let store = Store::open(data)?;
         let udp = UdpSocket::bind(cfg.gossip_bind).map_err(|e| io::Error::new(e.kind(), format!("gossip {}: {e}", cfg.gossip_bind)))?;
@@ -679,7 +716,28 @@ impl ClusterSetup {
         let hooks: Arc<dyn ClusterHooks> = cs.clone();
         let _ = node.cluster.set(Arc::downgrade(&hooks));
         drop(hooks);
-        let mut driver = UdpDriver::with_socket(udp, Gossip::new(me.clone(), cfg.gossip.clone(), sys::getrandom_u64()))?;
+        let mut gcfg = cfg.gossip.clone();
+        if cfg.key.is_some() {
+            // Sealed datagrams stay within the unsealed size budget (MTU).
+            gcfg.max_packet = gcfg.max_packet.saturating_sub(GOSSIP_OVERHEAD);
+        }
+        let mut driver = UdpDriver::with_socket(udp, Gossip::new(me.clone(), gcfg, sys::getrandom_u64()))?;
+        match &cfg.key {
+            Some(k) => {
+                let mut boot = [0u8; 8];
+                sys::fill_random(&mut boot)?;
+                driver.set_cipher(GossipCipher::new(k, boot, cfg.gossip_max_skew.as_millis() as u64));
+                eprintln!(
+                    "k10s: cluster authentication: key id {} (gossip sealed with XChaCha20-Poly1305, peer links \
+                     authenticated and encrypted with ChaCha20-Poly1305)",
+                    k.id_hex()
+                );
+            }
+            None => eprintln!(
+                "k10s: WARNING: --insecure-unauthenticated-cluster: gossip and peer links are NOT authenticated; anyone \
+                 who can reach the gossip or rpc port can join, deploy code and read or change any service's data"
+            ),
+        }
         // Resume from the stored desired state: serve it (alone for now) and announce it (the highest version in
         // the cluster wins, so a whole-cluster restart converges on the newest one).
         if let Some(cur) = cs.store.current() {

@@ -65,8 +65,13 @@ curl 127.0.0.1:8080/hello/
 curl '127.0.0.1:8080/compute/?n=1000'
 ```
 Try a single service without a node: `k10s run examples/echo.ten --method POST --body hi`.
-A cluster: start more nodes with `--gossip`, `--rpc` and `--join HOST:PORT` (see [docs/NODE.md](docs/NODE.md)),
-then `apply` to any of them. Prebuilt binaries: [Releases and versions](#releases-and-versions).
+The admin API (`apply`, `status`, `logs`) answers loopback clients only until you give it a token
+(`--admin-token-file FILE` on the node, the same file to the CLI or `K10S_ADMIN_TOKEN_FILE`).
+
+A cluster: create a key once (`k10s keygen -o cluster.key`), copy it to every node, and start them with
+`--cluster-key-file cluster.key`, `--gossip`, `--rpc` and `--join HOST:PORT` (see [docs/NODE.md](docs/NODE.md));
+then `apply` to any of them. Gossip and peer links are authenticated and encrypted with that key.
+Prebuilt binaries: [Releases and versions](#releases-and-versions).
 
 ## Releases and versions
 Prebuilt artifacts: [GitHub Releases](https://github.com/bzzdevlabs/k10s/releases). *Latest* is the last stable
@@ -131,8 +136,8 @@ major bump) so that dev builds carry it. `scripts/dist.sh` builds the same archi
 - Chaos, soak and abuse campaigns (see [docs/STATUS.md](docs/STATUS.md)).
 
 ## Status and limits
-Research prototype. Not yet: authentication/encryption of gossip and peer links, replicated storage (KV is
-node-local), consensus for singletons, hostile multi-tenancy on one node (Spectre-class side channels are only
+Research prototype. Not yet: per-node identity and signed bundles (one shared cluster key today), TLS, replicated
+storage (KV is node-local), consensus for singletons, hostile multi-tenancy on one node (Spectre-class side channels are only
 partly mitigated), architectures other than x86-64 for the JIT (others run on the interpreter). See
 [docs/STATUS.md](docs/STATUS.md) and [SECURITY.md](SECURITY.md).
 

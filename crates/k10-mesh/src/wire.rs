@@ -19,12 +19,16 @@
 //! | 8    | CallResult    | status:i32 body |
 //! | 9    | Ping          | — |
 //! | 10   | Pong          | — |
+//! | 11   | Auth          | version:u8 id:u64 nonce:[32] — handshake of authenticated links ([`crate::secure`]) |
 //!
 //! `deadline_ms` is the caller's remaining time budget, relative (clocks are not synchronized). `method` is the
 //! host API's `req_method` code (0 GET, 1 POST, 2 PUT, 3 DELETE, 4 other); it is carried as is.
+//!
+//! With a cluster key, `Auth` goes first in clear, then frames travel in sealed records: `len | AEAD(frames) | tag[16]`.
 
 use crate::codec::{put_u16, put_u32, put_u64, DecodeError, Reader};
 use crate::member::Member;
+use crate::secure::Opener;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -47,6 +51,8 @@ pub const KIND_CALL: u8 = 7;
 pub const KIND_CALL_RESULT: u8 = 8;
 pub const KIND_PING: u8 = 9;
 pub const KIND_PONG: u8 = 10;
+/// Handshake frame of authenticated links (not a [`Msg`]; see [`crate::secure::SecureLink`]).
+pub const KIND_AUTH: u8 = 11;
 
 /// A peer-protocol message. Borrowed fields make both encoding (no copy before the output buffer) and decoding
 /// (slices into the receive buffer) copy-free.
@@ -74,6 +80,8 @@ pub enum WireError {
     FrameTooShort { len: u32 },
     UnknownKind(u8),
     Malformed(&'static str),
+    /// A sealed record failed authentication (other key, forged, replayed, reordered).
+    Unauthenticated,
 }
 
 impl fmt::Display for WireError {
@@ -83,6 +91,7 @@ impl fmt::Display for WireError {
             WireError::FrameTooShort { len } => write!(f, "frame length {len} shorter than its header"),
             WireError::UnknownKind(k) => write!(f, "unknown frame kind {k}"),
             WireError::Malformed(what) => write!(f, "malformed {what}"),
+            WireError::Unauthenticated => f.write_str("frame failed authentication (different cluster key, or tampered)"),
         }
     }
 }
@@ -180,6 +189,21 @@ impl<'a> Msg<'a> {
         }
     }
 
+    /// Upper bound of the encoded frame size (header included, tag excluded), to check caps before encoding.
+    pub fn frame_len_bound(&self) -> usize {
+        HEADER_LEN
+            + match self {
+                Msg::Hello { .. } => 128,
+                Msg::GetManifest { .. } => 8,
+                Msg::Manifest { bytes } => bytes.len(),
+                Msg::GetBlob { .. } | Msg::BlobMissing { .. } => 32,
+                Msg::Blob { bytes, .. } => 32 + bytes.len(),
+                Msg::Call { service, path, body, .. } => 8 + service.len() + path.len() + body.len(),
+                Msg::CallResult { body, .. } => 4 + body.len(),
+                Msg::Ping | Msg::Pong => 0,
+            }
+    }
+
     fn payload_len_hint(&self) -> usize {
         match self {
             Msg::Hello { .. } => 64,
@@ -243,6 +267,12 @@ pub struct FrameDecoder {
     start: usize,
     max_frame: usize,
     error: Option<WireError>,
+    /// Set once a link is authenticated: frames then arrive in sealed records.
+    opener: Option<Opener>,
+    /// Inside an opened record: end of its plaintext in `buf` (the tag follows).
+    rec_end: Option<usize>,
+    /// Cap on a record's `len`.
+    max_record: usize,
 }
 
 impl Default for FrameDecoder {
@@ -254,14 +284,29 @@ impl Default for FrameDecoder {
 impl FrameDecoder {
     /// `max_frame` caps `len` (kind + request id + payload).
     pub fn new(max_frame: usize) -> Self {
-        FrameDecoder { buf: Vec::new(), start: 0, max_frame: max_frame.max(9), error: None }
+        FrameDecoder { buf: Vec::new(), start: 0, max_frame: max_frame.max(9), error: None, opener: None, rec_end: None, max_record: 0 }
+    }
+
+    /// Frames arrive in sealed records from now on (opened in place; failure is sticky); `max_frame` replaces the cap.
+    pub fn set_opener(&mut self, opener: Opener, max_frame: usize) {
+        self.opener = Some(opener);
+        self.max_frame = max_frame.max(9);
+        self.max_record = (self.max_frame + 4).max(crate::secure::RECORD_TARGET) + crate::crypto::TAG_LEN;
     }
 
     fn compact(&mut self) {
         if self.start > 0 {
             self.buf.drain(..self.start);
+            if let Some(e) = &mut self.rec_end {
+                *e -= self.start;
+            }
             self.start = 0;
         }
+    }
+
+    fn fail(&mut self, e: WireError) -> Result<Option<Frame<'_>>, WireError> {
+        self.error = Some(e);
+        Err(e)
     }
 
     /// Appends received bytes.
@@ -306,30 +351,63 @@ impl FrameDecoder {
         if let Some(e) = self.error {
             return Err(e);
         }
-        let avail = &self.buf[self.start..];
+        // Sealed links: open the next record in place, then return its frames one by one.
+        let end = loop {
+            if self.opener.is_none() {
+                break self.buf.len();
+            }
+            match self.rec_end {
+                Some(e) if self.start < e => break e,
+                Some(e) => {
+                    self.start = e + crate::crypto::TAG_LEN;
+                    self.rec_end = None;
+                }
+                None => {
+                    let avail = &self.buf[self.start..];
+                    if avail.len() < 4 {
+                        return Ok(None);
+                    }
+                    let len = u32::from_le_bytes([avail[0], avail[1], avail[2], avail[3]]);
+                    if (len as usize) < crate::crypto::TAG_LEN {
+                        return self.fail(WireError::FrameTooShort { len });
+                    }
+                    if len as u64 > self.max_record as u64 {
+                        return self.fail(WireError::FrameTooLarge { len: len as u64, max: self.max_record });
+                    }
+                    let total = 4 + len as usize;
+                    if avail.len() < total {
+                        return Ok(None);
+                    }
+                    let s = self.start;
+                    if !self.opener.as_mut().unwrap().open(&mut self.buf[s..s + total]) {
+                        return self.fail(WireError::Unauthenticated);
+                    }
+                    self.start += 4;
+                    self.rec_end = Some(s + total - crate::crypto::TAG_LEN);
+                }
+            }
+        };
+        let sealed = self.opener.is_some();
+        let avail = &self.buf[self.start..end];
         if avail.len() < 4 {
-            return Ok(None);
+            return if sealed { self.fail(WireError::Malformed("frame split across records")) } else { Ok(None) };
         }
         let len = u32::from_le_bytes([avail[0], avail[1], avail[2], avail[3]]);
         if (len as usize) < 9 {
-            let e = WireError::FrameTooShort { len };
-            self.error = Some(e);
-            return Err(e);
+            return self.fail(WireError::FrameTooShort { len });
         }
         if len as u64 > self.max_frame as u64 {
-            let e = WireError::FrameTooLarge { len: len as u64, max: self.max_frame };
-            self.error = Some(e);
-            return Err(e);
+            return self.fail(WireError::FrameTooLarge { len: len as u64, max: self.max_frame });
         }
         let total = 4 + len as usize;
         if avail.len() < total {
-            return Ok(None);
+            return if sealed { self.fail(WireError::Malformed("frame split across records")) } else { Ok(None) };
         }
         let kind = avail[4];
-        if !(KIND_HELLO..=KIND_PONG).contains(&kind) {
-            let e = WireError::UnknownKind(kind);
-            self.error = Some(e);
-            return Err(e);
+        // `Auth` is never sealed.
+        let last_kind = if sealed { KIND_PONG } else { KIND_AUTH };
+        if !(KIND_HELLO..=last_kind).contains(&kind) {
+            return self.fail(WireError::UnknownKind(kind));
         }
         let mut id = [0u8; 8];
         id.copy_from_slice(&avail[5..13]);
