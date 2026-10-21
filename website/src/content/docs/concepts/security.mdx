@@ -34,15 +34,31 @@ machine-code verification matters most there.
 
 ## Who may deploy
 
-- **Admin API** (`/_k10s/`: apply, status, logs, cluster): a bearer token (`--admin-token-file`), compared in
-  constant time on the request head before any body is read. Without a token a hosted node serves the admin API
-  to loopback clients only. `--admin ADDR` moves it to its own listener. `health` and `metrics` stay open:
-  scrapers should not need a secret that can deploy code.
-- **Cluster:** one shared 32-byte key (`k10s keygen`). Gossip datagrams are sealed with XChaCha20-Poly1305 and
-  rejected before decoding when forged, stale (clock skew bound, 300 s) or replayed. Peer links run a mutual
-  handshake on fresh nonces, then encrypt and authenticate every record with ChaCha20-Poly1305 (per-direction
-  keys, counter nonces: no injection, replay, reordering or reflection). Manifests and blobs are still checked
-  against their SHA-256 when fetched.
+- **Admin API** (`/_k10s/`: apply, status, logs, cluster): every request is signed with the node's admin key
+  (HMAC-SHA256 over the node process's random audience, method, target, time, nonce and the body's hash;
+  `--admin-token-file`, else `DATA/admin.key` created on first start). Audience, signature, 60 s clock window and
+  nonce cache are checked on the request head before any body is read: the key never travels, and a captured
+  request can be neither altered nor replayed (not on that node, another node sharing the key, or after a restart). `health` is
+  open; `metrics` is open on the dedicated admin listener (`--admin ADDR`) so scrapers need no secret that can
+  deploy code.
+- **Cluster:** a shared 32-byte key (`k10s keygen`). Gossip datagrams are sealed with XChaCha20-Poly1305 (key id
+  and sender authenticated) and rejected before decoding when forged, stale (clock skew bound, default 300 s) or
+  replayed. Peer links run a mutual handshake on fresh nonces, then encrypt and authenticate every record with
+  ChaCha20-Poly1305 (per-direction keys, counter nonces: no injection, replay, reordering or reflection). Nothing
+  is served on a link before the peer has proved it holds the key, and what an unauthenticated peer can make a
+  node buffer is capped. Manifests and blobs are still checked against their SHA-256 when fetched; key material is
+  wiped from memory when dropped.
+
+### Key rotation
+
+A node accepts a next key besides its current one (`--cluster-next-key-file`). Rotate with three rolling restarts,
+one node at a time; the cluster stays whole and serving throughout:
+
+1. every node: `--cluster-key-file old.key --cluster-next-key-file new.key`;
+2. every node: `--cluster-key-file new.key --cluster-next-key-file old.key`;
+3. every node: `--cluster-key-file new.key`.
+
+`k10s status` shows the key ids (`auth`) of each node.
 
 ## CPU side channels
 
@@ -77,8 +93,8 @@ per-service weight yet.
 <Aside type="caution" title="Open items">
 	- **Every key holder is fully trusted.** A node with the cluster key can deploy and read the traffic it carries.
 	  No per-node identity, no revocation (rotate the key on every node), no forward secrecy.
-	- **Bundles are not signed.** Whoever holds an admin token or the cluster key deploys code.
-	- **No TLS** on the admin API or service ingress: keep the admin listener on a trusted network or behind a TLS
-	  proxy, and configure a token when a local proxy makes remote clients look like loopback ones.
+	- **Bundles are not signed.** Whoever holds an admin key or the cluster key deploys code.
+	- **No TLS** on the admin API or service ingress: signed requests cannot be forged or replayed, but bundles,
+	  status and logs travel in clear; keep the admin listener on a trusted network or behind a TLS proxy.
 	- **Traffic analysis:** message sizes and timing are visible.
 </Aside>

@@ -9,7 +9,12 @@ Local `main` contains `origin/main` plus the security hardening below; it is not
 pre-release, step 8).
 - Isolation: SFI-masked JIT and interpreter, validator, red-team and differential suites, objdump encoder fuzzing and
   SFI verifier tests.
-- Control plane: bearer-token admin API, sealed gossip and encrypted, authenticated peer links (shared cluster key).
+- Control plane: signed admin requests (HMAC over a per-process audience, method, target, time, nonce and body
+  hash; clock window, nonce cache), every node has an admin key (`DATA/admin.key`), `metrics` open only on
+  `--admin`; sealed gossip (key id and sender authenticated, replay state kept past the skew window) and encrypted,
+  authenticated peer links in one `k10_mesh::secure::Link` for hosted and metal (nothing served before the peer's
+  `Hello` opens, capped unauthenticated input and handshaking links); cluster key rotation (current + next key);
+  zeroized key material; metal secrets via fw_cfg, wall-clock resync, RDRAND failure fails the link.
 - Authority: per-service `calls` allowlist (manifest format 2, index-based, canonical).
 - Side channels: `br_table` compare trees and clamped jump tables, opt-in lfence/retpoline, speculation-safe host
   bounds (`k10-nospec`), per-node SipHash-keyed fuzzy guest clock; one host ABI crate (`k10-host`) for hosted and metal.
@@ -24,13 +29,6 @@ Rules: production-ready (no workarounds), comments only where needed as English 
 updated with every change and written as the current state, no perf regression (`bench/k10s/ab.py` vs 08f2921), no
 push or tag before step 9, never create namespaces or seek privileges on this machine.
 
-6. **Auth** — branch `worktree-agent-a34a5562a6c3410ee` (worktree under `.claude/worktrees/`; merge main first). Key
-   confirmation before serving (pre-auth record cap, `Hello` first, records held until the peer's first record opens,
-   cap on unauthenticated links); one `k10_mesh::secure::Link` for hosted and metal; exact-match boolean flags; signed
-   admin requests (HMAC over method‖target‖t‖n‖sha256(body), skew window, nonce cache), node always requires a key
-   (`DATA/admin.key`, 0600, when none is given), `metrics` open only on `--admin`; metal secrets via fw_cfg; gossip
-   replay state kept until max(ts, last) + skew + margin, sender id in AAD, no skew-0 mode; metal wall-clock resync;
-   cluster key rotation (current + next key, key id on the wire); zeroized key material; RDRAND failure fails the link.
 7. **Performance** — main is 2–12 % below 08f2921 in `ab.py` runs (noisy) and a trivial invoke costs ~19 ns vs ~10 ns.
    Bisect 08f2921..main with `cargo bench -p k10-jit` / `crates/k10-node/examples/measure.rs` and `ab.py`, fix the
    causes without weakening any security property. `ab.py` gains an option to give the base the same manifest
@@ -78,6 +76,8 @@ push or tag before step 9, never create namespaces or seek privileges on this ma
 - Never touch Docker containers/images not created by k10s scripts (the machine has the user's own).
 
 ## Open items
+- Untested here (needs root): `k10s node --user U --data NEW_DIR` without `--admin-token-file` creates the data
+  directory and `admin.key` owned by U. Metal has no test of the admin nonce-cache 429.
 - Multi-hour soak to rule out the ~40 KB/min RSS drift seen once on a cluster node.
 - Metal has no per-service memory reservations (it shares placement, not the accounting).
 - Native-hardware open questions for the user: end of docs/research/native-hardware.md; decisions list in

@@ -26,8 +26,6 @@ pub struct IoStats {
     pub packets_received: u64,
     pub bytes_received: u64,
     pub send_errors: u64,
-    /// Datagrams dropped by the [`GossipCipher`] (not authentic, stale or replayed).
-    pub rejected: u64,
 }
 
 /// A UDP socket plus the gossip state machine.
@@ -43,8 +41,9 @@ pub struct UdpDriver {
 }
 
 /// Unix time in milliseconds (the gossip cipher's timestamps).
-fn wall_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+fn wall_ms() -> io::Result<u64> {
+    let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| io::Error::other("system clock before 1970"))?;
+    Ok(d.as_millis() as u64)
 }
 
 impl UdpDriver {
@@ -99,6 +98,7 @@ impl UdpDriver {
     /// Drains the socket (up to an internal budget), feeding every datagram to gossip and sending replies.
     /// Returns the number of datagrams processed.
     pub fn on_readable(&mut self, now_ms: u64) -> io::Result<usize> {
+        let wall = if self.cipher.is_some() { wall_ms()? } else { 0 };
         let mut n = 0;
         while n < READ_BUDGET {
             match self.sock.recv_from(&mut self.rx) {
@@ -107,10 +107,9 @@ impl UdpDriver {
                     self.stats.packets_received += 1;
                     self.stats.bytes_received += len as u64;
                     let pkt = match &mut self.cipher {
-                        Some(c) => match c.open(&mut self.rx[..len], wall_ms()) {
+                        Some(c) => match c.open(&mut self.rx[..len], wall) {
                             Ok(p) => p,
                             Err(r) => {
-                                self.stats.rejected += 1;
                                 self.last_reject = Some((from, r));
                                 continue;
                             }
@@ -118,7 +117,7 @@ impl UdpDriver {
                         None => &self.rx[..len],
                     };
                     let out = self.gossip.on_packet(from, pkt, now_ms);
-                    self.flush(out);
+                    self.flush(out)?;
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => break,
                 // ICMP errors from earlier sends surface on recv on Linux; they are not fatal for UDP.
@@ -131,9 +130,9 @@ impl UdpDriver {
     }
 
     /// Runs gossip timers; call when `now_ms >= next_deadline()` (extra calls are harmless).
-    pub fn on_tick(&mut self, now_ms: u64) {
+    pub fn on_tick(&mut self, now_ms: u64) -> io::Result<()> {
         let out = self.gossip.tick(now_ms);
-        self.flush(out);
+        self.flush(out)
     }
 
     /// Next time `on_tick` has work (absolute, same clock as `now_ms`).
@@ -141,23 +140,23 @@ impl UdpDriver {
         self.gossip.next_deadline()
     }
 
-    pub fn join(&mut self, seeds: &[Addr], now_ms: u64) {
+    pub fn join(&mut self, seeds: &[Addr], now_ms: u64) -> io::Result<()> {
         let out = self.gossip.join(seeds, now_ms);
-        self.flush(out);
+        self.flush(out)
     }
 
     pub fn set_fallback_seeds(&mut self, addrs: &[Addr]) {
         self.gossip.set_fallback_seeds(addrs);
     }
 
-    pub fn leave(&mut self, now_ms: u64) {
+    pub fn leave(&mut self, now_ms: u64) -> io::Result<()> {
         let out = self.gossip.leave(now_ms);
-        self.flush(out);
+        self.flush(out)
     }
 
-    pub fn set_desired(&mut self, version: u64, hash: [u8; 32]) {
+    pub fn set_desired(&mut self, version: u64, hash: [u8; 32]) -> io::Result<()> {
         let out = self.gossip.set_desired(version, hash);
-        self.flush(out);
+        self.flush(out)
     }
 
     /// Next pending membership / desired-state event.
@@ -186,11 +185,13 @@ impl UdpDriver {
         self.sock.set_nonblocking(true)
     }
 
-    fn flush(&mut self, out: Output) {
+    fn flush(&mut self, out: Output) -> io::Result<()> {
+        self.events.extend(out.events);
+        let wall = if self.cipher.is_some() && !out.packets.is_empty() { wall_ms()? } else { 0 };
         for (to, pkt) in out.packets {
             let bytes: &[u8] = match &mut self.cipher {
                 Some(c) => {
-                    c.seal(&pkt, wall_ms(), &mut self.sealed);
+                    c.seal(&pkt, wall, &mut self.sealed);
                     &self.sealed
                 }
                 None => &pkt,
@@ -203,7 +204,7 @@ impl UdpDriver {
                 Err(_) => self.stats.send_errors += 1, // UDP is best effort; gossip tolerates loss
             }
         }
-        self.events.extend(out.events);
+        Ok(())
     }
 }
 
@@ -238,7 +239,7 @@ impl MeshThread {
         let start = Instant::now();
         let now = move || start.elapsed().as_millis() as u64;
         if !seeds.is_empty() {
-            d.join(&seeds, now());
+            d.join(&seeds, now())?;
         }
         let snapshot = |d: &UdpDriver| Snapshot {
             local: d.gossip().local().clone(),
@@ -255,10 +256,10 @@ impl MeshThread {
                 let mut dirty = false;
                 loop {
                     match cmd_rx.try_recv() {
-                        Ok(Cmd::Join(s)) => d.join(&s, now()),
-                        Ok(Cmd::SetDesired(v, h)) => d.set_desired(v, h),
+                        Ok(Cmd::Join(s)) => d.join(&s, now())?,
+                        Ok(Cmd::SetDesired(v, h)) => d.set_desired(v, h)?,
                         Ok(Cmd::Leave) => {
-                            d.leave(now());
+                            d.leave(now())?;
                             *sh.lock().unwrap() = snapshot(&d);
                             return Ok(());
                         }
@@ -267,7 +268,7 @@ impl MeshThread {
                     }
                     dirty = true;
                 }
-                d.on_tick(now());
+                d.on_tick(now())?;
                 d.on_readable(now())?;
                 while let Some(e) = d.poll_event() {
                     dirty = true;

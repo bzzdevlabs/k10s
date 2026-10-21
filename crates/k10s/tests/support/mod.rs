@@ -6,6 +6,9 @@
 //! binary under a running chaos/soak test).
 #![allow(dead_code)]
 
+use k10_mesh::admin_auth::AdminKey;
+use k10_mesh::secure::{ClusterKey, ClusterKeys, Link, LinkEvent};
+use k10_mesh::wire::DEFAULT_MAX_FRAME;
 use k10_mesh::{Bundle, Manifest, ServiceSpec};
 use k10_node::http::{self, Client};
 use std::io::{BufRead, BufReader};
@@ -26,28 +29,53 @@ pub fn tmpdir(tag: &str) -> PathBuf {
     d
 }
 
-/// A cluster key file shared by every test node of this process (fresh random key, mode 0600).
+/// A new random key file (64 hex digits, mode 0600).
+pub fn new_key_file(tag: &str) -> PathBuf {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let p = std::env::temp_dir().join(format!("k10s-test-{tag}-{}-{}", std::process::id(), k10_node::sys::mono_ns()));
+    let mut k = [0u8; 32];
+    k10_node::sys::fill_random(&mut k).unwrap();
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&p).unwrap();
+    writeln!(f, "{}", k10_mesh::sha256::to_hex(&k)).unwrap();
+    p
+}
+
+/// The cluster key file shared by every test node of this process.
 pub fn key_file() -> &'static Path {
     static F: OnceLock<PathBuf> = OnceLock::new();
-    F.get_or_init(|| {
-        use std::os::unix::fs::OpenOptionsExt;
-        use std::io::Write;
-        let p = std::env::temp_dir().join(format!("k10s-test-key-{}-{}", std::process::id(), k10_node::sys::mono_ns()));
-        let mut k = [0u8; 32];
-        k10_node::sys::fill_random(&mut k).unwrap();
-        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&p).unwrap();
-        writeln!(f, "{}", k10_mesh::sha256::to_hex(&k)).unwrap();
-        p
-    })
+    F.get_or_init(|| new_key_file("cluster-key"))
+}
+
+/// The admin key file shared by every test node of this process.
+pub fn admin_key_file() -> &'static Path {
+    static F: OnceLock<PathBuf> = OnceLock::new();
+    F.get_or_init(|| new_key_file("admin-key"))
+}
+
+pub fn cluster_key_of(path: &Path) -> ClusterKey {
+    ClusterKey::parse_hex(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
 /// The cluster key of [`key_file`].
-pub fn cluster_key() -> k10_mesh::secure::ClusterKey {
-    k10_mesh::secure::ClusterKey::parse_hex(&std::fs::read_to_string(key_file()).unwrap()).unwrap()
+pub fn cluster_key() -> ClusterKey {
+    cluster_key_of(key_file())
 }
 
-/// Cluster-mode arguments get the test cluster key unless they choose their own authentication.
-pub fn with_cluster_key(args: &mut Vec<String>) {
+pub fn admin_key() -> AdminKey {
+    AdminKey::parse(&std::fs::read_to_string(admin_key_file()).unwrap()).unwrap()
+}
+
+/// A request signed with the test admin key.
+pub fn admin_req(addr: &str, method: &str, path: &str, body: &[u8], timeout: Duration) -> std::io::Result<http::ClientResponse> {
+    http::request_signed(addr, method, path, body, timeout, Some(&admin_key()))
+}
+
+/// The test keys unless the arguments choose their own: the admin key, and the cluster key in cluster mode.
+pub fn with_test_keys(args: &mut Vec<String>) {
+    if !args.iter().any(|a| a == "--admin-token-file") {
+        args.extend(["--admin-token-file".into(), admin_key_file().display().to_string()]);
+    }
     let cluster = args.iter().any(|a| ["--gossip", "--rpc", "--join", "--advertise"].contains(&a.as_str()));
     let chosen = args.iter().any(|a| a == "--cluster-key-file" || a == "--insecure-unauthenticated-cluster");
     if cluster && !chosen {
@@ -55,35 +83,46 @@ pub fn with_cluster_key(args: &mut Vec<String>) {
     }
 }
 
-/// Handshakes a raw peer connection as member `id` with the test key and sends its `Hello`.
-pub fn peer_handshake(s: &mut std::net::TcpStream, id: u64) -> k10_mesh::secure::SecureLink {
-    use k10_mesh::secure::{SecureLink, AUTH_FRAME_LEN};
-    use k10_mesh::wire::{FrameDecoder, Msg};
-    use std::io::{Read, Write};
+/// Writes what `link` lets out of `out`.
+pub fn peer_send(s: &mut std::net::TcpStream, link: &mut Link, out: &mut Vec<u8>) {
+    use std::io::Write;
+    link.seal(out);
+    let n = out.len() - link.held();
+    s.write_all(&out[..n]).unwrap();
+    out.drain(..n);
+}
+
+/// Handshakes a raw peer connection as member `id` with the test key, until the node's `Hello`.
+pub fn peer_handshake(s: &mut std::net::TcpStream, id: u64) -> (Link, Vec<u8>) {
+    peer_handshake_with(s, id, &ClusterKeys::new(cluster_key(), None).unwrap())
+}
+
+pub fn peer_handshake_with(s: &mut std::net::TcpStream, id: u64, keys: &ClusterKeys) -> (Link, Vec<u8>) {
+    use std::io::Read;
     let mut nonce = [0u8; 32];
     k10_node::sys::fill_random(&mut nonce).unwrap();
-    let mut sec = SecureLink::new(&cluster_key(), k10_mesh::NodeId(id), nonce);
     let mut out = Vec::new();
-    sec.start(&mut out);
-    s.write_all(&out).unwrap();
-    out.clear();
-    let mut dec = FrameDecoder::new(AUTH_FRAME_LEN);
-    let mut buf = [0u8; 256];
-    let payload = loop {
-        if let Some(f) = dec.next().unwrap() {
-            break f.payload.to_vec();
+    let mut link = Link::new(Some(keys), &test_member(id), None, nonce, DEFAULT_MAX_FRAME, &mut out);
+    let mut buf = [0u8; 4096];
+    loop {
+        peer_send(s, &mut link, &mut out);
+        match link.next(&mut out).expect("handshake") {
+            Some(LinkEvent::Up(_)) => break,
+            Some(LinkEvent::Frame(_)) => unreachable!("frames come after Hello"),
+            None => {
+                let n = s.read(&mut buf).unwrap();
+                assert!(n > 0, "node closed the link during the handshake");
+                link.feed(&buf[..n]);
+            }
         }
-        let n = s.read(&mut buf).unwrap();
-        assert!(n > 0, "node closed the link during the handshake");
-        dec.feed(&buf[..n]);
-    };
-    sec.on_auth(&payload, None, &mut out).unwrap();
-    let a: k10_mesh::Addr = "127.0.0.1:1".parse().unwrap();
-    let me = k10_mesh::Member::new(k10_mesh::NodeId(id), a, a, a, k10_mesh::Capacity { mem_bytes: 1 << 30, cores: 1 });
-    sec.push(&Msg::Hello { member: me }, 0, &mut out).unwrap();
-    sec.seal_pending(&mut out);
-    s.write_all(&out).unwrap();
-    sec
+    }
+    peer_send(s, &mut link, &mut out);
+    (link, out)
+}
+
+pub fn test_member(id: u64) -> k10_mesh::Member {
+    let a: k10_mesh::Addr = "127.0.0.1:9".parse().unwrap();
+    k10_mesh::Member::new(k10_mesh::NodeId(id), a, a, a, k10_mesh::Capacity { mem_bytes: 1 << 30, cores: 1 })
 }
 
 pub fn wait_for(what: &str, timeout: Duration, mut f: impl FnMut() -> bool) -> Duration {
@@ -156,8 +195,9 @@ impl NodeProc {
         }
     }
 
+    /// A signed GET (admin endpoints need it; services ignore it).
     pub fn get(&self, path: &str) -> std::io::Result<http::ClientResponse> {
-        http::request(&self.http, "GET", path, b"", Duration::from_secs(10))
+        admin_req(&self.http, "GET", path, b"", Duration::from_secs(10))
     }
 
     pub fn status(&self) -> String {
@@ -183,12 +223,18 @@ impl Drop for NodeProc {
     }
 }
 
-/// Spawns `k10s node` with `args` (after `node`). Single-node mode unless `args` contain cluster flags. The log
-/// (stderr) is kept in memory, bounded to its last 4 MiB.
+/// Spawns `k10s node` with `args` (after `node`) and the test keys. Single-node mode unless `args` contain cluster
+/// flags. The log (stderr) is kept in memory, bounded to its last 4 MiB.
 pub fn spawn(name: &str, data: &Path, args: &[String]) -> NodeProc {
+    let mut args = args.to_vec();
+    with_test_keys(&mut args);
+    spawn_raw(name, data, &args)
+}
+
+/// [`spawn`] without adding the test keys.
+pub fn spawn_raw(name: &str, data: &Path, args: &[String]) -> NodeProc {
     let mut all: Vec<String> = vec!["node".into(), "--name".into(), name.into(), "--data".into(), data.display().to_string()];
     all.extend(args.iter().cloned());
-    with_cluster_key(&mut all);
     let mut child = Command::new(bin()).args(&all).stderr(Stdio::piped()).stdout(Stdio::null()).spawn().expect("spawn k10s node");
     let log = Arc::new(Mutex::new(String::new()));
     let (tx, rx) = mpsc::channel::<(String, String, String)>();
@@ -344,7 +390,7 @@ pub fn bundle(version: u64, svcs: &[Svc]) -> Bundle {
 
 /// `POST /_k10s/apply` of raw bytes; returns (status, body).
 pub fn apply_raw(addr: &str, bytes: &[u8], timeout: Duration) -> (u16, String) {
-    match http::request(addr, "POST", "/_k10s/apply", bytes, timeout) {
+    match admin_req(addr, "POST", "/_k10s/apply", bytes, timeout) {
         Ok(r) => (r.status, r.text()),
         Err(e) => (0, format!("transport error: {e}")),
     }

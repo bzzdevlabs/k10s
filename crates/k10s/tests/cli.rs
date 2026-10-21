@@ -24,6 +24,8 @@ fn node_apply_status_logs_and_restart() {
     let bin = common::k10s_bin();
     let dir = tmpdir("e2e");
     let data = dir.join("data");
+    // The node generates its admin key in its data directory; the CLI is pointed at it.
+    let key = data.join("admin.key");
     std::fs::write(dir.join("echo.k10"), k10_ir::encode(&demo::echo())).unwrap();
     std::fs::write(dir.join("kv.k10"), k10_ir::encode(&demo::kv())).unwrap();
     std::fs::write(dir.join("logger.k10"), k10_ir::encode(&demo::logger())).unwrap();
@@ -55,33 +57,33 @@ fn node_apply_status_logs_and_restart() {
     };
     let mut child = spawn();
     wait_up();
-    let out = Command::new(bin).args(["apply", dir.join("app.k10s").to_str().unwrap(), "--node", &addr]).output().unwrap();
+    let out = Command::new(bin).args(["apply", dir.join("app.k10s").to_str().unwrap(), "--node", &addr]).env("K10S_ADMIN_TOKEN_FILE", &key).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let txt = String::from_utf8_lossy(&out.stdout);
     assert!(txt.contains("\"added\":[\"echo\",\"kv\",\"logger\"]"), "{txt}");
     // .ten sources are compiled by `apply`; errors are rendered diagnostics and nothing is sent.
-    let out = Command::new(bin).args(["apply", dir.join("bad.k10s").to_str().unwrap(), "--node", &addr]).output().unwrap();
+    let out = Command::new(bin).args(["apply", dir.join("bad.k10s").to_str().unwrap(), "--node", &addr]).env("K10S_ADMIN_TOKEN_FILE", &key).output().unwrap();
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("cannot read") && err.contains("could not compile"), "{err}");
-    let out = Command::new(bin).args(["apply", dir.join("broken.k10s").to_str().unwrap(), "--node", &addr]).output().unwrap();
+    let out = Command::new(bin).args(["apply", dir.join("broken.k10s").to_str().unwrap(), "--node", &addr]).env("K10S_ADMIN_TOKEN_FILE", &key).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("cannot find `nope`") && err.contains("broken.ten:2:13") && err.contains("^^^^"), "{err}");
-    let out = Command::new(bin).args(["apply", dir.join("ten.k10s").to_str().unwrap(), "--node", &addr]).output().unwrap();
+    let out = Command::new(bin).args(["apply", dir.join("ten.k10s").to_str().unwrap(), "--node", &addr]).env("K10S_ADMIN_TOKEN_FILE", &key).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(String::from_utf8_lossy(&out.stdout).contains("\"added\":[\"hi\"]"));
     assert_eq!(http::request(&addr, "GET", "/hi", b"", Duration::from_secs(5)).unwrap().text(), "hi from ten");
     // The first manifest again: `hi` is removed, the others are unchanged.
-    let out = Command::new(bin).args(["apply", dir.join("app.k10s").to_str().unwrap(), "--node", &addr]).output().unwrap();
+    let out = Command::new(bin).args(["apply", dir.join("app.k10s").to_str().unwrap(), "--node", &addr]).env("K10S_ADMIN_TOKEN_FILE", &key).output().unwrap();
     assert!(String::from_utf8_lossy(&out.stdout).contains("\"removed\":[\"hi\"]"), "{}", String::from_utf8_lossy(&out.stdout));
     assert_eq!(http::request(&addr, "GET", "/echo", b"", Duration::from_secs(5)).unwrap().text(), "hello\n");
     assert_eq!(http::request(&addr, "PUT", "/kv/k", b"v", Duration::from_secs(5)).unwrap().status, 200);
     assert_eq!(http::request(&addr, "POST", "/logger", b"from cli test", Duration::from_secs(5)).unwrap().status, 200);
-    let out = Command::new(bin).args(["status", "--node", &addr]).output().unwrap();
+    let out = Command::new(bin).args(["status", "--node", &addr]).env("K10S_ADMIN_TOKEN_FILE", &key).output().unwrap();
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("\"name\":\"echo\""));
-    let out = Command::new(bin).args(["logs", "logger", "--node", &addr]).output().unwrap();
+    let out = Command::new(bin).args(["logs", "logger", "--node", &addr]).env("K10S_ADMIN_TOKEN_FILE", &key).output().unwrap();
     assert!(String::from_utf8_lossy(&out.stdout).contains("from cli test"));
     // Graceful stop on SIGTERM, then restart: the bundle and KV data come back.
     unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
@@ -103,6 +105,8 @@ fn node_apply_status_logs_and_restart() {
 #[test]
 fn usage_errors() {
     let bin = common::k10s_bin();
+    let key = tmpdir("usage").join("admin.key");
+    assert!(Command::new(bin).args(["keygen", "-o", key.to_str().unwrap()]).output().unwrap().status.success());
     let out = Command::new(bin).output().unwrap();
     assert!(!out.status.success());
     let out = Command::new(bin).args(["node", "--bogus", "1"]).output().unwrap();
@@ -113,7 +117,7 @@ fn usage_errors() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("usage: k10s build"));
     let out = Command::new(bin).args(["run", "x.ten", "--path", "nope"]).output().unwrap();
     assert!(!out.status.success());
-    let out = Command::new(bin).args(["status", "--node", "127.0.0.1:1"]).output().unwrap();
+    let out = Command::new(bin).args(["status", "--node", "127.0.0.1:1"]).env("K10S_ADMIN_TOKEN_FILE", &key).output().unwrap();
     assert!(String::from_utf8_lossy(&out.stderr).contains("cannot reach node"));
 }
 

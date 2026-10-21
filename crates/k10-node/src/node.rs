@@ -70,8 +70,8 @@ pub struct NodeConfig {
     pub http: SocketAddr,
     /// Separate admin listener; the ingress then serves only `/_k10s/health` of the admin API.
     pub admin_listen: Option<SocketAddr>,
-    /// Admin bearer token (all of `/_k10s/` but `health`, `metrics`); `None`: loopback clients only.
-    pub admin_token: Option<crate::admin::AdminToken>,
+    /// Key of signed admin requests (`k10_mesh::admin_auth`); `None`: only `health` and `metrics` are served.
+    pub admin_key: Option<k10_mesh::admin_auth::AdminKey>,
     /// Persistent state (KV logs, last applied bundle). `None` = memory only.
     pub data_dir: Option<PathBuf>,
     pub shards: usize,
@@ -140,7 +140,7 @@ impl Default for NodeConfig {
             name: hostname(),
             http: "127.0.0.1:8080".parse().unwrap(),
             admin_listen: None,
-            admin_token: None,
+            admin_key: None,
             data_dir: None,
             shards: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
             backend: BackendKind::from_env(),
@@ -237,6 +237,8 @@ pub struct NodeShared {
     pub http_addr: OnceLock<SocketAddr>,
     /// Bound address of the separate admin listener, if any.
     pub admin_addr: OnceLock<SocketAddr>,
+    /// Checks signed admin requests (`None` without an admin key).
+    pub admin: Option<Mutex<k10_mesh::admin_auth::AdminVerifier>>,
     pub counters: NodeCounters,
     /// Max instances with a snapshot mapped (VMA budget, from `vm.max_map_count`).
     pub snapshot_map_budget: u64,
@@ -627,6 +629,14 @@ impl Bound {
             n => n,
         };
         let budget = MemBudget::new(cfg.mem_limit);
+        let admin = match cfg.admin_key.clone() {
+            Some(k) => {
+                let mut audience = [0u8; k10_mesh::admin_auth::AUDIENCE_LEN];
+                crate::sys::fill_random(&mut audience)?;
+                Some(Mutex::new(k10_mesh::admin_auth::AdminVerifier::new(k, audience)))
+            }
+            None => None,
+        };
         let shared = Arc::new(NodeShared {
             clock,
             logs: Logs::new(cfg.log_lines, 256 << 10, cfg.log_stderr),
@@ -645,6 +655,7 @@ impl Bound {
             started_ns: sys::mono_ns(),
             http_addr: OnceLock::new(),
             admin_addr: OnceLock::new(),
+            admin,
             counters: NodeCounters::default(),
             // 2 VMAs per mapped snapshot; keep room for fiber stacks (2 VMAs each) and everything else.
             snapshot_map_budget: max_maps.saturating_sub(2 * (shards_n * cfg_max_fibers) as u64 + 8192) / 2,

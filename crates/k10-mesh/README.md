@@ -17,7 +17,8 @@ adds a UDP driver, a thread runner and a deterministic simulator. The crate has 
 | `wire` | TCP peer protocol framing: `Msg` (borrowed, copy-free), `FrameDecoder` (incremental) |
 | `sha256` | SHA-256, `to_hex`/`from_hex` |
 | `crypto` | ChaCha20 (SSE2 on x86-64), Poly1305, (X)ChaCha20-Poly1305, HMAC/HKDF-SHA256, `ct_eq` (RFC vectors) |
-| `secure` | cluster key, `GossipCipher` (sealed datagrams, anti-replay), `SecureLink` (peer-link handshake, sealed frames) |
+| `secure` | cluster keys (current + next), `GossipCipher` (sealed datagrams, anti-replay), `Link` (peer-link handshake, sealed records; hosted and metal) |
+| `admin_auth` | signed admin requests: `AdminKey` (client), `AdminVerifier` (clock window, nonce cache), `check_body` |
 | `driver` (std) | `UdpDriver` (caller-owned epoll loop) and `MeshThread` (self-contained thread) |
 | `sim` (std) | discrete-event simulator: virtual time, loss, latency, partitions |
 
@@ -94,9 +95,10 @@ addr    = 4 ip[4] port:u16 | 6 ip[16] port:u16;  raddr = 0 port:u16 (same IP as 
 `frame = len:u32 LE | kind:u8 | request_id:u64 LE | payload`, with `len = 9 + payload`.
 Messages: Hello{member}, GetManifest{version}/Manifest{bytes}, GetBlob{hash}/Blob{hash,bytes}/BlobMissing{hash},
 Call{service,path,body,deadline_ms,method}/CallResult{status,body}, Ping/Pong. With a cluster key
-(`secure::SecureLink`) each side first sends `Auth` (kind 11: id, fresh nonce); frames then travel in records,
-`len | ChaCha20-Poly1305(frames) | tag[16]` (one per write, ≤ 64 KiB unless one larger frame), under a per-direction
-session key, opened in place by `FrameDecoder::set_opener`. Payload layouts are documented in
+(`secure::Link`) each side first sends `Auth` (kind 11: version, id, fresh nonce, held key ids); the frame stream
+then travels in records, `len | ChaCha20-Poly1305(stream bytes) | tag[16]` (one per write, ≤ 64 KiB of plaintext, a
+frame may span records), under a per-direction session key; the first record holds only `Hello` (≤ 256 bytes) and
+nothing else is sent before the peer's has opened. Payload layouts are documented in
 `src/wire.rs`. `FrameDecoder` takes partial input (`feed`, or `spare`/`commit` to read in place) and caps the
 frame size (default: the largest bundle blob plus headers). Errors are sticky, and the decoder never allocates from a claimed length. `encode_header` allows
 vectored writes of large blobs.

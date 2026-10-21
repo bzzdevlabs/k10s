@@ -1,11 +1,12 @@
 //! Admin API under `/_k10s/`: `GET status` (JSON), `GET metrics` (Prometheus text), `GET logs/<svc>`,
 //! `POST apply` (body = encoded `k10_mesh::Bundle`), `GET health`, `GET cluster` (text, cluster mode).
-//! Access control: [`gate`].
+//! Access control: [`gate`] (signed requests, `k10_mesh::admin_auth`).
 
 use crate::http::{Method, RequestHead};
 use crate::node::{short_hash, NodeShared};
 use crate::service::ServiceRt;
 use crate::sys;
+use k10_mesh::admin_auth::AdminReject;
 use k10_mesh::Bundle;
 use std::fmt::Write as _;
 use std::sync::atomic::Ordering::Relaxed;
@@ -28,71 +29,27 @@ pub fn endpoint(target: &str) -> Option<&str> {
     (rest.is_empty() || rest.starts_with('/')).then(|| rest.trim_start_matches('/'))
 }
 
-/// Open endpoints: liveness and read-only counters (scrapers should not need a token that can deploy code).
-fn is_public(endpoint: &str) -> bool {
-    matches!(endpoint, "health" | "metrics")
-}
-
-/// Admin bearer token; only its SHA-256 is kept, compared in constant time.
-#[derive(Clone)]
-pub struct AdminToken([u8; 32]);
-
-impl AdminToken {
-    pub fn new(secret: &[u8]) -> AdminToken {
-        AdminToken(k10_mesh::sha256::sha256(secret))
-    }
-
-    pub fn matches(&self, presented: &[u8]) -> bool {
-        k10_mesh::crypto::ct_eq(&k10_mesh::sha256::sha256(presented), &self.0)
-    }
-}
-
-impl std::fmt::Debug for AdminToken {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("AdminToken(..)")
-    }
-}
-
-/// Access check on a request head (body not read yet): `None` = proceed, else the status and message to close with.
-pub fn gate(
-    node: &NodeShared,
-    admin_listener: bool,
-    h: &RequestHead,
-    head: &[u8],
-    peer_is_loopback: impl FnOnce() -> bool,
-) -> Option<(u16, &'static str)> {
+/// Access check on a request head (body not read yet). `Ok(Some(h))`: signed, the body must hash to `h`
+/// ([`k10_mesh::admin_auth::check_body`]); `Err`: the status and message to close with.
+pub fn gate(node: &NodeShared, admin_listener: bool, h: &RequestHead, head: &[u8]) -> Result<Option<[u8; 32]>, (u16, String)> {
     let ep = match (endpoint(&h.target), admin_listener) {
-        (None, false) => return None,
-        (None, true) => return Some((404, "this listener serves the admin API (/_k10s/) only")),
-        (Some(ep), false) if node.admin_addr.get().is_some() => {
-            return (ep != "health").then_some((404, "the admin API is served on the admin listener (--admin)"));
+        (None, false) => return Ok(None),
+        (None, true) => return Err((404, "this listener serves the admin API (/_k10s/) only".into())),
+        (Some(ep), false) if node.admin_addr.get().is_some() && ep != "health" => {
+            return Err((404, "the admin API is served on the admin listener (--admin)".into()));
         }
         (Some(ep), _) => ep,
     };
-    if is_public(ep) {
-        return None;
+    // Liveness and the audience requests are signed for are open; read-only counters too, but only on the dedicated
+    // admin listener.
+    if ep == "health" || ep == "audience" || (ep == "metrics" && admin_listener) {
+        return Ok(None);
     }
-    match &node.cfg.admin_token {
-        Some(t) => {
-            let presented = h.auth.and_then(|(a, b)| bearer(&head[a..b]));
-            match presented {
-                Some(tok) if t.matches(tok) => None,
-                _ => Some((401, "admin API: missing or invalid bearer token")),
-            }
-        }
-        None if !h.forwarded && peer_is_loopback() => None,
-        None => Some((403, "admin API: without --admin-token-file only loopback clients may use it")),
-    }
-}
-
-/// The token of an `Authorization: Bearer <token>` value.
-fn bearer(v: &[u8]) -> Option<&[u8]> {
-    let (scheme, rest) = (v.get(..6)?, &v[6..]);
-    if !scheme.eq_ignore_ascii_case(b"bearer") || !rest.first().is_some_and(|c| *c == b' ' || *c == b'\t') {
-        return None;
-    }
-    let t = rest.trim_ascii();
-    (!t.is_empty()).then_some(t)
+    let Some(v) = &node.admin else { return Err((403, "admin API disabled: this node has no admin key".into())) };
+    let now = sys::wall_ms();
+    let auth = h.auth.map(|(a, b)| &head[a..b]);
+    let r = v.lock().unwrap_or_else(|e| e.into_inner()).verify_head(h.method.as_str(), &h.target, auth, now);
+    r.map(Some).map_err(|e| (if e == AdminReject::Busy { 429 } else { 401 }, e.to_string()))
 }
 
 pub fn handle(node: &Arc<NodeShared>, method: Method, target: &str, body: Vec<u8>) -> AdminOut {
@@ -101,6 +58,10 @@ pub fn handle(node: &Arc<NodeShared>, method: Method, target: &str, body: Vec<u8
         (Method::Get | Method::Head, "status") => respond(200, "application/json", status_json(node)),
         (Method::Get | Method::Head, "metrics") => respond(200, "text/plain; version=0.0.4", metrics(node)),
         (Method::Get | Method::Head, "health") => respond(200, "text/plain", "ok\n"),
+        (Method::Get | Method::Head, "audience") => match &node.admin {
+            Some(v) => respond(200, "text/plain", format!("{}\n", v.lock().unwrap_or_else(|e| e.into_inner()).audience())),
+            None => respond(404, "text/plain", "admin API disabled: this node has no admin key\n"),
+        },
         (Method::Get | Method::Head, "cluster") => match node.cluster_hooks() {
             Some(c) => respond(200, "text/plain; charset=utf-8", c.status_text()),
             None => respond(404, "text/plain", "not in cluster mode\n"),
@@ -114,7 +75,7 @@ pub fn handle(node: &Arc<NodeShared>, method: Method, target: &str, body: Vec<u8
                 None => respond(404, "text/plain", format!("unknown service `{svc}`\n")),
             }
         }
-        (_, "status" | "metrics" | "health" | "apply" | "cluster") => respond(405, "text/plain", "method not allowed\n"),
+        (_, "status" | "metrics" | "health" | "audience" | "apply" | "cluster") => respond(405, "text/plain", "method not allowed\n"),
         (_, p) if p.starts_with("logs/") => respond(405, "text/plain", "method not allowed\n"),
         _ => respond(404, "text/plain", "unknown admin endpoint\n"),
     }
@@ -427,23 +388,15 @@ pub fn metrics(node: &NodeShared) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{bearer, endpoint, json_str, AdminToken};
+    use super::{endpoint, json_str};
 
     #[test]
-    fn endpoints_and_bearer() {
+    fn endpoints() {
         assert_eq!(endpoint("/_k10s/status?x=1"), Some("status"));
         assert_eq!(endpoint("/_k10s//health"), Some("health"));
         assert_eq!(endpoint("/_k10s"), Some(""));
         assert_eq!(endpoint("/_k10sx/status"), None);
         assert_eq!(endpoint("/echo"), None);
-        assert_eq!(bearer(b"Bearer abc"), Some(&b"abc"[..]));
-        assert_eq!(bearer(b"bearer  abc "), Some(&b"abc"[..]));
-        assert_eq!(bearer(b"Basic abc"), None);
-        assert_eq!(bearer(b"Bearerabc"), None);
-        assert_eq!(bearer(b"Bearer "), None);
-        let t = AdminToken::new(b"s3cret");
-        assert!(t.matches(b"s3cret") && !t.matches(b"s3cre") && !t.matches(b""));
-        assert_eq!(format!("{t:?}"), "AdminToken(..)");
     }
 
     #[test]

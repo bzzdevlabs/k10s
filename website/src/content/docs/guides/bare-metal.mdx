@@ -28,12 +28,12 @@ cloud, where every node is already a VM, this deletes the guest Linux.
    ./build.sh
    ```
 
-2. Boot it in QEMU/KVM with an admin token. The serial console is on stdout; host port 8090 forwards to the guest's
-   port 80.
+2. Boot it in QEMU/KVM with an admin key. The serial console is on stdout; host port 8090 forwards to the guest's
+   port 80. The key reaches the guest as a QEMU fw_cfg file, never on the kernel command line.
 
    ```bash
-   T=$(openssl rand -hex 16)
-   APPEND="k10.verbose k10.admin_token=$T" ./run.sh
+   k10s keygen -o admin.key
+   ADMIN_KEY=admin.key APPEND="k10.verbose" ./run.sh
    ```
 
    <Terminal
@@ -52,9 +52,15 @@ cloud, where every node is already a VM, this deletes the guest Linux.
    ```bash
    curl localhost:8090/hello/
    curl 'localhost:8090/sha/?n=1000'
-   curl -H "Authorization: Bearer $T" localhost:8090/_k10s/status
-   curl -H "Authorization: Bearer $T" --data-binary @out/bundle.k10b localhost:8090/_k10s/apply
+   k10s status --node 127.0.0.1:8090 --admin-token-file admin.key
+   export K10S_ADMIN_TOKEN_FILE=admin.key   # tools/admin_auth.py signs requests for curl
+   curl -H "Authorization: $(tools/admin_auth.py localhost:8090 POST /_k10s/apply @out/bundle.k10b)" \
+     --data-binary @out/bundle.k10b localhost:8090/_k10s/apply
    ```
+
+   Admin requests are signed as on hosted nodes (for the guest's `/_k10s/audience`, new at every boot);
+   `/_k10s/health` and `/_k10s/audience` are open. Without an admin key the guest serves
+   only `health` of its admin API.
 
 </Steps>
 
@@ -71,15 +77,32 @@ advertises those host addresses. Two hosted nodes and one guest:
 
 ```bash
 k10s keygen -o cluster.key
-k10s node --http 127.0.0.1:19001 --gossip 127.0.0.1:19101 --rpc 127.0.0.1:19201 --mem 64MiB --cluster-key-file cluster.key &
-k10s node --http 127.0.0.1:19002 --gossip 127.0.0.1:19102 --rpc 127.0.0.1:19202 --mem 64MiB --cluster-key-file cluster.key --join 127.0.0.1:19101 &
+k10s keygen -o admin.key
+k10s node --http 127.0.0.1:19001 --gossip 127.0.0.1:19101 --rpc 127.0.0.1:19201 --mem 64MiB --cluster-key-file cluster.key --admin-token-file admin.key &
+k10s node --http 127.0.0.1:19002 --gossip 127.0.0.1:19102 --rpc 127.0.0.1:19202 --mem 64MiB --cluster-key-file cluster.key --admin-token-file admin.key --join 127.0.0.1:19101 &
 qemu-system-x86_64 … \
   -netdev user,id=n0,hostfwd=tcp:127.0.0.1:19003-:80,hostfwd=udp:127.0.0.1:19103-:7946,hostfwd=tcp:127.0.0.1:19203-:7947 \
-  -append "k10.join=127.0.0.1:19101 k10.gossip=127.0.0.1:19103 k10.rpc=127.0.0.1:19203 k10.http=127.0.0.1:19003 k10.mem=67108864 k10.cluster_key=$(cat cluster.key)"
-curl --data-binary @out/bundle.k10b localhost:19001/_k10s/apply
+  -fw_cfg name=opt/k10s/cluster_key,file=cluster.key -fw_cfg name=opt/k10s/admin_key,file=admin.key \
+  -append "k10.join=127.0.0.1:19101 k10.gossip=127.0.0.1:19103 k10.rpc=127.0.0.1:19203 k10.http=127.0.0.1:19003 k10.mem=67108864"
+curl -H "Authorization: $(K10S_ADMIN_TOKEN_FILE=admin.key tools/admin_auth.py localhost:19001 POST /_k10s/apply @out/bundle.k10b)" \
+  --data-binary @out/bundle.k10b localhost:19001/_k10s/apply
 ```
 
-`./cluster-test.sh` runs two hosted nodes and one guest through join, apply, routing, failover and rejoin.
+`./cluster-test.sh` runs two hosted nodes and one guest through join, apply, routing, failover and rejoin, key
+rotation, a node with the wrong key and a flood of unauthenticated links. Peer links use the same `secure::Link`
+code as hosted nodes; at most 16 accepted links may be in their handshake on a guest.
+
+## Secrets (fw_cfg)
+
+| fw_cfg file | Meaning |
+|---|---|
+| `opt/k10s/admin_key` | admin key (`k10s keygen`); requests to `/_k10s/*` but `health` must be signed with it; without it only `health` is served |
+| `opt/k10s/cluster_key` | the cluster key, the same as the hosted nodes' (or boot with `k10.insecure_unauthenticated_cluster`) |
+| `opt/k10s/cluster_next_key` | next cluster key during a rotation ([Security](/k10s/concepts/security/#key-rotation)) |
+
+Pass each with `-fw_cfg name=opt/k10s/<name>,file=FILE` (`run.sh`: `ADMIN_KEY=`, `CLUSTER_KEY=`,
+`CLUSTER_NEXT_KEY=`). A malformed key stops the boot, and so does a cluster key without RDRAND (link nonces come
+from it; a failed RDRAND fails the link).
 
 ## Kernel command line
 
@@ -91,9 +114,9 @@ curl --data-binary @out/bundle.k10b localhost:19001/_k10s/apply
 | `k10.spin_us=N` | busy-poll window before halting (default 50) |
 | `k10.jit_indirect=jump\|lfence\|retpoline` | Spectre v2 hardening of JIT indirect branches |
 | `k10.timer_res_us=N` | guest clock resolution (default 100; 0 = full; any other value needs RDRAND) |
-| `k10.admin_token=TOKEN` | bearer token for `/_k10s/*` except `health`; without it the admin API answers 403 |
 | `k10.join=HOST:PORT,…` | cluster seeds; with `k10.gossip=`, `k10.rpc=`, `k10.http=` (advertised addresses) |
-| `k10.cluster_key=HEX` | the hosted nodes' `k10s keygen` key (or `k10.insecure_unauthenticated_cluster`) |
+| `k10.insecure_unauthenticated_cluster` | cluster mode without a key (isolated test networks only) |
+| `k10.gossip_max_skew_s=N` | clock skew allowed on gossip, seconds (default 300, at least 1) |
 | `k10.node_id=HEX`, `k10.probe_ms=N`, `k10.suspicion_mult=N`, `k10.mem=BYTES` | identity and tuning |
 | `k10.selftest`, `k10.exit_on_ready` | test modes |
 
@@ -109,13 +132,13 @@ node starts empty and waits for `POST /_k10s/apply`.
 - **Memory:** a tagged frame allocator shared by the heap and the instance slots; NX everywhere, the kernel and JIT
   code W^X, page 0 unmapped.
 - **Time:** kvmclock, a tickless one-shot LAPIC timer armed only for the next deadline; an idle node takes no timer
-  interrupts.
+  interrupts. The wall clock (gossip and admin request time windows) is re-read from kvmclock every 10 s.
 - **NIC:** legacy virtio-net with fixed buffers (nothing allocated per packet), smoltcp for TCP/IP, the same
   HTTP/1.1 ingress and host API as the hosted node.
 
 <Aside type="caution" title="v0 limits">
 	VM guests only (PVH, legacy virtio-net, 4 GiB mapped). No storage driver: the key-value store is in memory. No
-	DHCP, IPv4 only, no TLS. The cluster key and admin token sit on the kernel command line. There is no OS layer
+	DHCP, IPv4 only, no TLS. There is no OS layer
 	under the kernel, so the independent verification of the JIT's output matters most here. Full list:
 	[metal/README.md](https://github.com/bzzdevlabs/k10s/blob/main/metal/README.md).
 </Aside>

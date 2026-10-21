@@ -9,17 +9,23 @@
 #      versa; `call` across nodes);
 #   4. kill the guest (SIGKILL of QEMU) → the hosted nodes declare it dead and serve its services (probe loop through
 #      a hosted ingress measures the outage);
-#   5. restart the guest (same node id) → it rejoins with a higher incarnation, fetches the desired state, gets its
-#      services back, and serves through its ingress again;
-#   6. apply a new version through the guest → the hosted nodes fetch it from the guest and apply it.
-#   Shared cluster key (`k10s keygen`, guest: k10.cluster_key=); guest admin API token: k10.admin_token=.
-# Environment: BASE (port base, default 19400), K10S (hosted binary, default ../target/node/release/k10s, built with
-# `CARGO_TARGET_DIR=target/node cargo build --release -p k10s` if missing), ENGINE (jit|interp, guest), PROBE_MS (100),
-# SUSPICION_MULT (2), MEM (guest RAM, 128M), SMP (guest CPUs, 1).
+#   5. restart the guest (same node id) with the cluster key and a next key (key rotation) → it rejoins the nodes
+#      that hold only the current key, with a higher incarnation, fetches the desired state, gets its services back,
+#      and serves through its ingress again;
+#   6. apply a new version through the guest → the hosted nodes fetch it from the guest and apply it;
+#   7. refused peers: a hosted node with another cluster key joining through the guest (its gossip is dropped, it
+#      never becomes a member), raw connections to the guest's peer port that never authenticate (at most 16 are kept
+#      in their handshake, oldest evicted, all closed after the 5 s handshake timeout).
+#   Keys (`k10s keygen -o`, mode 0600): a shared cluster key (guest: fw_cfg opt/k10s/cluster_key), a next key (guest:
+#   opt/k10s/cluster_next_key), a shared admin key (hosted: --admin-token-file; guest: opt/k10s/admin_key); every
+#   admin request is signed for the receiving node process's audience (tools/admin_auth.py, bench/k10s/k10s.py); one
+#   signed for another node, or for the guest before its restart, is refused.
+# Environment: BASE (port base, default 19400), K10S (hosted binary, default ../target/metal-host/release/k10s, built
+# with `CARGO_TARGET_DIR=target/metal-host cargo build --release -p k10s`), ENGINE (jit|interp, guest), PROBE_MS
+# (100), SUSPICION_MULT (2), MEM (guest RAM, 128M), SMP (guest CPUs, 1).
 set -uo pipefail
 cd "$(dirname "$0")"
 BASE="${BASE:-19400}"
-K10S="${K10S:-../target/node/release/k10s}"
 PROBE_MS="${PROBE_MS:-100}"
 SUSP="${SUSPICION_MULT:-2}"
 MEM="${MEM:-128M}"
@@ -28,12 +34,22 @@ SMP="${SMP:-1}"
 OUT=out/cluster-test
 rm -rf "$OUT"
 mkdir -p "$OUT"
-[[ -x "$K10S" ]] || (cd .. && CARGO_TARGET_DIR=target/node cargo build --release -p k10s) || exit 1
+if [[ -z "${K10S:-}" ]]; then
+    K10S=../target/metal-host/release/k10s
+    (cd .. && CARGO_TARGET_DIR=target/metal-host cargo build --release -q -p k10s) || exit 1
+fi
 [[ -f out/k10-metal.elf ]] || ./build.sh >/dev/null
-"$K10S" keygen -o "$OUT/cluster.key" 2>/dev/null || exit 1
-KEY=$(cat "$OUT/cluster.key")
-TOKEN=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
-AUTH="Authorization: Bearer $TOKEN"
+for k in cluster cluster-next wrong admin; do
+    "$K10S" keygen -o "$OUT/$k.key" 2>/dev/null || exit 1
+done
+export K10S_ADMIN_TOKEN_FILE=$PWD/$OUT/admin.key
+# sign PORT METHOD TARGET [BODY|@FILE]: Authorization header value for an admin request to the node at
+# 127.0.0.1:PORT (signed for its audience, /_k10s/audience).
+sign() {
+    local port=$1
+    shift
+    tools/admin_auth.py "127.0.0.1:$port" "$@"
+}
 
 pass=0
 fail=0
@@ -54,30 +70,36 @@ cleanup() {
 }
 trap cleanup EXIT
 
-hosted() { # name http gossip rpc [join]
+hosted() { # name http gossip rpc [join [cluster key file]]
     local a=(node --name "$1" --http "127.0.0.1:$2" --gossip "127.0.0.1:$3" --rpc "127.0.0.1:$4" --data "$OUT/$1"
-        --mem 64MiB --shards 2 --probe-ms "$PROBE_MS" --suspicion-mult "$SUSP" --cluster-key-file "$OUT/cluster.key")
+        --mem 64MiB --shards 2 --probe-ms "$PROBE_MS" --suspicion-mult "$SUSP" --cluster-key-file "${6:-$OUT/cluster.key}"
+        --admin-token-file "$OUT/admin.key")
     [[ -n "${5:-}" ]] && a+=(--join "$5")
     "$K10S" "${a[@]}" 2> "$OUT/$1.log" &
     PIDS+=($!)
 }
 
-guest() { # serial log
+guest() { # serial log [next]: secrets as fw_cfg files; `next`: also the next cluster key (rotation)
+    local fw=(-fw_cfg "name=opt/k10s/cluster_key,file=$OUT/cluster.key" -fw_cfg "name=opt/k10s/admin_key,file=$OUT/admin.key")
+    [[ "${2:-}" == next ]] && fw+=(-fw_cfg "name=opt/k10s/cluster_next_key,file=$OUT/cluster-next.key")
     # shellcheck disable=SC2054
     qemu-system-x86_64 -M pc -enable-kvm -cpu host -m "$MEM" -smp "$SMP" -nodefaults -display none -no-reboot \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$H3-:80,hostfwd=udp:127.0.0.1:$G3-:7946,hostfwd=tcp:127.0.0.1:$R3-:7947" \
-        -device virtio-net-pci,disable-modern=on,netdev=n0,romfile= -kernel out/k10-metal.elf -serial "file:$1" \
-        -append "k10.engine=$ENGINE k10.join=127.0.0.1:$G1,127.0.0.1:$G2 k10.gossip=127.0.0.1:$G3 k10.rpc=127.0.0.1:$R3 k10.http=127.0.0.1:$H3 k10.node_id=$GUEST_ID k10.probe_ms=$PROBE_MS k10.suspicion_mult=$SUSP k10.mem=67108864 k10.cluster_key=$KEY k10.admin_token=$TOKEN" &
+        -device virtio-net-pci,disable-modern=on,netdev=n0,romfile= -kernel out/k10-metal.elf -serial "file:$1" "${fw[@]}" \
+        -append "k10.engine=$ENGINE k10.join=127.0.0.1:$G1,127.0.0.1:$G2 k10.gossip=127.0.0.1:$G3 k10.rpc=127.0.0.1:$R3 k10.http=127.0.0.1:$H3 k10.node_id=$GUEST_ID k10.probe_ms=$PROBE_MS k10.suspicion_mult=$SUSP k10.mem=67108864" &
     QPID=$!
 }
 
-# st PORT PYEXPR: evaluates PYEXPR on the node's /_k10s/status JSON (`d`, cluster part `c`); prints the result.
+# st PORT PYEXPR: evaluates PYEXPR on the node's /_k10s/status JSON (`d`, cluster part `c`; signed request);
+# prints the result.
 st() {
-    curl -s -m 2 -H "$AUTH" "127.0.0.1:$1/_k10s/status" 2>/dev/null | python3 -c "
+    python3 -c "
 import json, sys
+sys.path.insert(0, '../bench/k10s')
+import k10s
 try:
-    d = json.load(sys.stdin)
+    d = json.loads(k10s.http_get('127.0.0.1:$1', '/_k10s/status', 2)[1])
 except Exception:
     print(''); sys.exit()
 c = d.get('cluster', {})
@@ -163,13 +185,22 @@ links=$(st "$H3" "sorted(l['state'] for l in c['links'])")
 [[ "$links" == "['up', 'up']" ]] && ok "guest peer links: $links" || ko "guest peer links: $links"
 ids=$(for p in "$H1" "$H2" "$H3"; do st "$p" "c['auth'].get('key_id')"; done | sort -u)
 [[ $(echo "$ids" | wc -l) == 1 && ${#ids} == 16 ]] && ok "same cluster key id on all three ($ids)" || ko "key ids: $ids"
-code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "127.0.0.1:$H3/_k10s/status")
-[[ "$code" == 401 ]] && ok "guest admin API without the token -> 401" || ko "guest status without the token: $code"
+KEY_ID=$ids
+code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "127.0.0.1:$H3/_k10s/status")$(curl -s -m 5 -o /dev/null -w '%{http_code}' "127.0.0.1:$H3/_k10s/metrics")
+[[ "$code" == 401401 ]] && ok "guest admin API unsigned (status, metrics) -> 401" || ko "guest status/metrics unsigned: $code"
+code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "127.0.0.1:$H1/_k10s/status")
+[[ "$code" == 401 ]] && ok "hosted admin API unsigned -> 401" || ko "hosted status unsigned: $code"
+a1=$(curl -s -m 5 "127.0.0.1:$H1/_k10s/audience") a3=$(curl -s -m 5 "127.0.0.1:$H3/_k10s/audience")
+[[ "$a3" =~ ^[0-9a-f]{32}$ && "$a1" =~ ^[0-9a-f]{32}$ && "$a1" != "$a3" ]] && ok "audiences open and distinct (n1 $a1, guest $a3)" || ko "audiences: n1 '$a1', guest '$a3'"
+r=$(curl -s -m 5 -H "Authorization: $(sign "$H1" GET /_k10s/status)" "127.0.0.1:$H3/_k10s/status")
+[[ "$r" == *"another node"* ]] && ok "guest refuses a request signed for n1 (same admin key)" || ko "request signed for n1 sent to the guest: '${r:0:80}'"
+r=$(curl -s -m 5 -H "Authorization: $(sign "$H3" GET /_k10s/status)" "127.0.0.1:$H1/_k10s/status")
+[[ "$r" == *"another node"* ]] && ok "n1 refuses a request signed for the guest" || ko "request signed for the guest sent to n1: '${r:0:80}'"
 
 echo "== apply through hosted node n1"
 target/release/mkbundle -o "$OUT/bundle.k10b" --version 0 2>/dev/null
 T0=$(now_ms)
-r=$(curl -s -m 10 --data-binary "@$OUT/bundle.k10b" "127.0.0.1:$H1/_k10s/apply")
+r=$(curl -s -m 10 -H "Authorization: $(sign "$H1" POST /_k10s/apply "@$OUT/bundle.k10b")" --data-binary "@$OUT/bundle.k10b" "127.0.0.1:$H1/_k10s/apply")
 V=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['version'])" "$r" 2>/dev/null)
 [[ -n "$V" ]] && ok "apply via n1 -> version $V" || ko "apply via n1: $r"
 t=$(wait_for 10 all_applied "$V")
@@ -229,6 +260,7 @@ while time.time() < t_end:
 print(json.dumps(res))
 EOF
 PROBE=$!
+EARLIER=$(sign "$H3" GET /_k10s/status)
 sleep 1
 KILL_T=$(python3 -c "import time; print(time.time())")
 kill -9 "$QPID"
@@ -258,14 +290,18 @@ for s in "${SERVICES[@]}"; do
     expect "after failover: $name via n2" "http://127.0.0.1:$H2$path" 200 "$re"
 done
 
-echo "== restart the guest (same node id)"
+echo "== restart the guest (same node id, current + next cluster key; the hosted nodes hold only the current one)"
 T0=$(now_ms)
-guest "$OUT/guest2.log"
+guest "$OUT/guest2.log" next
 t=$(wait_for 15 all_live 3)
 REJOIN_MS=$(($(now_ms) - T0))
 [[ $t != -1 ]] && ok "guest rejoined: 3 live members everywhere (${REJOIN_MS} ms after QEMU start)" || ko "guest did not rejoin"
 INC2=$(st "$H1" "[m['incarnation'] for m in c['members'] if m['id']=='$GUEST_ID'][0]")
 ((INC2 > INC1)) && ok "higher incarnation ($INC1 -> $INC2)" || ko "incarnation $INC1 -> $INC2"
+r=$(curl -s -m 5 -H "Authorization: $EARLIER" "127.0.0.1:$H3/_k10s/status")
+[[ "$r" == *"earlier start"* ]] && ok "restarted guest refuses a request signed before the restart" || ko "request signed before the restart: '${r:0:80}'"
+auth=$(st "$H3" "c['auth']['key_id'] + ' ' + str(c['auth']['next_key_id'])")
+[[ "${auth% *}" == "$KEY_ID" && "${auth#* }" =~ ^[0-9a-f]{16}$ && "${auth#* }" != "$KEY_ID" ]] && ok "guest key ids: current $KEY_ID, next ${auth#* }" || ko "guest key ids: '$auth'"
 t=$(wait_for 10 eval "[[ \$(applied_v $H3) == $V ]]")
 RESYNC_MS=$(($(now_ms) - T0))
 [[ $t != -1 ]] && ok "rejoined guest fetched and applied v$V (${RESYNC_MS} ms after QEMU start)" || ko "rejoined guest did not apply v$V"
@@ -276,7 +312,7 @@ serve_all "rejoined"
 
 echo "== apply through the guest (operator apply on the k10-metal node)"
 target/release/mkbundle -o "$OUT/bundle2.k10b" --version 0 --services hello,echo,sha,chain,config,compute 2>/dev/null
-r=$(curl -s -m 10 -H "$AUTH" --data-binary "@$OUT/bundle2.k10b" "127.0.0.1:$H3/_k10s/apply")
+r=$(curl -s -m 10 -H "Authorization: $(sign "$H3" POST /_k10s/apply "@$OUT/bundle2.k10b")" --data-binary "@$OUT/bundle2.k10b" "127.0.0.1:$H3/_k10s/apply")
 V2=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['version'])" "$r" 2>/dev/null)
 [[ "$V2" == $((V + 1)) ]] && ok "apply via the guest -> version $V2 (highest known + 1)" || ko "apply via the guest: $r"
 t=$(wait_for 10 all_applied "$V2") && ok "hosted nodes fetched v$V2 from the guest and applied it (${t} ms)" || ko "v$V2 not applied everywhere"
@@ -288,6 +324,41 @@ done
 
 rej=$(st "$H1" "c['stats']['gossip_rejected'] + c['stats']['link_auth_failures']")$(st "$H3" "c['stats']['gossip_rejected'] + c['stats']['link_auth_failures']")
 [[ "$rej" == 00 ]] && ok "no authentication failures between members" || ko "authentication failures (n1, guest): $rej"
+
+echo "== refused peers"
+H4=$((BASE + 4)) G4=$((BASE + 104)) R4=$((BASE + 204))
+hosted n4 "$H4" "$G4" "$R4" "127.0.0.1:$G3" "$OUT/wrong.key"
+rejected() { st "$H3" "c['stats']['gossip_rejected']"; }
+t=$(wait_for 5 eval 'r=$(rejected); ((${r:-0} > 0))') && ok "guest dropped gossip from a node with another cluster key ($(rejected) datagrams)" || ko "guest did not reject the wrong-key node's gossip"
+sleep 1
+n4=$(st "$H4" "c.get('live_members')") n3=$(st "$H3" "c.get('live_members')")
+[[ "$n4" == 1 && "$n3" == 3 ]] && ok "wrong-key node stays alone; the guest still sees 3 live members" || ko "membership with a wrong-key node: n4 $n4, guest $n3"
+kill "${PIDS[-1]}" 2>/dev/null
+F0=$(st "$H3" "c['stats']['link_auth_failures']")
+# One connection to the guest's peer port sends garbage, then 20 never authenticate (held 8 s).
+python3 - "$R3" <<'PY' &
+import socket, sys, time
+port = int(sys.argv[1])
+bad = socket.create_connection(("127.0.0.1", port), timeout=2)
+bad.sendall(b"\xff" * 64)
+time.sleep(0.2)
+socks = []
+for _ in range(20):
+    socks.append(socket.create_connection(("127.0.0.1", port), timeout=2))
+    time.sleep(0.02)
+time.sleep(8)
+PY
+RAW=$!
+handshaking() { st "$H3" "sum(1 for l in c['links'] if l['state'] == 'handshake')"; }
+sleep 1.7
+n=$(handshaking)
+[[ "$n" == 16 ]] && ok "at most 16 unauthenticated links kept in their handshake ($n; oldest evicted)" || ko "links in their handshake: $n (want 16)"
+t=$(wait_for 6 eval '[[ $(handshaking) == 0 ]]') && ok "unauthenticated links closed by the handshake timeout" || ko "links still in their handshake: $(handshaking)"
+F1=$(st "$H3" "c['stats']['link_auth_failures']")
+((F1 - F0 >= 21)) && ok "guest counted $((F1 - F0)) refused peer links (1 garbage, 4 evicted, 16 timed out)" || ko "refused peer links counted: $F0 -> $F1"
+wait $RAW
+n3=$(st "$H3" "c.get('live_members')")
+[[ "$n3" == 3 ]] && ok "cluster unaffected (3 live members)" || ko "live members after refused peers: $n3"
 grep -q "PANIC\|CPU exception" "$OUT"/guest*.log && ko "kernel panic/exception in guest logs" || ok "no panic or CPU exception in guest logs"
 echo "== timings: join ${JOIN_MS} ms, apply->all applied ${APPLY_MS} ms, rejoin ${REJOIN_MS} ms, rejoin->applied ${RESYNC_MS} ms"
 echo "== $pass passed, $fail failed"

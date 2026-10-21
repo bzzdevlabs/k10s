@@ -77,24 +77,6 @@ impl BootInfo {
     pub fn has_flag(&self, flag: &str) -> bool {
         self.cmdline().split_ascii_whitespace().any(|w| w == flag || w.split('=').next() == Some(flag))
     }
-    /// The command line with secret values (`k10.cluster_key`, `k10.admin_token`) masked, for logs.
-    pub fn cmdline_redacted(&self) -> alloc::string::String {
-        let mut o = alloc::string::String::new();
-        for w in self.cmdline().split_ascii_whitespace() {
-            if !o.is_empty() {
-                o.push(' ');
-            }
-            match w.split_once('=') {
-                Some((k, _)) if k == "k10.cluster_key" || k == "k10.admin_token" => {
-                    o.push_str(k);
-                    o.push_str("=...");
-                }
-                _ => o.push_str(w),
-            }
-        }
-        o
-    }
-
     /// Value of `key=value` on the command line.
     pub fn arg(&self, key: &str) -> Option<&str> {
         self.cmdline().split_ascii_whitespace().find_map(|w| w.strip_prefix(key)?.strip_prefix('='))

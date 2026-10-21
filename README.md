@@ -54,7 +54,10 @@ cargo build --release -p k10s
 ```bash
 ./target/release/k10s node --http 127.0.0.1:8080 --data /tmp/k10s-data
 ```
-In another terminal:
+In another terminal (admin requests are signed with the key the node created in its data directory):
+```bash
+export K10S_ADMIN_TOKEN_FILE=/tmp/k10s-data/admin.key
+```
 ```bash
 ./target/release/k10s apply examples/app.k10s --node 127.0.0.1:8080
 ```
@@ -65,8 +68,9 @@ curl 127.0.0.1:8080/hello/
 curl '127.0.0.1:8080/compute/?n=1000'
 ```
 Try a single service without a node: `k10s run examples/echo.ten --method POST --body hi`.
-The admin API (`apply`, `status`, `logs`) answers loopback clients only until you give it a token
-(`--admin-token-file FILE` on the node, the same file to the CLI or `K10S_ADMIN_TOKEN_FILE`).
+Admin requests (`apply`, `status`, `logs`) are signed with the node's admin key: a node creates `DATA/admin.key`
+on first start (or takes `--admin-token-file FILE`); give the CLI the same file (`--admin-token-file` or
+`K10S_ADMIN_TOKEN_FILE`; without `--data`, node and CLI share `~/.local/state/k10s/admin.key`).
 
 A cluster: create a key once (`k10s keygen -o cluster.key`), copy it to every node, and start them with
 `--cluster-key-file cluster.key`, `--gossip`, `--rpc` and `--join HOST:PORT` (see [docs/NODE.md](docs/NODE.md));

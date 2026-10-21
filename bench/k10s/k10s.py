@@ -17,7 +17,7 @@ Subcommands (all print JSON on stdout):
   status <addr>                          /_k10s/status
   wrap <name> <env.json> <runs.jsonl>    {"experiment", "env", "runs"} like nodestat.py wrap
 """
-import json, os, platform, socket, statistics, subprocess, sys, threading, time
+import hashlib, hmac, json, os, platform, socket, statistics, subprocess, sys, threading, time
 
 TCK = os.sysconf("SC_CLK_TCK")
 
@@ -102,12 +102,32 @@ def host_busy_jiffies():
     return sum(f[:8]) - f[3] - f[4]
 
 
+OPEN = ("/_k10s/health", "/_k10s/audience")
+
+
+def admin_auth(addr, method, path, body):
+    """K10s-HMAC Authorization value (docs/NODE.md) for the node process at `addr` (its /_k10s/audience) with the key
+    in $K10S_ADMIN_TOKEN_FILE, or None without one."""
+    f = os.environ.get("K10S_ADMIN_TOKEN_FILE")
+    if not f:
+        return None
+    key = open(f, "rb").read().strip()
+    st, aud = http_get(addr, "/_k10s/audience")
+    if st != 200:
+        raise RuntimeError(f"{addr}/_k10s/audience: HTTP {st}")
+    a, t, n, h = aud.decode().strip(), str(int(time.time() * 1000)), os.urandom(16).hex(), hashlib.sha256(body).hexdigest()
+    sig = hmac.new(key, "\n".join(["K10s-HMAC", a, method, path, t, n, h]).encode(), hashlib.sha256).hexdigest()
+    return f"K10s-HMAC a={a},t={t},n={n},h={h},sig={sig}"
+
+
 def http_get(addr, path, timeout=5.0, method="GET", body=b""):
     host, port = addr.rsplit(":", 1)
     s = socket.create_connection((host, int(port)), timeout=timeout)
     try:
         s.settimeout(timeout)
-        s.sendall(f"{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
+        auth = admin_auth(addr, method, path, body) if path.startswith("/_k10s/") and path.split("?")[0] not in OPEN else None
+        extra = f"Authorization: {auth}\r\n" if auth else ""
+        s.sendall(f"{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n{extra}Content-Length: {len(body)}\r\n\r\n".encode() + body)
         d = b""
         while True:
             c = s.recv(65536)

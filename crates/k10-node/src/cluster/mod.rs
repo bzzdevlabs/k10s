@@ -23,7 +23,7 @@ use crate::router::RemoteRouter;
 use crate::service::Placement;
 use crate::sys;
 use k10_mesh::driver::{IoStats, UdpDriver};
-use k10_mesh::secure::{ClusterKey, GossipCipher, GossipCipherStats, GOSSIP_OVERHEAD};
+use k10_mesh::secure::{ClusterKeys, GossipCipher, GossipCipherStats, GOSSIP_OVERHEAD};
 use k10_mesh::sha256::to_hex;
 use k10_mesh::{place, Bundle, Capacity, DesiredState, Gossip, Manifest, Member, MemberState, NodeId};
 use router::{MeshInbox, MeshMsg, MeshRouter};
@@ -59,11 +59,11 @@ pub struct ClusterConfig {
     pub leave_grace: Duration,
     /// A desired-state fetch from one peer that makes no progress for this long moves on to the next peer.
     pub fetch_timeout: Duration,
-    /// Shared cluster key (sealed gossip, encrypted peer links); `None` is refused by `bind` unless `insecure`.
-    pub key: Option<ClusterKey>,
+    /// Cluster keys (sealed gossip, encrypted peer links); `None` is refused by `bind` unless `insecure`.
+    pub keys: Option<ClusterKeys>,
     /// Explicit opt-in to run unauthenticated (anyone reaching the gossip/rpc ports controls the cluster).
     pub insecure: bool,
-    /// Gossip datagrams stamped further than this from the local clock are dropped (zero: no check).
+    /// Gossip datagrams stamped further than this from the local clock are dropped (at least 1 s).
     pub gossip_max_skew: Duration,
 }
 
@@ -78,7 +78,7 @@ impl Default for ClusterConfig {
             debounce: Duration::from_millis(50),
             leave_grace: Duration::from_millis(1000),
             fetch_timeout: Duration::from_secs(10),
-            key: None,
+            keys: None,
             insecure: false,
             gossip_max_skew: Duration::from_millis(k10_mesh::secure::DEFAULT_MAX_SKEW_MS),
         }
@@ -455,7 +455,8 @@ impl ClusterHooks for ClusterShared {
                 "\"forward_failed\":{},\"forward_local\":{},\"resent_unsent\":{},\"served_for_peers\":{},\"not_here\":{},",
                 "\"dial_failures\":{},\"congested_skips\":{},\"links_overflowed\":{},\"accept_pauses\":{},",
                 "\"peer_bytes_in\":{},\"peer_bytes_out\":{},\"link_auth_failures\":{},\"gossip_rejected\":{},",
-                "\"gossip_bad_tag\":{},\"gossip_stale\":{},\"gossip_replayed\":{},\"pending_calls\":{},\"fetches\":{},",
+                "\"gossip_bad_tag\":{},\"gossip_unknown_key\":{},\"gossip_stale\":{},\"gossip_replayed\":{},",
+                "\"gossip_older_boot\":{},\"pending_calls\":{},\"fetches\":{},",
                 "\"blobs_fetched\":{},\"blobs\":{},\"applies\":{},\"apply_errors\":{}}}}}"
             ),
             self.id,
@@ -464,8 +465,12 @@ impl ClusterHooks for ClusterShared {
             local.as_ref().map(|m| m.rpc.to_string()).unwrap_or_default(),
             local.as_ref().map(|m| m.http.to_string()).unwrap_or_default(),
             self.leaving(),
-            match &self.cfg.key {
-                Some(k) => format!("{{\"mode\":\"key\",\"key_id\":\"{}\"}}", k.id_hex()),
+            match &self.cfg.keys {
+                Some(k) => format!(
+                    "{{\"mode\":\"key\",\"key_id\":\"{}\",\"next_key_id\":{}}}",
+                    k.current().id_hex(),
+                    k.next().map_or_else(|| "null".to_string(), |n| format!("\"{}\"", n.id_hex()))
+                ),
                 None => "{\"mode\":\"insecure\"}".to_string(),
             },
             desired,
@@ -496,10 +501,12 @@ impl ClusterHooks for ClusterShared {
             l(&s.peer_bytes_in),
             l(&s.peer_bytes_out),
             l(&s.link_auth_failures),
-            mv.io.rejected,
+            mv.cipher.map_or(0, |c| c.malformed + c.unknown_key + c.bad_tag + c.stale + c.replayed + c.older_boot),
             mv.cipher.map_or(0, |c| c.bad_tag + c.malformed),
+            mv.cipher.map_or(0, |c| c.unknown_key),
             mv.cipher.map_or(0, |c| c.stale),
             mv.cipher.map_or(0, |c| c.replayed),
+            mv.cipher.map_or(0, |c| c.older_boot),
             mv.pending_calls,
             l(&s.fetches),
             l(&s.blobs_fetched),
@@ -524,9 +531,9 @@ impl ClusterHooks for ClusterShared {
             local.as_ref().map(|m| m.gossip.to_string()).unwrap_or_default(),
             local.as_ref().map(|m| m.rpc.to_string()).unwrap_or_default(),
         );
-        match &self.cfg.key {
+        match &self.cfg.keys {
             Some(k) => {
-                let _ = writeln!(o, "auth: cluster key id {}", k.id_hex());
+                let _ = writeln!(o, "auth: cluster key id {}", k.current().id_hex());
             }
             None => o.push_str("auth: NONE (--insecure-unauthenticated-cluster)\n"),
         }
@@ -684,7 +691,10 @@ pub struct ClusterSetup {
 
 impl ClusterSetup {
     pub fn bind(cfg: ClusterConfig) -> io::Result<ClusterBound> {
-        if cfg.key.is_none() && !cfg.insecure {
+        if cfg.gossip_max_skew < Duration::from_secs(1) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "the gossip clock skew bound is at least 1 s"));
+        }
+        if cfg.keys.is_none() && !cfg.insecure {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "cluster mode needs a cluster key: create one with `k10s keygen -o FILE`, copy the file to every node \
@@ -745,21 +755,20 @@ impl ClusterSetup {
         let _ = node.cluster.set(Arc::downgrade(&hooks));
         drop(hooks);
         let mut gcfg = cfg.gossip.clone();
-        if cfg.key.is_some() {
+        if cfg.keys.is_some() {
             // Sealed datagrams stay within the unsealed size budget (MTU).
             gcfg.max_packet = gcfg.max_packet.saturating_sub(GOSSIP_OVERHEAD);
         }
         let mut driver = UdpDriver::with_socket(udp, Gossip::new(me.clone(), gcfg, sys::getrandom_u64()))?;
-        match &cfg.key {
+        match &cfg.keys {
             Some(k) => {
                 let mut boot = [0u8; 8];
                 sys::fill_random(&mut boot)?;
-                driver.set_cipher(GossipCipher::new(k, boot, cfg.gossip_max_skew.as_millis() as u64));
-                eprintln!(
-                    "k10s: cluster authentication: key id {} (gossip sealed with XChaCha20-Poly1305, peer links \
-                     authenticated and encrypted with ChaCha20-Poly1305)",
-                    k.id_hex()
-                );
+                driver.set_cipher(GossipCipher::new(k, id, boot, cfg.gossip_max_skew.as_millis() as u64));
+                match k.next() {
+                    Some(n) => eprintln!("k10s: cluster key id {}, next key id {}", k.current().id_hex(), n.id_hex()),
+                    None => eprintln!("k10s: cluster key id {}", k.current().id_hex()),
+                }
             }
             None => eprintln!(
                 "k10s: WARNING: --insecure-unauthenticated-cluster: gossip and peer links are NOT authenticated; anyone \
@@ -770,7 +779,7 @@ impl ClusterSetup {
         // the cluster wins, so a whole-cluster restart converges on the newest one).
         if let Some(cur) = cs.store.current() {
             let _ = cs.apply_stored(&cur);
-            driver.set_desired(cur.version(), cur.hash);
+            driver.set_desired(cur.version(), cur.hash)?;
         }
         eprintln!(
             "k10s: cluster node {id}: gossip {} rpc {} http {} (bound {gossip_bound} / {rpc_bound} / {http_bound}){}",

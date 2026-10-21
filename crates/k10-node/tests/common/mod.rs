@@ -12,13 +12,21 @@ pub fn tmpdir(tag: &str) -> PathBuf {
     d
 }
 
+pub const ADMIN_KEY: &str = "test-admin-key-0123456789abcdef0123456789";
+
 pub fn config(shards: usize) -> NodeConfig {
     NodeConfig {
         http: "127.0.0.1:0".parse().unwrap(),
         shards,
         call_timeout: Duration::from_secs(2),
+        admin_key: Some(k10_mesh::admin_auth::AdminKey::parse(ADMIN_KEY).unwrap()),
         ..NodeConfig::default()
     }
+}
+
+/// A signed admin request.
+pub fn admin(c: &mut k10_node::http::Client, method: &str, path: &str, body: &[u8]) -> std::io::Result<k10_node::http::ClientResponse> {
+    c.request_with(method, path, body, Some(&k10_mesh::admin_auth::AdminKey::parse(ADMIN_KEY).unwrap()))
 }
 
 pub fn start(cfg: NodeConfig) -> Node {
@@ -92,8 +100,13 @@ pub fn client(node: &Node) -> Client {
     Client::connect(&node.http_addr().to_string(), Duration::from_secs(30)).unwrap()
 }
 
+/// A GET, signed when it targets the admin API.
 pub fn get(node: &Node, path: &str) -> ClientResponse {
-    client(node).request("GET", path, b"").unwrap()
+    if path.starts_with("/_k10s/") {
+        admin(&mut client(node), "GET", path, b"").unwrap()
+    } else {
+        client(node).request("GET", path, b"").unwrap()
+    }
 }
 
 pub fn post(node: &Node, path: &str, body: &[u8]) -> ClientResponse {

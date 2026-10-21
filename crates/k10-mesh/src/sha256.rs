@@ -15,13 +15,20 @@ const K: [u32; 64] = [
 
 const H0: [u32; 8] = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
 
-/// Incremental SHA-256 hasher.
+/// Incremental SHA-256 hasher (wiped on drop: HMAC keeps keyed states in it).
 #[derive(Clone)]
 pub struct Sha256 {
     state: [u32; 8],
     buf: [u8; 64],
     buf_len: usize,
     total: u64,
+}
+
+impl Drop for Sha256 {
+    fn drop(&mut self) {
+        crate::crypto::zeroize(&mut self.state);
+        crate::crypto::zeroize(&mut self.buf);
+    }
 }
 
 impl Default for Sha256 {

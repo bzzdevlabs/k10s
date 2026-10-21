@@ -24,6 +24,7 @@ mod arch;
 mod boot;
 mod cluster;
 mod coro;
+mod fw_cfg;
 mod http;
 mod mem;
 mod net;
@@ -162,7 +163,7 @@ extern "C" fn kmain() -> ! {
         if arch::apic::uses_tsc_deadline() { "TSC-deadline" } else { "LAPIC one-shot" },
         if arch::paging::nx_enabled() { "on" } else { "off" },
         if jit { "jit" } else { "interp" },
-        bi.cmdline_redacted()
+        bi.cmdline()
     ); }
 
     if bi.has_flag("k10.selftest") {
@@ -171,8 +172,17 @@ extern "C" fn kmain() -> ! {
         arch::halt_forever();
     }
 
-    // Admin API access: a bearer token, or explicitly open (`k10.admin_insecure`), else only /_k10s/health.
-    runtime::admin_init(bi.arg("k10.admin_token").filter(|t| !t.is_empty()), bi.has_flag("k10.admin_insecure"));
+    // Admin API: requests signed with the key in fw_cfg `opt/k10s/admin_key` for this boot's random audience;
+    // without a key only /_k10s/health.
+    use k10_mesh::admin_auth::{AdminKey, AdminVerifier, AUDIENCE_LEN};
+    let admin_key = fw_cfg::secret("opt/k10s/admin_key", AdminKey::parse).unwrap_or_else(|e| fatal(format_args!("{e}")));
+    runtime::admin_init(admin_key.map(|key| {
+        let mut audience = [0u8; AUDIENCE_LEN];
+        if !arch::rdrand_bytes(&mut audience) {
+            fatal(format_args!("an admin key needs RDRAND for the admin audience (use -cpu host)"));
+        }
+        AdminVerifier::new(key, audience)
+    }));
 
     // Network.
     let t_banner = arch::rdtsc();
@@ -277,6 +287,7 @@ fn main_loop(net: &mut net::Net, spin_ns: u64) -> ! {
     let mut last_busy = time::now_ns();
     let mut spin_from: Option<u64> = None;
     loop {
+        time::resync_wall_if_due();
         net.poll_ingress();
         net.service(&mut runtime::submit);
         cluster::poll(net);

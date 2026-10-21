@@ -66,13 +66,13 @@ fn udp_driver_in_a_caller_owned_loop() {
     assert!(a.raw_fd() >= 0 && a.raw_fd() != b.raw_fd());
     let start = Instant::now();
     let now = || start.elapsed().as_millis() as u64;
-    b.join(&[a_addr], now());
+    b.join(&[a_addr], now()).unwrap();
     let mut up = false;
     while start.elapsed() < Duration::from_secs(5) {
         for d in [&mut a, &mut b] {
             d.on_readable(now()).unwrap();
             if now() >= d.next_deadline() {
-                d.on_tick(now());
+                d.on_tick(now()).unwrap();
             }
         }
         while let Some(e) = a.poll_event() {
@@ -91,11 +91,11 @@ fn udp_driver_in_a_caller_owned_loop() {
 /// datagrams (the pre-authentication attack: a `Desired` item pointing at the attacker), are dropped before decoding.
 #[test]
 fn sealed_gossip_rejects_other_keys_and_plaintext() {
-    use k10_mesh::secure::{ClusterKey, GossipCipher, DEFAULT_MAX_SKEW_MS};
+    use k10_mesh::secure::{ClusterKey, ClusterKeys, GossipCipher, DEFAULT_MAX_SKEW_MS};
     let key = ClusterKey::new(&[42; 32]);
     let mk = |id: u64, k: &ClusterKey| {
         let mut d = UdpDriver::bind(member(id), fast(), id).unwrap();
-        d.set_cipher(GossipCipher::new(k, id.to_le_bytes(), DEFAULT_MAX_SKEW_MS));
+        d.set_cipher(GossipCipher::new(&ClusterKeys::new(k.clone(), None).unwrap(), NodeId(id), id.to_le_bytes(), DEFAULT_MAX_SKEW_MS));
         d
     };
     let mut a = mk(20, &key);
@@ -104,8 +104,8 @@ fn sealed_gossip_rejects_other_keys_and_plaintext() {
     let a_addr = a.gossip().local().gossip;
     let start = Instant::now();
     let now = || start.elapsed().as_millis() as u64;
-    b.join(&[a_addr], now());
-    x.join(&[a_addr], now());
+    b.join(&[a_addr], now()).unwrap();
+    x.join(&[a_addr], now()).unwrap();
     // A forged plaintext datagram: a sync from an unknown sender announcing a desired state.
     let mut forger = k10_mesh::Gossip::new(member(23), fast(), 23);
     let forged = forger.set_desired(99, [0xee; 32]);
@@ -119,7 +119,7 @@ fn sealed_gossip_rejects_other_keys_and_plaintext() {
         for d in [&mut a, &mut b, &mut x] {
             d.on_readable(now()).unwrap();
             if now() >= d.next_deadline() {
-                d.on_tick(now());
+                d.on_tick(now()).unwrap();
             }
             while d.poll_event().is_some() {}
         }
@@ -133,8 +133,7 @@ fn sealed_gossip_rejects_other_keys_and_plaintext() {
     assert_eq!(x.gossip().num_live(), 1, "the node with another key stays alone");
     assert!(a.gossip().desired().is_none(), "the forged desired state was not decoded");
     let st = a.cipher_stats().unwrap();
-    assert!(st.bad_tag > 0 && st.malformed > 0, "{st:?}");
-    assert!(a.io_stats().rejected >= st.bad_tag + st.malformed);
+    assert!(st.unknown_key > 0 && st.malformed > 0, "{st:?}");
     assert!(a.take_last_reject().is_some());
     assert_eq!(a.gossip().stats().malformed_packets, 0, "rejected datagrams never reach the gossip decoder");
 }

@@ -8,7 +8,6 @@ fn le64(b: &[u8]) -> u64 {
 }
 
 /// Incremental Poly1305 state for one key (a key must never authenticate two different messages).
-#[derive(Clone)]
 pub struct Poly1305 {
     r: [u64; 3],
     /// `r1·20`, `r2·20` (the reduction folds 2^130 ≡ 5 into the limb products).
@@ -17,6 +16,16 @@ pub struct Poly1305 {
     pad: [u64; 2],
     buf: [u8; 16],
     buf_len: usize,
+}
+
+impl Drop for Poly1305 {
+    fn drop(&mut self) {
+        super::zeroize(&mut self.r);
+        super::zeroize(&mut self.s);
+        super::zeroize(&mut self.h);
+        super::zeroize(&mut self.pad);
+        super::zeroize(&mut self.buf);
+    }
 }
 
 impl Poly1305 {
@@ -68,7 +77,6 @@ impl Poly1305 {
         self.h = [h0, h1, h2];
     }
 
-    #[inline(never)]
     pub fn update(&mut self, mut data: &[u8]) {
         if self.buf_len > 0 {
             let take = (16 - self.buf_len).min(data.len());

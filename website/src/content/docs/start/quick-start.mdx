@@ -19,16 +19,19 @@ You need the `k10s` binary ([Installation](/k10s/start/installation/)) and a che
    	session={`
    $ k10s node --http 127.0.0.1:8080 --data /tmp/k10s-data
    «dim:k10s: sandbox mode=on user=1000 caps=none landlock=abi2 seccomp=kill jit_dump=-»
-   «dim:k10s: admin API on the ingress: loopback clients only (health and metrics open)»
+   «dim:k10s: generated the admin key /tmp/k10s-data/admin.key»
+   «dim:k10s: admin API on the ingress: requests signed with the key in /tmp/k10s-data/admin.key»
    k10s 0.1.0: node \`laptop\` listening on «teal:http://127.0.0.1:8080» (8 shards, backend jit, data /tmp/k10s-data)
    `}
    />
 
-2. **Deploy.** In another terminal, apply the manifest. The CLI compiles every `.ten` file it references and sends
-   one bundle; the node validates and JIT-compiles every module before it switches over.
+2. **Deploy.** In another terminal, point the CLI at the node's admin key and apply the manifest. The CLI compiles
+   every `.ten` file it references and sends one bundle; the node validates and JIT-compiles every module before it
+   switches over.
 
    <Terminal
    	session={`
+   $ export K10S_ADMIN_TOKEN_FILE=/tmp/k10s-data/admin.key
    $ k10s apply examples/app.k10s
    {"ok":true,"version":1,"added":["chain","compute","counter","echo","hello","nbody","sort","todo"],
     "updated":[],"removed":[],"unchanged":[],"warnings":[]}
@@ -90,9 +93,10 @@ hi«dim:k10s: HTTP 200 (2 bytes, 0.106 ms)»
 />
 
 <Aside type="note" title="Admin access">
-	`apply`, `status` and `logs` use the node's admin API under `/_k10s/`. Without a token it only answers loopback
-	clients. To administer a node remotely, start it with `--admin-token-file FILE` and pass the same file to the CLI;
-	see [Production setup](/k10s/guides/production/).
+	`apply`, `status` and `logs` use the node's admin API under `/_k10s/`, and every request is signed with the node's
+	admin key: `DATA/admin.key` (created on first start), or the file given with `--admin-token-file`. The CLI reads
+	`--admin-token-file`, `$K10S_ADMIN_TOKEN_FILE`, or `~/.local/state/k10s/admin.key` (where a node without `--data`
+	keeps its key); see [Production setup](/k10s/guides/production/).
 </Aside>
 
 ## Next

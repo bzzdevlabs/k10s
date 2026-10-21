@@ -1,18 +1,17 @@
 //! ChaCha20-Poly1305 (RFC 8439) and XChaCha20-Poly1305 in place, detached tag, cipher and MAC fused per batch.
 
 use super::chacha20::{hchacha20, xor_into, ChaCha20, BATCH};
-use super::ct_eq;
 use super::poly1305::Poly1305;
+use super::{ct_eq, zeroize};
 
 pub const TAG_LEN: usize = 16;
 
-/// The fused loop, one instance per direction with a single call site per primitive (small i-cache footprint: peer
-/// links mostly seal short records, often with cold caches).
-#[inline(never)]
+/// Cipher and MAC fused per keystream batch; one instance per direction.
 fn run<const OPEN: bool>(c: &ChaCha20, aad: &[u8], data: &mut [u8]) -> [u8; 16] {
     let mut ks = [0u8; BATCH];
     c.blocks(0, &mut ks);
     let mut poly = Poly1305::new(ks[..32].try_into().unwrap());
+    zeroize(&mut ks[..32]);
     poly.update(aad);
     poly.pad16();
     // Block 0 is the Poly1305 key; the data's keystream starts at block 1.
@@ -43,26 +42,25 @@ fn run<const OPEN: bool>(c: &ChaCha20, aad: &[u8], data: &mut [u8]) -> [u8; 16] 
     poly.finalize()
 }
 
-/// A ChaCha20-Poly1305 key, parsed once (frames on a peer link reuse it with a counter nonce).
-#[derive(Clone)]
+/// A ChaCha20-Poly1305 key: the cipher state is set up once, each message only sets its nonce.
 pub struct Key {
-    key: [u8; 32],
+    base: ChaCha20,
 }
 
 impl Key {
     pub fn new(key: &[u8; 32]) -> Key {
-        Key { key: *key }
+        Key { base: ChaCha20::new(key, &[0; 12]) }
     }
 
     /// Encrypts `data` in place and returns the tag.
     pub fn seal(&self, nonce: &[u8; 12], aad: &[u8], data: &mut [u8]) -> [u8; TAG_LEN] {
-        run::<false>(&ChaCha20::new(&self.key, nonce), aad, data)
+        run::<false>(&self.base.with_nonce(nonce), aad, data)
     }
 
     /// Verifies and decrypts `data` in place; on a bad tag zeroes it and returns false.
     #[must_use]
     pub fn open(&self, nonce: &[u8; 12], aad: &[u8], data: &mut [u8], tag: &[u8; TAG_LEN]) -> bool {
-        let t = run::<true>(&ChaCha20::new(&self.key, nonce), aad, data);
+        let t = run::<true>(&self.base.with_nonce(nonce), aad, data);
         if ct_eq(&t, tag) {
             true
         } else {
@@ -74,21 +72,23 @@ impl Key {
 
 /// XChaCha20-Poly1305: a 192-bit nonce, safe to pick at random (or from a per-sender prefix) under a shared key.
 pub fn xseal(key: &[u8; 32], nonce: &[u8; 24], aad: &[u8], data: &mut [u8]) -> [u8; TAG_LEN] {
-    let (sub, n) = xsubkey(key, nonce);
-    Key::new(&sub).seal(&n, aad, data)
+    let (k, n) = xsubkey(key, nonce);
+    k.seal(&n, aad, data)
 }
 
 #[must_use]
 pub fn xopen(key: &[u8; 32], nonce: &[u8; 24], aad: &[u8], data: &mut [u8], tag: &[u8; TAG_LEN]) -> bool {
-    let (sub, n) = xsubkey(key, nonce);
-    Key::new(&sub).open(&n, aad, data, tag)
+    let (k, n) = xsubkey(key, nonce);
+    k.open(&n, aad, data, tag)
 }
 
-fn xsubkey(key: &[u8; 32], nonce: &[u8; 24]) -> ([u8; 32], [u8; 12]) {
-    let sub = hchacha20(key, nonce[..16].try_into().unwrap());
+fn xsubkey(key: &[u8; 32], nonce: &[u8; 24]) -> (Key, [u8; 12]) {
+    let mut sub = hchacha20(key, nonce[..16].try_into().unwrap());
+    let k = Key::new(&sub);
+    zeroize(&mut sub);
     let mut n = [0u8; 12];
     n[4..].copy_from_slice(&nonce[16..]);
-    (sub, n)
+    (k, n)
 }
 
 #[cfg(test)]

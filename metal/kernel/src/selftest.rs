@@ -1,6 +1,7 @@
 //! In-kernel self tests (`k10.selftest` on the command line): memory, page permissions (W^X, NX), coroutines, the
-//! one-shot timer, both engines (interpreter and JIT) through the engine seam — host calls, host traps, stack
-//! overflow, time-slice preemption + CPU-budget traps on a coroutine. Exits QEMU through `isa-debug-exit` with
+//! one-shot timer, wall-clock resync, fw_cfg files, the admin gate (signed requests), both engines (interpreter and
+//! JIT) through the engine seam — host calls, host traps, stack overflow, time-slice preemption + CPU-budget traps
+//! on a coroutine. Exits QEMU through `isa-debug-exit` with
 //! success/failure (see metal/test.sh).
 
 use alloc::boxed::Box;
@@ -16,7 +17,7 @@ use crate::coro::{Coroutine, Yield};
 use crate::mem::{frames, slots};
 use crate::runtime::engine::{self, HostCalls, Scratch};
 use crate::runtime::host::HostFn;
-use crate::{arch, http, kprintln, time};
+use crate::{arch, fw_cfg, http, kprintln, runtime, time};
 
 macro_rules! check {
     ($ok:ident, $cond:expr, $($msg:tt)*) => {
@@ -110,6 +111,31 @@ pub fn run() -> bool {
     };
     check!(ok, parsed, "http: request head");
 
+    // Wall clock: a resync from kvmclock steps it by (almost) nothing this early and leaves `now_ns` alone.
+    let (m0, w0) = (time::now_ns(), time::unix_ms());
+    let resynced = time::resync_wall();
+    let (m1, w1) = (time::now_ns(), time::unix_ms());
+    check!(
+        ok,
+        m1 >= m0 && w0 > 1_600_000_000_000 && (!resynced || w1.abs_diff(w0) < 100),
+        "time: wall clock {} ms, resync from kvmclock: {}, step {} ms, monotonic clock unaffected",
+        w0,
+        resynced,
+        w1 as i64 - w0 as i64
+    );
+
+    // fw_cfg files (metal/test.sh passes `-fw_cfg name=opt/k10s/selftest,string=k10s fw_cfg selftest`).
+    check!(ok, fw_cfg::file("opt/k10s/no-such-file", 64) == Ok(None), "fw_cfg: missing file");
+    match fw_cfg::file("opt/k10s/selftest", 64) {
+        Ok(None) => kprintln!("  info fw_cfg: opt/k10s/selftest not given"),
+        r => {
+            check!(ok, r == Ok(Some(b"k10s fw_cfg selftest".to_vec())), "fw_cfg: file opt/k10s/selftest read");
+            check!(ok, fw_cfg::file("opt/k10s/selftest", 4) == Err(20), "fw_cfg: file larger than the limit refused");
+        }
+    }
+
+    ok &= admin_gate();
+
     // Page permissions: kernel text read+execute, data read+write+NX, null page unmapped.
     let nx = arch::paging::nx_enabled();
     let text = arch::paging::query(run as *const () as u64);
@@ -148,6 +174,49 @@ pub fn run() -> bool {
 }
 
 static TEST_STATIC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+/// The admin gate with a test key: requests signed for this node's audience pass once, everything else under
+/// `/_k10s` but health and audience is refused.
+fn admin_gate() -> bool {
+    use k10_mesh::admin_auth::{check_body, AdminKey, AdminVerifier};
+    let mut ok = true;
+    let key = "k10s-selftest-admin-key-0123456789abcdef";
+    runtime::admin_init(Some(AdminVerifier::new(AdminKey::parse(key).unwrap(), [0xa5; 16])));
+    let (aud, other) = ("a5".repeat(16), "5a".repeat(16));
+    let signer = AdminKey::parse(key).unwrap();
+    let now = time::unix_ms();
+    let gate = |m: &str, target: &[u8], auth: Option<&str>| runtime::admin_gate(m, target, auth.map(str::as_bytes));
+    let st = |r: Result<Option<[u8; 32]>, (u16, alloc::string::String)>| r.err().map_or(200, |e| e.0);
+    check!(ok, gate("GET", b"/_k10s/audience", None) == Ok(None), "admin: audience endpoint open");
+    let elsewhere = signer.authorization(&other, "GET", "/_k10s/status", now, &[6; 16], b"");
+    check!(ok, st(gate("GET", b"/_k10s/status", Some(&elsewhere))) == 401, "admin: signed for another audience -> 401");
+    let get = signer.authorization(&aud, "GET", "/_k10s/status", now, &[7; 16], b"");
+    let empty = k10_mesh::sha256::sha256(b"");
+    check!(ok, gate("GET", b"/_k10s/status", Some(&get)) == Ok(Some(empty)), "admin: signed GET status accepted");
+    check!(ok, st(gate("GET", b"/_k10s/status", Some(&get))) == 401, "admin: replayed request -> 401");
+    check!(ok, st(gate("GET", b"/_k10s/status", None)) == 401, "admin: unsigned status -> 401");
+    check!(ok, st(gate("GET", b"/_k10s/metrics", None)) == 401, "admin: unsigned metrics -> 401");
+    check!(ok, gate("GET", b"/_k10s/health", None) == Ok(None) && gate("GET", b"/hello/", None) == Ok(None), "admin: health and services open");
+    let post = signer.authorization(&aud, "POST", "/_k10s/status", now, &[8; 16], b"");
+    check!(ok, st(gate("GET", b"/_k10s/status", Some(&post))) == 401, "admin: signature for another method -> 401");
+    let stale = signer.authorization(&aud, "GET", "/_k10s/status", now - 120_000, &[9; 16], b"");
+    check!(ok, st(gate("GET", b"/_k10s/status", Some(&stale))) == 401, "admin: stale request -> 401");
+    let apply = signer.authorization(&aud, "POST", "/_k10s/apply", now, &[10; 16], b"bundle");
+    let body = gate("POST", b"/_k10s/apply", Some(&apply)).ok().flatten();
+    check!(
+        ok,
+        body.is_some_and(|h| check_body(&h, b"bundle").is_ok() && check_body(&h, b"other").is_err()),
+        "admin: body checked against its signed hash"
+    );
+    runtime::admin_init(None);
+    let get = signer.authorization(&aud, "GET", "/_k10s/status", now, &[11; 16], b"");
+    check!(
+        ok,
+        st(gate("GET", b"/_k10s/status", Some(&get))) == 403 && st(gate("GET", b"/_k10s/audience", None)) == 403,
+        "admin: no admin key -> 403 (audience too)"
+    );
+    ok
+}
 
 /// The engine-level tests, run once per engine.
 fn engines(jit: bool) -> bool {

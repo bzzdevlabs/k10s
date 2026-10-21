@@ -68,6 +68,8 @@ PY
 [ -x "$K10S" ] && [ -f "$CACHE/mod/hold.k10" ] || prepare_k10s
 CLUSTER_KEY="$CACHE/cluster.key"                     # cluster key shared by every benchmark node
 [ -f "$CLUSTER_KEY" ] || "$K10S" keygen -o "$CLUSTER_KEY" 2>/dev/null
+export K10S_ADMIN_TOKEN_FILE="$CACHE/admin.key"      # admin key of every benchmark node (k10s apply, k10s.py sign with it)
+[ -f "$K10S_ADMIN_TOKEN_FILE" ] || "$K10S" keygen -o "$K10S_ADMIN_TOKEN_FILE" 2>/dev/null
 
 # start_node <tag> <http_port> [k10s node flags...] -> sets LAST_PID (not via $(...): the node must be a child of this
 # shell). Fresh, empty data dir per start unless KEEP_DATA=1.
@@ -76,7 +78,7 @@ start_node() {
   local data="$CACHE/data/$tag"
   [ "${KEEP_DATA:-0}" = 1 ] || rm -rf "$data"
   mkdir -p "$data"
-  local cmd=("$K10S" node --http "127.0.0.1:$port" --data "$data" --name "$tag" "$@")
+  local cmd=("$K10S" node --http "127.0.0.1:$port" --data "$data" --name "$tag" --admin-token-file "$K10S_ADMIN_TOKEN_FILE" "$@")
   # the binary's page cache is charged to the cgroup that faults it in first: evict it so a node's working set includes
   # its own text pages, like a kind node's does (pages still mapped by a running node stay shared, as between kind nodes)
   $PY fadvise-drop "$K10S" 2>/dev/null || true

@@ -148,6 +148,10 @@ struct Conn {
     gen: u32,
     inbuf: Vec<u8>,
     sent_continue: bool,
+    /// The pending request's head passed the admin gate (checked once: its nonce is spent).
+    gated: bool,
+    /// Body hash a signed admin request committed to.
+    signed: Option<[u8; 32]>,
     /// A request from this connection is with the runtime.
     busy: bool,
     keep_alive: bool,
@@ -155,6 +159,16 @@ struct Conn {
     out_pos: usize,
     /// Close once `out` is flushed.
     close_after: bool,
+}
+
+impl Conn {
+    /// Answers `status` with a plain-text `msg` (none if empty) and closes once it is sent.
+    fn refuse(&mut self, status: u16, msg: &str) {
+        http::write_head(&mut self.out, status, (!msg.is_empty()).then_some("text/plain"), msg.len(), false);
+        self.out.extend_from_slice(msg.as_bytes());
+        self.inbuf.clear();
+        self.close_after = true;
+    }
 }
 
 #[derive(Default, Clone, Copy, Debug)]
@@ -361,6 +375,8 @@ impl Net {
                 gen,
                 inbuf: Vec::new(),
                 sent_continue: false,
+                gated: false,
+                signed: None,
                 busy: false,
                 keep_alive: true,
                 out: Vec::new(),
@@ -447,37 +463,42 @@ impl Net {
                     Parse::Incomplete => {}
                     Parse::Error(status) => {
                         self.stats.bad_requests += 1;
-                        http::write_head(&mut c.out, status, None, 0, false);
-                        c.inbuf.clear();
-                        c.close_after = true;
+                        c.refuse(status, "");
                     }
                     Parse::Head(h) => {
                         // Admin access control, before the body is read.
-                        if let Some(st) = crate::runtime::admin_gate(&h.target, h.auth.map(|(a, b)| &c.inbuf[a..b])) {
+                        let mut refused = None;
+                        if !c.gated {
+                            match crate::runtime::admin_gate(h.method.as_str(), &h.target, h.auth.map(|(a, b)| &c.inbuf[a..b])) {
+                                Ok(signed) => (c.gated, c.signed) = (true, signed),
+                                Err(e) => refused = Some(e),
+                            }
+                        }
+                        if let Some((st, msg)) = refused {
                             self.stats.bad_requests += 1;
-                            let msg: &[u8] = if st == 401 { b"admin API: missing or invalid bearer token\n" } else { b"admin API disabled: boot with k10.admin_token=TOKEN\n" };
-                            http::write_head(&mut c.out, st, Some("text/plain"), msg.len(), false);
-                            c.out.extend_from_slice(msg);
-                            c.inbuf.clear();
-                            c.close_after = true;
+                            c.refuse(st, &msg);
                         } else if h.content_length > self.limits.max_body {
                             self.stats.bad_requests += 1;
-                            http::write_head(&mut c.out, 413, None, 0, false);
-                            c.inbuf.clear();
-                            c.close_after = true;
+                            c.refuse(413, "");
                         } else if c.inbuf.len() >= h.len + h.content_length {
                             let body = c.inbuf[h.len..h.len + h.content_length].to_vec();
                             c.inbuf.drain(..h.len + h.content_length);
-                            c.busy = true;
-                            c.keep_alive = h.keep_alive;
-                            c.sent_continue = false;
-                            self.stats.requests += 1;
-                            submit(Request {
-                                conn: ConnId { idx: idx as u32, gen: c.gen },
-                                method: h.method,
-                                target: h.target,
-                                body,
-                            });
+                            c.gated = false;
+                            if let Some(Err(e)) = c.signed.take().map(|d| k10_mesh::admin_auth::check_body(&d, &body)) {
+                                self.stats.bad_requests += 1;
+                                c.refuse(401, &alloc::format!("{e}\n"));
+                            } else {
+                                c.busy = true;
+                                c.keep_alive = h.keep_alive;
+                                c.sent_continue = false;
+                                self.stats.requests += 1;
+                                submit(Request {
+                                    conn: ConnId { idx: idx as u32, gen: c.gen },
+                                    method: h.method,
+                                    target: h.target,
+                                    body,
+                                });
+                            }
                         } else if h.expect_continue && !c.sent_continue {
                             c.sent_continue = true;
                             c.out.extend_from_slice(http::CONTINUE);

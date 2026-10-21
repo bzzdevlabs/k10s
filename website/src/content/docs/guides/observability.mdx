@@ -55,12 +55,13 @@ Each line starts with its Unix time in milliseconds.
 
 ## Metrics
 
-`GET /_k10s/metrics` serves Prometheus text. It is open without a token (read-only counters), so a scraper needs no
-secret that can deploy code; use `--admin ADDR` to keep it off the public interface.
+`GET /_k10s/metrics` serves Prometheus text. On the dedicated admin listener (`--admin ADDR`) it is open
+(read-only counters), so a scraper needs no secret that can deploy code; on the ingress it is an admin request
+like the others (signed). Point scrapers at the admin listener:
 
 <Terminal
 	session={`
-$ curl -s 127.0.0.1:8080/_k10s/metrics | grep shop
+$ curl -s 127.0.0.1:8081/_k10s/metrics | grep shop
 k10s_service_requests_total{service="shop"} 2
 k10s_service_ok_total{service="shop"} 2
 k10s_service_errors_total{service="shop"} 0
@@ -74,7 +75,7 @@ scrape_configs:
   - job_name: k10s
     metrics_path: /_k10s/metrics
     static_configs:
-      - targets: ['10.0.0.1:8080', '10.0.0.2:8080', '10.0.0.3:8080']
+      - targets: ['10.0.0.1:8081', '10.0.0.2:8081', '10.0.0.3:8081']   # the --admin listeners
 ```
 
 | Family | Series |

@@ -155,7 +155,7 @@ the caveats. Highlights beyond §0:
 ## 7. Limitations (honest list)
 - **Security model:** same-organization workloads per node. Spectre-class side channels between co-located workloads
   are only partly mitigated (SECURITY.md); use separate nodes per hostile tenant. Gossip and peer links are
-  authenticated and encrypted with one shared cluster key and the admin API takes a bearer token, but every key
+  authenticated and encrypted with one shared cluster key (rotatable) and admin requests are signed, but every key
   holder is trusted (no per-node identity, no signed bundles yet).
 - **Storage:** KV is durable but node-local (atomic per node via `kv_add`/`kv_cas`); no replication or consensus yet.
 - **Compute speed:** Ten + baseline JIT is ~1.1–1.6× slower than portable Go and ~4× slower than Go's SHA-256
