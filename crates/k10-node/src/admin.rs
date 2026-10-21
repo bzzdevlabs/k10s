@@ -169,12 +169,12 @@ fn svc_json(s: &ServiceRt, now: u64) -> String {
     };
     format!(
         concat!(
-            "{{\"name\":{},\"rt\":{},\"placement\":{},\"code\":\"{}\",\"memory\":{},\"max_instances\":{},\"cpu_ms\":{},\"fresh\":{},",
+            "{{\"name\":{},\"rt\":{},\"placement\":{},\"code\":\"{}\",\"memory\":{},\"max_instances\":{},\"cpu_ms\":{},\"fresh\":{},\"may_call\":{},",
             "\"mem_reserved\":{},\"mem_used\":{},\"mem_shared\":{},",
             "\"instances\":{{\"live\":{},\"idle\":{},\"peak\":{}}},\"queue\":{},\"snapshot\":{},",
             "\"requests\":{},\"ok\":{},\"errors\":{},\"traps\":{},\"interrupted\":{},\"created\":{},\"destroyed\":{},",
             "\"reclaimed\":{},\"queued\":{},\"cpu_ms_total\":{:.3},\"init_ms_total\":{:.3},\"backoff_ms\":{},",
-            "\"consecutive_traps\":{},\"kv_keys\":{},\"retired\":{}}}"
+            "\"consecutive_traps\":{},\"kv_keys\":{},\"kv_durable\":{},\"retired\":{}}}"
         ),
         json_str(s.name()),
         s.id,
@@ -190,9 +190,14 @@ fn svc_json(s: &ServiceRt, now: u64) -> String {
         s.spec.max_instances,
         s.spec.cpu_ms,
         s.spec.fresh,
+        if s.spec.calls.is_any() {
+            "\"*\"".to_string()
+        } else {
+            format!("[{}]", s.spec.calls.names().map(json_str).collect::<Vec<_>>().join(","))
+        },
         s.mem_res.bytes(),
         live as u64 * s.instance_bytes(),
-        live.saturating_sub(s.mem_res.in_use()) as u64 * s.instance_bytes(),
+        live.saturating_sub(s.mem_res.in_use() as u32) as u64 * s.instance_bytes(),
         live,
         s.idle_total(),
         s.peak.load(Relaxed),
@@ -212,6 +217,7 @@ fn svc_json(s: &ServiceRt, now: u64) -> String {
         s.backoff_remaining_ns(now) / 1_000_000,
         s.consecutive_traps(),
         s.kv.len(),
+        s.kv.durable(),
         s.retired.load(Relaxed),
     )
 }
@@ -235,6 +241,7 @@ pub fn status_json(node: &NodeShared) -> String {
     let mut names: Vec<&String> = table.by_name.keys().collect();
     names.sort();
     let services: Vec<String> = names.iter().map(|n| svc_json(&table.by_name[*n], now)).collect();
+    let warnings: Vec<String> = names.iter().filter_map(|n| table.by_name[*n].call_warning()).map(|w| json_str(&w)).collect();
     let m = &node.mem;
     let kv = node.kv.stats();
     let code = node.backend.stats();
@@ -256,11 +263,11 @@ pub fn status_json(node: &NodeShared) -> String {
         concat!(
             "{{\"node\":{},\"version\":\"{}\",\"backend\":\"{}\",\"shards\":{},\"uptime_s\":{:.3},\"http\":\"{}\",",
             "\"code\":{{\"modules\":{},\"code_bytes\":{},\"exec_bytes\":{},\"prepared\":{},\"prepare_ms_total\":{:.3}}},",
-            "\"manifest\":{{\"version\":{},\"hash\":\"{}\"}},",
+            "\"manifest\":{{\"version\":{},\"hash\":\"{}\",\"warnings\":[{}]}},",
             "\"services\":[{}],",
             "\"memory\":{{\"rss_bytes\":{},\"slots_used\":{},\"slot_bytes\":{},\"reserved_bytes\":{},",
             "\"snapshot_mapped\":{},\"mem_limit\":{},\"mem_reserved\":{},\"mem_shared_used\":{},\"mem_shared_limit\":{},",
-            "\"mem_committed\":{},\"mem_refused\":{}}},",
+            "\"mem_committed\":{},\"mem_retiring\":{},\"mem_overcommit\":{},\"mem_refused\":{}}},",
             "\"http_stats\":{{\"requests\":{},\"2xx\":{},\"4xx\":{},\"5xx\":{},\"admin\":{},\"connections_open\":{},",
             "\"accepted\":{},\"rejected\":{},\"conn_timeouts\":{},\"accept_pauses\":{},\"buffered_bytes\":{},",
             "\"buffer_max\":{},\"buffer_refused\":{}}},",
@@ -268,8 +275,8 @@ pub fn status_json(node: &NodeShared) -> String {
             "\"backlog\":{},\"preempt_requests\":{},\"yields\":{},\"calls\":{},\"calls_failed\":{},\"timeouts\":{},",
             "\"queued_served\":{},\"cross_shard_replies\":{}}},",
             "\"kv\":{{\"namespaces\":{},\"keys\":{},\"live_bytes\":{},\"log_bytes\":{},\"flushes\":{},\"compactions\":{},",
-            "\"errors\":{}}},",
-            "\"applies\":{},\"apply_errors\":{},\"per_shard\":[{}]{}}}"
+            "\"errors\":{},\"degraded\":{}}},",
+            "\"applies\":{},\"apply_errors\":{},\"reload_error\":{},\"per_shard\":[{}]{}}}"
         ),
         json_str(&node.cfg.name),
         BUILD_VERSION.get().copied().unwrap_or(env!("CARGO_PKG_VERSION")),
@@ -284,6 +291,7 @@ pub fn status_json(node: &NodeShared) -> String {
         code.prepare_ns as f64 / 1e6,
         table.version,
         k10_mesh::sha256::to_hex(&table.manifest_hash),
+        warnings.join(","),
         services.join(","),
         sys::rss_bytes(),
         m.slots_used.load(Relaxed),
@@ -295,6 +303,8 @@ pub fn status_json(node: &NodeShared) -> String {
         node.budget.shared_used(),
         node.budget.limit().saturating_sub(node.budget.reserved()),
         node.budget.committed(),
+        node.budget.retiring(),
+        node.budget.overcommit(),
         node.budget.refused(),
         shard_sum(node, |s| &s.http_requests),
         shard_sum(node, |s| &s.http_2xx),
@@ -329,8 +339,10 @@ pub fn status_json(node: &NodeShared) -> String {
         kv.flushes,
         kv.compactions,
         kv.errors,
+        kv.degraded,
         node.counters.applies.load(Relaxed),
         node.counters.apply_errors.load(Relaxed),
+        node.reload_error.get().map(|e| json_str(e)).unwrap_or_else(|| "null".into()),
         per_shard.join(","),
         node.cluster_hooks().map(|c| format!(",\"cluster\":{}", c.status_json())).unwrap_or_default(),
     )
@@ -363,6 +375,9 @@ pub fn metrics(node: &NodeShared) -> String {
         }),
         ("k10s_service_memory_bytes", "gauge", "Memory of the service's live instances (slots)", |s| {
             s.live.load(Relaxed) as u64 * s.instance_bytes()
+        }),
+        ("k10s_service_kv_durable", "gauge", "1 if KV writes reach disk (0: memory-only store or degraded log)", |s| {
+            s.kv.durable() as u64
         }),
     ];
     for (name, ty, help, get) in per_svc {
@@ -402,7 +417,9 @@ pub fn metrics(node: &NodeShared) -> String {
     gauge(&mut o, "k10s_memory_reserved_bytes", "gauge", "Instance memory reserved for the services placed here", b.reserved());
     gauge(&mut o, "k10s_memory_shared_used_bytes", "gauge", "Instance memory used beyond the reservations (burst instances)", b.shared_used());
     gauge(&mut o, "k10s_memory_committed_bytes", "gauge", "Reservations plus burst instances", b.committed());
+    gauge(&mut o, "k10s_memory_overcommit_bytes", "gauge", "Reservations beyond --mem (no burst instance possible)", b.overcommit());
     gauge(&mut o, "k10s_memory_refused_total", "counter", "Instance creations refused for lack of memory", b.refused());
+    gauge(&mut o, "k10s_reload_failed", "gauge", "1 if the persisted bundle could not be reloaded at start", node.reload_error.get().is_some() as u64);
     gauge(&mut o, "k10s_rss_bytes", "gauge", "Resident set size of the node process", sys::rss_bytes());
     gauge(&mut o, "k10s_manifest_version", "gauge", "Applied manifest version", table.version);
     let code = node.backend.stats();
@@ -411,6 +428,8 @@ pub fn metrics(node: &NodeShared) -> String {
     let kv = node.kv.stats();
     gauge(&mut o, "k10s_kv_keys", "gauge", "Keys in the KV store", kv.keys as u64);
     gauge(&mut o, "k10s_kv_log_bytes", "gauge", "Size of the KV logs", kv.log_bytes);
+    gauge(&mut o, "k10s_kv_errors_total", "counter", "Failed KV log writes, fsyncs, rewrites and compactions", kv.errors);
+    gauge(&mut o, "k10s_kv_degraded", "gauge", "KV namespaces whose log is being rewritten after an I/O error", kv.degraded as u64);
     o
 }
 

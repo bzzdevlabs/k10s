@@ -19,6 +19,10 @@ impl fmt::Display for NodeId {
 /// the same type as `std::net::SocketAddr`. On the wire only the IP and port are kept (no flow info / scope id).
 pub type Addr = SocketAddr;
 
+/// Placement algorithm version of this build (see [`crate::place`]).
+pub const PLACEMENT_VERSION: u8 = 2;
+const CORES_MASK: u32 = (1 << 24) - 1;
+
 /// What a node offers to placement.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
 pub struct Capacity {
@@ -72,12 +76,14 @@ pub struct Member {
     /// SWIM incarnation: only the member itself increases it (to refute suspicion or to publish changes).
     pub incarnation: u64,
     pub state: MemberState,
+    /// Placement algorithm this node implements (every member uses the lowest live one).
+    pub placement: u8,
 }
 
 impl Member {
     /// A new alive member with incarnation 0.
     pub fn new(id: NodeId, gossip: Addr, rpc: Addr, http: Addr, capacity: Capacity) -> Member {
-        Member { id, gossip, rpc, http, capacity, incarnation: 0, state: MemberState::Alive }
+        Member { id, gossip, rpc, http, capacity, incarnation: 0, state: MemberState::Alive, placement: PLACEMENT_VERSION }
     }
 
     /// Alive or Suspect: counts for placement and routing.
@@ -95,7 +101,8 @@ impl Member {
         put_rel_addr(out, &self.rpc, &self.gossip);
         put_rel_addr(out, &self.http, &self.gossip);
         put_varint(out, self.capacity.mem_bytes);
-        put_varint(out, self.capacity.cores as u64);
+        // The top byte of the cores varint carries the placement version (0 from older nodes = 1).
+        put_varint(out, (self.capacity.cores & CORES_MASK) as u64 | (self.placement as u64) << 24);
     }
 
     pub(crate) fn decode_from(r: &mut Reader<'_>) -> Res<Member> {
@@ -107,7 +114,9 @@ impl Member {
         let http = get_rel_addr(r, &gossip)?;
         let mem_bytes = r.varint()?;
         let cores = r.varint_u32()?;
-        Ok(Member { id, gossip, rpc, http, capacity: Capacity { mem_bytes, cores }, incarnation, state })
+        let placement = ((cores >> 24) as u8).max(1);
+        let capacity = Capacity { mem_bytes, cores: cores & CORES_MASK };
+        Ok(Member { id, gossip, rpc, http, capacity, incarnation, state, placement })
     }
 
     /// Decodes a member encoded with [`Member::encode_into`]; trailing bytes are an error.
@@ -188,6 +197,11 @@ mod tests {
         let mut b = Vec::new();
         m.encode_into(&mut b);
         assert_eq!(Member::decode(&b).unwrap(), m);
+        // Older nodes send no placement version in the cores varint: read as version 1.
+        let mut b0 = Vec::new();
+        Member { placement: 0, ..m.clone() }.encode_into(&mut b0);
+        let d = Member::decode(&b0).unwrap();
+        assert_eq!((d.placement, d.capacity.cores), (1, 8));
         // every truncation fails cleanly
         for n in 0..b.len() {
             assert!(Member::decode(&b[..n]).is_err());

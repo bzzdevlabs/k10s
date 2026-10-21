@@ -1,0 +1,90 @@
+---
+// Desktop window chrome for drawn renderings (terminals, editors, consoles).
+interface Props {
+	title?: string;
+	variant?: 'terminal' | 'editor' | 'qemu';
+	caption?: string;
+}
+const { title = '', variant = 'terminal', caption } = Astro.props;
+---
+
+<figure class="k-figure not-content">
+	<div class:list={['win', `win-${variant}`]} role="img" aria-label={caption ?? title}>
+		<div class="bar">
+			<span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+			<span class="title">{title}</span>
+			<slot name="bar-end" />
+		</div>
+		<div class="body"><slot /></div>
+	</div>
+	{caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<style>
+	.win {
+		--win-bg: #0f141a;
+		--win-bar: #1a212a;
+		--win-ink: #d6dee6;
+		border-radius: 0.75rem;
+		overflow: hidden;
+		background: var(--win-bg);
+		color: var(--win-ink);
+		border: 1px solid #ffffff14;
+		box-shadow:
+			0 1px 0 #ffffff0d inset,
+			0 1.5rem 3rem -1.2rem #00000080,
+			0 0 0 1px #00000040;
+		text-align: start;
+	}
+	.win-editor {
+		--win-bg: #1e1e1e;
+		--win-bar: #2c2c2c;
+	}
+	.win-qemu {
+		--win-bg: #000;
+		--win-bar: #e8e8e8;
+	}
+	.bar {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		height: 2.1rem;
+		padding-inline: 0.85rem;
+		background: var(--win-bar);
+		border-bottom: 1px solid #00000059;
+		font: 500 0.75rem/1 var(--sl-font);
+	}
+	.win-qemu .bar {
+		color: #333;
+		border-bottom-color: #bbb;
+	}
+	.dots {
+		display: flex;
+		gap: 0.45rem;
+		flex: none;
+	}
+	.dots i {
+		width: 0.72rem;
+		height: 0.72rem;
+		border-radius: 50%;
+		background: #ff5f57;
+	}
+	.dots i:nth-child(2) {
+		background: #febc2e;
+	}
+	.dots i:nth-child(3) {
+		background: #28c840;
+	}
+	.title {
+		flex: 1;
+		text-align: center;
+		opacity: 0.75;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		margin-inline-end: 3rem;
+	}
+	.body {
+		overflow-x: auto;
+	}
+</style>

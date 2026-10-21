@@ -73,13 +73,24 @@ pub fn compile_file_with_sources(path: &Path, sources: &mut Sources) -> Result<M
 
 /// Like [`compile`]; also records every source text read into `sources` (for [`Diagnostic::render`]).
 pub fn compile_with_sources(src: &str, path: Option<&Path>, sources: &mut Sources) -> Result<Module, Vec<Diagnostic>> {
-    Driver::new(false).run(src, path, sources)
+    compile_with_reader(src, path, sources, &mut |p| std::fs::read_to_string(p))
+}
+
+/// Like [`compile_with_sources`]; included files are read with `read` (editors serving unsaved buffers, targets
+/// without a file system).
+pub fn compile_with_reader(
+    src: &str,
+    path: Option<&Path>,
+    sources: &mut Sources,
+    read: &mut dyn FnMut(&Path) -> std::io::Result<String>,
+) -> Result<Module, Vec<Diagnostic>> {
+    Driver::new(false, read).run(src, path, sources)
 }
 
 /// Type-checks the whole prelude (including functions no program uses). For tests.
 #[doc(hidden)]
 pub fn check_prelude() -> Result<(), Vec<Diagnostic>> {
-    Driver::new(true).run("", None, &mut Sources::new()).map(|_| ())
+    Driver::new(true, &mut |p| std::fs::read_to_string(p)).run("", None, &mut Sources::new()).map(|_| ())
 }
 
 /// The prelude, lexed and parsed once per process and shared by every compilation: its AST is borrowed by the
@@ -106,7 +117,7 @@ fn prelude_cache() -> &'static PreludeCache {
     })
 }
 
-struct Driver {
+struct Driver<'r> {
     /// File 0 is the prelude.
     files: Vec<Arc<SourceFile>>,
     /// Parsed user files (`parsed[i]` is `files[i + 1]`).
@@ -117,14 +128,34 @@ struct Driver {
     diags: Diags,
     loaded: HashMap<PathBuf, u32>,
     check_all: bool,
+    read: &'r mut dyn FnMut(&Path) -> std::io::Result<String>,
 }
 
 fn align_up(x: u64, a: u64) -> u64 {
     x.div_ceil(a.max(1)) * a.max(1)
 }
 
-impl Driver {
-    fn new(check_all: bool) -> Driver {
+/// Identity of a source file for "each file once": its canonical path, or the lexically normalized one where
+/// canonicalization fails (no such file, no file system).
+fn file_key(p: &Path) -> PathBuf {
+    use std::path::Component;
+    std::fs::canonicalize(p).unwrap_or_else(|_| {
+        let mut out = PathBuf::new();
+        for c in p.components() {
+            match c {
+                Component::CurDir => {}
+                Component::ParentDir if matches!(out.components().next_back(), Some(Component::Normal(_))) => {
+                    out.pop();
+                }
+                c => out.push(c),
+            }
+        }
+        out
+    })
+}
+
+impl<'r> Driver<'r> {
+    fn new(check_all: bool, read: &'r mut dyn FnMut(&Path) -> std::io::Result<String>) -> Driver<'r> {
         let cache = prelude_cache();
         Driver {
             files: vec![cache.file.clone()],
@@ -135,15 +166,14 @@ impl Driver {
             diags: Diags { list: cache.diags.clone() },
             loaded: HashMap::new(),
             check_all,
+            read,
         }
     }
 
     fn run(mut self, src: &str, path: Option<&Path>, sources: &mut Sources) -> Result<Module, Vec<Diagnostic>> {
         let (name, dir) = match path {
             Some(p) => {
-                if let Ok(c) = std::fs::canonicalize(p) {
-                    self.loaded.insert(c, 1);
-                }
+                self.loaded.insert(file_key(p), 1);
                 (p.display().to_string(), Some(p.parent().map(Path::to_path_buf).unwrap_or_default()))
             }
             None => ("<input>".to_string(), None),
@@ -194,11 +224,11 @@ impl Driver {
             Some(b) if !b.as_os_str().is_empty() => b.join(&rel),
             _ => PathBuf::from(&rel),
         };
-        let canon = std::fs::canonicalize(&full).unwrap_or_else(|_| full.clone());
+        let canon = file_key(&full);
         if self.loaded.contains_key(&canon) {
             return; // each file is included once
         }
-        match std::fs::read_to_string(&full) {
+        match (self.read)(&full) {
             Ok(text) => {
                 self.loaded.insert(canon, self.files.len() as u32);
                 let dir = full.parent().map(Path::to_path_buf);
@@ -221,7 +251,7 @@ impl Driver {
             return None;
         }
         let parse_errors = !self.diags.is_empty();
-        let t = std::time::Instant::now();
+        let t = timer();
         let prog = sema::check(&input, &self.files, &mut self.names, &self.strings, &mut self.diags, self.check_all)?;
         timing("check", t);
         if parse_errors {
@@ -261,7 +291,7 @@ impl Driver {
         let data = data_segments(&prog.statics, &live_s, &addrs);
 
         // Folding and forwarder inlining.
-        let t = std::time::Instant::now();
+        let t = timer();
         let fwd: Vec<Option<fold::Forwarder>> = prog
             .funcs
             .iter()
@@ -310,7 +340,7 @@ impl Driver {
         }
         let results: Vec<u8> = prog.funcs.iter().map(|f| f.results).collect();
         let ctx = lower::LowerCtx { func_index: &func_index, results: &results };
-        let t = std::time::Instant::now();
+        let t = timer();
         let funcs: Vec<k10_ir::Func> =
             order.iter().map(|&i| lower::lower(prog.funcs[i].body.as_ref().expect("body"), &ctx)).collect();
         let exports: Vec<Export> = prog
@@ -348,9 +378,14 @@ impl Driver {
 }
 
 /// Prints phase timings to stderr when `K10_LANG_TIMING` is set.
-fn timing(what: &str, t: std::time::Instant) {
+/// The start of a timed phase when `K10_LANG_TIMING` is set (the clock is not read otherwise: wasm32 has none).
+fn timer() -> Option<std::time::Instant> {
     static ON: OnceLock<bool> = OnceLock::new();
-    if *ON.get_or_init(|| std::env::var_os("K10_LANG_TIMING").is_some()) {
+    ON.get_or_init(|| std::env::var_os("K10_LANG_TIMING").is_some()).then(std::time::Instant::now)
+}
+
+fn timing(what: &str, t: Option<std::time::Instant>) {
+    if let Some(t) = t {
         eprintln!("k10-lang: {what} {:.2} ms", t.elapsed().as_secs_f64() * 1e3);
     }
 }

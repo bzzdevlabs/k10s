@@ -1,0 +1,51 @@
+---
+title: Contributing
+description: How to build, test and contribute to k10s, and the rules that keep its security boundary sound.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Contributions are welcome. Start with
+[CONTRIBUTING.md](https://github.com/bzzdevlabs/k10s/blob/main/CONTRIBUTING.md) and the
+[code of conduct](https://github.com/bzzdevlabs/k10s/blob/main/CODE_OF_CONDUCT.md).
+
+## Build and test
+
+```bash
+cargo build --release -p k10s
+cargo test
+K10S_BACKEND=interp cargo test   # the same suites on the reference interpreter
+```
+
+CI runs `scripts/ci-test.sh unit musl metal-selftest metal` on every pull request.
+
+## Rules of thumb
+
+- **The validator and the JIT are the security boundary.** Changes to them need tests that try to break them.
+- `crates/k10-ir/src/types.rs` (TIR) and `docs/JIT-ABI.md` are frozen interfaces: changes need a design
+  discussion.
+- Minimal dependencies: the core crates have none besides `libc`; justify any new one in the pull request.
+- Every `unsafe` block states its invariants in a comment.
+- Keep docs in sync with behaviour; numbers in docs must come from a reproducible command.
+- `cargo clippy` clean, `rustfmt` formatted.
+
+## This site
+
+The site lives in [website/](https://github.com/bzzdevlabs/k10s/tree/main/website) and is built with
+[Starlight](https://starlight.astro.build). It highlights Ten with the VS Code extension's grammar and embeds the
+repository's examples verbatim.
+
+```bash
+cd website
+npm ci
+npm run dev
+```
+
+Every page has an *Edit page* link. Pushes to `main` that touch the site deploy it to GitHub Pages.
+
+<Aside type="caution" title="Security issues">
+	Do not open public issues for vulnerabilities: follow
+	[SECURITY.md](https://github.com/bzzdevlabs/k10s/blob/main/SECURITY.md).
+</Aside>
+
+k10s is licensed under Apache-2.0.

@@ -1,0 +1,101 @@
+---
+title: Installation
+description: Install the k10s binary from a GitHub release or build it from source.
+---
+
+import { Tabs, TabItem, Steps, Aside } from '@astrojs/starlight/components';
+import Terminal from '~/components/Terminal.astro';
+
+k10s is one static binary: node daemon, JIT, Ten compiler and CLI. Prebuilt binaries are for x86-64 Linux.
+
+<Tabs syncKey="install">
+<TabItem label="Prebuilt binary">
+
+<Steps>
+
+1. Download the static (musl) archive and the checksums of the latest release:
+
+   ```bash
+   gh release download --repo bzzdevlabs/k10s \
+     --pattern 'k10s-*-x86_64-unknown-linux-musl.tar.gz' --pattern SHA256SUMS
+   ```
+
+   Or pick the files by hand on the [releases page](https://github.com/bzzdevlabs/k10s/releases).
+
+2. Verify and unpack:
+
+   ```bash
+   sha256sum -c SHA256SUMS --ignore-missing
+   tar xzf k10s-*-x86_64-unknown-linux-musl.tar.gz
+   ```
+
+3. Put `k10s` on your `PATH`:
+
+   ```bash
+   sudo install -m 0755 k10s-*-x86_64-unknown-linux-musl/k10s /usr/local/bin/k10s
+   ```
+
+</Steps>
+
+</TabItem>
+<TabItem label="From source">
+
+<Steps>
+
+1. Install a stable [Rust toolchain](https://rustup.rs) and clone the repository:
+
+   ```bash
+   git clone https://github.com/bzzdevlabs/k10s.git && cd k10s
+   ```
+
+2. Build the binary:
+
+   ```bash
+   cargo build --release -p k10s
+   ```
+
+3. The binary is `target/release/k10s`. Copy it anywhere: it has no runtime dependencies besides libc.
+
+</Steps>
+
+</TabItem>
+</Tabs>
+
+Check the installation:
+
+<Terminal
+	session={`
+$ k10s --version
+k10s 0.1.0
+`}
+/>
+
+## Release archives
+
+Every release publishes these files. `V` is the version (`0.1.0`, or `0.1.1-dev.45` for a development build).
+
+| Archive | Contents |
+|---|---|
+| `k10s-V-x86_64-unknown-linux-musl.tar.gz` | `k10s`, statically linked: runs on any x86-64 Linux |
+| `k10s-V-x86_64-unknown-linux-gnu.tar.gz` | the same, linked against glibc |
+| `k10s-examples-V.tar.gz` | Ten sources, compiled `.k10` modules and `app.k10s` |
+| `k10s-metal-V-x86_64.tar.gz` | the [bare-metal kernel](/k10s/guides/bare-metal/) and its bundle tool |
+| `k10s-bench-V-linux-amd64.tar.gz` | benchmark workloads and the load generator |
+| `k10s-V-src.tar.gz` | the sources, stamped with their version |
+| `SHA256SUMS` | checksums of all of the above |
+
+*Latest* on GitHub is the last stable release. Every push to `main` also publishes a development pre-release; see
+[Releases and versions](/k10s/project/releases/).
+
+## Requirements
+
+- **x86-64 Linux** for the JIT. On other architectures, `--backend interp` runs services on the reference
+  interpreter.
+- **Process sandbox:** `k10s node` confines itself with seccomp and, when the kernel has it, Landlock (Linux
+  5.13+; TCP port rules need 6.7+). It logs what it applied at start-up. See
+  [Production setup](/k10s/guides/production/).
+
+<Aside>
+	Nothing else is needed on a node: no container runtime, no CNI plugin, no etcd. The same binary is the CLI you
+	use from your laptop.
+</Aside>

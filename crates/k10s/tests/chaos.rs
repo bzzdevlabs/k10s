@@ -1,18 +1,7 @@
-//! Multi-node chaos campaign: a seeded, reproducible driver injects random faults while load runs through every
-//! live ingress, and checks invariants once each disruption re-stabilizes:
-//!
-//!  * live nodes see exactly each other as live, and converge on the same desired version and placement;
-//!  * every service of the current manifest answers correctly (right identity and version) through every ingress;
-//!  * no node crashed on its own, and restarted nodes keep their id;
-//!  * 0 errors in the stable verification window.
-//!
-//! Faults hit every node, the oldest (seed) one more often: SIGKILL (restarted at once or later), SIGSTOP/SIGCONT,
-//! graceful leave + rejoin, apply then SIGKILL of the node that took it, leave replaced by a fresh node, joins and
-//! re-applies. Nodes start with `--join` of up to 3 live members; a restart reuses the data dir and, when free, the
-//! same ports, joining through live members (operational rule), or with its first-run `--join` (static config, none
-//! for `c0`) when a member it knew kept its address, sometimes on new ports (then it rejoins via `DATA/peers`).
-//!
-//! `chaos_short` runs ~90 s; `chaos_long` (`#[ignore]`) ≥ 20 min (`K10S_CHAOS_SECS`). Replay with `K10S_CHAOS_SEED`.
+//! Seeded chaos campaign: faults hit every node, the seed included (kill, stop, leave, restarts with live, static or
+//! no `--join`, on the same or new ports, apply then kill of its origin) under load; after each round, live nodes must
+//! see exactly each other, agree on version and placement, keep their ids, and answer every service with 0 errors.
+//! `chaos_short` ~90 s; `chaos_long` (`#[ignore]`) `K10S_CHAOS_SECS`; replay with `K10S_CHAOS_SEED`.
 
 mod support;
 use support::*;
@@ -50,10 +39,6 @@ struct Cluster {
     ids: BTreeMap<String, String>,
     /// Node name → `--join` of its first run (its static config).
     first_join: BTreeMap<String, Option<String>>,
-    /// Node name → other live node → (its gossip address, live together since), as of the last converged round.
-    together: BTreeMap<String, BTreeMap<String, (String, Instant)>>,
-    /// Node name → when it went down.
-    died: BTreeMap<String, Instant>,
     next_name: u64,
     version: u64,
     svcs: Vec<Svc>,
@@ -69,8 +54,6 @@ impl Cluster {
             rpc: BTreeMap::new(),
             ids: BTreeMap::new(),
             first_join: BTreeMap::new(),
-            together: BTreeMap::new(),
-            died: BTreeMap::new(),
             next_name: 0,
             version: 0,
             svcs: vec![],
@@ -117,9 +100,7 @@ impl Cluster {
         self.nodes.push(n);
     }
 
-    /// Restarts down node `i` (same data dir): `--join` of live members (50%), else its static `--join` on the same
-    /// ports (30%) or on new ones (20%: nobody can find it, it must rejoin by itself). Static variants need what the
-    /// product guarantees for them: a member in its `DATA/peers` (live together > 1.5 s) still at the same address.
+    /// Restarts down node `i`: live `--join` (50%), else static `--join` on the same (30%) or new (20%) ports.
     fn restart(&mut self, i: usize) -> &'static str {
         assert!(self.nodes[i].child.is_none());
         let name = self.nodes[i].name.clone();
@@ -140,28 +121,10 @@ impl Cluster {
         how
     }
 
-    /// Some member `name` knew for over 1.5 s before going down is live at the same address.
+    /// Static restarts need what the product guarantees: an address in the node's `DATA/peers` still live.
     fn has_peer_path(&self, name: &str) -> bool {
-        let (Some(t), Some(&died)) = (self.together.get(name), self.died.get(name)) else { return false };
-        t.iter().any(|(x, (g, since))| {
-            died.saturating_duration_since(*since) > Duration::from_millis(1500)
-                && self.nodes.iter().any(|n| n.child.is_some() && &n.name == x && &n.gossip == g)
-        })
-    }
-
-    /// Records which live nodes know each other (after a converged round).
-    fn note_converged(&mut self) {
-        let now = Instant::now();
-        let live: Vec<(String, String)> = self.live_idx().iter().map(|&i| (self.nodes[i].name.clone(), self.nodes[i].gossip.clone())).collect();
-        for (d, _) in &live {
-            let old = self.together.remove(d).unwrap_or_default();
-            let t = live
-                .iter()
-                .filter(|(x, _)| x != d)
-                .map(|(x, g)| (x.clone(), (g.clone(), old.get(x).filter(|(og, _)| og == g).map_or(now, |(_, s)| *s))))
-                .collect();
-            self.together.insert(d.clone(), t);
-        }
+        let peers = std::fs::read_to_string(self.dir.join(name).join("peers")).unwrap_or_default();
+        peers.lines().skip(1).any(|a| self.nodes.iter().any(|n| n.child.is_some() && n.gossip == a))
     }
 
     fn wait_all_live(&self) {
@@ -215,7 +178,6 @@ impl Cluster {
     }
 
     fn sigkill(&mut self, i: usize) {
-        self.died.insert(self.nodes[i].name.clone(), Instant::now());
         self.nodes[i].signal(libc::SIGKILL);
         if let Some(mut ch) = self.nodes[i].child.take() {
             let _ = ch.wait();
@@ -490,7 +452,6 @@ fn inject(c: &mut Cluster) -> String {
         4 if can_fault => {
             // Graceful leave, then the same node rejoins.
             let i = c.victim();
-            c.died.insert(c.nodes[i].name.clone(), Instant::now());
             let st = c.nodes[i].terminate(Duration::from_secs(10));
             assert!(st.is_some_and(|s| s.success()), "{}: graceful exit {st:?}\n{}", c.nodes[i].name, c.nodes[i].log());
             std::thread::sleep(Duration::from_millis(c.rng.below(1000)));
@@ -544,7 +505,6 @@ fn run_chaos(tag: &str, duration: Duration, seed: u64) -> Stats {
     let mut c = Cluster::start(tag, 5, seed);
     c.apply();
     wait_converged(&c, Duration::from_secs(30)).expect("initial convergence");
-    c.note_converged();
     let ingresses = |c: &Cluster| c.live_idx().iter().map(|&i| c.nodes[i].http.clone()).collect::<Vec<_>>();
     let load = Load::start(4, ingresses(&c));
     let mut stats = Stats { events: BTreeMap::new(), verifications: 0, violations: Vec::new() };
@@ -560,7 +520,7 @@ fn run_chaos(tag: &str, duration: Duration, seed: u64) -> Stats {
         // Let gossip detect kills/leaves and re-place before converging.
         std::thread::sleep(Duration::from_millis(300));
         match wait_converged(&c, Duration::from_secs(40)) {
-            Ok(()) => c.note_converged(),
+            Ok(()) => {}
             Err(e) => {
                 stats.violations.push(format!("round {round} ({ev}): {e}"));
                 // Give it more time once.
@@ -569,7 +529,6 @@ fn run_chaos(tag: &str, duration: Duration, seed: u64) -> Stats {
                     dump_logs(&c);
                     break;
                 }
-                c.note_converged();
             }
         }
         // Check no live node crashed on its own.

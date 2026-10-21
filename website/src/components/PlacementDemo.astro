@@ -1,0 +1,195 @@
+---
+// Interactive rendezvous-hashing placement (simplified: equal weights; k10s also weighs node capacity).
+const nodes = ['node-a', 'node-b', 'node-c', 'node-d', 'node-e'];
+---
+
+<figure class="k-figure not-content">
+	<div class="pd" data-pd>
+		<div class="grid">
+			{
+				nodes.map((n) => (
+					<button type="button" class="node" data-node={n} aria-pressed="true">
+						<span class="hd">
+							<span class="nm">{n}</span>
+							<span class="state">alive</span>
+						</span>
+						<span class="svcs" />
+					</button>
+				))
+			}
+		</div>
+		<p class="msg" aria-live="polite">Click a node to take it down or bring it back.</p>
+	</div>
+	<figcaption>
+		Each node scores every (node, service) pair with a hash and keeps the top <code>replicas</code>. Removing a node
+		only moves the replicas it held.
+	</figcaption>
+</figure>
+
+<script>
+	const services: [string, number][] = [
+		['hello', 1],
+		['echo', 2],
+		['todo', 1],
+		['chain', 1],
+		['compute', 1],
+		['counter', 1],
+		['sort', 1],
+		['nbody', 1],
+		['api', 3],
+	];
+
+	function score(node: string, svc: string) {
+		let h = 0x811c9dc5;
+		for (const ch of `${node}/${svc}`) h = Math.imul(h ^ ch.charCodeAt(0), 0x01000193);
+		h ^= h >>> 16;
+		h = Math.imul(h, 0x85ebca6b);
+		h ^= h >>> 13;
+		return h >>> 0;
+	}
+
+	function place(live: string[]) {
+		const out = new Map<string, string[]>(live.map((n) => [n, []]));
+		for (const [svc, replicas] of services) {
+			const ranked = [...live].sort((a, b) => score(b, svc) - score(a, svc));
+			for (const n of ranked.slice(0, replicas)) out.get(n)!.push(svc);
+		}
+		return out;
+	}
+
+	for (const root of document.querySelectorAll<HTMLElement>('[data-pd]')) {
+		const buttons = [...root.querySelectorAll<HTMLButtonElement>('.node')];
+		const msg = root.querySelector('.msg')!;
+		let prev = new Map<string, string[]>();
+
+		const render = (changed?: string) => {
+			const live = buttons.filter((b) => b.getAttribute('aria-pressed') === 'true').map((b) => b.dataset.node!);
+			const next = place(live);
+			let moved = 0;
+			let kept = 0;
+			for (const b of buttons) {
+				const list = next.get(b.dataset.node!) ?? [];
+				const before = prev.get(b.dataset.node!) ?? [];
+				const box = b.querySelector('.svcs')!;
+				box.replaceChildren(
+					...list.map((s) => {
+						const chip = document.createElement('span');
+						chip.className = 'chip';
+						chip.textContent = s;
+						if (prev.size && !before.includes(s)) {
+							chip.classList.add('moved');
+							moved++;
+						} else kept++;
+						return chip;
+					}),
+				);
+				b.querySelector('.state')!.textContent = live.includes(b.dataset.node!) ? 'alive' : 'dead';
+			}
+			if (changed) {
+				const up = live.includes(changed);
+				msg.textContent = `${changed} ${up ? 'is back' : 'is down'}: ${moved} replica${moved === 1 ? '' : 's'} moved, ${kept} stayed put.`;
+			}
+			prev = next;
+		};
+
+		for (const b of buttons) {
+			b.addEventListener('click', () => {
+				const alive = b.getAttribute('aria-pressed') === 'true';
+				const liveCount = buttons.filter((x) => x.getAttribute('aria-pressed') === 'true').length;
+				if (alive && liveCount === 1) return;
+				b.setAttribute('aria-pressed', String(!alive));
+				render(b.dataset.node);
+			});
+		}
+		render();
+	}
+</script>
+
+<style>
+	.pd {
+		padding: 1rem;
+		border-radius: 0.8rem;
+		background: var(--k-surface);
+		border: 1px solid var(--k-line);
+	}
+	.grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr));
+		gap: 0.6rem;
+	}
+	.node {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		min-height: 8rem;
+		padding: 0.6rem;
+		border-radius: 0.6rem;
+		border: 1px solid color-mix(in srgb, var(--k-teal) 50%, var(--k-line));
+		background: var(--k-surface-2);
+		color: var(--k-ink);
+		font: inherit;
+		text-align: start;
+		cursor: pointer;
+		transition:
+			opacity 0.2s,
+			border-color 0.2s;
+	}
+	.node:hover {
+		border-color: var(--k-teal);
+	}
+	.node[aria-pressed='false'] {
+		opacity: 0.45;
+		border-style: dashed;
+		border-color: var(--k-rose);
+	}
+	.hd {
+		display: flex;
+		justify-content: space-between;
+		align-items: baseline;
+		gap: 0.4rem;
+	}
+	.nm {
+		font: 700 0.8rem var(--sl-font-mono);
+	}
+	.state {
+		font-size: 0.65rem;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: var(--k-teal);
+	}
+	.node[aria-pressed='false'] .state {
+		color: var(--k-rose);
+	}
+	.svcs {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.25rem;
+	}
+	.svcs :global(.chip) {
+		font: 600 0.68rem var(--sl-font-mono);
+		padding: 0.1rem 0.4rem;
+		border-radius: 0.3rem;
+		background: color-mix(in srgb, var(--k-teal) 18%, var(--k-surface));
+		border: 1px solid color-mix(in srgb, var(--k-teal) 45%, transparent);
+	}
+	.svcs :global(.chip.moved) {
+		background: color-mix(in srgb, var(--k-amber) 30%, var(--k-surface));
+		border-color: var(--k-amber);
+	}
+	@media (prefers-reduced-motion: no-preference) {
+		.svcs :global(.chip.moved) {
+			animation: pop 0.5s ease-out;
+		}
+	}
+	@keyframes pop {
+		from {
+			transform: scale(1.35);
+		}
+	}
+	.msg {
+		margin: 0.8rem 0 0;
+		font-size: var(--sl-text-sm);
+		color: var(--k-ink-dim);
+		min-height: 1.5em;
+	}
+</style>

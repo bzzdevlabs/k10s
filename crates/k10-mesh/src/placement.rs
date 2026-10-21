@@ -3,7 +3,8 @@
 //! Algorithm (capacity-aware weighted rendezvous hashing):
 //! * candidates = Alive/Suspect members, deduplicated by id, sorted by id (input order never matters);
 //! * each node has a memory budget `capacity.mem_bytes`; one replica consumes [`instance_bytes`] (slot + tail page),
-//!   exactly what a node reserves per service placed on it, so reservations always fit;
+//!   what a node reserves per service placed on it (version 1, older nodes: `2^mem_log2`); the members' lowest
+//!   `placement` version is used, so mixed-version clusters agree;
 //! * replicas are assigned in rounds — replica 0 of every service (by name), then replica 1, … — so first replicas
 //!   win over extra replicas when memory is short;
 //! * every node gets the weighted HRW score `w / −ln(u)` for the service, `u = hash(service, node)` uniform in
@@ -20,7 +21,7 @@
 
 use crate::codec::mix64;
 use crate::manifest::{Manifest, ServiceSpec};
-use crate::member::{Member, NodeId};
+use crate::member::{Member, NodeId, PLACEMENT_VERSION};
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -118,6 +119,8 @@ pub fn place(manifest: &Manifest, members: &[Member]) -> Placement {
     let inv_w: Vec<f64> = nodes.iter().map(|m| if m.capacity.mem_bytes == 0 { 0.0 } else { 1.0 / m.capacity.mem_bytes as f64 }).collect();
     let mut free: Vec<u64> = nodes.iter().map(|m| m.capacity.mem_bytes).collect();
 
+    let version = nodes.iter().map(|m| m.placement).min().unwrap_or(PLACEMENT_VERSION).clamp(1, PLACEMENT_VERSION);
+    let demand_of = |s: &ServiceSpec| if version >= 2 { instance_bytes(s) } else { s.mem_bytes() };
     let mut svcs: Vec<&ServiceSpec> = manifest.services.iter().collect();
     svcs.sort();
     svcs.dedup_by(|a, b| a.name == b.name);
@@ -137,7 +140,7 @@ pub fn place(manifest: &Manifest, members: &[Member]) -> Placement {
                 unplaced += 1;
                 continue;
             }
-            let demand = instance_bytes(s);
+            let demand = demand_of(s);
             let skey = keys[si];
             let rkey = mix64(skey ^ (r as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15));
             for &n in &assigned[si] {
@@ -207,7 +210,7 @@ mod tests {
             cpu_ms: 100,
             fresh: false,
             config: vec![],
-            calls: vec![],
+            calls: Default::default(),
         }
     }
 

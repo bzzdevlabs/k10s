@@ -10,6 +10,59 @@ Keep-alive: the desktop scheduled task `k10s-session-watchdog` (17 and 47 past e
 disables itself once the state line at the top is switched from IN PROGRESS to COMPLETE — do that only when
 everything is done.
 
+## Security round 2 (2026-10-20) — resume here, one item per session
+(Leave the state line above as is: the old watchdog task keys on it.) Local `main` (not pushed; origin/main = c1c5234) holds
+fixes #1–#5 of the security review, the release pipeline (SemVer: tag vX.Y.Z → release, main → vX.Y.Z-dev.N
+pre-release), the KV durability fix. All suites + metal were green at 5b6eb94. Independent reviews then found defects;
+reworks were started by agents and stopped mid-way (token budget). Each lives on a branch whose tip may be a
+"WIP (stopped…)" commit: finish it, run its tests, merge into main. Rules: production-ready (no workarounds), comments only
+where needed as English one-liners, no perf regression (A/B with `bench/k10s/ab.py` vs 08f2921), no pushes/tags until
+step 8, never experiment with namespaces/privileges on this machine.
+
+1. DONE (merged 93ada5f) — **Calls allowlist**: index-based `calls` format 2, canonical `Calls`, strict decode bounded
+   by service count, warnings at apply/reload, `Fiber::caller` nulled in `finish`; status shows per-service grants as
+   `may_call` (`calls` stays the call counter). All suites both backends, metal test (294) and cluster-test (114) green.
+2. DONE (merged e1888a7) — **Reservations / rejoin**: degraded (over-committed) reload and cluster installs, retiring
+   units, fail-fast waiters, relief list, placement version in gossip, reconnect set with per-address backoff and
+   DATA/peers fallback seeds, persisted incarnation (decided at bind). `k10-mesh` is built at opt-level 2 in debug
+   (unoptimized crypto missed gossip deadlines in mesh_abuse). All suites both backends, chaos_short ×3 seeds,
+   chaos_long 20 min (1631 rounds), metal test (294; needs `bench/bin/loadgen`, else its loadgen checks are skipped)
+   and cluster-test (110; varies with placement) green.
+3. **Release pipeline** — `worktree-agent-abc9097adc759323d` (d857328, committed; final validation pending). Review
+   items: fail on dev-tag collision; never republish/move `:dev` backwards; stable tags must be on main; skip dev publish
+   when HEAD has v$base; metal/test.sh non-blocking in PR CI; build provenance attestations; `--latest=false` backports,
+   orphan drafts, GHCR dev pruning, glibc floor, e2e tests on the dist musl binary; build.rs decoupled from metal, no
+   process-wide version global (NodeConfig field); CONTRIBUTING lists tag/branch protection for the user to apply.
+   Validate YAML, run dist.sh + ci-test.sh, merge.
+4. **Spectre** — `worktree-agent-a164c4392bf6288f3` (3be341f WIP: compiled, suites not run). Items: shared no_std host
+   crate (one copy-out semantics hosted/metal + parity test; `nospec`/`clock` moved out, k10-ir back to
+   forbid(unsafe_code)); per-node immutable guest clock (no `inv`, no process-wide atomics); SipHash-keyed fuzzy edges
+   with domain separation, keys from fill_random/RDRAND without fallback; metal invalid knobs `fatal()`; no panic on
+   br_table length; aarch64 `nospec` or explicit x86-only; dead code (`check_range`, `load_r11` arm, double IrqLock);
+   SECURITY.md wording (raises cost; retpoline AMD/CET caveats). Clean option names (no aliases needed). Finish, test, merge.
+5. **Sandbox + SFI verifier** — `worktree-agent-a57497ca666c45a0a` (ee37a7b WIP; verifier holes a–f committed before it).
+   Sandbox items: two-phase start (bind + read secrets → setres[ug]id → caps check → Landlock → seccomp → KV, bundle
+   reload, threads); refuse root without `--user`; socket type STREAM/DGRAM only; required Landlock rules fail loudly;
+   no-Landlock = fail unless `--sandbox seccomp-only`; drop NET_BIND_TCP rules; pre-opened /proc fds; accurate `log` mode;
+   cfg-gate x86-64 Linux; musl tkill(SIGABRT); benign syscalls (poll, rmdir, get*id, uname); `--user` buffer/fchown
+   fixes; SIGHUP handling; split into sandbox/{mod,seccomp,landlock,user}.rs with trimmed comments. Finish, test, merge.
+6. **Auth** — `worktree-agent-a34a5562a6c3410ee` (db963af WIP, largest). Items: key confirmation before serving
+   (pre-auth record cap, `Hello` first, hold records, cap unauthenticated links); one `k10_mesh::secure::Link` shared by
+   hosted and metal; exact-match boolean flags (no fail-open `=false`); signed admin requests (HMAC over
+   method‖target‖t‖n‖sha256(body), skew + nonce cache), node always requires a key (auto `DATA/admin.key` 0600), no
+   loopback/X-Forwarded heuristic, `metrics` open only on `--admin`; metal secrets via fw_cfg not cmdline; gossip
+   replay-state GC fix, no skew-0 mode, sender id in AAD; metal wall-clock resync; cluster key rotation (current + next,
+   key id on wire); zeroize keys; RDRAND failure fails the link; dead code + comment trims; NODE.md claims match code.
+7. **Integrate**: merge order 1→6 into main (resolve main.rs/node.rs/mesh.rs conflicts), full suites both backends,
+   `metal/test.sh`, `metal/cluster-test.sh`, quiet-machine `bench/k10s/ab.py` (≥ 4 rounds) vs a 08f2921 build; update this
+   file and README/REPORT numbers.
+8. **Push main** (publishes the first dev pre-release); watch the release workflow; fix what the first real run shows
+   (sandbox under the GitHub runners' kernel, musl suite).
+9. Optional perf (after 6): shard-owned peer links (each shard dials/reads its own link per peer; mesh keeps gossip,
+   fetch, accept; expected 7 → 3 wake-ups per forwarded request, ≈ −40 % CPU at 1 conn). A shard-does-mesh-work
+   prototype regressed c=64 and was dropped.
+10. User: delete the test GHCR images `k10s-bench-*` (0.1.0, 0.1.0-dev.46, latest, dev) or grant `gh` packages scope.
+
 ## Built and verified (on `main`)
 | Component | Where | State |
 |---|---|---|
@@ -45,7 +98,7 @@ everything is done.
    roadmap) and refresh `README.md` numbers; commit; push.
 
 ## Conventions
-- Commit as `Quentin Gerard <quentin.gerard@telespazio.com>` via `git -c user.name=… -c user.email=…`, trailer
+- Commit as `Quentin Gerard <quentingerard8@gmail.com>` via `git -c user.name=… -c user.email=…`, NO trailer
   `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`; push `main` to `origin` after each verified commit.
 - Use separate cargo target dirs per concurrent agent (`target/node`, `target/chaos`, …) to avoid lock contention.
 - Never touch Docker containers/images not created by k10s scripts (the machine has the user's own).

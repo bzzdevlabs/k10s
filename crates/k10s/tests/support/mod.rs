@@ -272,7 +272,7 @@ pub struct Svc {
     pub fresh: bool,
     pub replicas: u32,
     pub config: Vec<u8>,
-    pub calls: Vec<String>,
+    pub calls: k10_mesh::Calls,
 }
 
 impl Svc {
@@ -286,12 +286,12 @@ impl Svc {
             fresh: false,
             replicas: 1,
             config: vec![],
-            calls: vec![],
+            calls: Default::default(),
         }
     }
     /// The services this one may `call` (manifest allowlist).
     pub fn calls(mut self, names: &[&str]) -> Svc {
-        self.calls = k10_mesh::manifest::canonical_calls(names);
+        self.calls = k10_mesh::Calls::from_list(names).expect("valid callees");
         self
     }
     pub fn mem(mut self, log2: u8) -> Svc {

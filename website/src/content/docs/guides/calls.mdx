@@ -1,0 +1,75 @@
+---
+title: Service calls
+description: Call one service from another with a host function, grant calls in the manifest, and handle errors and deadlines.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+There is no HTTP client, DNS or connection pool in a k10s service. Calling another service is a host function:
+on the same node it is a function call in the callee's instance plus one copy of the payload each way; across
+nodes it travels over the persistent peer link.
+
+## Grant the call
+
+A service may call only the services listed in its `calls`:
+
+```k10s
+service echo  { code = "echo.ten" }
+service chain { code = "chain.ten" config = "echo" calls = ["echo"] }
+```
+
+`apply` refuses names that are not services of the manifest. A call that is not granted returns `-1` with an empty
+response, exactly like a call to a service that does not exist, without even looking the name up. HTTP ingress is
+not restricted: any client of a node reaches any service.
+
+## Call
+
+```ten
+export fn handle() {
+    heap_reset();
+    let st = call_svc("echo", null, 0);
+    if st < 0 {
+        status(502);
+        out_str("backend error ");
+        out_int(st);
+        return;
+    }
+    out_call_resp();
+}
+```
+
+- `call_svc(name, body, len)` suspends the caller until the callee answers, then returns its HTTP status.
+- `name` may carry a path: `call_svc("todo/42", null, 0)` gives the callee the path `/42`.
+- Calls are always `POST`. `call_read()` copies the response body to the heap; `out_call_resp()` forwards it.
+
+## Errors
+
+| Result | Prelude constant | Meaning | Ingress status |
+|---|---|---|---|
+| `≥ 0` | | the callee's HTTP status | |
+| `-1` | `CALL_UNKNOWN` | unknown service, or not granted | 404 |
+| `-2` | `CALL_UNAVAILABLE` | crash backoff with nothing alive, queue full, depth over 32, over 10,000 calls in one request, out of memory | 503 |
+| `-3` | `CALL_TIMEOUT` | deadline passed | 504 |
+| `-4` | `CALL_TRAPPED` | the callee trapped | 500 |
+
+## Deadlines
+
+Each call gets `min(now + 5 s, the caller's own deadline)`; ingress requests have 30 s. A timed-out caller resumes
+with `-3` and a late reply is dropped. This also breaks call cycles that exhaust instances: with
+`max_instances = 1`, `A → B → A` times out on the inner call and everything unwinds.
+
+## Cost
+
+| Path | Latency |
+|---|---|
+| same shard | 0.45 µs |
+| another shard on the same node | 14 µs (1.8 µs with `--idle-spin-us 50`) |
+| another node | one hop over an authenticated, multiplexed peer link |
+
+In the benchmark, an HTTP → service → `call` → echo chain served 171 k req/s at 64 connections, where the same
+chain on Kubernetes served 25.6 k.
+
+<Aside type="note" title="At most once across nodes">
+	A remote call is retried on another replica only when it provably never ran. A call whose bytes reached a peer
+	that then failed returns `-2` rather than running twice.
+</Aside>

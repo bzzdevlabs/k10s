@@ -1,0 +1,84 @@
+---
+title: Security model
+description: What k10s protects against today, the layers behind the isolation boundary, who may deploy, and the known gaps.
+---
+
+import { Aside, Badge } from '@astrojs/starlight/components';
+
+## Threat model
+
+Workloads on a node belong to **one organization**: they may be buggy, they must never crash, corrupt or starve
+each other or the node. Within that model k10s defends against:
+
+- a module that reads or writes outside its slot, jumps outside its code, or calls a host function it did not
+  import;
+- a workload that crashes, hangs or starves the node or other workloads through host functions, ingress, the
+  admin API or the peer protocol;
+- a service calling a service its `calls` allowlist does not grant, or telling such a service from one that does
+  not exist;
+- memory-safety bugs in the runtime, the mesh or the bare-metal kernel.
+
+Report vulnerabilities as described in [SECURITY.md](https://github.com/bzzdevlabs/k10s/blob/main/SECURITY.md).
+
+## Layers
+
+| Layer | What it does |
+|---|---|
+| **Software fault isolation** | the boundary: masked memory, structured control flow, closed host API ([details](/k10s/concepts/isolation/)) |
+| **Machine-code verifier** | an independent checker re-verifies the generated code of every function in the test suites |
+| **Process sandbox** | `k10s node` drops to seccomp (83 syscalls) and Landlock (data directory only) once its listeners are bound |
+| **systemd hardening** | an optional unit adds its own layer ([Production setup](/k10s/guides/production/)) |
+
+On bare metal there is no OS layer: hardware NX and W^X for kernel and JIT code are the only extra barrier, so
+machine-code verification matters most there.
+
+## Who may deploy
+
+- **Admin API** (`/_k10s/`: apply, status, logs, cluster): a bearer token (`--admin-token-file`), compared in
+  constant time on the request head before any body is read. Without a token a hosted node serves the admin API
+  to loopback clients only. `--admin ADDR` moves it to its own listener. `health` and `metrics` stay open:
+  scrapers should not need a secret that can deploy code.
+- **Cluster:** one shared 32-byte key (`k10s keygen`). Gossip datagrams are sealed with XChaCha20-Poly1305 and
+  rejected before decoding when forged, stale (clock skew bound, 300 s) or replayed. Peer links run a mutual
+  handshake on fresh nonces, then encrypt and authenticate every record with ChaCha20-Poly1305 (per-direction
+  keys, counter nonces: no injection, replay, reordering or reflection). Manifests and blobs are still checked
+  against their SHA-256 when fetched.
+
+## CPU side channels
+
+All instances on a node share one address space, the caches and the branch predictors: the textbook setting for
+Spectre. k10s closes the cheap gaps; **one node per mutually distrustful tenant** remains the boundary for side
+channels.
+
+| Mitigation | Status |
+|---|---|
+| guest accesses masked by data flow (Spectre v1) | <Badge text="default" variant="success" /> |
+| `br_table` as compare trees or clamped tables | <Badge text="default" variant="success" /> |
+| branch-free clamps of every guest pointer, length and offset in host code | <Badge text="default" variant="success" /> |
+| coarse guest clock: 100 µs steps with randomized edges (`--timer-res-us`) | <Badge text="default" variant="success" /> |
+| retpolines or `lfence` on JIT indirect branches (`--jit-indirect`) | <Badge text="opt-in" variant="caution" /> |
+| the runtime's own indirect branches, return-stack speculation, Spectre v4, shared caches, SMT | <Badge text="not mitigated" variant="danger" /> |
+
+## Denial of service
+
+| Resource | Bound |
+|---|---|
+| memory | one reserved instance per service, a shared burst pool, `max_instances`, KV quota per service (`--kv-max`, 256 MiB) |
+| CPU | 2 ms slices, per-request `cpu_ms` budget, crash-loop backoff |
+| connections | node-wide buffer budget (`--conn-buffer-max`), head and body limits, slowloris timeouts |
+| calls | depth 32, 10,000 per invocation, 5 s default deadline, queue of 10,000 |
+| peers | read and write caps per link; a peer that stops reading is cut off |
+
+The shared pool, the connection budget and CPU are first come, first served between services: there is no
+per-service weight yet.
+
+## Known gaps
+
+<Aside type="caution" title="Open items">
+	- **Every key holder is fully trusted.** A node with the cluster key can deploy and read the traffic it carries.
+	  No per-node identity, no revocation (rotate the key on every node), no forward secrecy.
+	- **Bundles are not signed.** Whoever holds an admin token or the cluster key deploys code.
+	- **No TLS** on the admin API or service ingress: keep the admin listener on a trusted network or behind a TLS
+	  proxy, and configure a token when a local proxy makes remote clients look like loopback ones.
+	- **Traffic analysis:** message sizes and timing are visible.
+</Aside>

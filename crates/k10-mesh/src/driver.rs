@@ -146,6 +146,10 @@ impl UdpDriver {
         self.flush(out);
     }
 
+    pub fn set_fallback_seeds(&mut self, addrs: &[Addr]) {
+        self.gossip.set_fallback_seeds(addrs);
+    }
+
     pub fn leave(&mut self, now_ms: u64) {
         let out = self.gossip.leave(now_ms);
         self.flush(out);
