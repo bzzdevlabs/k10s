@@ -3,6 +3,7 @@
 //! The node runs the binary's default backend (`K10S_BACKEND`, else jit).
 
 mod common;
+mod support;
 use common::*;
 use k10_node::http;
 use std::process::{Child, Command, Stdio};
@@ -49,6 +50,7 @@ fn wait_http(addr: &str, path: &str) {
 fn spawn_node(addr: &str, data: &std::path::Path) -> Proc {
     let child = Command::new(k10s_bin())
         .args(["node", "--http", addr, "--data", data.to_str().unwrap(), "--shards", "2"])
+        .args(["--admin-token-file", support::admin_key_file().to_str().unwrap()])
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
@@ -67,12 +69,13 @@ fn examples_on_a_node() {
     std::fs::write(&manifest, examples_manifest()).unwrap();
     let out = Command::new(k10s_bin())
         .args(["apply", manifest.to_str().unwrap(), "--node", &addr])
+        .env("K10S_ADMIN_TOKEN_FILE", support::admin_key_file())
         .output()
         .unwrap();
     let txt = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{txt} {}", String::from_utf8_lossy(&out.stderr));
     assert!(txt.contains("\"added\":[\"chain\",\"compute\",\"counter\",\"echo\",\"hello\",\"nbody\",\"sort\",\"todo\"]"), "{txt}");
-    let st = http::request(&addr, "GET", "/_k10s/status", b"", Duration::from_secs(5)).unwrap().text();
+    let st = support::admin_req(&addr, "GET", "/_k10s/status", b"", Duration::from_secs(5)).unwrap().text();
     let backend = std::env::var("K10S_BACKEND").unwrap_or_else(|_| "jit".into());
     assert!(st.contains(&format!("\"backend\":\"{backend}\"")), "{st}");
     assert!(st.contains("\"code\":{\"modules\":8,"), "{st}");
@@ -89,9 +92,9 @@ fn examples_on_a_node() {
         let at = s.find("\"calls\":").unwrap() + 8;
         s[at..].chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap()
     };
-    let before = calls(&http::request(&addr, "GET", "/_k10s/status", b"", Duration::from_secs(5)).unwrap().text());
+    let before = calls(&support::admin_req(&addr, "GET", "/_k10s/status", b"", Duration::from_secs(5)).unwrap().text());
     assert_eq!(http::request(&addr, "GET", "/chain", b"", Duration::from_secs(5)).unwrap().text(), "hello");
-    let after = calls(&http::request(&addr, "GET", "/_k10s/status", b"", Duration::from_secs(5)).unwrap().text());
+    let after = calls(&support::admin_req(&addr, "GET", "/_k10s/status", b"", Duration::from_secs(5)).unwrap().text());
     assert_eq!(after, before + 1);
 
     // Byte-identical to the Go reference workload, when its binary is built (bench/workloads/build.sh).
@@ -123,7 +126,10 @@ fn examples_on_a_node() {
 
 /// Applies a manifest file to the node at `addr` with the CLI.
 fn apply(addr: &str, manifest: &std::path::Path) {
-    let out = Command::new(k10s_bin()).args(["apply", manifest.to_str().unwrap(), "--node", addr]).output().unwrap();
+    let out = Command::new(k10s_bin())
+        .args(["apply", manifest.to_str().unwrap(), "--node", addr])
+        .env("K10S_ADMIN_TOKEN_FILE", support::admin_key_file())
+        .output().unwrap();
     assert!(out.status.success(), "{} {}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
 }
 
@@ -139,6 +145,7 @@ fn atomic_kv_under_concurrency() {
     let addr = format!("127.0.0.1:{}", free_port());
     let child = Command::new(k10s_bin())
         .args(["node", "--http", &addr, "--data", dir.join("data").to_str().unwrap(), "--shards", "4"])
+        .args(["--admin-token-file", support::admin_key_file().to_str().unwrap()])
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
@@ -211,7 +218,7 @@ fn atomic_kv_under_concurrency() {
     listed.sort_unstable();
     assert_eq!(listed, kept);
     // The service's instances really ran concurrently (otherwise this test proves nothing).
-    let st = http::request(&addr, "GET", "/_k10s/status", b"", Duration::from_secs(5)).unwrap().text();
+    let st = support::admin_req(&addr, "GET", "/_k10s/status", b"", Duration::from_secs(5)).unwrap().text();
     let at = st.find("\"name\":\"counter\"").unwrap();
     let peak: u64 = {
         let s = &st[at..];

@@ -1,6 +1,6 @@
 ---
 title: Production setup
-description: Run a k10s node as an unprivileged, sandboxed service with an admin token, a cluster key and systemd hardening.
+description: Run a k10s node as an unprivileged, sandboxed service with an admin key, a cluster key and systemd hardening.
 ---
 
 import { Steps, Aside } from '@astrojs/starlight/components';
@@ -14,7 +14,7 @@ import Terminal from '~/components/Terminal.astro';
    ```bash
    sudo useradd --system --home /var/lib/k10s k10s
    sudo install -d -o k10s -g k10s -m 0700 /etc/k10s
-   sudo -u k10s k10s keygen -o /etc/k10s/admin.token
+   sudo -u k10s k10s keygen -o /etc/k10s/admin.key     # same file on every node you deploy to
    sudo -u k10s k10s keygen -o /etc/k10s/cluster.key   # same file on every node
    ```
 
@@ -28,7 +28,7 @@ import Terminal from '~/components/Terminal.astro';
 
    [Service]
    ExecStart=/usr/local/bin/k10s node --data /var/lib/k10s --http 0.0.0.0:8080 \
-     --admin 10.0.0.1:8081 --admin-token-file /etc/k10s/admin.token \
+     --admin 10.0.0.1:8081 --admin-token-file /etc/k10s/admin.key \
      --cluster-key-file /etc/k10s/cluster.key --advertise 10.0.0.1 \
      --join 10.0.0.1:7946,10.0.0.2:7946,10.0.0.3:7946
    User=k10s
@@ -62,18 +62,19 @@ import Terminal from '~/components/Terminal.astro';
    $ sudo systemctl enable --now k10s
    $ journalctl -u k10s -n 3 -o cat
    k10s: sandbox mode=on user=998 caps=none landlock=abi2 seccomp=kill jit_dump=-
-   k10s: cluster authentication: key id 9c66ecc2b991cd9e (gossip sealed with XChaCha20-Poly1305, peer links authenticated and encrypted with ChaCha20-Poly1305)
+   k10s: cluster key id 9c66ecc2b991cd9e
    k10s 0.1.0: node \`node-1\` listening on http://0.0.0.0:8080 (8 shards, backend jit, data /var/lib/k10s)
    `}
    />
 
-4. **Deploy from your machine** with the same token:
+4. **Deploy from your machine** with a copy of the admin key (requests are signed with it; it never travels):
 
    ```bash
-   k10s apply app.k10s --node 10.0.0.1:8081 --admin-token-file admin.token
+   k10s apply app.k10s --node 10.0.0.1:8081 --admin-token-file admin.key
    ```
 
-   The CLI also reads `$K10S_ADMIN_TOKEN_FILE` or `$K10S_ADMIN_TOKEN`.
+   The CLI also reads `$K10S_ADMIN_TOKEN_FILE`. Signed requests carry a timestamp: keep node and client clocks
+   within 60 s (NTP).
 
 </Steps>
 
@@ -117,7 +118,6 @@ peers. A replacement node with an empty directory joins and fetches the desired 
 node-local key-value data is lost.
 
 <Aside type="caution" title="No TLS yet">
-	Neither the admin API nor the ingress speaks TLS. Keep `--admin` on a private network, or put both behind a TLS
-	proxy. A local reverse proxy makes remote clients look like loopback ones: always configure a token in that
-	setup.
+	Neither the admin API nor the ingress speaks TLS. Signed admin requests cannot be forged or replayed, but their
+	contents travel in clear: keep `--admin` on a private network, or put both behind a TLS proxy.
 </Aside>

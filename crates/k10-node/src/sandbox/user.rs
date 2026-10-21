@@ -69,7 +69,7 @@ impl User {
 
     /// While still root: `dir` must belong to the user; a missing one is created and handed over (never through a
     /// symlink).
-    pub(super) fn own_dir(&self, dir: &Path) -> Result<(), String> {
+    pub fn own_dir(&self, dir: &Path) -> Result<(), String> {
         let created = !dir.exists();
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let c = CString::new(dir.as_os_str().as_bytes()).map_err(|_| "bad data dir path".to_string())?;

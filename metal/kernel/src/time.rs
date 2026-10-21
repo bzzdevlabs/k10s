@@ -1,10 +1,12 @@
 //! Time: the TSC is the clock. Its frequency comes from (in order) KVM's paravirtual clock (exact, no waiting),
 //! CPUID leaf 0x15, or a 10 ms calibration against the PIT. Wall-clock time at boot comes from kvmclock's wall
-//! clock (no port I/O), else the CMOS RTC; afterwards it advances with the monotonic clock.
+//! clock (no port I/O), else the CMOS RTC; afterwards it advances with the monotonic clock and, with kvmclock, is
+//! re-read from it every [`RESYNC_NS`] ([`resync_wall_if_due`]), so host clock adjustments and drift do not build
+//! up in gossip and admin-request timestamps. Resyncs step the wall clock only: `now_ns` stays monotonic.
 //!
 //! Also home of the preemption request flag set by the timer interrupt (see `runtime::sched`).
 
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::arch::{self, cpuid, inb, outb, rdtsc, wrmsr};
 use crate::sync::{Global, SetOnce};
@@ -14,7 +16,12 @@ static TSC_HZ: AtomicU64 = AtomicU64::new(0);
 /// Nanoseconds per TSC tick as a 32.32 fixed-point number.
 static NS_PER_TSC_FP32: AtomicU64 = AtomicU64::new(0);
 static TSC_BOOT: AtomicU64 = AtomicU64::new(0);
-static BOOT_UNIX_MS: AtomicU64 = AtomicU64::new(0);
+/// Unix time in ns at `now_ns() == 0`.
+static WALL_AT_BOOT_NS: AtomicU64 = AtomicU64::new(0);
+static KVMCLOCK: AtomicBool = AtomicBool::new(false);
+static NEXT_RESYNC_NS: AtomicU64 = AtomicU64::new(0);
+/// Interval between wall-clock resyncs from kvmclock.
+pub const RESYNC_NS: u64 = 10_000_000_000;
 /// kvmclock system time at `kmain` entry: kvmclock counts from 0 when KVM creates the VM, so this is the time QEMU's
 /// remaining setup and the firmware took before the kernel got control (0 when unknown).
 static VM_TO_KMAIN_NS: AtomicU64 = AtomicU64::new(0);
@@ -101,12 +108,31 @@ pub fn init(tsc_boot: u64) -> Source {
     };
     TSC_HZ.store(hz, Ordering::Relaxed);
     NS_PER_TSC_FP32.store(((1_000_000_000u128 << 32) / hz as u128) as u64, Ordering::Relaxed);
-    let boot_ms = match wall {
-        Some(ns) => ns / 1_000_000,
-        None => rtc_unix_seconds() * 1000,
-    };
-    BOOT_UNIX_MS.store(boot_ms, Ordering::Relaxed);
+    WALL_AT_BOOT_NS.store(wall.unwrap_or_else(|| rtc_unix_seconds() * 1_000_000_000), Ordering::Relaxed);
+    KVMCLOCK.store(wall.is_some(), Ordering::Relaxed);
+    NEXT_RESYNC_NS.store(if wall.is_some() { RESYNC_NS } else { u64::MAX }, Ordering::Relaxed);
     src
+}
+
+/// Re-reads the wall clock from kvmclock if [`RESYNC_NS`] has passed (CPU 0's main loop).
+pub fn resync_wall_if_due() {
+    if now_ns() >= NEXT_RESYNC_NS.load(Ordering::Relaxed) {
+        resync_wall();
+    }
+}
+
+/// Re-reads the wall clock from kvmclock now; false without kvmclock. CPU 0 only (its kvmclock area).
+pub fn resync_wall() -> bool {
+    if !KVMCLOCK.load(Ordering::Relaxed) {
+        return false;
+    }
+    let r = pvclock_read();
+    let base = kvm_wall_base_ns();
+    let tsc = rdtsc();
+    let mono = tsc_to_ns(tsc.wrapping_sub(TSC_BOOT.load(Ordering::Relaxed)));
+    WALL_AT_BOOT_NS.store((base + r.system_ns(tsc)).saturating_sub(mono), Ordering::Relaxed);
+    NEXT_RESYNC_NS.store(mono + RESYNC_NS, Ordering::Relaxed);
+    true
 }
 
 pub fn tsc_hz() -> u64 {
@@ -135,9 +161,14 @@ pub fn now_ms() -> u64 {
     now_ns() / 1_000_000
 }
 
+/// Wall-clock Unix nanoseconds.
+pub fn unix_ns() -> u64 {
+    WALL_AT_BOOT_NS.load(Ordering::Relaxed).saturating_add(now_ns())
+}
+
 /// Wall-clock Unix milliseconds.
 pub fn unix_ms() -> u64 {
-    BOOT_UNIX_MS.load(Ordering::Relaxed) + now_ms()
+    unix_ns() / 1_000_000
 }
 
 /// The guest clock (`now_ns`, `time_ms`), set at boot.
@@ -162,7 +193,7 @@ pub fn guest_now_ns() -> u64 {
 
 /// `time_ms` for guests.
 pub fn guest_unix_ms() -> u64 {
-    guest(|c, e| c.unix_ms(BOOT_UNIX_MS.load(Ordering::Relaxed).saturating_mul(1_000_000).saturating_add(now_ns()), e))
+    guest(|c, e| c.unix_ms(unix_ns(), e))
 }
 
 /// Timer interrupt: request preemption if this CPU's running invocation's slice/budget deadline has passed.
@@ -244,27 +275,41 @@ struct PvWallClock {
 }
 static mut PVWALL: PvWallClock = PvWallClock { version: 0, sec: 0, nsec: 0 };
 
-/// KVM paravirtual clock: exact TSC frequency, and the Unix time (ns) at TSC value `tsc_boot`.
-fn kvmclock(tsc_boot: u64) -> Option<(u64, u64)> {
-    let (_, b, c, d) = cpuid(0x4000_0000, 0);
-    let mut sig = [0u8; 12];
-    sig[0..4].copy_from_slice(&b.to_le_bytes());
-    sig[4..8].copy_from_slice(&c.to_le_bytes());
-    sig[8..12].copy_from_slice(&d.to_le_bytes());
-    if &sig != b"KVMKVMKVM\0\0\0" {
-        return None;
+const MSR_KVM_WALL_CLOCK_NEW: u32 = 0x4b56_4d00;
+const MSR_KVM_SYSTEM_TIME_NEW: u32 = 0x4b56_4d01;
+
+/// One consistent kvmclock reading: system time (ns since the VM was created) at a TSC value, and the TSC scale.
+struct PvReading {
+    tsc: u64,
+    system_ns: u64,
+    mul: u32,
+    shift: i8,
+}
+
+impl PvReading {
+    /// Nanoseconds for `ticks` TSC ticks (the pvclock scaling).
+    fn scale(&self, ticks: u64) -> u64 {
+        let t = if self.shift >= 0 { (ticks as u128) << self.shift } else { ticks as u128 >> -self.shift };
+        ((t * self.mul as u128) >> 32) as u64
     }
-    const KVM_FEATURE_CLOCKSOURCE2: u32 = 1 << 3;
-    const MSR_KVM_WALL_CLOCK_NEW: u32 = 0x4b56_4d00;
-    const MSR_KVM_SYSTEM_TIME_NEW: u32 = 0x4b56_4d01;
-    if cpuid(0x4000_0001, 0).0 & KVM_FEATURE_CLOCKSOURCE2 == 0 {
-        return None;
+
+    /// System time at TSC value `tsc`.
+    fn system_ns(&self, tsc: u64) -> u64 {
+        if tsc >= self.tsc {
+            self.system_ns + self.scale(tsc - self.tsc)
+        } else {
+            self.system_ns.saturating_sub(self.scale(self.tsc - tsc))
+        }
     }
+}
+
+/// Reads this CPU's kvmclock (registered for the read only).
+fn pvclock_read() -> PvReading {
     wrmsr(MSR_KVM_SYSTEM_TIME_NEW, &raw mut PVCLOCK as u64 | 1);
-    let (mul, shift, tsc_ts, sys_ns) = loop {
+    let r = loop {
         // The hypervisor makes `version` odd while updating.
         // SAFETY: plain volatile reads of a static that only the hypervisor writes.
-        let (v, mul, shift, tsc_ts, sys, v2) = unsafe {
+        let (v, mul, shift, tsc, sys, v2) = unsafe {
             use core::ptr::read_volatile as rd;
             (
                 rd(&raw const PVCLOCK.version),
@@ -276,23 +321,51 @@ fn kvmclock(tsc_boot: u64) -> Option<(u64, u64)> {
             )
         };
         if v == v2 && v & 1 == 0 && mul != 0 {
-            break (mul, shift, tsc_ts, sys);
+            break PvReading { tsc, system_ns: sys, mul, shift };
         }
         core::hint::spin_loop();
     };
     wrmsr(MSR_KVM_SYSTEM_TIME_NEW, 0);
+    r
+}
+
+/// Unix time (ns) at kvmclock system time 0, as the host's clock says now.
+fn kvm_wall_base_ns() -> u64 {
+    wrmsr(MSR_KVM_WALL_CLOCK_NEW, &raw mut PVWALL as u64);
+    loop {
+        // SAFETY: as in `pvclock_read`.
+        let (v, sec, nsec, v2) = unsafe {
+            use core::ptr::read_volatile as rd;
+            (rd(&raw const PVWALL.version), rd(&raw const PVWALL.sec), rd(&raw const PVWALL.nsec), rd(&raw const PVWALL.version))
+        };
+        if v == v2 && v & 1 == 0 {
+            return sec as u64 * 1_000_000_000 + nsec as u64;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// KVM paravirtual clock: exact TSC frequency, and the Unix time (ns) at TSC value `tsc_boot`.
+fn kvmclock(tsc_boot: u64) -> Option<(u64, u64)> {
+    let (_, b, c, d) = cpuid(0x4000_0000, 0);
+    let mut sig = [0u8; 12];
+    sig[0..4].copy_from_slice(&b.to_le_bytes());
+    sig[4..8].copy_from_slice(&c.to_le_bytes());
+    sig[8..12].copy_from_slice(&d.to_le_bytes());
+    if &sig != b"KVMKVMKVM\0\0\0" {
+        return None;
+    }
+    const KVM_FEATURE_CLOCKSOURCE2: u32 = 1 << 3;
+    if cpuid(0x4000_0001, 0).0 & KVM_FEATURE_CLOCKSOURCE2 == 0 {
+        return None;
+    }
+    let r = pvclock_read();
     // ns = ((tsc << shift) * mul) >> 32  ⇒  hz = 1e9 * 2^32 / (mul * 2^shift)
     let num: u128 = 1_000_000_000u128 << 32;
-    let hz = if shift >= 0 { num / ((mul as u128) << shift) } else { (num << (-shift)) / mul as u128 } as u64;
-
-    // Wall clock: Unix time at system_time = 0, plus system_time at `tsc_boot`.
-    wrmsr(MSR_KVM_WALL_CLOCK_NEW, &raw mut PVWALL as u64);
-    let (sec, nsec) = unsafe { (core::ptr::read_volatile(&raw const PVWALL.sec), core::ptr::read_volatile(&raw const PVWALL.nsec)) };
-    let to_ns = |ticks: u64| ((ticks as u128 * 1_000_000_000) / hz as u128) as u64;
-    let sys_at_boot = if tsc_boot >= tsc_ts { sys_ns + to_ns(tsc_boot - tsc_ts) } else { sys_ns.saturating_sub(to_ns(tsc_ts - tsc_boot)) };
-    let wall = sec as u64 * 1_000_000_000 + nsec as u64 + sys_at_boot;
+    let hz = if r.shift >= 0 { num / ((r.mul as u128) << r.shift) } else { (num << (-r.shift)) / r.mul as u128 } as u64;
+    let sys_at_boot = r.system_ns(tsc_boot);
     VM_TO_KMAIN_NS.store(sys_at_boot, Ordering::Relaxed);
-    Some((hz, wall))
+    Some((hz, kvm_wall_base_ns() + sys_at_boot))
 }
 
 fn cpuid15_hz() -> Option<u64> {

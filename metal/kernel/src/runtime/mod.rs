@@ -35,6 +35,7 @@ use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use k10_ir::Trap;
+use k10_mesh::admin_auth::{AdminReject, AdminVerifier};
 use k10_mesh::{Bundle, Manifest, NodeId, ServiceSpec};
 
 use self::engine::{Prepared, Scratch};
@@ -1362,40 +1363,46 @@ pub enum KvRefused {
 
 // --- admin API -----------------------------------------------------------------------------------------------
 
-/// SHA-256 of `k10.admin_token`, or `None`: the admin API is then refused unless `k10.admin_insecure`.
-static ADMIN_TOKEN: crate::sync::Global<Option<[u8; 32]>> = crate::sync::Global::new(None);
-static ADMIN_OPEN: AtomicBool = AtomicBool::new(false);
+/// Checks signed admin requests (key from fw_cfg `opt/k10s/admin_key`, audience random per boot); `None`: only
+/// `/_k10s/health` is served.
+static ADMIN: Global<Option<AdminVerifier>> = Global::new(None);
 
-/// Admin access from the kernel command line (`k10.admin_token=TOKEN`, or `k10.admin_insecure`).
-pub fn admin_init(token: Option<&str>, insecure: bool) {
-    *ADMIN_TOKEN.borrow_mut() = token.map(|t| k10_mesh::sha256::sha256(t.as_bytes()));
-    ADMIN_OPEN.store(insecure, Ordering::Relaxed);
+/// Installs the admin verifier (at boot).
+pub fn admin_init(v: Option<AdminVerifier>) {
+    *ADMIN.borrow_mut() = v;
 }
 
-/// `None` if `target` may proceed, else the status to close with; all of `/_k10s/` but `health` needs the token.
-pub fn admin_gate(target: &[u8], auth: Option<&[u8]>) -> Option<u16> {
+/// Access check on a request head, before its body is read. `Ok(Some(h))`: signed, the body must hash to `h`
+/// ([`k10_mesh::admin_auth::check_body`]); `Err`: the status and message to close with. All of `/_k10s` but
+/// `health` and `audience` (what clients sign for) needs a request signed with the admin key: status, logs, apply,
+/// bench.
+pub fn admin_gate(method: &str, target: &[u8], auth: Option<&[u8]>) -> Result<Option<[u8; 32]>, (u16, String)> {
     let path = &target[..target.iter().position(|&c| c == b'?').unwrap_or(target.len())];
     if !(path == b"/_k10s" || path.starts_with(b"/_k10s/")) || path == b"/_k10s/health" {
-        return None;
+        return Ok(None);
     }
-    let Some(want) = *ADMIN_TOKEN.borrow() else {
-        return if ADMIN_OPEN.load(Ordering::Relaxed) { None } else { Some(403) };
+    let mut admin = ADMIN.borrow_mut();
+    let Some(v) = admin.as_mut() else {
+        return Err((403, "admin API disabled: this node has no admin key (fw_cfg opt/k10s/admin_key)\n".into()));
     };
-    let presented = auth.and_then(|v| {
-        let (scheme, rest) = (v.get(..6)?, &v[6..]);
-        let ok = scheme.eq_ignore_ascii_case(b"bearer") && rest.first().is_some_and(|c| *c == b' ' || *c == b'\t');
-        ok.then(|| rest.trim_ascii())
-    });
-    match presented {
-        Some(t) if k10_mesh::crypto::ct_eq(&k10_mesh::sha256::sha256(t), &want) => None,
-        _ => Some(401),
+    if path == b"/_k10s/audience" {
+        return Ok(None);
     }
+    let r = match core::str::from_utf8(target) {
+        Ok(t) => v.verify_head(method, t, auth, time::unix_ms()),
+        Err(_) => Err(AdminReject::Malformed),
+    };
+    r.map(Some).map_err(|e| (if e == AdminReject::Busy { 429 } else { 401 }, alloc::format!("{e}\n")))
 }
 
 fn admin(path: &[u8]) -> (u16, Option<&'static str>, Vec<u8>) {
     match path {
         b"/_k10s/status" => (200, Some("application/json"), status_json().into_bytes()),
         b"/_k10s/health" => (200, Some("text/plain"), b"ok\n".to_vec()),
+        b"/_k10s/audience" => match ADMIN.borrow().as_ref() {
+            Some(v) => (200, Some("text/plain"), alloc::format!("{}\n", v.audience()).into_bytes()),
+            None => (403, Some("text/plain"), b"admin API disabled: this node has no admin key\n".to_vec()),
+        },
         p if p.starts_with(b"/_k10s/logs/") => {
             let name = core::str::from_utf8(&p[12..]).unwrap_or("");
             let mut out = String::new();
@@ -1407,7 +1414,7 @@ fn admin(path: &[u8]) -> (u16, Option<&'static str>, Vec<u8>) {
             }
             (200, Some("text/plain"), out.into_bytes())
         }
-        _ => (404, Some("text/plain"), b"unknown admin endpoint (status, health, apply, logs/<service>, bench/<n>/<service>/...)\n".to_vec()),
+        _ => (404, Some("text/plain"), b"unknown admin endpoint (status, health, audience, apply, logs/<service>, bench/<n>/<service>/...)\n".to_vec()),
     }
 }
 

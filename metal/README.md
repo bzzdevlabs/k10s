@@ -18,16 +18,22 @@ Measurements: [RESULTS.md](RESULTS.md).
 ```sh
 ./build.sh                 # out/k10-metal.elf (kernel), out/bundle.k10b (18 test services, 4 of them compiled from
                            # ../examples/*.ten); EMBED=1 also bakes the bundle in
-T=$(openssl rand -hex 16)  # admin API token (without k10.admin_token= the admin API is closed, but for health)
-APPEND="k10.verbose k10.admin_token=$T" ./run.sh   # QEMU/KVM, serial on stdout, host 127.0.0.1:8090 -> guest :80 (PORT=, MEM=, BIOS=)
+k10s keygen -o admin.key   # admin key (mode 0600); without one the admin API serves only /_k10s/health
+ADMIN_KEY=admin.key ./run.sh # QEMU/KVM, serial on stdout, host 127.0.0.1:8090 -> guest :80 (PORT=, MEM=, BIOS=);
+                           # the key goes in as fw_cfg opt/k10s/admin_key, never on the kernel command line
 curl localhost:8090/hello/ # -> hello from k10-metal
 curl 'localhost:8090/sha/?n=1000'                # Ten SHA-256 chain (examples/compute.ten), JIT-compiled
-curl -H "Authorization: Bearer $T" 'localhost:8090/_k10s/bench/100/sha/?n=1000' # per-invocation CPU time (JSON)
-curl -H "Authorization: Bearer $T" localhost:8090/_k10s/status
-curl -H "Authorization: Bearer $T" --data-binary @out/bundle.k10b localhost:8090/_k10s/apply   # redeploy
+k10s status --json --node 127.0.0.1:8090 --admin-token-file admin.key   # signed admin request
+export K10S_ADMIN_TOKEN_FILE=admin.key           # tools/admin_auth.py signs for curl:
+curl -H "Authorization: $(tools/admin_auth.py 127.0.0.1:8090 GET '/_k10s/bench/100/sha/?n=1000')" \
+     'localhost:8090/_k10s/bench/100/sha/?n=1000'  # per-invocation CPU time (JSON)
+curl -H "Authorization: $(tools/admin_auth.py 127.0.0.1:8090 POST /_k10s/apply @out/bundle.k10b)" --data-binary @out/bundle.k10b \
+     localhost:8090/_k10s/apply                  # redeploy
 SMP=4 ./run.sh             # four CPUs: CPU 0 runs the network, CPU-heavy requests are spread over all four
-./test.sh                  # in-kernel self tests + 248 end-to-end checks: JIT, interpreter, JIT on 4 CPUs (TEST_PORT=18090)
-./cluster-test.sh          # 2 hosted `k10s node` + 1 k10-metal guest: join, apply, routing, failover, rejoin
+./test.sh                  # in-kernel self tests + end-to-end checks: JIT, interpreter, JIT on 4 CPUs, admin API signing
+                           # (TEST_PORT=18090)
+./cluster-test.sh          # 2 hosted `k10s node` + 1 k10-metal guest: join, apply, routing, failover, rejoin with a next
+                           # cluster key, refused peers (wrong key, unauthenticated links)
 tools/linux-compare.sh     # builds the Linux comparison guest (host kernel + tiny initramfs)
 tools/measure.py           # measurements -> out/results/*.json (see RESULTS.md); `engines` = JIT vs interpreter,
                            # `smp` = throughput with -smp 1/2/4
@@ -40,12 +46,20 @@ before halting, default 50), `k10.engine=jit|interp` (default jit), `k10.smp=N` 
 `k10.jit_indirect=jump|lfence|retpoline` (Spectre v2 hardening of JIT indirect branches, default jump),
 `k10.timer_res_us=N` (resolution of the guests' `now_ns`/`time_ms`, default 100, 0 = full; any other value needs
 RDRAND for its key; SECURITY.md),
-`k10.admin_token=TOKEN` (bearer token of `/_k10s/*` but `health`; without it the admin API answers 403 unless
-`k10.admin_insecure`). Cluster mode: `k10.join=HOST:PORT[,…]`, `k10.gossip=`, `k10.rpc=`, `k10.http=` (advertised
-addresses), `k10.node_id=HEX`, `k10.probe_ms=N`, `k10.suspicion_mult=N`, `k10.mem=BYTES`, `k10.host_alias=IP`,
-and either `k10.cluster_key=HEX` (the hosted nodes' `k10s keygen` key) or `k10.insecure_unauthenticated_cluster`
-(required; `k10.gossip_max_skew_s=N`, default 300). Secret values are masked in the verbose boot log. An invalid `k10.spin_us`, `k10.engine`, `k10.smp`,
-`k10.jit_indirect` or `k10.timer_res_us` value stops the boot.
+Cluster mode: `k10.join=HOST:PORT[,…]`, `k10.gossip=`, `k10.rpc=`, `k10.http=` (advertised addresses),
+`k10.node_id=HEX`, `k10.probe_ms=N`, `k10.suspicion_mult=N`, `k10.mem=BYTES`, `k10.host_alias=IP`,
+`k10.gossip_max_skew_s=N` (default 300, at least 1), and `k10.insecure_unauthenticated_cluster` when no cluster key
+is given. An invalid `k10.spin_us`, `k10.engine`, `k10.smp`, `k10.jit_indirect`, `k10.timer_res_us` or
+`k10.gossip_max_skew_s` value stops the boot.
+
+Secrets never go on the kernel command line (the host shows it in its process list): they are QEMU fw_cfg files,
+`-fw_cfg name=opt/k10s/<name>,file=FILE` (run.sh: `ADMIN_KEY=`, `CLUSTER_KEY=`, `CLUSTER_NEXT_KEY=`), each created
+with `k10s keygen -o FILE` (mode 0600). The kernel wipes the raw bytes after parsing; a malformed file stops the boot.
+* `opt/k10s/admin_key`: the admin key (needs RDRAND, for the per-boot audience). Without it the admin API serves only
+  `/_k10s/health` (403 otherwise).
+* `opt/k10s/cluster_key`: the cluster key (the hosted nodes' `--cluster-key-file`); cluster mode needs it (and
+  RDRAND) unless `k10.insecure_unauthenticated_cluster`.
+* `opt/k10s/cluster_next_key`: the next cluster key while rotating (`--cluster-next-key-file` on hosted nodes).
 
 The deployment bundle comes from QEMU's `-initrd` (PVH module 0). If there is none, the kernel uses the bundle
 baked in at build time (`K10_EMBED_BUNDLE=path`). If neither exists, the node starts empty and waits for
@@ -64,8 +78,10 @@ metal/                    its own cargo workspace (own target dir); path-depends
     src/percpu.rs         per-CPU state through the GS base (preemption request, idle flag, load, counters)
     src/smp.rs            application processors: real-mode trampoline, INIT-SIPI-SIPI, AP entry
     src/pvh.rs            hvm_start_info: E820 map, command line, modules
+    src/fw_cfg.rs         QEMU fw_cfg over I/O ports: CPU count, named files (secrets: cluster and admin keys)
     src/mem/              frame allocator (bitmap), kernel heap, instance slots
-    src/time.rs           TSC clock (kvmclock / CPUID 0x15 / PIT), wall clock, guest clock, preemption flag + JIT preemption word
+    src/time.rs           TSC clock (kvmclock / CPUID 0x15 / PIT), wall clock (kvmclock resync), guest clock, preemption flag
+                          + JIT preemption word
     src/pci.rs            config space via 0xCF8/0xCFC, BAR assignment when firmware did none
     src/virtio_net.rs     legacy virtio-net driver + smoltcp Device glue
     src/net.rs            smoltcp interface, listener pool, HTTP connections, UDP + extra listeners + TCP dial
@@ -77,7 +93,7 @@ metal/                    its own cargo workspace (own target dir); path-depends
     src/selftest.rs       in-kernel tests (k10.selftest)
   mkbundle/               host tool: test services built with k10_ir::builder and compiled from Ten → Bundle
   tools/                  boottime.py, measure.py, cluster_measure.py, linux-guest (comparison /init),
-                          mkinitramfs.py, linux-compare.sh
+                          mkinitramfs.py, linux-compare.sh, admin_auth.py (signs admin requests for curl)
   build.sh run.sh test.sh cluster-test.sh
 ```
 
@@ -141,8 +157,14 @@ HTTP/1.1 supports keep-alive, pipelining (one request in flight per connection),
 
 **Runtime.** Routing and the host API follow the hosted node:
 * `/<service>/<rest>` invokes the service. `req_path` sees `/<rest>` plus the `?query`.
-* `/_k10s/*` needs `Authorization: Bearer <k10.admin_token>` (checked on the request head), except
-  `/_k10s/health`.
+* `/_k10s/*` needs a request signed with the admin key, except `/_k10s/health` and `/_k10s/audience`:
+  `Authorization: K10s-HMAC a=…,t=…,n=…,h=…,sig=…` (`k10_mesh::admin_auth`, docs/NODE.md; `k10s status|apply|logs
+  --node ADDR --admin-token-file FILE` or `tools/admin_auth.py ADDR …` sign). `a` is the guest's audience, 16 random
+  bytes drawn at boot and served open as hex at `GET /_k10s/audience`: a request is accepted by one boot of one
+  node only, at most once (nodes sharing the admin key, or the same guest after a restart, refuse it). The head is
+  checked before the body is read (unsigned, wrong key or audience, more than 60 s from the guest's clock, replayed
+  nonce → 401 with `WWW-Authenticate: K10s-HMAC`; too many requests in the window → 429), then the body against
+  the hash it signed. That covers everything else under `/_k10s` (there is no separate admin listener).
 * `/_k10s/status` returns JSON with memory per tag, counters, network and per-service stats.
 * `/_k10s/apply` takes a bundle. `/_k10s/logs/<service>` returns the last 64 `log` lines.
 * `/_k10s/bench/<n>/<service>/<rest>` runs `/<rest>` on `<service>` n times back to back in one task and answers
@@ -238,13 +260,19 @@ cluster, speaking the hosted node's protocols (docs/NODE.md "Cluster mode", crat
   kernel's monotonic time and driven from the main loop (its next deadline bounds the idle `hlt`). The member
   advertises `k10.gossip`/`k10.rpc`/`k10.http` and a capacity of `k10.mem` (default: free memory at boot), with
   the wall clock as starting incarnation (a guest rebooted with the same `k10.node_id` refutes its old Dead record).
-* *Authentication*: as on hosted nodes (docs/NODE.md "Cluster authentication"): sealed gossip datagrams and
-  `Auth`-handshaken, encrypted peer links with `k10.cluster_key`; handshake nonces and the gossip boot id come from
-  RDRAND (key mode refuses to start without it).
-* *Peer links*: `k10_mesh::wire` frames over smoltcp TCP (port 7947, plus outgoing connections): `Hello` both ways,
-  one link per peer pair (dial members with a larger id when they come up, others lazily; when both ends dialed,
-  the connection dialed by the smaller id wins), requests multiplexed by id, write buffers flushed every main-loop
-  iteration, 200 ms…5 s dial backoff, 1 s connect timeout.
+* *Authentication*: as on hosted nodes (docs/NODE.md "Cluster authentication"), with the same code
+  (`k10_mesh::secure`): gossip datagrams sealed with the cluster key (opened with it or the next key; timestamps
+  within `k10.gossip_max_skew_s` of the guest's wall clock) and `Auth`-handshaken, encrypted peer links. Handshake
+  nonces and the gossip nonce prefix come from RDRAND: key mode refuses to start without it, a failed read stops
+  cluster startup (gossip) or drops that link (nonce), never falling back to the TSC.
+* *Wall clock*: kvmclock's wall clock at boot, advanced by the TSC and re-read from kvmclock every 10 s, so gossip
+  and admin-request timestamps follow the host's clock over long uptimes (the monotonic clock is never stepped).
+* *Peer links*: `k10_mesh::secure::Link` over smoltcp TCP (port 7947, plus outgoing connections): `Auth`, then
+  `Hello` in the first sealed record, then sealed records. A peer that has not finished the handshake within 5 s is
+  dropped, and at most 16 accepted links (two socket buffers each) may be in their handshake (the oldest is
+  evicted). One link per peer pair (dial members with a larger id when they come up, others lazily; when both ends
+  dialed, the connection dialed by the smaller id wins), requests multiplexed by id, write buffers flushed every
+  main-loop iteration, 200 ms…5 s dial backoff, 1 s connect timeout.
 * *Desired state*: a newer `DesiredState` from gossip is fetched (`GetManifest`, then the missing blobs with
   `GetBlob`, pipelined; the origin first, then the other live members; 10 s without progress → next one), checked
   with SHA-256 and kept in memory (no disk). `POST /_k10s/apply` on the guest works like on a hosted node: version
@@ -264,16 +292,17 @@ cluster, speaking the hosted node's protocols (docs/NODE.md "Cluster mode", crat
   hosted members, or other guests, advertising `127.0.0.1:<port>` — is reached through the slirp host alias
   10.0.2.2 (`k10.host_alias`). Replies to datagram sources work because slirp maps them back.
 * `/_k10s/status` gains the hosted node's `"cluster"` object (members, desired/applied, placement, links,
-  counters) and a `placement` per service.
+  `auth` with `key_id`/`next_key_id`, counters) and a `placement` per service.
 
 ```sh
 # two hosted nodes on the host, one guest; the guest's forwarded ports are 19003 (http), 19103/udp, 19203
-k10s keygen -o cluster.key
-k10s node --http 127.0.0.1:19001 --gossip 127.0.0.1:19101 --rpc 127.0.0.1:19201 --mem 64MiB --cluster-key-file cluster.key &
-k10s node --http 127.0.0.1:19002 --gossip 127.0.0.1:19102 --rpc 127.0.0.1:19202 --mem 64MiB --cluster-key-file cluster.key --join 127.0.0.1:19101 &
+k10s keygen -o cluster.key; k10s keygen -o admin.key
+k10s node --http 127.0.0.1:19001 --gossip 127.0.0.1:19101 --rpc 127.0.0.1:19201 --mem 64MiB --cluster-key-file cluster.key --admin-token-file admin.key &
+k10s node --http 127.0.0.1:19002 --gossip 127.0.0.1:19102 --rpc 127.0.0.1:19202 --mem 64MiB --cluster-key-file cluster.key --admin-token-file admin.key --join 127.0.0.1:19101 &
 qemu-system-x86_64 … -netdev user,id=n0,hostfwd=tcp:127.0.0.1:19003-:80,hostfwd=udp:127.0.0.1:19103-:7946,hostfwd=tcp:127.0.0.1:19203-:7947 \
-    -append "k10.join=127.0.0.1:19101 k10.gossip=127.0.0.1:19103 k10.rpc=127.0.0.1:19203 k10.http=127.0.0.1:19003 k10.mem=67108864 k10.cluster_key=$(cat cluster.key)"
-curl --data-binary @out/bundle.k10b localhost:19001/_k10s/apply     # any member; every service answers on every ingress
+    -fw_cfg name=opt/k10s/cluster_key,file=cluster.key -fw_cfg name=opt/k10s/admin_key,file=admin.key \
+    -append "k10.join=127.0.0.1:19101 k10.gossip=127.0.0.1:19103 k10.rpc=127.0.0.1:19203 k10.http=127.0.0.1:19003 k10.mem=67108864"
+k10s status --node 127.0.0.1:19003 --admin-token-file admin.key     # any member, signed with the shared admin key
 ```
 
 ## Dependencies and why
@@ -308,8 +337,8 @@ Deliberately *not* used:
 * **KV is in memory only.** There is no virtio-blk, so it is not durable across reboots.
 * **Cluster mode is volatile.** The desired state lives in memory: a rebooted guest fetches it again from its
   peers (a guest alone keeps nothing). No graceful leave (a stopped guest is detected as failed). KV is node-local,
-  as on hosted nodes. The cluster key and admin token sit on the kernel command line (visible to whoever controls
-  the hypervisor). No separate admin listener.
+  as on hosted nodes. The keys are in QEMU's fw_cfg (readable by whoever controls the hypervisor, as the guest's
+  memory is). No separate admin listener and no `/_k10s/metrics`.
 * **JIT code is page-granular per module** (W^X forbids appending to an executable page): a 300-byte module takes a
   4 KiB page; modules deployed several times share one copy by code hash.
 * **Static IP, IPv4 only.** No DHCP or TLS.

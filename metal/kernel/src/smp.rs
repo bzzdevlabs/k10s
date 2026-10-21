@@ -114,17 +114,9 @@ extern "C" {
     static ap_tramp_end: u8;
 }
 
-/// Number of CPUs QEMU was started with (`-smp`), from fw_cfg (`FW_CFG_NB_CPUS`); `None` without fw_cfg.
+/// Number of CPUs QEMU was started with (`-smp`), from fw_cfg; `None` without fw_cfg.
 fn fw_cfg_cpus() -> Option<usize> {
-    // Signature check: key 0 reads "QEMU".
-    arch::outw(0x510, 0x0000);
-    let sig = [arch::inb(0x511), arch::inb(0x511), arch::inb(0x511), arch::inb(0x511)];
-    if &sig != b"QEMU" {
-        return None;
-    }
-    arch::outw(0x510, 0x0005);
-    let n = arch::inb(0x511) as usize | (arch::inb(0x511) as usize) << 8;
-    (n >= 1).then_some(n)
+    crate::fw_cfg::read_u16(crate::fw_cfg::NB_CPUS).map(usize::from).filter(|&n| n >= 1)
 }
 
 fn delay_us(us: u64) {

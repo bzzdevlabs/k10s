@@ -27,7 +27,7 @@ import urllib.request
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
 BASE = int(os.environ.get("BASE", "19700"))
-K10S = os.environ.get("K10S", "../target/node/release/k10s")
+K10S = os.environ.get("K10S", "../target/metal-host/release/k10s")
 REPS = int(os.environ.get("REPS", "5"))
 DUR = int(os.environ.get("DUR", "3"))
 PROBE_MS = os.environ.get("PROBE_MS", "100")
@@ -39,8 +39,18 @@ GUEST_ID = "00000000000000a1"
 H = [BASE + 1, BASE + 2, BASE + 3]
 G = [BASE + 101, BASE + 102, BASE + 103]
 R = [BASE + 201, BASE + 202, BASE + 203]
-TOKEN = secrets.token_hex(16)  # the guest's admin API token (hosted nodes: loopback, no token)
-KEY = secrets.token_hex(32)  # cluster key
+os.environ["K10S_ADMIN_TOKEN_FILE"] = os.path.abspath(f"{OUT}/admin.key")
+sys.path.insert(0, os.path.abspath("../bench/k10s"))
+from k10s import OPEN, admin_auth  # noqa: E402
+
+
+def new_keys():
+    """Fresh cluster and admin keys (`k10s keygen` format, mode 0600): hosted nodes take the files, the guest gets
+    them as fw_cfg files; admin requests are signed with the admin key (bench/k10s/k10s.py)."""
+    os.makedirs(OUT, exist_ok=True)
+    for k in ("cluster", "admin"):
+        with os.fdopen(os.open(f"{OUT}/{k}.key", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+            f.write(secrets.token_hex(32) + "\n")
 
 
 def now():
@@ -49,7 +59,9 @@ def now():
 
 def get(port, path, timeout=2.0):
     try:
-        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers={"Authorization": f"Bearer {TOKEN}"})
+        signed = path.startswith("/_k10s/") and path.split("?")[0] not in OPEN
+        headers = {"Authorization": admin_auth(f"127.0.0.1:{port}", "GET", path, b"")} if signed else {}
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=headers)
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, r.read()
     except urllib.error.HTTPError as e:
@@ -91,10 +103,7 @@ def hosted(name, i, join=None):
     os.makedirs(OUT, exist_ok=True)
     args = [K10S, "node", "--name", name, "--http", f"127.0.0.1:{H[i]}", "--gossip", f"127.0.0.1:{G[i]}", "--rpc",
             f"127.0.0.1:{R[i]}", "--data", f"{OUT}/{name}", "--mem", "64MiB", "--shards", "2", "--probe-ms", PROBE_MS,
-            "--suspicion-mult", SUSP, "--cluster-key-file", f"{OUT}/cluster.key"]
-    if not os.path.exists(f"{OUT}/cluster.key"):
-        with os.fdopen(os.open(f"{OUT}/cluster.key", os.O_WRONLY | os.O_CREAT, 0o600), "w") as f:
-            f.write(KEY + "\n")
+            "--suspicion-mult", SUSP, "--cluster-key-file", f"{OUT}/cluster.key", "--admin-token-file", f"{OUT}/admin.key"]
     if join:
         args += ["--join", join]
     return subprocess.Popen(args, stderr=open(f"{OUT}/{name}.log", "w"), stdout=subprocess.DEVNULL)
@@ -103,13 +112,14 @@ def hosted(name, i, join=None):
 def guest():
     append = (f"k10.engine={ENGINE} k10.join=127.0.0.1:{G[0]},127.0.0.1:{G[1]} k10.gossip=127.0.0.1:{G[2]} "
               f"k10.rpc=127.0.0.1:{R[2]} k10.http=127.0.0.1:{H[2]} k10.node_id={GUEST_ID} k10.probe_ms={PROBE_MS} "
-              f"k10.suspicion_mult={SUSP} k10.mem=67108864 k10.cluster_key={KEY} k10.admin_token={TOKEN}")
+              f"k10.suspicion_mult={SUSP} k10.mem=67108864")
     cmd = ["qemu-system-x86_64", "-M", "pc", "-enable-kvm", "-cpu", "host", "-m", "128M", "-smp", "1", "-nodefaults",
            "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
            "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{H[2]}-:80,hostfwd=udp:127.0.0.1:{G[2]}-:7946,"
                       f"hostfwd=tcp:127.0.0.1:{R[2]}-:7947",
            "-device", "virtio-net-pci,disable-modern=on,netdev=n0,romfile=", "-kernel", "out/k10-metal.elf",
-           "-serial", f"file:{OUT}/guest.log", "-append", append]
+           "-serial", f"file:{OUT}/guest.log", "-append", append,
+           "-fw_cfg", f"name=opt/k10s/cluster_key,file={OUT}/cluster.key", "-fw_cfg", f"name=opt/k10s/admin_key,file={OUT}/admin.key"]
     return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
@@ -122,6 +132,7 @@ def loadgen(port, path, conns=1):
 
 def one_rep(rep):
     shutil.rmtree(OUT, ignore_errors=True)
+    new_keys()
     res = {"loadavg": float(open("/proc/loadavg").read().split()[0])}
     procs = [hosted("n1", 0)]
     time.sleep(0.3)
@@ -136,7 +147,8 @@ def one_rep(rep):
                    check=True, capture_output=True)
     data = open(f"{OUT}/b.k10b", "rb").read()
     t0 = now()
-    req = urllib.request.Request(f"http://127.0.0.1:{H[0]}/_k10s/apply", data=data, method="POST")
+    req = urllib.request.Request(f"http://127.0.0.1:{H[0]}/_k10s/apply", data=data, method="POST",
+                                 headers={"Authorization": admin_auth(f"127.0.0.1:{H[0]}", "POST", "/_k10s/apply", data)})
     v = json.loads(urllib.request.urlopen(req, timeout=10).read())["version"]
     t_api = now()
     done = {}

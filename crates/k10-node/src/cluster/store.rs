@@ -208,12 +208,12 @@ impl Store {
         }
     }
 
-    /// Gossip addresses of members last seen alive (`DATA/peers`), if written for the same cluster `stamp`.
-    pub fn load_peers(&self, stamp: &str) -> Vec<SocketAddr> {
+    /// Gossip addresses of members last seen alive (`DATA/peers`), if written under one of `stamps` (the key ids).
+    pub fn load_peers(&self, stamps: &[String]) -> Vec<SocketAddr> {
         let Some(dir) = &self.dir else { return Vec::new() };
         let Ok(s) = std::fs::read_to_string(dir.join("peers")) else { return Vec::new() };
         let mut lines = s.lines();
-        if lines.next() != Some(&format!("k10s-peers {stamp}")) {
+        if !lines.next().and_then(|l| l.strip_prefix("k10s-peers ")).is_some_and(|st| stamps.iter().any(|s| s == st)) {
             eprintln!("k10s: cluster: ignoring {} (written for another cluster key)", dir.join("peers").display());
             return Vec::new();
         }
@@ -345,14 +345,16 @@ mod tests {
         assert_eq!(node_id(Some(&dir)).unwrap(), id);
         assert_ne!(node_id(None).unwrap(), node_id(None).unwrap());
         // remembered peers: bounded, survive a reopen, garbage lines skipped
-        assert!(st.load_peers("k1").is_empty());
+        let (k1, k2) = (vec!["k1".to_string()], vec!["k2".to_string()]);
+        assert!(st.load_peers(&k1).is_empty());
         let peers: Vec<SocketAddr> = (0..20).map(|i| format!("127.0.0.1:{}", 7000 + i).parse().unwrap()).collect();
         st.save_peers("k1", &peers).unwrap();
-        assert_eq!(Store::open(Some(&dir)).unwrap().load_peers("k1"), peers[..MAX_PEERS]);
-        assert!(st.load_peers("k2").is_empty(), "another cluster key: ignored");
+        assert_eq!(Store::open(Some(&dir)).unwrap().load_peers(&k1), peers[..MAX_PEERS]);
+        assert!(st.load_peers(&k2).is_empty(), "another cluster key: ignored");
+        assert_eq!(st.load_peers(&["k2".to_string(), "k1".to_string()]).len(), MAX_PEERS, "written under the old key");
         std::fs::write(dir.join("peers"), "k10s-peers k1\ngarbage\n10.0.0.1:7946\n").unwrap();
-        assert_eq!(st.load_peers("k1"), vec!["10.0.0.1:7946".parse::<SocketAddr>().unwrap()]);
-        assert!(Store::open(None).unwrap().load_peers("k1").is_empty());
+        assert_eq!(st.load_peers(&k1), vec!["10.0.0.1:7946".parse::<SocketAddr>().unwrap()]);
+        assert!(Store::open(None).unwrap().load_peers(&k1).is_empty());
         // incarnations never go back, even when the wall clock does
         assert_eq!(st.next_incarnation(1000).unwrap(), 1000);
         assert_eq!(st.next_incarnation(500).unwrap(), 1001);

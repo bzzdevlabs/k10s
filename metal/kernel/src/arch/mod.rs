@@ -120,6 +120,16 @@ pub fn rdrand() -> Option<u64> {
     None
 }
 
+/// Fills `buf` from RDRAND; false if it failed (callers refuse the operation, never fall back).
+#[must_use]
+pub fn rdrand_bytes(buf: &mut [u8]) -> bool {
+    for chunk in buf.chunks_mut(8) {
+        let Some(v) = rdrand() else { return false };
+        chunk.copy_from_slice(&v.to_le_bytes()[..chunk.len()]);
+    }
+    true
+}
+
 pub fn has_rdrand() -> bool {
     cpuid(1, 0).2 & (1 << 30) != 0
 }

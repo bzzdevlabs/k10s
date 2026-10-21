@@ -14,13 +14,16 @@ every node accepts `apply` and HTTP, and every node computes the same placement 
 
 <Steps>
 
-1. **Create a cluster key** once and copy it to every node. Gossip and peer links are authenticated and encrypted
-   with it.
+1. **Create a cluster key and an admin key** once and copy them to every node. Gossip and peer links are
+   authenticated and encrypted with the cluster key; admin requests (`apply`, `status`) are signed with the admin key.
 
    <Terminal
    	session={`
    $ k10s keygen -o cluster.key
    «dim:k10s: wrote a new key to cluster.key (mode 0600)»
+   $ k10s keygen -o admin.key
+   «dim:k10s: wrote a new key to admin.key (mode 0600)»
+   $ export K10S_ADMIN_TOKEN_FILE=$PWD/admin.key
    `}
    />
 
@@ -33,7 +36,7 @@ every node accepts `apply` and HTTP, and every node computes the same placement 
 
    ```bash
    k10s node --data /var/lib/k10s --http 0.0.0.0:8080 \
-     --cluster-key-file cluster.key --advertise 10.0.0.1 \
+     --cluster-key-file cluster.key --admin-token-file admin.key --advertise 10.0.0.1 \
      --join 10.0.0.1:7946,10.0.0.2:7946,10.0.0.3:7946
    ```
 
@@ -49,7 +52,7 @@ every node accepts `apply` and HTTP, and every node computes the same placement 
      k10s node --name node-$i --data /tmp/k10s-$i \
        --http 127.0.0.1:808$i --gossip 127.0.0.1:794$i --rpc 127.0.0.1:795$i \
        --join 127.0.0.1:7941,127.0.0.1:7942,127.0.0.1:7943 \
-       --cluster-key-file cluster.key &
+       --cluster-key-file cluster.key --admin-token-file admin.key &
    done
    ```
 
@@ -61,7 +64,7 @@ every node accepts `apply` and HTTP, and every node computes the same placement 
    <Terminal
    	title="node-1"
    	session={`
-   «dim:k10s: cluster authentication: key id 9c66ecc2b991cd9e (gossip sealed with XChaCha20-Poly1305, peer links authenticated and encrypted with ChaCha20-Poly1305)»
+   «dim:k10s: cluster key id 9c66ecc2b991cd9e»
    k10s: mesh: member 3e17a7349398c75b «green:up» (http 127.0.0.1:8082, rpc 127.0.0.1:7952)
    k10s: mesh: member ce6ddcefbb2ee3bc «green:up» (http 127.0.0.1:8083, rpc 127.0.0.1:7953)
    `}

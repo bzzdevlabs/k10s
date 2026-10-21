@@ -142,7 +142,7 @@ fn peer_that_never_reads_is_cut_off() {
     let target = &nodes[1];
     let mut s = std::net::TcpStream::connect(rpc_addr(target)).unwrap();
     // A key holder (authenticated peers are trusted with the protocol, not with unbounded buffers).
-    let mut sec = peer_handshake(&mut s, 0xbad);
+    let (mut sec, _) = peer_handshake(&mut s, 0xbad);
     let mut w = s.try_clone().unwrap();
     let writer = std::thread::spawn(move || {
         let mut sent = 0u64;
@@ -152,7 +152,7 @@ fn peer_that_never_reads_is_cut_off() {
                 sent += 1;
                 sec.push(&k10_mesh::wire::Msg::GetManifest { version: 1 }, sent, &mut reqs).unwrap();
             }
-            sec.seal_pending(&mut reqs);
+            sec.seal(&mut reqs);
             if w.write_all(&reqs).is_err() {
                 break; // the node closed the link
             }
@@ -215,6 +215,7 @@ fn fd_exhaustion_does_not_spin() {
     let mut cmd = Command::new(bin());
     cmd.args(["node", "--data", dir.join("data").to_str().unwrap(), "--http", &http, "--shards", "1"])
         .args(["--gossip", "127.0.0.1:0", "--rpc", "127.0.0.1:0", "--cluster-key-file", key_file().to_str().unwrap()])
+        .args(["--admin-token-file", admin_key_file().to_str().unwrap()])
         .stdout(Stdio::null())
         .stderr(std::fs::File::create(&log).unwrap());
     // SAFETY: setrlimit is async-signal-safe; nothing else runs between fork and exec.
@@ -237,9 +238,10 @@ fn fd_exhaustion_does_not_spin() {
     }
     let pid = child.id() as i32;
     let _guard = Kill(&mut child);
-    let status = || http::request(&http, "GET", "/_k10s/status", b"", Duration::from_secs(2)).map(|r| r.text());
-    wait_for("cluster up", Duration::from_secs(20), || status().is_ok_and(|s| s.contains("\"cluster\":{")));
-    let st = status().unwrap();
+    wait_for("node up", Duration::from_secs(20), || {
+        http::request(&http, "GET", "/_k10s/health", b"", Duration::from_secs(2)).is_ok_and(|r| r.status == 200)
+    });
+    let st = admin_req(&http, "GET", "/_k10s/status", b"", Duration::from_secs(5)).unwrap().text();
     let rpc = {
         let s = &st[st.find("\"cluster\":{").unwrap()..];
         let r = s.find("\"rpc\":\"").unwrap() + 7;
@@ -271,7 +273,7 @@ fn fd_exhaustion_does_not_spin() {
     wait_for("node serves again", Duration::from_secs(20), || {
         http::request(&http, "GET", "/_k10s/health", b"", Duration::from_secs(2)).is_ok_and(|r| r.status == 200)
     });
-    let st = http::request(&http, "GET", "/_k10s/status", b"", Duration::from_secs(5)).unwrap().text();
+    let st = admin_req(&http, "GET", "/_k10s/status", b"", Duration::from_secs(5)).unwrap().text();
     let http_pauses = section_num(&st, "http_stats", "accept_pauses").unwrap();
     let mesh_pauses = num_after(&st[st.find("\"cluster\":{").unwrap()..], "accept_pauses").unwrap();
     assert!(http_pauses >= 1 && mesh_pauses >= 1, "pauses: http {http_pauses}, mesh {mesh_pauses}");

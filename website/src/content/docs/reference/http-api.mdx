@@ -21,15 +21,25 @@ Unknown services answer 404.
 | Endpoint | Access | |
 |---|---|---|
 | `GET /_k10s/health` | open | `ok` while the node serves |
-| `GET /_k10s/metrics` | open | Prometheus text ([Observability](/k10s/guides/observability/)) |
+| `GET /_k10s/audience` | open | what admin requests to this node process are signed for (32 hex digits) |
+| `GET /_k10s/metrics` | open on `--admin`, else admin | Prometheus text ([Observability](/k10s/guides/observability/)) |
 | `GET /_k10s/status` | admin | JSON status of the node, its services and, in cluster mode, the cluster |
 | `GET /_k10s/cluster` | admin | the cluster status as text |
 | `GET /_k10s/logs/<service>` | admin | recent log lines of a service |
 | `POST /_k10s/apply` | admin | deploy a bundle (`k10s apply` builds it) |
 
-**Admin access:** with `--admin-token-file`, requests need `Authorization: Bearer <token>` (401 otherwise).
-Without a token, only loopback peers are served, and not when a `Forwarded` or `X-Forwarded-For` header shows a
-local proxy relaying someone else (403). The decision is made on the request head, before any body is read.
+**Admin access:** requests are signed with the node's admin key (`--admin-token-file`, else `DATA/admin.key`):
+
+```
+Authorization: K10s-HMAC a=<audience>,t=<unix ms>,n=<32 hex digits>,h=<hex sha256(body)>,sig=<hex>
+sig = HMAC-SHA256(admin key, "K10s-HMAC\n" + a + "\n" + method + "\n" + target + "\n" + t + "\n" + n + "\n" + h)
+```
+
+`a` is the node's `GET /_k10s/audience` (random per node process: a request signed for one node is refused by
+another, and by the same node after a restart). `target` is the request target as sent (path and query). `t` must
+be within 60 s of the node's clock and each `(t, n)` is accepted once; the signature is checked on the request head, before any body is read, and the body
+against `h` after (401 on any failure, 429 when too many requests arrive within the window). `k10s apply`,
+`status` and `logs` sign for you.
 
 **Apply responses:** 200 with a report (`version`, `added`, `updated`, `removed`, `unchanged`, `warnings`; in a
 cluster also `hash` and `cluster`), 400 for a malformed bundle, 409 for a stale version, 422 for an invalid module

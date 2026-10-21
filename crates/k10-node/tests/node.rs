@@ -124,7 +124,7 @@ fn apply_rejects_calls_to_services_not_in_the_manifest() {
     // Over HTTP the bundle does not even decode (the decoder checks callees too).
     let b = bundle(vec![svc("c", &demo::caller("echo")).calls(&["echo"])]).encode();
     let mut c = client(&node);
-    let r = c.request("POST", "/_k10s/apply", &b).unwrap();
+    let r = admin(&mut c, "POST", "/_k10s/apply", &b).unwrap();
     assert_eq!(r.status, 400, "{}", r.text());
     assert_eq!(get(&node, "/echo").status, 200, "the running state is unchanged");
     assert_eq!(get(&node, "/c").status, 404);
@@ -209,7 +209,7 @@ fn trap_fails_request_and_replaces_instance() {
     assert!(r.text().contains("StackOverflow"), "{}", r.text());
     assert_eq!(c.request("POST", "/deep", b"20").unwrap().text(), "20");
     // The trap is in the service log.
-    let logs = c.request("GET", "/_k10s/logs/m", b"").unwrap().text();
+    let logs = admin(&mut c, "GET", "/_k10s/logs/m", b"").unwrap().text();
     assert!(logs.contains("trapped: Unreachable"), "{logs}");
     node.shutdown();
 }
@@ -487,38 +487,52 @@ fn admin_endpoints() {
     let mut c = client(&node);
     assert_eq!(c.request("POST", "/logger", b"first line").unwrap().text(), "logged");
     assert_eq!(c.request("POST", "/logger", b"second line\n").unwrap().text(), "logged");
-    let logs = c.request("GET", "/_k10s/logs/logger", b"").unwrap();
+    let logs = admin(&mut c, "GET", "/_k10s/logs/logger", b"").unwrap();
     assert_eq!(logs.status, 200);
     assert!(logs.text().contains(" first line\n") && logs.text().contains(" second line\n"), "{}", logs.text());
-    assert_eq!(c.request("GET", "/_k10s/logs/nosuch", b"").unwrap().status, 404);
+    assert_eq!(admin(&mut c, "GET", "/_k10s/logs/nosuch", b"").unwrap().status, 404);
     assert_eq!(c.request("GET", "/cfg", b"").unwrap().text(), "a=b");
-    let m = c.request("GET", "/_k10s/metrics", b"").unwrap().text();
+    let m = admin(&mut c, "GET", "/_k10s/metrics", b"").unwrap().text();
     assert!(m.contains("k10s_service_requests_total{service=\"logger\"} 2"), "{m}");
     assert!(m.contains("k10s_rss_bytes"));
-    let st = c.request("GET", "/_k10s/status", b"").unwrap().text();
+    let st = admin(&mut c, "GET", "/_k10s/status", b"").unwrap().text();
     assert!(st.starts_with('{') && st.ends_with('}'));
     assert!(st.contains("\"name\":\"cfg\""));
-    assert_eq!(c.request("GET", "/_k10s/nope", b"").unwrap().status, 404);
-    assert_eq!(c.request("GET", "/_k10s/apply", b"").unwrap().status, 405);
+    assert_eq!(admin(&mut c, "GET", "/_k10s/nope", b"").unwrap().status, 404);
+    assert_eq!(admin(&mut c, "GET", "/_k10s/apply", b"").unwrap().status, 405);
     assert_eq!(c.request("GET", "/_k10s/health", b"").unwrap().text(), "ok\n");
+    // Unsigned (metrics too: it is open only on a dedicated --admin listener) or signed for another body.
+    for p in ["/_k10s/status", "/_k10s/metrics", "/_k10s/logs/logger"] {
+        assert_eq!(client(&node).request("GET", p, b"").unwrap().status, 401, "{p}");
+    }
+    let key = k10_mesh::admin_auth::AdminKey::parse(ADMIN_KEY).unwrap();
+    let mut nonce = [7u8; 16];
+    nonce[0] = 1;
+    let aud = client(&node).audience().unwrap();
+    let auth = key.authorization(&aud, "POST", "/_k10s/apply", k10_node::sys::wall_ms(), &nonce, b"signed");
+    let mut s = TcpStream::connect(node.http_addr()).unwrap();
+    write!(s, "POST /_k10s/apply HTTP/1.1\r\nauthorization: {auth}\r\ncontent-length: 6\r\n\r\nforged").unwrap();
+    let mut resp = String::new();
+    s.read_to_string(&mut resp).unwrap();
+    assert!(resp.starts_with("HTTP/1.1 401") && resp.contains("body does not match"), "{resp}");
     // apply over HTTP: garbage, then a real bundle, then a stale version.
-    let r = c.request("POST", "/_k10s/apply", b"garbage").unwrap();
+    let r = admin(&mut c, "POST", "/_k10s/apply", b"garbage").unwrap();
     assert_eq!(r.status, 400, "{}", r.text());
     let b = bundle(vec![svc("echo", &demo::echo())]);
-    let r = c.request("POST", "/_k10s/apply", &b.encode()).unwrap();
+    let r = admin(&mut c, "POST", "/_k10s/apply", &b.encode()).unwrap();
     assert_eq!(r.status, 200, "{}", r.text());
     assert!(r.text().contains("\"added\":[\"echo\"]"), "{}", r.text());
     assert!(r.text().contains("\"removed\":[\"cfg\",\"logger\"]"), "{}", r.text());
     let mut stale = bundle(vec![svc("echo", &demo::echo())]);
     stale.manifest.version = 1;
-    let r = c.request("POST", "/_k10s/apply", &stale.encode()).unwrap();
+    let r = admin(&mut c, "POST", "/_k10s/apply", &stale.encode()).unwrap();
     assert_eq!(r.status, 409, "{}", r.text());
     // Invalid module.
     let mut bad = bundle(vec![svc("echo", &demo::echo())]);
     bad.blobs[0].1 = b"K10M\x01\x0cjunk".to_vec();
     bad.manifest.services[0].code_hash = k10_mesh::sha256::sha256(&bad.blobs[0].1);
     bad.blobs[0].0 = bad.manifest.services[0].code_hash;
-    let r = c.request("POST", "/_k10s/apply", &bad.encode()).unwrap();
+    let r = admin(&mut c, "POST", "/_k10s/apply", &bad.encode()).unwrap();
     assert_eq!(r.status, 422, "{}", r.text());
     assert_eq!(c.request("GET", "/echo", b"").unwrap().text(), "hello\n");
     node.shutdown();
@@ -877,7 +891,7 @@ fn over_committed_apply_is_rejected() {
     node.apply(many(15)).unwrap();
     let err = node.apply(many(16)).unwrap_err();
     assert!(err.contains("memory reservations do not fit") && err.contains("--mem"), "{err}");
-    let r = client(&node).request("POST", "/_k10s/apply", &many(16).encode()).unwrap();
+    let r = admin(&mut client(&node), "POST", "/_k10s/apply", &many(16).encode()).unwrap();
     assert_eq!(r.status, 422, "{}", r.text());
     assert!(r.text().contains("16 service(s)"), "{}", r.text());
     let s = status(&node);

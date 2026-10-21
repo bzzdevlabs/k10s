@@ -30,11 +30,11 @@ Runs a node.
 | `--sandbox on\|seccomp-only\|log\|off` | `on`, or `$K10S_SANDBOX` | process sandbox (Landlock + seccomp) |
 | `--user USER[:GROUP]` | | started as root: switch to USER once the listeners are bound |
 
-**Admin API** (`/_k10s/`; `health` and `metrics` are always open):
+**Admin API** (`/_k10s/`; requests signed with the admin key; `health` is open, `metrics` too on `--admin`):
 
 | Flag | Meaning |
 |---|---|
-| `--admin-token-file FILE` | require this bearer token; without it, only loopback clients may use the admin API |
+| `--admin-token-file FILE` | the admin key; default `DATA/admin.key` (or `admin.key` in the state directory without `--data`), created with mode 0600 on first start |
 | `--admin ADDR` | serve the admin API on its own listener; the ingress then serves only `/_k10s/health` |
 
 **Cluster mode** (any of these flags turns it on):
@@ -46,8 +46,9 @@ Runs a node.
 | `--join HOST:PORT,…` | | gossip addresses of members |
 | `--advertise HOST` | bind IP, else default route | IP given to peers |
 | `--cluster-key-file FILE` | required | the cluster key (`k10s keygen`), the same on every node |
+| `--cluster-next-key-file FILE` | | key rotation: also accepted ([Security](/k10s/concepts/security/#key-rotation)) |
 | `--insecure-unauthenticated-cluster` | | no authentication: isolated test networks only |
-| `--gossip-max-skew SECS` | `300` | clock skew allowed on gossip; `0` = off |
+| `--gossip-max-skew SECS` | `300` | clock skew allowed on gossip, at least 1 |
 | `--probe-ms N` | `200` | gossip probe period |
 | `--suspicion-mult N` | `4` | suspicion timeout multiplier |
 | `--leave-grace-ms N` | `1000` | time given to peers to converge on a graceful leave |
@@ -101,7 +102,7 @@ The service's recent log lines.
 k10s keygen [-o FILE]
 ```
 
-32 random bytes as hex: a cluster key or an admin token. `FILE` is created with mode 0600 and never overwritten.
+32 random bytes as hex: a cluster key or an admin key. `FILE` is created with mode 0600 and never overwritten.
 
 ## k10s version
 
@@ -112,6 +113,7 @@ development build.
 
 | Variable | Used by |
 |---|---|
-| `K10S_ADMIN_TOKEN_FILE`, `K10S_ADMIN_TOKEN` | `apply`, `status`, `logs` when `--admin-token-file` is not given |
+| `K10S_ADMIN_TOKEN_FILE` | `apply`, `status`, `logs`: the admin key when `--admin-token-file` is not given (else `admin.key` in the state directory) |
+| `K10S_HOME`, `XDG_STATE_HOME` | state directory (`$K10S_HOME`, else `$XDG_STATE_HOME/k10s`, else `~/.local/state/k10s`) |
 | `K10S_BACKEND` | default backend of `node` and `run` |
 | `K10S_SANDBOX` | default of `--sandbox` |

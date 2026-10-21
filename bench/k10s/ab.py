@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Interleaved A/B of two k10s binaries (single node + 3-node forwarded), default flags.
 Usage: ab.py BASE_BIN NEW_BIN LOADGEN OUT.jsonl [rounds] [dur_s] [port_base]"""
-import json, os, signal, subprocess, sys, tempfile, time, urllib.request
+import hashlib, hmac, json, os, signal, subprocess, sys, tempfile, time, urllib.parse, urllib.request
 
 BASE, NEW, LG, OUT = sys.argv[1:5]
 ROUNDS = int(sys.argv[5]) if len(sys.argv) > 5 else 4
@@ -21,9 +21,24 @@ def cpu(pids):
     return t / TCK
 
 
-def get(url):
-    with urllib.request.urlopen(url, timeout=2) as r:
+def get(url, key=None):
+    """GET, signed with the admin key file `key` (K10s-HMAC, docs/NODE.md) when given."""
+    req = urllib.request.Request(url)
+    if key:
+        u = urllib.parse.urlsplit(url)
+        target = u.path + (f"?{u.query}" if u.query else "")
+        a = get(f"{u.scheme}://{u.netloc}/_k10s/audience").decode().strip()
+        t, n, h = str(int(time.time() * 1000)), os.urandom(16).hex(), hashlib.sha256(b"").hexdigest()
+        sig = hmac.new(open(key, "rb").read().strip(), "\n".join(["K10s-HMAC", a, "GET", target, t, n, h]).encode(),
+                       hashlib.sha256).hexdigest()
+        req.add_header("Authorization", f"K10s-HMAC a={a},t={t},n={n},h={h},sig={sig}")
+    with urllib.request.urlopen(req, timeout=2) as r:
         return r.read()
+
+
+def admin_key(variant, d):
+    """The new binary signs admin requests; the base serves them unsigned to loopback clients."""
+    return f"{d}/admin.key" if variant == "new" else None
 
 
 def wait_up(port, proc):
@@ -51,11 +66,13 @@ def prep(variant, binary, d):
     with open(f"{d}/echo.k10s", "w") as f:
         f.write('service echo { code = "echo.k10" memory = 64KiB }\n')
     if variant == "new":
-        subprocess.run([binary, "keygen", "-o", f"{d}/cluster.key"], check=True, capture_output=True)
+        for k in ("cluster.key", "admin.key"):
+            subprocess.run([binary, "keygen", "-o", f"{d}/{k}"], check=True, capture_output=True)
 
 
-def node(binary, d, tag, port, extra):
+def node(binary, d, tag, port, extra, key):
     data = f"{d}/data-{tag}"; os.makedirs(data, exist_ok=True)
+    extra = extra + (["--admin-token-file", key] if key else [])
     log = open(f"{d}/{tag}.log", "w")
     p = subprocess.Popen([binary, "node", "--http", f"127.0.0.1:{port}", "--data", data, "--name", tag] + extra,
                          stdout=log, stderr=subprocess.STDOUT)
@@ -84,9 +101,15 @@ def load(addr, path, conns, pids):
             "load1": float(open("/proc/loadavg").read().split()[0])}
 
 
+def apply(binary, bundle, addr, key):
+    env = dict(os.environ, **({"K10S_ADMIN_TOKEN_FILE": key} if key else {}))
+    subprocess.run([binary, "apply", bundle, "--node", addr], check=True, capture_output=True, env=env)
+
+
 def single(variant, binary, d, port, rnd, emit):
-    p = node(binary, d, f"s{rnd}", port, ["--shards", "8"])
-    subprocess.run([binary, "apply", f"{d}/app.k10s", "--node", f"127.0.0.1:{port}"], check=True, capture_output=True)
+    key = admin_key(variant, d)
+    p = node(binary, d, f"s{rnd}", port, ["--shards", "8"], key)
+    apply(binary, f"{d}/app.k10s", f"127.0.0.1:{port}", key)
     time.sleep(0.5)
     for path in ["/echo", "/chain", "/compute?n=1000"]:
         get(f"http://127.0.0.1:{port}{path}")
@@ -97,23 +120,23 @@ def single(variant, binary, d, port, rnd, emit):
 
 
 def cluster(variant, binary, d, port, rnd, emit):
-    ps, http = [], []
+    ps, http, key = [], [], admin_key(variant, d)
     auth = ["--cluster-key-file", f"{d}/cluster.key"] if variant == "new" else []
     for i in range(3):
         hp, gp, rp = port + 10 + i, port + 20 + i, port + 30 + i
         extra = ["--shards", "2", "--gossip", f"127.0.0.1:{gp}", "--rpc", f"127.0.0.1:{rp}", "--probe-ms", "200"] + auth
         if i: extra += ["--join", f"127.0.0.1:{port + 20}"]
-        ps.append(node(binary, d, f"c{rnd}-{i}", hp, extra)); http.append(f"127.0.0.1:{hp}")
+        ps.append(node(binary, d, f"c{rnd}-{i}", hp, extra, key)); http.append(f"127.0.0.1:{hp}")
     t0 = time.time()
     while True:
-        ok = all(sum(m.get("state") == "alive" for m in json.loads(get(f"http://{a}/_k10s/status")).get("cluster", {}).get("members", [])) == 3 for a in http)
+        ok = all(sum(m.get("state") == "alive" for m in json.loads(get(f"http://{a}/_k10s/status", key)).get("cluster", {}).get("members", [])) == 3 for a in http)
         if ok: break
         if time.time() - t0 > 30: raise SystemExit("cluster did not converge")
         time.sleep(0.1)
-    subprocess.run([binary, "apply", f"{d}/echo.k10s", "--node", http[0]], check=True, capture_output=True)
+    apply(binary, f"{d}/echo.k10s", http[0], key)
     t0 = time.time()
     while True:
-        c = json.loads(get(f"http://{http[0]}/_k10s/status")).get("cluster", {})
+        c = json.loads(get(f"http://{http[0]}/_k10s/status", key)).get("cluster", {})
         pl = c.get("placement", {}).get("echo")
         if pl: break
         if time.time() - t0 > 30: raise SystemExit("no placement")

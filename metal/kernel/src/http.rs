@@ -26,6 +26,17 @@ impl Method {
             Method::Other => 4,
         }
     }
+
+    /// The name signed admin requests commit to.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Method::Get => "GET",
+            Method::Post => "POST",
+            Method::Put => "PUT",
+            Method::Delete => "DELETE",
+            Method::Other => "OTHER",
+        }
+    }
 }
 
 /// A parsed request head.
@@ -169,7 +180,7 @@ pub fn write_head(out: &mut Vec<u8>, status: u16, content_type: Option<&str>, bo
         let _ = w.write_str("Connection: close\r\n");
     }
     if status == 401 {
-        let _ = w.write_str("WWW-Authenticate: Bearer realm=\"k10s\"\r\n");
+        let _ = w.write_str("WWW-Authenticate: K10s-HMAC realm=\"k10s\"\r\n");
     }
     let _ = w.write_str("Server: k10-metal\r\n\r\n");
 }

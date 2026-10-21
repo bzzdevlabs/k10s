@@ -547,14 +547,6 @@ pub fn peer_addr(fd: RawFd) -> io::Result<std::net::SocketAddr> {
     sock_name(fd, true)
 }
 
-/// The connected peer is on a loopback address (IPv4-mapped included).
-pub fn peer_is_loopback(fd: RawFd) -> bool {
-    peer_addr(fd).is_ok_and(|a| match a.ip() {
-        std::net::IpAddr::V4(ip) => ip.is_loopback(),
-        std::net::IpAddr::V6(ip) => ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback()),
-    })
-}
-
 fn sock_name(fd: RawFd, peer: bool) -> io::Result<std::net::SocketAddr> {
     // SAFETY: zeroed sockaddr_storage is valid; getsockname/getpeername write at most `len` bytes.
     let mut ss: libc::sockaddr_storage = unsafe { std::mem::zeroed() };

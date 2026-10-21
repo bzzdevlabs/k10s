@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
 # End-to-end test of k10-metal under QEMU/KVM:
-#   1. in-kernel self tests (k10.selftest → isa-debug-exit status 33), both engines;
+#   1. in-kernel self tests (k10.selftest → isa-debug-exit status 33), both engines, fw_cfg, the admin gate;
 #   then, for each engine (ENGINES, default "jit interp"; the JIT is the default, `k10.engine=interp` selects the
 #   interpreter):
 #   2. boot with the test bundle, wait for the "ready" serial line, check every service over HTTP
 #      (status codes and bodies), traps → 500 + instance replaced, KV, instance state vs fresh, service calls,
 #      the Ten-compiled services (SHA-256 chain, f64 n-body, merge sort in 2 MiB, KV/JSON REST API);
 #   3. isolation: CPU-bound infinite loops (spin) running while other services keep answering;
-#   4. redeploy over HTTP (POST /_k10s/apply with the k10.admin_token bearer token) and check the new service set;
+#   4. redeploy over HTTP (POST /_k10s/apply signed with the admin key) and check the new service set;
 #   5. keep-alive load with bench/bin/loadgen (if present): no errors;
 #   6. the same functional checks with a tiny guest (MEM_SMALL, default 8M).
+#   Admin API: requests signed (K10s-HMAC) with an admin key passed as fw_cfg `opt/k10s/admin_key`, for the guest's
+#   per-boot audience; unsigned, wrongly signed, replayed, body-mismatched requests and requests signed for an earlier
+#   boot are refused, health and audience are open, and a guest without an admin key serves health only.
 #   Then: embedded bundle, qboot firmware, no panic in any serial log.
 # Environment: TEST_PORT (default 18090), MEM (64M), MEM_SMALL (8M), BIOS (firmware, empty = SeaBIOS), ENGINES,
-# EXTRA_CMDLINE (appended to the engine suites' kernel command line).
+# EXTRA_CMDLINE (appended to the engine suites' kernel command line), K10S (hosted binary for `k10s keygen`, default
+# ../target/metal-host/release/k10s, built with `CARGO_TARGET_DIR=target/metal-host cargo build --release -p k10s`).
 set -uo pipefail
 cd "$(dirname "$0")"
 PORT="${TEST_PORT:-18090}"
@@ -26,10 +30,20 @@ LOADGEN=../bench/bin/loadgen
 OUT=out/test
 mkdir -p "$OUT"
 [[ -f out/k10-metal.elf && -f out/bundle.k10b ]] || ./build.sh >/dev/null
+if [[ -z "${K10S:-}" ]]; then
+    K10S=../target/metal-host/release/k10s
+    (cd .. && CARGO_TARGET_DIR=target/metal-host cargo build --release -q -p k10s) || exit 1
+fi
 
-# Admin API bearer token (kernel command line `k10.admin_token=`); `expect` sends it to /_k10s/ URLs.
-TOKEN=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
-AUTH="Authorization: Bearer $TOKEN"
+# Admin keys (`k10s keygen`, mode 0600): the guest's (fw_cfg opt/k10s/admin_key) and another one.
+rm -f "$OUT/admin.key" "$OUT/wrong.key"
+"$K10S" keygen -o "$OUT/admin.key" 2>/dev/null && "$K10S" keygen -o "$OUT/wrong.key" 2>/dev/null || exit 1
+export K10S_ADMIN_TOKEN_FILE=$OUT/admin.key
+# sign METHOD TARGET [BODY|@FILE]: Authorization header value for an admin request to the running guest (signed for
+# its audience, /_k10s/audience).
+sign() { tools/admin_auth.py "127.0.0.1:$PORT" "$@"; }
+# A request signed for the previous guest boot (replayed to the next one).
+EARLIER=
 
 pass=0
 fail=0
@@ -48,10 +62,12 @@ qemu_args() { # $1 = mem
 }
 
 QPID=
-boot() { # $1 = mem, $2 = bundle, $3 = log, $4 = kernel command line
+boot() { # $1 = mem, $2 = bundle, $3 = log, $4 = kernel command line; NO_ADMIN_KEY=1: no admin key
     rm -f "$3"
+    local fw=(-fw_cfg "name=opt/k10s/admin_key,file=$OUT/admin.key")
+    [[ -n "${NO_ADMIN_KEY:-}" ]] && fw=()
     # shellcheck disable=SC2046
-    qemu-system-x86_64 $(qemu_args "$1") -initrd "$2" -serial "file:$3" -append "k10.admin_token=$TOKEN ${4:-}" &
+    qemu-system-x86_64 $(qemu_args "$1") "${fw[@]}" -initrd "$2" -serial "file:$3" -append "${4:-}" &
     QPID=$!
     for _ in $(seq 1 200); do
         grep -q "k10-metal ready" "$3" 2>/dev/null && return 0
@@ -63,12 +79,21 @@ boot() { # $1 = mem, $2 = bundle, $3 = log, $4 = kernel command line
 shutdown() { [[ -n "$QPID" ]] && kill "$QPID" 2>/dev/null && wait "$QPID" 2>/dev/null; QPID=; }
 trap shutdown EXIT
 
-# expect NAME URL EXPECTED_STATUS EXPECTED_BODY_REGEX|len=N [curl args...]
+# expect NAME URL EXPECTED_STATUS EXPECTED_BODY_REGEX|len=N [curl args...]; /_k10s/ requests are signed.
 expect() {
     local name=$1 url=$2 st=$3 re=$4
     shift 4
     local body code
-    [[ "$url" == */_k10s/* ]] && set -- -H "$AUTH" "$@"
+    if [[ "$url" == */_k10s/* ]]; then
+        local m=GET data= i
+        for ((i = 1; i <= $#; i++)); do
+            case "${!i}" in
+                -X) i=$((i + 1)); m=${!i} ;;
+                --data-binary) i=$((i + 1)); data=${!i}; [[ $m == GET ]] && m=POST ;;
+            esac
+        done
+        set -- -H "Authorization: $(sign "$m" "${url#"$U"}" "$data")" "$@"
+    fi
     body=$(curl -sS -m 5 -o - -w '\n%{http_code}' "$@" "$url" 2>&1)
     code=${body##*$'\n'}
     body=${body%$'\n'*}
@@ -112,15 +137,25 @@ functional() {
     expect "random" "$U/random" 200 '^[0-9]+$'
     expect "unknown service" "$U/nope" 404 'no such service'
     expect "spin -> budget trap" "$U/spin" 500 'Interrupted'
-    expect "status" "$U/_k10s/status" 200 '"services":\['
-    expect "health (no token needed)" "$U/_k10s/health" 200 '^ok$'
-    local code
-    code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$U/_k10s/status")
-    [[ "$code" == 401 ]] && ok "status without the token -> 401" || ko "status without the token: $code"
-    code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer x$TOKEN" -X POST --data-binary 'x' "$U/_k10s/apply")
-    [[ "$code" == 401 ]] && ok "apply with a wrong token -> 401" || ko "apply with a wrong token: $code"
+    expect "status (signed)" "$U/_k10s/status" 200 '"services":\['
+    local code a
+    code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$U/_k10s/health")
+    [[ "$code" == 200 ]] && ok "health unsigned -> 200" || ko "health unsigned: $code"
+    a=$(curl -s -m 5 "$U/_k10s/audience")
+    [[ "$a" =~ ^[0-9a-f]{32}$ ]] && ok "audience unsigned -> $a" || ko "audience: '$a'"
+    a=$(curl -s -m 5 -D - -o /dev/null "$U/_k10s/status" | tr -d '\r')
+    [[ "$a" == "HTTP/1.1 401"* && "$a" == *'WWW-Authenticate: K10s-HMAC realm="k10s"'* ]] && ok "status unsigned -> 401, K10s-HMAC challenge" || ko "status unsigned: ${a:0:80}"
+    code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$U/_k10s/metrics")
+    [[ "$code" == 401 ]] && ok "metrics unsigned -> 401" || ko "metrics unsigned: $code"
     code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$U/_k10s/bench/10/hello/")
-    [[ "$code" == 401 ]] && ok "bench without the token -> 401" || ko "bench without the token: $code"
+    [[ "$code" == 401 ]] && ok "bench unsigned -> 401" || ko "bench unsigned: $code"
+    code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H "Authorization: $(K10S_ADMIN_TOKEN_FILE=$OUT/wrong.key sign POST /_k10s/apply x)" --data-binary x "$U/_k10s/apply")
+    [[ "$code" == 401 ]] && ok "apply signed with another key -> 401" || ko "apply signed with another key: $code"
+    a=$(sign GET /_k10s/status)
+    code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H "Authorization: $a" "$U/_k10s/status")$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H "Authorization: $a" "$U/_k10s/status")
+    [[ "$code" == 200401 ]] && ok "replayed signed request -> 401" || ko "signed request then its replay: $code"
+    code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H "Authorization: $(sign POST /_k10s/apply x)" --data-binary y "$U/_k10s/apply")
+    [[ "$code" == 401 ]] && ok "apply whose body differs from the signed one -> 401" || ko "apply with another body: $code"
 
     # Services compiled from Ten (examples/*.ten) with k10-lang.
     expect "sha (Ten: SHA-256 chain x1000)" "$U/sha/?n=1000" 200 '^cc2cbdc008d39ef7d46c8f4bd213c400cf60059acb1f0b409f7116b2912f2c9a$'
@@ -144,10 +179,24 @@ functional() {
 
 echo "== selftest"
 # shellcheck disable=SC2046
-timeout 30 qemu-system-x86_64 $(qemu_args "$MEM") -serial "file:$OUT/selftest.log" -append k10.selftest
+timeout 30 qemu-system-x86_64 $(qemu_args "$MEM") -fw_cfg "name=opt/k10s/selftest,string=k10s fw_cfg selftest" \
+    -serial "file:$OUT/selftest.log" -append k10.selftest
 st=$?
 grep -E "  (ok|FAIL|info) " "$OUT/selftest.log" | sed 's/^/    /'
 [[ $st == 33 ]] && ok "selftest (exit $st)" || ko "selftest (exit $st)"
+grep -q "ok   fw_cfg: file opt/k10s/selftest read" "$OUT/selftest.log" && ok "selftest read a fw_cfg file" || ko "selftest did not read the fw_cfg file"
+
+echo "== admin API without an admin key"
+if NO_ADMIN_KEY=1 boot "$MEM" out/bundle.k10b "$OUT/serial-nokey.log"; then
+    code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$U/_k10s/status")$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$U/_k10s/audience")
+    [[ "$code" == 403403 ]] && ok "status and audience refused (no admin key) -> 403" || ko "status/audience without an admin key: $code"
+    code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$U/_k10s/health")
+    [[ "$code" == 200 ]] && ok "health served without an admin key" || ko "health without an admin key: $code"
+    expect "services served without an admin key" "$U/hello/" 200 '^hello from k10-metal$'
+else
+    ko "boot without an admin key (no ready line)"
+fi
+shutdown
 
 engine_suite() { # $1 = engine (jit | interp); NCPU = CPUs
 local E=$1 CMD="k10.engine=$1${EXTRA_CMDLINE:+ $EXTRA_CMDLINE}"
@@ -220,8 +269,9 @@ if boot "$MEM" out/bundle.k10b "$OUT/serial-${E// /-}.log" "$CMD"; then
         [[ "$errs" == 0 ]] && ok "loadgen chain (service calls under load): no errors" || ko "loadgen chain errors: $errs"
     fi
     expect "still healthy" "$U/_k10s/status" 200 '"5xx":[0-9]+'
+    EARLIER=$(sign GET /_k10s/status)
     if ((NCPU > 1)); then
-        busy=$(curl -s -H "$AUTH" "$U/_k10s/status" | python3 -c "import json,sys; d=json.load(sys.stdin); print(sum(1 for c in d['cpus'] if c['tasks_run'] > 0), len(d['cpus']))")
+        busy=$(curl -s -H "Authorization: $(sign GET /_k10s/status)" "$U/_k10s/status" | python3 -c "import json,sys; d=json.load(sys.stdin); print(sum(1 for c in d['cpus'] if c['tasks_run'] > 0), len(d['cpus']))")
         [[ "${busy% *}" -ge 2 && "${busy#* }" == "$NCPU" ]] && ok "$NCPU CPUs online, ${busy% *} ran invocations" || ko "CPUs that ran invocations / online: $busy"
     fi
 else
@@ -233,6 +283,8 @@ shutdown
 echo "== [$E] functional ($MEM_SMALL guest)"
 if boot "$MEM_SMALL" out/bundle.k10b "$OUT/serial-small-${E// /-}.log" "$CMD"; then
     ok "boot: $(grep 'k10-metal ready' "$OUT/serial-small-${E// /-}.log")"
+    a=$(curl -s -m 5 -H "Authorization: $EARLIER" "$U/_k10s/status")
+    [[ "$a" == *"another node or an earlier start"* ]] && ok "request signed for the previous boot -> refused" || ko "request signed for the previous boot: '${a:0:80}'"
     functional
     if [[ -x $LOADGEN ]]; then
         r=$($LOADGEN -addr "127.0.0.1:$PORT" -path /hello/ -conns 16 -duration 2s -warmup 300ms 2>/dev/null)

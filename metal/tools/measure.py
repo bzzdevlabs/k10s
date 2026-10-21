@@ -31,7 +31,16 @@ KERNEL = "out/k10-metal.elf"
 BUNDLE = "out/bundle.k10b"
 LINUX_KERNEL = f"/boot/vmlinuz-{os.uname().release}"
 QBOOT = "/usr/share/qemu/qboot.rom"
-TOKEN = secrets.token_hex(16)  # admin API bearer token given to every k10-metal guest
+# Admin key given to every k10-metal guest (fw_cfg opt/k10s/admin_key; `k10s keygen` format, mode 0600); admin
+# requests are signed with it (bench/k10s/k10s.py).
+ADMIN_KEY = os.path.abspath(f"{OUT}/admin.key")
+if os.path.exists(ADMIN_KEY):
+    os.unlink(ADMIN_KEY)
+with os.fdopen(os.open(ADMIN_KEY, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+    f.write(secrets.token_hex(32) + "\n")
+os.environ["K10S_ADMIN_TOKEN_FILE"] = ADMIN_KEY
+sys.path.insert(0, os.path.abspath("../bench/k10s"))
+from k10s import OPEN, admin_auth  # noqa: E402
 
 
 def qemu_cmd(mem="64M", kernel=KERNEL, initrd=BUNDLE, append="", port=PORT, bios=None, net=True, debug_exit=True, smp=1):
@@ -48,7 +57,7 @@ def qemu_cmd(mem="64M", kernel=KERNEL, initrd=BUNDLE, append="", port=PORT, bios
     if initrd:
         c += ["-initrd", initrd]
     if "k10-metal" in kernel:
-        append = f"k10.admin_token={TOKEN} {append}".strip()
+        c += ["-fw_cfg", f"name=opt/k10s/admin_key,file={ADMIN_KEY}"]
     if append:
         c += ["-append", append]
     return c
@@ -110,7 +119,9 @@ class Guest:
 def http(port, path, method="GET", body=b"", timeout=5.0):
     with socket.create_connection(("127.0.0.1", port), timeout=timeout) as s:
         s.settimeout(timeout)
-        s.sendall(f"{method} {path} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: {len(body)}\r\n"
+        signed = path.startswith("/_k10s/") and path.split("?")[0] not in OPEN
+        auth = f"Authorization: {admin_auth(f'127.0.0.1:{port}', method, path, body)}\r\n" if signed else ""
+        s.sendall(f"{method} {path} HTTP/1.1\r\nHost: x\r\n{auth}Content-Length: {len(body)}\r\n"
                   f"Connection: close\r\n\r\n".encode() + body)
         data = b""
         while True:

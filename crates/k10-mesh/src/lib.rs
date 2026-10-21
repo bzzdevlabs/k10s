@@ -11,11 +11,12 @@
 //!
 //! The core is `no_std + alloc`; see README.md for the protocol.
 #![cfg_attr(not(feature = "std"), no_std)]
-// No unsafe code except the SSE2 ChaCha20 kernel (`crypto::chacha20::sse2`, intrinsics only; hosted x86-64).
+// Unsafe code only for SSE2 intrinsics (`crypto::chacha20`) and volatile zeroization (`crypto::zeroize`).
 #![deny(unsafe_code)]
 extern crate alloc;
 
 mod codec;
+pub mod admin_auth;
 pub mod bundle;
 pub mod crypto;
 pub mod gossip;

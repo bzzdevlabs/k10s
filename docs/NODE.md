@@ -181,15 +181,24 @@ status ≥ 0, −1 unknown service, −2 unavailable (crash backoff with nothing
   slots used, slot bytes, reserved, snapshot-mapped; HTTP, execution and KV counters; per shard), `GET metrics`
   (Prometheus text), `GET logs/<svc>`, `GET health`, `POST apply`.
 - **Admin access** (`admin::gate`, decided on the request head before any body is read or reserved; a refusal
-  closes the connection): `health` and `metrics` are open (liveness, read-only counters: a scraper should not need a
-  secret that can deploy code). Everything else needs `Authorization: Bearer <token>` when the node has
-  `--admin-token-file FILE` (only its SHA-256 is kept; constant-time comparison; 401 with `WWW-Authenticate`).
-  Without a token only loopback peers (`getpeername`) are served, and not when a `Forwarded`/`X-Forwarded-For`
-  header shows a local proxy relaying someone else (403). `--admin ADDR` serves the admin API on its own listener
-  (accepted by shard 0); the ingress then answers only `/_k10s/health` of it (404 otherwise), and the admin listener
-  serves no services. Credentials are only parsed for `/_k10s` targets: service traffic pays one prefix check.
-  CLI: `k10s apply|status|logs` send the token from `--admin-token-file`, `$K10S_ADMIN_TOKEN_FILE` or
-  `$K10S_ADMIN_TOKEN`; `k10s keygen [-o FILE]` writes 32 random bytes as hex (mode 0600, never overwrites).
+  closes the connection): every node has an admin key (`--admin-token-file FILE`, else `DATA/admin.key`, or
+  `admin.key` in the state directory without `--data`, created with mode 0600 on first start; started as root with
+  `--user`, the data directory and a created key belong to that user). Requests are signed (`k10_mesh::admin_auth`):
+  `Authorization: K10s-HMAC a=<audience>,t=<unix ms>,n=<32 hex>,h=<sha256(body) hex>,sig=<hex>`, where `sig` =
+  HMAC-SHA256(admin key, `K10s-HMAC\n<a>\n<method>\n<target>\n<t>\n<n>\n<h>`). The audience is 16 random bytes per
+  node process, served open at `GET /_k10s/audience` (hex). The node checks the audience, the signature (constant
+  time), `|t − its clock| ≤ 60 s` and that `(t, n)` was not seen within that window (at most 65 536 remembered;
+  beyond that 429 until they expire), then reads the body and checks it against `h` (401 on any failure, with
+  `WWW-Authenticate: K10s-HMAC`). The key never travels; a captured request is accepted by no other node (even one
+  sharing the key), not after a restart, and not twice, and cannot be altered (method, target, time and body are
+  signed). `health` and `audience` are open; `metrics` is open on the admin listener only. `--admin ADDR` serves the admin API on its own listener (accepted by shard 0); the ingress then
+  answers only `/_k10s/health` of it (404 otherwise), and the admin listener serves no services. Credentials are
+  only parsed for `/_k10s` targets: service traffic pays one prefix check.
+  CLI: `k10s apply|status|logs` fetch the audience, then sign with the key from `--admin-token-file`, `$K10S_ADMIN_TOKEN_FILE`, or
+  `admin.key` in the state directory (`$K10S_HOME`, else `$XDG_STATE_HOME/k10s`, else `~/.local/state/k10s`);
+  `k10s keygen [-o FILE]` writes 32 random bytes as hex (mode 0600, never overwrites). Secret files larger than
+  4 KiB are refused, a warning is printed when other users can read them, and their contents are wiped after
+  parsing.
 
 ## Apply and persistence
 - `POST /_k10s/apply` body = `k10_mesh::Bundle::encode()`. The node decodes the bundle, validates the manifest,
@@ -368,7 +377,8 @@ It refuses to start without `--cluster-key-file FILE` (the same `k10s keygen` ke
   on the newest one. `DATA/bundle.k10b` (single-node mode) is not used.
 - **Joining and rejoining.** Give every node, the first one included, the same `--join a,b,c` list (a node skips
   its own address). Each node also keeps the gossip addresses of up to 16 live members in `DATA/peers` (previous
-  ones kept while live, the rest random; stamped with the cluster key id, ignored on mismatch) and contacts them
+  ones kept while live, the rest random; stamped with the current cluster key id, ignored unless it names a key the
+  node holds) and contacts them
   at start and whenever it is isolated, so a restarted node rejoins even with dead, moved or no seeds. Reconnects
   (one sync per second, round-robin, per-address backoff 1 s → 60 s) try seeds that are not live, dead members and
   tombstones (which keep the last address for an hour). The incarnation is persisted (`DATA/incarnation`) and
@@ -473,38 +483,51 @@ never reads (the link is closed at the cap, peak RSS stays < 100 MB, forwarding 
 lines, both serve again afterwards).
 
 ### Cluster authentication
-Every member holds the same 32-byte cluster key (`k10_mesh::secure`; hand-written `no_std` crypto in
-`k10_mesh::crypto`, checked against the RFC 8439 / 5869 / 4231 and XChaCha draft vectors). HKDF-SHA256 derives a
-gossip key, a peer key and a public key id (`"auth"."key_id"` in status: equal on nodes sharing a key).
-- **Gossip**: each datagram is sealed with XChaCha20-Poly1305,
-  `'K' | 1 | nonce[24] = boot[8] (random per process) ctr[8] ts_ms[8] | ciphertext | tag[16]` (42 bytes; gossip's
-  `max_packet` shrinks by as much, so datagrams stay ≤ 1400 bytes). A receiver drops a datagram before decoding it
-  when the tag fails (another key, plaintext, forgery), when `ts` is more than `--gossip-max-skew` (300 s; 0 = off)
-  from its own clock, or when it is a replay: per sender it keeps the newest boot (a later `ts` replaces it) and a
-  64-counter sliding window. SWIM incarnations and desired-state versions are monotonic as well, so nothing can be
-  rolled back; a desired state can only come from a key holder, and the manifest and blobs it names are still checked
+Every member holds the cluster key (`k10_mesh::secure`; hand-written `no_std` crypto in `k10_mesh::crypto`, checked
+against the RFC 8439 / 5869 / 4231 and XChaCha draft vectors), and during a rotation a next key as well. HKDF-SHA256
+derives from each a gossip key, a peer key and a public key id (`"auth"."key_id"` and `"next_key_id"` in status).
+Derived keys, session keys and secret file contents are zeroized when dropped.
+- **Gossip**: each datagram is sealed with XChaCha20-Poly1305 under the current key,
+  `'K' | 2 | key id[8] | sender id[8] | nonce[24] = boot[8] (random per process) ctr[8] ts_ms[8] | ciphertext |
+  tag[16]` (58 bytes; gossip's `max_packet` shrinks by as much, so datagrams stay ≤ 1400 bytes); the header up to
+  the nonce is authenticated data. A receiver opens it with the held key the id names and drops it before decoding
+  when the key is unknown, the tag fails (another key, plaintext, forgery), `ts` is more than `--gossip-max-skew`
+  (default 300 s, at least 1 s) from its own clock, or it is a replay: per sender id it keeps the newest boot (only
+  a later `ts` replaces it) and a 64-counter sliding window, for max(newest `ts`, last receipt) + skew + 60 s, past
+  which any datagram of that sender would be stale anyway (at most 32 768 senders; the least recently heard is
+  evicted first). SWIM incarnations and desired-state versions are monotonic as well, so nothing can be rolled
+  back; a desired state can only come from a key holder, and the manifest and blobs it names are still checked
   against their SHA-256 when fetched.
-- **Peer links**: each side sends `Auth` (kind 11, in clear: version, node id, 32 fresh random bytes from
-  `getrandom`), then derives one key per direction,
-  `k(A→B) = HKDF-Expand(HKDF-Extract("k10s link v1", peer key), id_A | id_B | nonce_A | nonce_B)`. Frames then
-  travel in sealed records, `len:u32 | ChaCha20-Poly1305(frames) | tag[16]` (`len` counts the tag and is
-  authenticated), with the record counter as nonce: one record per write (the frames a loop iteration queued for that
-  peer; records close at 64 KiB, a larger frame travels alone), so crypto costs one seal per batch, not per frame.
-  The first record each side receives starts with the peer's `Hello`, whose id must match its `Auth`: opening it
-  proves the peer holds the key and agrees on both nonces (mutual challenge–response).
+- **Peer links** (`secure::Link`, the same code on metal): each side sends `Auth` (kind 11, in clear: version, node
+  id, 32 fresh random bytes, the ids of the keys it holds, current first). Both pick the same key: the smaller id
+  of the current keys the other also holds, else the smallest common id (none: the link fails). Each direction's
+  key is `HKDF-Expand(HKDF-Extract("k10s link v2", peer key), "record key" | Auth(sender) | Auth(receiver))`, so
+  tampering with either `Auth` fails the link. The frame stream then travels in sealed records,
+  `len:u32 | ChaCha20-Poly1305(stream bytes) | tag[16]` (`len` counts the tag and is authenticated, at most 64 KiB
+  of plaintext, a frame may span records), with the record counter as nonce: one record per write (the frames a
+  loop iteration queued for that peer), so crypto costs one seal per batch, not per frame. Each side's first record
+  holds only its `Hello`, whose id must match its `Auth`: opening it proves the peer holds the key and agrees on
+  both nonces (mutual challenge–response); a first frame other than `Hello` closes the link.
   Fresh nonces give fresh keys per connection; per-direction keys stop reflection; the implicit counter stops
   injection, replay, reordering and dropping — any failure closes the link (`link_auth_failures`; a dialed peer is
-  backed off). Before `Auth` the decoder accepts nothing larger than an `Auth` frame, and a link that has not
-  completed the handshake within 5 s is closed. A peer claiming this node's id, or a dialed link reaching another
-  node, is refused. Records queued during the handshake wait unsealed at the end of the write buffer (not written)
-  and are sealed in place once the peer's `Auth` arrives; afterwards records are sealed in place when written and
-  opened in place in the decoder's buffer (no extra copy). One handshake round trip is added per connection.
+  backed off). **Nothing is served before the peer authenticates**: until the peer's `Auth` arrives only ours
+  leaves; then only our `Hello` record; every other frame waits (sealed, not written) until the peer's `Hello`
+  record has opened. Unauthenticated input is bounded: before `Auth` the decoder accepts nothing larger than an
+  `Auth` frame, then nothing larger than a 256-byte first record; a link that has not completed the handshake within
+  5 s is closed, and at most 128 accepted links (16 on metal) may be in the handshake (the oldest is closed). A peer claiming this
+  node's id, or a dialed link reaching another node, is refused. One handshake round trip is added per connection.
+  A failure to get random bytes fails the link.
+- **Key rotation**, one node at a time, each step a rolling restart that keeps the cluster whole and serving:
+  1. every node: `--cluster-key-file OLD --cluster-next-key-file NEW` (seals with OLD, accepts both);
+  2. every node: `--cluster-key-file NEW --cluster-next-key-file OLD` (seals with NEW, still accepts OLD);
+  3. every node: `--cluster-key-file NEW`.
+  Neighbouring steps always share a key (links pick it, gossip is opened with either).
 - Cost: ChaCha20 runs four blocks per batch with SSE2 intrinsics on hosted x86-64 (the only `unsafe` in `k10-mesh`;
   LLVM does not vectorize the rotations itself; portable interleaved lanes on metal), fused with Poly1305; a short
   record costs one batch. Sealing per record rather than per frame keeps it to one seal/open per write: the first
   per-frame version cost ≈ 2 µs of mesh CPU per forwarded request (−8 % throughput at c = 64 on the loaded host).
   Numbers: `cargo bench -p k10-mesh --bench crypto` and the table below.
-- `--insecure-unauthenticated-cluster` keeps the old plaintext protocol (no `Auth`, no sealing) and prints a warning;
+- `--insecure-unauthenticated-cluster` runs the plaintext protocol (no `Auth`, no sealing) and prints a warning;
   it does not interoperate with keyed nodes (each side drops the other's datagrams and links).
 
 ### Cluster measurements (release, localhost, i7-7820HQ 4C/8T; other agents compiling: load 3.5–12, so numbers are noisy)

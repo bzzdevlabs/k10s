@@ -6,7 +6,7 @@ pub mod hkdf;
 pub mod poly1305;
 
 pub use aead::TAG_LEN;
-pub use hkdf::{hkdf_expand, hkdf_extract, hmac_sha256};
+pub use hkdf::{hkdf_expand, hkdf_extract, HmacSha256};
 
 /// Constant-time equality (the time depends on the lengths only).
 pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
@@ -18,6 +18,16 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
         d |= x ^ y;
     }
     core::hint::black_box(d) == 0
+}
+
+/// Overwrites `buf` with zeros so the optimizer cannot drop the writes (key material on drop).
+#[allow(unsafe_code)]
+pub fn zeroize<T: Copy + Default>(buf: &mut [T]) {
+    for x in buf.iter_mut() {
+        // SAFETY: `x` is a valid, exclusive reference.
+        unsafe { core::ptr::write_volatile(x, T::default()) };
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 }
 
 #[cfg(test)]

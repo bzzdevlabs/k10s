@@ -58,9 +58,14 @@ fn le32(b: &[u8]) -> u32 {
 }
 
 /// A ChaCha20 key and nonce (the input state minus the block counter).
-#[derive(Clone)]
 pub struct ChaCha20 {
     state: [u32; 16],
+}
+
+impl Drop for ChaCha20 {
+    fn drop(&mut self) {
+        super::zeroize(&mut self.state);
+    }
 }
 
 impl ChaCha20 {
@@ -76,16 +81,28 @@ impl ChaCha20 {
         ChaCha20 { state }
     }
 
+    /// The same key with another nonce.
+    #[inline]
+    pub fn with_nonce(&self, nonce: &[u8; 12]) -> ChaCha20 {
+        let mut state = self.state;
+        for i in 0..3 {
+            state[13 + i] = le32(&nonce[4 * i..]);
+        }
+        ChaCha20 { state }
+    }
+
     /// One 64-byte block (RFC 8439 §2.3): the reference, single-block path.
     pub fn block(&self, counter: u32) -> [u8; 64] {
         let mut s = self.state;
         s[12] = counter;
-        let init = s;
+        let mut init = s;
         rounds(&mut s);
         let mut out = [0u8; 64];
         for i in 0..16 {
             out[4 * i..4 * i + 4].copy_from_slice(&s[i].wrapping_add(init[i]).to_le_bytes());
         }
+        super::zeroize(&mut s);
+        super::zeroize(&mut init);
         out
     }
 
@@ -93,12 +110,13 @@ impl ChaCha20 {
     #[inline]
     pub fn blocks(&self, counter: u32, out: &mut [u8; BATCH]) {
         #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
-        sse2::keystream(&self.state, counter, out);
+        sse2::blocks(&self.state, counter, out);
         #[cfg(not(all(target_arch = "x86_64", target_feature = "sse2")))]
         self.blocks_portable(counter, out)
     }
 
     /// Portable [`ChaCha20::blocks`]: four interleaved scalar blocks (LLVM does not vectorize SSE2 rotations).
+    #[doc(hidden)]
     pub fn blocks_portable(&self, counter: u32, out: &mut [u8; BATCH]) {
         let s = &self.state;
         let mut i12 = [0u32; LANES];
@@ -166,86 +184,80 @@ impl ChaCha20 {
     }
 }
 
-/// SSE2 keystream, one register per state word and one lane per block: the crate's only unsafe code.
+/// SSE2 keystream: one register per state word, one lane per block.
 #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 #[allow(unsafe_code)]
 mod sse2 {
     use super::BATCH;
     use core::arch::x86_64::*;
 
-    #[inline]
-    #[target_feature(enable = "sse2")]
-    fn rotl<const L: i32, const R: i32>(x: __m128i) -> __m128i {
-        _mm_or_si128(_mm_slli_epi32::<L>(x), _mm_srli_epi32::<R>(x))
-    }
-
-    #[inline]
-    pub fn keystream(state: &[u32; 16], counter: u32, out: &mut [u8; BATCH]) {
-        // SAFETY: needs only SSE2, which this module is compiled for (every x86-64 CPU has it).
-        unsafe { blocks(state, counter, out) }
-    }
-
-    #[target_feature(enable = "sse2")]
-    fn blocks(state: &[u32; 16], counter: u32, out: &mut [u8; BATCH]) {
-        let w = |i: usize| _mm_set1_epi32(state[i] as i32);
-        let init = [
-            w(0),
-            w(1),
-            w(2),
-            w(3),
-            w(4),
-            w(5),
-            w(6),
-            w(7),
-            w(8),
-            w(9),
-            w(10),
-            w(11),
-            _mm_add_epi32(_mm_set1_epi32(counter as i32), _mm_set_epi32(3, 2, 1, 0)),
-            w(13),
-            w(14),
-            w(15),
-        ];
-        let [mut x0, mut x1, mut x2, mut x3, mut x4, mut x5, mut x6, mut x7, mut x8, mut x9, mut x10, mut x11, mut x12, mut x13, mut x14, mut x15] =
-            init;
-        macro_rules! qr {
-            ($a:ident, $b:ident, $c:ident, $d:ident) => {
-                $a = _mm_add_epi32($a, $b);
-                $d = rotl::<16, 16>(_mm_xor_si128($d, $a));
-                $c = _mm_add_epi32($c, $d);
-                $b = rotl::<12, 20>(_mm_xor_si128($b, $c));
-                $a = _mm_add_epi32($a, $b);
-                $d = rotl::<8, 24>(_mm_xor_si128($d, $a));
-                $c = _mm_add_epi32($c, $d);
-                $b = rotl::<7, 25>(_mm_xor_si128($b, $c));
-            };
-        }
-        for _ in 0..10 {
-            qr!(x0, x4, x8, x12);
-            qr!(x1, x5, x9, x13);
-            qr!(x2, x6, x10, x14);
-            qr!(x3, x7, x11, x15);
-            qr!(x0, x5, x10, x15);
-            qr!(x1, x6, x11, x12);
-            qr!(x2, x7, x8, x13);
-            qr!(x3, x4, x9, x14);
-        }
-        let x = [x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12, x13, x14, x15];
-        // Transpose each group of four words (lane j = block j) into 16 contiguous bytes of block j.
-        for k in 0..4 {
-            let a = _mm_add_epi32(x[4 * k], init[4 * k]);
-            let b = _mm_add_epi32(x[4 * k + 1], init[4 * k + 1]);
-            let c = _mm_add_epi32(x[4 * k + 2], init[4 * k + 2]);
-            let d = _mm_add_epi32(x[4 * k + 3], init[4 * k + 3]);
-            let t0 = _mm_unpacklo_epi32(a, b);
-            let t1 = _mm_unpacklo_epi32(c, d);
-            let t2 = _mm_unpackhi_epi32(a, b);
-            let t3 = _mm_unpackhi_epi32(c, d);
-            let rows = [_mm_unpacklo_epi64(t0, t1), _mm_unpackhi_epi64(t0, t1), _mm_unpacklo_epi64(t2, t3), _mm_unpackhi_epi64(t2, t3)];
-            for (j, r) in rows.into_iter().enumerate() {
-                let dst = &mut out[64 * j + 16 * k..64 * j + 16 * k + 16];
-                // SAFETY: `dst` is exactly 16 writable bytes; unaligned stores are allowed.
-                unsafe { _mm_storeu_si128(dst.as_mut_ptr() as *mut __m128i, r) };
+    pub fn blocks(state: &[u32; 16], counter: u32, out: &mut [u8; BATCH]) {
+        // SAFETY: the module is compiled for SSE2 only; each store writes exactly 16 in-bounds bytes.
+        unsafe {
+            macro_rules! rotl {
+                ($x:expr, $l:literal, $r:literal) => {{
+                    let x = $x;
+                    _mm_or_si128(_mm_slli_epi32::<$l>(x), _mm_srli_epi32::<$r>(x))
+                }};
+            }
+            let w = |i: usize| _mm_set1_epi32(state[i] as i32);
+            let init = [
+                w(0),
+                w(1),
+                w(2),
+                w(3),
+                w(4),
+                w(5),
+                w(6),
+                w(7),
+                w(8),
+                w(9),
+                w(10),
+                w(11),
+                _mm_add_epi32(_mm_set1_epi32(counter as i32), _mm_set_epi32(3, 2, 1, 0)),
+                w(13),
+                w(14),
+                w(15),
+            ];
+            let [mut x0, mut x1, mut x2, mut x3, mut x4, mut x5, mut x6, mut x7, mut x8, mut x9, mut x10, mut x11, mut x12, mut x13, mut x14, mut x15] =
+                init;
+            macro_rules! qr {
+                ($a:ident, $b:ident, $c:ident, $d:ident) => {
+                    $a = _mm_add_epi32($a, $b);
+                    $d = rotl!(_mm_xor_si128($d, $a), 16, 16);
+                    $c = _mm_add_epi32($c, $d);
+                    $b = rotl!(_mm_xor_si128($b, $c), 12, 20);
+                    $a = _mm_add_epi32($a, $b);
+                    $d = rotl!(_mm_xor_si128($d, $a), 8, 24);
+                    $c = _mm_add_epi32($c, $d);
+                    $b = rotl!(_mm_xor_si128($b, $c), 7, 25);
+                };
+            }
+            for _ in 0..10 {
+                qr!(x0, x4, x8, x12);
+                qr!(x1, x5, x9, x13);
+                qr!(x2, x6, x10, x14);
+                qr!(x3, x7, x11, x15);
+                qr!(x0, x5, x10, x15);
+                qr!(x1, x6, x11, x12);
+                qr!(x2, x7, x8, x13);
+                qr!(x3, x4, x9, x14);
+            }
+            let x = [x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12, x13, x14, x15];
+            // Transpose each group of four words (lane j = block j) into 16 contiguous bytes of block j.
+            for k in 0..4 {
+                let a = _mm_add_epi32(x[4 * k], init[4 * k]);
+                let b = _mm_add_epi32(x[4 * k + 1], init[4 * k + 1]);
+                let c = _mm_add_epi32(x[4 * k + 2], init[4 * k + 2]);
+                let d = _mm_add_epi32(x[4 * k + 3], init[4 * k + 3]);
+                let t0 = _mm_unpacklo_epi32(a, b);
+                let t1 = _mm_unpacklo_epi32(c, d);
+                let t2 = _mm_unpackhi_epi32(a, b);
+                let t3 = _mm_unpackhi_epi32(c, d);
+                let rows = [_mm_unpacklo_epi64(t0, t1), _mm_unpackhi_epi64(t0, t1), _mm_unpacklo_epi64(t2, t3), _mm_unpackhi_epi64(t2, t3)];
+                for (j, r) in rows.into_iter().enumerate() {
+                    _mm_storeu_si128(out[64 * j + 16 * k..64 * j + 16 * k + 16].as_mut_ptr() as *mut __m128i, r);
+                }
             }
         }
     }
@@ -275,6 +287,7 @@ pub fn hchacha20(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] {
         out[4 * i..4 * i + 4].copy_from_slice(&s[i].to_le_bytes());
         out[16 + 4 * i..16 + 4 * i + 4].copy_from_slice(&s[12 + i].to_le_bytes());
     }
+    super::zeroize(&mut s);
     out
 }
 

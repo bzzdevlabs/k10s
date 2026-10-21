@@ -399,6 +399,8 @@ struct Conn {
     head_method: bool,
     /// First byte of the current request (0 = idle between requests).
     started: u64,
+    /// Body hash a signed admin request committed to (checked once the body is read).
+    signed_body: Option<[u8; 32]>,
     last_io: u64,
     body_deadline: u64,
     sent_continue: bool,
@@ -1779,6 +1781,7 @@ impl Shard {
                         last_io: now,
                         body_deadline: 0,
                         sent_continue: false,
+                        signed_body: None,
                         head_scanned: 0,
                         reserved: 0,
                         wcharged: 0,
@@ -1952,10 +1955,12 @@ impl Shard {
                             Parse::Complete(h) => {
                                 // Admin access control (admin listener, `/_k10s` targets), before the body is read.
                                 if c.admin || h.target.starts_with("/_k10s") {
-                                    let fd = c.fd.raw();
-                                    if let Some((st, msg)) = crate::admin::gate(&self.node, c.admin, &h, &c.rbuf, || sys::peer_is_loopback(fd)) {
-                                        self.conn_error(idx, st, msg);
-                                        return;
+                                    match crate::admin::gate(&self.node, c.admin, &h, &c.rbuf) {
+                                        Ok(signed) => c.signed_body = signed,
+                                        Err((st, msg)) => {
+                                            self.conn_error(idx, st, &msg);
+                                            return;
+                                        }
                                     }
                                 }
                                 let c = self.conns[idx as usize].as_mut().unwrap();
@@ -2017,6 +2022,7 @@ impl Shard {
         c.state = CState::Busy;
         c.keep_alive = false;
         c.head_method = false;
+        c.signed_body = None;
         let gen = c.gen;
         bump(&self.me.stats.http_requests, 1);
         let body = format!("{msg}\n");
@@ -2049,6 +2055,13 @@ impl Shard {
         c.sent_continue = false;
         let gen = c.gen;
         bump(&self.me.stats.http_requests, 1);
+        if let Some(hash) = c.signed_body.take() {
+            if let Err(e) = k10_mesh::admin_auth::check_body(&hash, &body) {
+                c.keep_alive = false;
+                let msg = format!("{e}\n");
+                return self.respond(idx, gen, 401, msg.as_bytes(), Some("text/plain"));
+            }
+        }
         if h.target == "/_k10s" || h.target.starts_with("/_k10s/") {
             bump(&self.me.stats.admin_requests, 1);
             match crate::admin::handle(&self.node, h.method, &h.target, body) {

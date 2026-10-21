@@ -7,6 +7,7 @@
 //! the limit (413), conflicting `Content-Length`s, whitespace before `:`, obsolete line folding and malformed request
 //! lines (400), versions other than 1.0/1.1 (505), unknown expectations (417).
 
+use k10_mesh::admin_auth::AdminKey;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
@@ -47,6 +48,18 @@ impl Method {
             Method::Head | Method::Other => 4,
         }
     }
+
+    /// The name signed requests commit to.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Method::Get => "GET",
+            Method::Post => "POST",
+            Method::Put => "PUT",
+            Method::Delete => "DELETE",
+            Method::Head => "HEAD",
+            Method::Other => "OTHER",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,8 +76,6 @@ pub struct RequestHead {
     pub head_len: usize,
     /// Admin targets (`/_k10s…`) only: byte range of the `Authorization` value in the parsed buffer.
     pub auth: Option<(usize, usize)>,
-    /// Admin targets only: a `Forwarded` / `X-Forwarded-For` header is present (a proxy relays the client).
-    pub forwarded: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -188,7 +199,6 @@ pub fn parse_head(buf: &[u8], lim: &Limits) -> Parse {
     // Credentials only matter for the admin API (no extra work on service traffic).
     let admin = target.starts_with("/_k10s");
     let mut auth = None;
-    let mut forwarded = false;
     for line in lines {
         if line.is_empty() {
             break;
@@ -236,8 +246,6 @@ pub fn parse_head(buf: &[u8], lim: &Limits) -> Parse {
         } else if admin && name.eq_ignore_ascii_case(b"authorization") {
             let at = value.as_ptr() as usize - buf.as_ptr() as usize;
             auth = Some((at, at + value.len()));
-        } else if admin && (name.eq_ignore_ascii_case(b"forwarded") || name.eq_ignore_ascii_case(b"x-forwarded-for")) {
-            forwarded = true;
         } else if name.eq_ignore_ascii_case(b"expect") {
             if value.eq_ignore_ascii_case(b"100-continue") {
                 expect_continue = minor == 1;
@@ -261,7 +269,7 @@ pub fn parse_head(buf: &[u8], lim: &Limits) -> Parse {
     if content_length > limit {
         return Parse::Error(413, "request body too large");
     }
-    Parse::Complete(RequestHead { method, target, minor, content_length, keep_alive, expect_continue, head_len: end, auth, forwarded })
+    Parse::Complete(RequestHead { method, target, minor, content_length, keep_alive, expect_continue, head_len: end, auth })
 }
 
 pub fn reason(status: u16) -> &'static str {
@@ -314,7 +322,7 @@ pub fn write_head(out: &mut Vec<u8>, status: u16, body_len: usize, keep_alive: b
         out.extend_from_slice(b"\r\nconnection: close");
     }
     if status == 401 {
-        out.extend_from_slice(b"\r\nwww-authenticate: Bearer realm=\"k10s\"");
+        out.extend_from_slice(b"\r\nwww-authenticate: K10s-HMAC realm=\"k10s\"");
     }
     out.extend_from_slice(b"\r\n\r\n");
 }
@@ -356,6 +364,8 @@ pub struct Client {
     stream: TcpStream,
     buf: Vec<u8>,
     host: String,
+    /// The node process's `/_k10s/audience`, fetched before the first signed request.
+    audience: Option<String>,
 }
 
 impl Client {
@@ -368,7 +378,7 @@ impl Client {
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
         stream.set_nodelay(true)?;
-        Ok(Client { stream, buf: Vec::new(), host: addr.to_string() })
+        Ok(Client { stream, buf: Vec::new(), host: addr.to_string(), audience: None })
     }
 
     pub fn set_timeout(&self, t: Duration) {
@@ -386,16 +396,34 @@ impl Client {
     }
 
     /// [`Client::request`] with an optional admin bearer token.
-    pub fn request_with(&mut self, method: &str, path: &str, body: &[u8], token: Option<&str>) -> io::Result<ClientResponse> {
-        let mut req = Vec::with_capacity(128 + body.len());
+    /// A request signed with `key` (admin API) when given.
+    pub fn request_with(&mut self, method: &str, path: &str, body: &[u8], key: Option<&AdminKey>) -> io::Result<ClientResponse> {
+        let mut req = Vec::with_capacity(256 + body.len());
         write!(req, "{method} {path} HTTP/1.1\r\nhost: {}\r\ncontent-length: {}\r\n", self.host, body.len())?;
-        if let Some(t) = token {
-            write!(req, "authorization: Bearer {t}\r\n")?;
+        if let Some(k) = key {
+            let aud = self.audience()?;
+            let mut nonce = [0u8; 16];
+            crate::sys::fill_random(&mut nonce)?;
+            write!(req, "authorization: {}\r\n", k.authorization(&aud, method, path, crate::sys::wall_ms(), &nonce, body))?;
         }
         req.extend_from_slice(b"\r\n");
         req.extend_from_slice(body);
         self.stream.write_all(&req)?;
         self.read_response()
+    }
+
+    /// The audience signed requests on this connection are bound to (one node process).
+    pub fn audience(&mut self) -> io::Result<String> {
+        if let Some(a) = &self.audience {
+            return Ok(a.clone());
+        }
+        let r = self.request_with("GET", "/_k10s/audience", b"", None)?;
+        let a = r.text().trim().to_string();
+        if r.status != 200 || a.len() != 2 * k10_mesh::admin_auth::AUDIENCE_LEN {
+            return Err(io::Error::other(format!("GET /_k10s/audience: HTTP {}: {a}", r.status)));
+        }
+        self.audience = Some(a.clone());
+        Ok(a)
     }
 
     /// Reads one response (for pipelining tests: write several requests with `stream()`, then call this).
@@ -452,9 +480,9 @@ pub fn request(addr: &str, method: &str, path: &str, body: &[u8], timeout: Durat
     Client::connect(addr, timeout)?.request(method, path, body)
 }
 
-/// One-shot request with an optional admin bearer token.
-pub fn request_auth(addr: &str, method: &str, path: &str, body: &[u8], timeout: Duration, token: Option<&str>) -> io::Result<ClientResponse> {
-    Client::connect(addr, timeout)?.request_with(method, path, body, token)
+/// One-shot admin request, signed with `key` when given.
+pub fn request_signed(addr: &str, method: &str, path: &str, body: &[u8], timeout: Duration, key: Option<&AdminKey>) -> io::Result<ClientResponse> {
+    Client::connect(addr, timeout)?.request_with(method, path, body, key)
 }
 
 #[cfg(test)]
@@ -562,13 +590,11 @@ mod tests {
 
     #[test]
     fn admin_credentials_are_captured_for_admin_targets_only() {
-        let req = b"GET /_k10s/status HTTP/1.1\r\nAuthorization:  Bearer abc \r\nX-Forwarded-For: 1.2.3.4\r\n\r\n";
+        let req = b"GET /_k10s/status HTTP/1.1\r\nAuthorization:  K10s-HMAC t=1 \r\n\r\n";
         let h = ok(req);
         let (a, b) = h.auth.unwrap();
-        assert_eq!(&req[a..b], b"Bearer abc");
-        assert!(h.forwarded);
-        let h = ok(b"GET /echo HTTP/1.1\r\nAuthorization: Bearer abc\r\nForwarded: for=x\r\n\r\n");
-        assert_eq!((h.auth, h.forwarded), (None, false));
+        assert_eq!(&req[a..b], b"K10s-HMAC t=1");
+        assert_eq!(ok(b"GET /echo HTTP/1.1\r\nAuthorization: Bearer abc\r\n\r\n").auth, None);
     }
 
     #[test]
