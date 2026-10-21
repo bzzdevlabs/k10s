@@ -1,0 +1,11 @@
+[package]
+name = "k10-host"
+description = "The k10s host ABI shared by the hosted node and k10-metal: functions, range rules, guest clock (no_std + alloc)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Path dependencies (not `workspace = true`) so that metal's `default-features = false` build stays no_std.
+k10-ir = { path = "../k10-ir", default-features = false }
+k10-nospec = { path = "../k10-nospec" }

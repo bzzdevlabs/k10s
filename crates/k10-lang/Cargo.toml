@@ -11,3 +11,4 @@ testhost = []
 
 [dependencies]
 k10-ir = { workspace = true }
+k10-host = { workspace = true }

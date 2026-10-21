@@ -90,12 +90,14 @@ curl --data-binary @out/bundle.k10b localhost:19001/_k10s/apply
 | `k10.smp=N` | use at most N CPUs |
 | `k10.spin_us=N` | busy-poll window before halting (default 50) |
 | `k10.jit_indirect=jump\|lfence\|retpoline` | Spectre v2 hardening of JIT indirect branches |
-| `k10.timer_res_us=N` | guest clock resolution (default 100; 0 = full) |
+| `k10.timer_res_us=N` | guest clock resolution (default 100; 0 = full; any other value needs RDRAND) |
 | `k10.admin_token=TOKEN` | bearer token for `/_k10s/*` except `health`; without it the admin API answers 403 |
 | `k10.join=HOST:PORT,…` | cluster seeds; with `k10.gossip=`, `k10.rpc=`, `k10.http=` (advertised addresses) |
 | `k10.cluster_key=HEX` | the hosted nodes' `k10s keygen` key (or `k10.insecure_unauthenticated_cluster`) |
 | `k10.node_id=HEX`, `k10.probe_ms=N`, `k10.suspicion_mult=N`, `k10.mem=BYTES` | identity and tuning |
 | `k10.selftest`, `k10.exit_on_ready` | test modes |
+
+An invalid `k10.engine`, `k10.smp`, `k10.spin_us`, `k10.jit_indirect` or `k10.timer_res_us` value stops the boot.
 
 The bundle comes from QEMU's `-initrd`, else from a bundle baked in at build time (`EMBED=1`); with neither, the
 node starts empty and waits for `POST /_k10s/apply`.

@@ -370,34 +370,17 @@ pub fn store(mem: &mut [u8], e: usize, width: usize, v: i64) {
     mem[e..e + width].copy_from_slice(&v.to_le_bytes()[..width]);
 }
 
-/// Range check shared by `mem.copy`, `mem.fill` and host-call buffers: returns the masked start `a & (S-1)` if
-/// `n ≤ S` and `(a & (S-1)) + n ≤ S` (as u64), else `MemOutOfBounds`. `size = S`.
-///
-/// Not speculation-safe for `n`: code indexing with `n` must use [`check_span`].
+/// The range rule (`k10_nospec::span`): `(start, len)` or `MemOutOfBounds`; `len` is 0 behind a misprediction.
 #[inline(always)]
-pub fn check_range(a: i64, n: i64, size: u64) -> Result<usize, Trap> {
-    check_span(a, n, size).map(|(d, _)| d)
-}
-
-/// [`check_range`] returning `(start, len)`, speculation-safe: `len` is masked branch-free, so it is 0 behind a
-/// mispredicted check (Spectre v1). Use it for every host access at a guest `(ptr, len)`. `size = S`.
-#[inline(always)]
-pub fn check_span(a: i64, n: i64, size: u64) -> Result<(usize, usize), Trap> {
-    let d = (a as u64) & (size - 1);
-    let n = n as u64;
-    // d < S: `n ≤ S - d` ⇔ `n ≤ S && d + n ≤ S`.
-    let m = crate::nospec::mask_le(n, size - d);
-    if m == 0 {
-        return Err(Trap::MemOutOfBounds);
-    }
-    Ok((d as usize, (n & m) as usize))
+fn span(a: i64, n: i64, size: u64) -> Result<(usize, usize), Trap> {
+    k10_nospec::span(a, n, size).ok_or(Trap::MemOutOfBounds)
 }
 
 /// `mem.copy(dst, src, n)` (memmove semantics). `size = S`; `mem` holds at least `S` bytes.
 #[inline]
 pub fn mem_copy(mem: &mut [u8], size: u64, dst: i64, src: i64, n: i64) -> Result<(), Trap> {
-    let (d, nd) = check_span(dst, n, size)?;
-    let (s, ns) = check_span(src, n, size)?;
+    let (d, nd) = span(dst, n, size)?;
+    let (s, ns) = span(src, n, size)?;
     let n = nd & ns; // = n, or 0 behind a mispredicted check
     mem.copy_within(s..s + n, d);
     Ok(())
@@ -406,7 +389,7 @@ pub fn mem_copy(mem: &mut [u8], size: u64, dst: i64, src: i64, n: i64) -> Result
 /// `mem.fill(dst, byte, n)`. `size = S`; `mem` holds at least `S` bytes.
 #[inline]
 pub fn mem_fill(mem: &mut [u8], size: u64, dst: i64, byte: i64, n: i64) -> Result<(), Trap> {
-    let (d, n) = check_span(dst, n, size)?;
+    let (d, n) = span(dst, n, size)?;
     mem[d..d + n].fill(byte as u8);
     Ok(())
 }

@@ -69,6 +69,8 @@ pub fn run() -> bool {
     drop(s);
     let s2 = slots::alloc(16);
     check!(ok, s2.as_ref().map(|s| s.base() as usize) == base, "slots: freed slot reused from cache");
+    let conf = crate::runtime::host_conformance();
+    check!(ok, conf.is_ok(), "host ABI conformance (k10_host::conformance): {:?}", conf);
     drop(s2);
 
     // Coroutines: ping-pong.

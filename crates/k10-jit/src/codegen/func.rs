@@ -30,14 +30,14 @@
 //! * Frame accesses use compile-time offsets inside the frame checked by the entry safepoint.
 //! * Exits are host calls (through `ctx.host_fns`), the interrupt hook, helpers, returns and the trap path.
 
-use super::{indirect_call, CompileOptions, IndirectBranch, Shared};
+use super::{indirect, CompileOptions, Indirect, Shared};
 use crate::abi::*;
 use crate::cpu::CpuFeatures;
 use crate::helpers::Helper;
 use crate::x64::Reg::*;
 use crate::x64::*;
 use alloc::vec::Vec;
-use k10_ir::{sem, BlockKind, Func, FuncInfo, Module, Op};
+use k10_ir::{sem, BlockKind, Func, FuncInfo, Module, Op, MAX_CODE_BYTES};
 
 /// Maximum number of register-allocated locals per function.
 pub(crate) const MAX_PINNED: usize = 6;
@@ -51,6 +51,8 @@ const TMP: Reg = R11;
 /// Operand-stack positions below this may hold unmaterialized local references (bounds the scans on writes).
 const LOCAL_REF_DEPTH: usize = 32;
 const NONE: u16 = u16::MAX;
+// Validated `br_table`s have at most MAX_CODE_BYTES entries: sizes and indices fit an imm32.
+const _: () = assert!(MAX_CODE_BYTES < i32::MAX as usize);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 struct RegSet(u16);
@@ -999,7 +1001,7 @@ impl<'a> Fc<'a> {
         }
         let r = self.take_reg(ii, 1, RegSet::EMPTY);
         self.drop_n(1); // `r` stays valid: nothing is allocated below
-        assert!(n < i32::MAX as usize);
+        debug_assert!(n <= MAX_CODE_BYTES); // validated: every entry costs at least one encoded byte
         // Runs: maximal index ranges sharing a target; the last (default) is [k, 2^64).
         let mut runs = core::mem::take(&mut self.s.runs);
         runs.clear();
@@ -1046,21 +1048,7 @@ impl<'a> Fc<'a> {
         let table = self.a.new_label();
         self.a.lea(TMP, Mem::rip(table));
         self.a.movsxd(r, RM::M(Mem::bi(TMP, r, 2, 0)));
-        match self.sh.indirect {
-            IndirectBranch::Jump => {
-                self.a.alu(Alu::Add, r, RM::R(TMP));
-                self.a.jmp_rm(RM::R(r));
-            }
-            IndirectBranch::Lfence => {
-                self.a.alu(Alu::Add, TMP, RM::R(r));
-                self.a.lfence();
-                self.a.jmp_rm(RM::R(TMP));
-            }
-            IndirectBranch::Retpoline => {
-                self.a.alu(Alu::Add, TMP, RM::R(r));
-                self.a.jmp(self.sh.retpoline);
-            }
-        }
+        indirect(self.a, self.sh, Indirect::TableJump(r));
         self.a.align(4, 0xCC);
         self.a.bind(table);
         let base = self.a.pos();
@@ -1183,16 +1171,16 @@ impl<'a> Fc<'a> {
                 self.a.load(Size::S64, Rax, Mem::b(R14, OFF_HOST_FNS));
                 let disp = 8 * imp as i64;
                 if fits_i32(disp) {
-                    indirect_call(self.a, self.sh, RM::M(Mem::b(Rax, disp as i32)));
+                    indirect(self.a, self.sh, Indirect::Call(RM::M(Mem::b(Rax, disp as i32))));
                 } else {
                     self.a.mov_ri(TMP, disp);
-                    indirect_call(self.a, self.sh, RM::M(Mem::bi(Rax, TMP, 0, 0)));
+                    indirect(self.a, self.sh, Indirect::Call(RM::M(Mem::bi(Rax, TMP, 0, 0))));
                 }
                 self.a.alu_ri32(Alu::Cmp, RM::M(Mem::b(R14, OFF_TRAP_REQUEST)), 0);
                 self.a.jcc(Cond::Ne, self.sh.host_trap);
             }
             ExtTarget::Helper(h) => {
-                indirect_call(self.a, self.sh, RM::M(Mem::rip(self.sh.helpers[h as usize])));
+                indirect(self.a, self.sh, Indirect::Call(RM::M(Mem::rip(self.sh.helpers[h as usize]))));
                 self.a.test32(Rax, Rax);
                 self.a.jcc(Cond::Ne, self.sh.trap_common);
             }

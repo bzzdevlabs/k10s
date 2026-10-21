@@ -55,8 +55,8 @@ docs/TIR.md was **not** edited.
 * **Traps** leave memory exactly as it was at the trapping instruction (including writes a host made before
   returning an error). Bulk ops check before writing anything and never touch the 8-byte tail.
 * **Host calls** receive the argument slice in parameter order and the whole memory (`2^k + 8` bytes); for an import
-  with `results = 0` the returned value is ignored. `sem::check_range(ptr, len, S)` implements the `mem.copy`
-  range rule for host-API buffers (docs/HOSTAPI.md).
+  with `results = 0` the returned value is ignored. `k10_nospec::span(ptr, len, S)` implements the `mem.copy`
+  range rule, host-API buffers included (`k10_host`, docs/HOSTAPI.md).
 * **NaNs**: float ops are native `f64` ops, so NaN sign/payload is whatever the CPU and compiler produce — it can
   even differ between two builds of the same code (LLVM may commute `fadd`/`fmul` operands), which the spec allows.
   Differential tests must not compare NaN bits unless programs canonicalize them (the generator does).

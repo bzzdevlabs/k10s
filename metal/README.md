@@ -38,12 +38,14 @@ Kernel command line (`APPEND=` for run.sh): `k10.verbose` (boot banner, phases, 
 in-kernel tests, then exit QEMU with status 33 on success), `k10.exit_on_ready`, `k10.spin_us=N` (busy-poll window
 before halting, default 50), `k10.engine=jit|interp` (default jit), `k10.smp=N` (use at most N CPUs),
 `k10.jit_indirect=jump|lfence|retpoline` (Spectre v2 hardening of JIT indirect branches, default jump),
-`k10.timer_res_us=N` (resolution of the guests' `now_ns`/`time_ms`, default 100, 0 = full; SECURITY.md),
+`k10.timer_res_us=N` (resolution of the guests' `now_ns`/`time_ms`, default 100, 0 = full; any other value needs
+RDRAND for its key; SECURITY.md),
 `k10.admin_token=TOKEN` (bearer token of `/_k10s/*` but `health`; without it the admin API answers 403 unless
 `k10.admin_insecure`). Cluster mode: `k10.join=HOST:PORT[,…]`, `k10.gossip=`, `k10.rpc=`, `k10.http=` (advertised
 addresses), `k10.node_id=HEX`, `k10.probe_ms=N`, `k10.suspicion_mult=N`, `k10.mem=BYTES`, `k10.host_alias=IP`,
 and either `k10.cluster_key=HEX` (the hosted nodes' `k10s keygen` key) or `k10.insecure_unauthenticated_cluster`
-(required; `k10.gossip_max_skew_s=N`, default 300). Secret values are masked in the verbose boot log.
+(required; `k10.gossip_max_skew_s=N`, default 300). Secret values are masked in the verbose boot log. An invalid `k10.spin_us`, `k10.engine`, `k10.smp`,
+`k10.jit_indirect` or `k10.timer_res_us` value stops the boot.
 
 The deployment bundle comes from QEMU's `-initrd` (PVH module 0). If there is none, the kernel uses the bundle
 baked in at build time (`K10_EMBED_BUNDLE=path`). If neither exists, the node starts empty and waits for
@@ -63,7 +65,7 @@ metal/                    its own cargo workspace (own target dir); path-depends
     src/smp.rs            application processors: real-mode trampoline, INIT-SIPI-SIPI, AP entry
     src/pvh.rs            hvm_start_info: E820 map, command line, modules
     src/mem/              frame allocator (bitmap), kernel heap, instance slots
-    src/time.rs           TSC clock (kvmclock / CPUID 0x15 / PIT), wall clock, preemption flag + JIT preemption word
+    src/time.rs           TSC clock (kvmclock / CPUID 0x15 / PIT), wall clock, guest clock, preemption flag + JIT preemption word
     src/pci.rs            config space via 0xCF8/0xCFC, BAR assignment when firmware did none
     src/virtio_net.rs     legacy virtio-net driver + smoltcp Device glue
     src/net.rs            smoltcp interface, listener pool, HTTP connections, UDP + extra listeners + TCP dial
@@ -146,7 +148,9 @@ HTTP/1.1 supports keep-alive, pipelining (one request in flight per connection),
 * `/_k10s/bench/<n>/<service>/<rest>` runs `/<rest>` on `<service>` n times back to back in one task and answers
   the per-invocation CPU time (min, median, p90, mean; TSC time while the invocation runs, host calls included,
   network excluded) — how RESULTS.md compares the engines.
-* All 19 host functions of docs/HOSTAPI.md are implemented. `log` writes to the serial console and a ring buffer.
+* All 19 host functions of docs/HOSTAPI.md are implemented (`k10_host`, shared with the hosted node; the selftest
+  runs its conformance cases). `log` writes to the serial console and a ring buffer. `now_ns`/`time_ms` use the
+  kernel's `GuestClock`, keyed by RDRAND at boot.
   The KV store is per service and in memory, and survives redeploys. Every `kv_*` call runs under the node lock,
   so `kv_add` and `kv_cas` are atomic across CPUs; a write that would eat into the heap reserve traps `Host(3)`. `call` runs a local service in the caller's
   coroutine, or (cluster mode) forwards to the node it is placed on.
@@ -205,7 +209,8 @@ return -4. `fresh` services restore the post-`init` snapshot before each request
 **Engines (runtime/engine.rs, runtime/jit.rs).** A module is prepared once, at apply, into a `Prepared` shared (by
 code hash) by every service deployed with the same blob and by all of their instances; a redeploy reuses unchanged
 code. The engine is chosen at boot: the JIT unless `k10.engine=interp`. Both reach the host API through one trait,
-`HostCalls` (`call(HostFn, args, mem)` and `safepoint()`), implemented once (runtime/host.rs).
+`HostCalls` (`call(HostFn, args, mem)` and `safepoint()`), implemented once (runtime/host.rs): the invocation is a
+`k10_host::Env`, and `k10_host::dispatch`, shared with the hosted node, runs the host functions.
 * **Interpreter**: `k10_ir::Interp`, value stacks on the heap; polls the `time::PREEMPT` flag every 64 safepoints.
 * **JIT** (docs/JIT-ABI.md): `k10_jit::compile_blob` (no_std) produces a position-independent blob; it is copied
   into sealed code frames (above) with `CodeBlob::write_to` and run with `BlobMeta::invoke` *on the coroutine

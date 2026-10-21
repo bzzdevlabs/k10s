@@ -73,6 +73,14 @@ pub fn mono_ns() -> u64 {
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
 }
 
+/// Wall clock, Unix nanoseconds.
+pub fn wall_ns() -> u64 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: valid pointer to a timespec.
+    unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts) };
+    (ts.tv_sec as u64).saturating_mul(1_000_000_000).saturating_add(ts.tv_nsec as u64)
+}
+
 /// Wall clock, Unix milliseconds.
 pub fn wall_ms() -> u64 {
     let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };

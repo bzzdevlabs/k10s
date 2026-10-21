@@ -3,7 +3,13 @@
 The only way a workload interacts with anything outside its memory slot. A module imports these by name; the node
 rejects modules that import unknown names or with the wrong parameter count. Every host function returns exactly one
 i64 (`results = 1`). Pointer/length arguments are addresses in the instance's memory; ranges are masked and checked
-exactly like `mem.copy` (out-of-range → trap `MemOutOfBounds`).
+exactly like `mem.copy` (out-of-range → trap `MemOutOfBounds`). One implementation (`crates/k10-host`) serves the
+hosted node, k10-metal and `k10_lang::testhost`, with these rules:
+- Every `(ptr, len)` argument is checked whole, before anything is read, copied or called, whatever the size of the
+  host data: `input_read(dst, off, n)`, `call_resp_read`, `req_path(dst, max)`, `config`, `kv_get(.., dst, max)`
+  trap if `(dst, n)` / `(dst, max)` does not fit, even when fewer bytes would be copied (a trap must not depend on
+  data the guest does not control). Lengths are unsigned: a negative length traps.
+- `output_status` stores codes outside `100..=599` as 500; `log` keeps the first 4096 bytes of a line.
 
 ## Exports a service module provides
 - `handle()` (0 params, 0 or 1 result) — called once per request. Required.
@@ -28,6 +34,8 @@ An instance handles one request at a time (actor semantics); the runtime runs ma
 | `call` | (name_ptr, name_len, req_ptr, req_len) | Invokes service `name` (optionally `name/path`) with the given body. Suspends the caller until the response arrives. Returns the callee's status (≥ 0) or an error: -1 unknown service (or not granted), -2 unavailable, -3 timeout, -4 callee trapped |
 | `call_resp_len` | () | length of the last call's response body |
 | `call_resp_read` | (dst, off, n) | copies bytes of the last call's response; returns bytes copied |
+
+Both ranges are checked first; then a target over 64 KiB returns -2 and a body over 16 MiB traps `Host(1)`.
 
 A service may call only the services listed in its manifest `calls` allowlist (`calls = ["echo"]`; none by default,
 not even itself; `["*"]` = any, discouraged). Any other call returns -1 with an empty response, exactly like a
@@ -76,10 +84,10 @@ buffer, `kv_cas`; on 0 another instance changed it meanwhile, so read again.
 | `log` | (ptr, len) | 0; appends a line to the service log |
 | `now_ns` | () | monotonic nanoseconds, in steps of the node's guest-clock resolution (default 100 µs) |
 | `time_ms` | () | wall-clock Unix milliseconds |
+| `random` | () | 64 random bits |
+| `config` | (dst, max) | copies the service's config bytes (from the manifest); returns the full length |
 
 The guest clock is coarse on purpose (SECURITY.md, "CPU side channels"): `now_ns` advances in steps of the
 resolution (`k10s node --timer-res-us`, k10-metal `k10.timer_res_us`; 0 = full nanosecond resolution), each step
 landing at a random point of its interval, so it is monotonic and at most one step ahead of real time; `time_ms`
 gets the same treatment at 1 ms (or the resolution, if coarser).
-| `random` | () | 64 random bits |
-| `config` | (dst, max) | copies the service's config bytes (from the manifest); returns the full length |

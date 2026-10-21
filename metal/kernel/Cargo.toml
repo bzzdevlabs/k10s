@@ -15,6 +15,7 @@ bench = false
 k10-ir.workspace = true
 k10-mesh.workspace = true
 k10-jit.workspace = true
+k10-host.workspace = true
 # TCP/IP: the one external dependency (see metal/README.md for why).
 smoltcp = { version = "0.14", default-features = false, features = [
     "alloc",

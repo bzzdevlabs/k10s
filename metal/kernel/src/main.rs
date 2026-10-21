@@ -73,6 +73,18 @@ pub fn boot_ms() -> f64 {
     BOOT_NS.load(Ordering::Relaxed) as f64 / 1e6
 }
 
+/// Stops the boot on a configuration error (QEMU exits with failure).
+pub fn fatal(msg: core::fmt::Arguments) -> ! {
+    kprintln!("k10-metal: {msg}");
+    arch::qemu_exit(arch::EXIT_FAILURE);
+    arch::halt_forever()
+}
+
+/// Boot argument `name` parsed as `T` (`None` if absent); an invalid value stops the boot.
+fn knob<T: core::str::FromStr>(bi: &pvh::BootInfo, name: &str, want: &str) -> Option<T> {
+    bi.arg(name).map(|v| v.parse().unwrap_or_else(|_| fatal(format_args!("{name}={v}: want {want}"))))
+}
+
 #[no_mangle]
 extern "C" fn kmain() -> ! {
     let tsc0 = arch::rdtsc();
@@ -107,28 +119,37 @@ extern "C" fn kmain() -> ! {
     let verbose = bi.has_flag("k10.verbose") || bi.has_flag("k10.selftest");
     VERBOSE.store(verbose, Ordering::Relaxed);
     // Execution engine: the JIT unless `k10.engine=interp`. JIT frames live on the coroutine stacks.
-    let jit = bi.arg("k10.engine") != Some("interp");
+    let jit = match bi.arg("k10.engine") {
+        None | Some("jit") => true,
+        Some("interp") => false,
+        Some(v) => fatal(format_args!("k10.engine={v}: want jit|interp")),
+    };
     runtime::engine::set_jit(jit);
-    // Side-channel knobs (SECURITY.md): JIT indirect-branch form, guest clock resolution.
+    // Side-channel knobs (SECURITY.md): JIT indirect-branch form, guest clock resolution (its key needs RDRAND).
     let indirect = match bi.arg("k10.jit_indirect") {
         None => k10_jit::IndirectBranch::Jump,
-        Some(v) => k10_jit::IndirectBranch::parse(v).unwrap_or_else(|| {
-            kprintln!("k10-metal: unknown k10.jit_indirect={v} (jump|lfence|retpoline), using retpoline");
-            k10_jit::IndirectBranch::Retpoline
-        }),
+        Some(v) => k10_jit::IndirectBranch::parse(v)
+            .unwrap_or_else(|| fatal(format_args!("k10.jit_indirect={v}: want jump|lfence|retpoline"))),
     };
-    runtime::jit::set_indirect(indirect);
-    let clock_res_ns = bi
-        .arg("k10.timer_res_us")
-        .and_then(|v| v.parse::<u64>().ok())
-        .map_or(k10_ir::clock::DEFAULT_RES_NS, |us| us.saturating_mul(1000));
-    time::set_guest_clock(clock_res_ns);
+    runtime::jit::configure(indirect);
+    let clock_res_ns = knob::<u64>(&bi, "k10.timer_res_us", "microseconds")
+        .map_or(k10_host::clock::DEFAULT_RES_NS, |us| us.saturating_mul(1000));
+    let mut clock_key = [0u8; 16];
+    if clock_res_ns != 0 {
+        for half in clock_key.chunks_mut(8) {
+            let r = arch::rdrand().unwrap_or_else(|| {
+                fatal(format_args!("the guest clock key needs RDRAND (use -cpu host), or k10.timer_res_us=0"))
+            });
+            half.copy_from_slice(&r.to_le_bytes());
+        }
+    }
+    time::set_guest_clock(k10_host::clock::GuestClock::new(clock_res_ns, clock_key));
     if verbose {
         kprintln!("k10-metal: jit indirect branches: {}, guest clock resolution: {} ns", indirect.name(), clock_res_ns);
     }
     coro::set_stack_size(if jit { coro::STACK_SIZE_JIT } else { coro::STACK_SIZE_INTERP });
     // Application processors (`-smp N`; `k10.smp=N` limits how many are used).
-    let ncpu = smp::start_aps(bi.arg("k10.smp").and_then(|v| v.parse().ok()).unwrap_or(percpu::MAX_CPUS));
+    let ncpu = smp::start_aps(knob(&bi, "k10.smp", "a CPU count").unwrap_or(percpu::MAX_CPUS));
     runtime::set_cpus(ncpu);
     if verbose { kprintln!(
         "k10-metal {}: {} KiB RAM ({} KiB usable), kernel image {} KiB, TSC {} MHz ({:?}), timer: {}, NX {}, engine {}, cmdline \"{}\"",
@@ -248,7 +269,7 @@ extern "C" fn kmain() -> ! {
         arch::qemu_exit(arch::EXIT_SUCCESS);
     }
 
-    let spin_ns: u64 = bi.arg("k10.spin_us").and_then(|v| v.parse::<u64>().ok()).unwrap_or(50) * 1000;
+    let spin_ns = knob::<u64>(&bi, "k10.spin_us", "microseconds").unwrap_or(50).saturating_mul(1000);
     main_loop(&mut net, spin_ns)
 }
 

@@ -3,8 +3,19 @@
 version = 4
 
 [[package]]
+name = "k10-host"
+version = "0.1.0"
+dependencies = [
+ "k10-ir",
+ "k10-nospec",
+]
+
+[[package]]
 name = "k10-ir"
 version = "0.1.0"
+dependencies = [
+ "k10-nospec",
+]
 
 [[package]]
 name = "k10-jit"
@@ -12,6 +23,7 @@ version = "0.1.0"
 dependencies = [
  "k10-ir",
  "k10-lang",
+ "k10-nospec",
  "libc",
 ]
 
@@ -19,6 +31,7 @@ dependencies = [
 name = "k10-lang"
 version = "0.1.0"
 dependencies = [
+ "k10-host",
  "k10-ir",
 ]
 
@@ -30,11 +43,16 @@ version = "0.1.0"
 name = "k10-node"
 version = "0.1.0"
 dependencies = [
+ "k10-host",
  "k10-ir",
  "k10-jit",
  "k10-mesh",
  "libc",
 ]
+
+[[package]]
+name = "k10-nospec"
+version = "0.1.0"
 
 [[package]]
 name = "k10s"

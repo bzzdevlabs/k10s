@@ -127,11 +127,9 @@ retpoline_thunk:
 1:  mov [rsp], r11     ; 4C 89 1C 24
     ret                ; C3
 ```
-`Jump` mode emits exactly the pre-hardening call sequences. Other bounds checks need no clamp: host-function and
-helper indices are compile-time constants, `call` targets are direct, frame offsets are constants checked by the
-entry safepoint, and division-by-zero checks guard no memory access. The bulk-memory helpers clamp their lengths
-branch-free (`k10_ir::sem::check_span`). Stack checks (`cmp rax, [r14 + 16]; jb slow`) are not clamped: a
-mispredicted check lets a speculative path run a few frames below `stack_limit` (into `HOST_RESERVE`, or a guard
-page), but JIT code writes every frame slot before reading it (locals are zeroed in the prologue, parameters and
-return addresses are written by the caller, spill slots by the spill), so such a path only reads back its own
-stores and never memory it does not own (residual risk: speculative store bypass, see SECURITY.md).
+`Jump` mode adds no instruction to a call. The other checks:
+- No clamp needed: host-function and helper indices are compile-time constants, `call` targets are direct, frame
+  offsets are constants, division-by-zero checks guard no memory access; bulk-memory helpers use `k10_nospec::span`.
+- Stack checks (`cmp rax, [r14 + 16]; jb slow`) are not clamped: a mispredicted one runs a few frames below
+  `stack_limit`, but every frame slot is written before it is read, so only the frame's own stores are read back.
+- Residual risk there: speculative store bypass (SECURITY.md).

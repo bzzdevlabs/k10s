@@ -107,11 +107,10 @@ placement and peer links on top of it.
   `"code"` (prepared modules alive, code bytes, executable bytes mapped, modules prepared and time spent).
 
 ## Host API
-docs/HOSTAPI.md, implemented once in `host.rs` (`HostCtx::dispatch(HostFn, args, mem)`); the interpreter adapter is
-`k10_ir::Host`. Notes on the exact semantics chosen where the spec is silent:
-- Every `(ptr, len)` is checked with `k10_ir::sem::check_range` (like `mem.copy`; negative lengths trap
-  `MemOutOfBounds`). Copy-out functions (`input_read`, `call_resp_read`, `req_path`, `kv_get`, `config`) check the
-  whole destination `(dst, n)` and copy `min(n, available)` bytes; reads at offsets past the end return 0.
+docs/HOSTAPI.md, implemented once for both runtimes in `crates/k10-host` (`k10_host::dispatch`; `HostCtx` in
+`host.rs` is the node's `Env`); the interpreter adapter is `k10_ir::Host`. Notes:
+- Ranges, copies and limits follow docs/HOSTAPI.md (whole declared ranges checked first); reads at offsets past
+  the end return 0.
 - `req_path` returns the suffix after `/<service>`, query string included (`/echo/a?x=1` → `/a?x=1`,
   `/echo?x` → `?x`, `/echo` → empty). Calls to `name/rest` get `/rest`.
 - `output_status` values outside 100..=599 are stored as 500. The optional result of `handle()` is ignored.
@@ -121,9 +120,10 @@ docs/HOSTAPI.md, implemented once in `host.rs` (`HostCtx::dispatch(HostFn, args,
   per-service quota exhausted, `Host(4)` `kv_add` on a value that is not 8 bytes, `Host(0x7FFF)` internal error
   (host panic).
 - `random`: per-invocation wyrand stream seeded from a per-shard generator (seeded by `getrandom`). `now_ns` is
-  `CLOCK_MONOTONIC`, `time_ms` `CLOCK_REALTIME`, both coarsened with fuzzy edges (`clock.rs`, `k10_ir::clock`) to
-  `--timer-res-us` (default 100; 0 = full resolution). Every guest `(ptr, len)`, offset and index is clamped
-  branch-free after its check (`check_span`, `k10_ir::nospec`; SECURITY.md, "CPU side channels").
+  `CLOCK_MONOTONIC`, `time_ms` `CLOCK_REALTIME`, both coarsened by the node's `GuestClock` (`NodeShared::clock`,
+  `--timer-res-us`, default 100, 0 = full resolution; SipHash key from `getrandom`, the node does not start without
+  one; per-shard interval cache). Every guest `(ptr, len)`, offset and index is clamped branch-free after its check
+  (`k10_nospec`; SECURITY.md, "CPU side channels").
 
 ## Service calls
 `call` suspends the caller's fiber; the shard submits the callee like any request (method POST). Results: callee

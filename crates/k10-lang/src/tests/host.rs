@@ -189,7 +189,7 @@ fn deployment_checks() {
     let m = compile_ok("import fn bogus() -> i64; export fn handle() { bogus(); }");
     assert!(h.add("s", m).unwrap_err().contains("unknown host function `bogus`"));
     let m = compile_ok("import fn log(p: *u8) -> i64; export fn handle() { log(null); }");
-    assert!(h.add("s", m).unwrap_err().contains("wrong signature"));
+    assert!(h.add("s", m).unwrap_err().contains("takes 2 parameters"));
     let m = compile_ok("export fn other() {}");
     assert!(h.add("s", m).unwrap_err().contains("does not export `handle`"));
 }

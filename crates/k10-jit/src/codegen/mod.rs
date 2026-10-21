@@ -40,9 +40,7 @@ impl Default for CompileOptions {
     }
 }
 
-/// Form of every indirect branch the JIT emits (jump tables, host/helper calls, interrupt hook, entry trampoline).
-/// Only prediction differs: plain branches use the branch target buffer, which other workloads on the core can
-/// train (Spectre v2). Sequences in docs/JIT-ABI.md.
+/// Form of every indirect branch the JIT emits (Spectre v2 hardening; sequences in docs/JIT-ABI.md).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum IndirectBranch {
     /// Plain `jmp reg` / `call [mem]` (default, no overhead).
@@ -126,28 +124,41 @@ pub(crate) struct Shared {
     pub retpoline: Label,
 }
 
-/// Indirect `call target` in the configured [`IndirectBranch`] form (clobbers `r11` except in `Jump` mode).
-pub(crate) fn indirect_call(a: &mut Asm, sh: &Shared, target: RM) {
-    match sh.indirect {
-        IndirectBranch::Jump => a.call_rm(target),
-        IndirectBranch::Lfence => {
-            load_r11(a, target);
-            a.lfence();
-            a.call_rm(RM::R(Reg::R11));
-        }
-        IndirectBranch::Retpoline => {
-            load_r11(a, target);
-            a.call(sh.retpoline);
-        }
-    }
+/// An indirect transfer: a call through a register (never `r11`) or memory, or a jump-table jump to `r + r11`.
+#[derive(Clone, Copy)]
+pub(crate) enum Indirect {
+    Call(RM),
+    TableJump(Reg),
 }
 
-/// `r11 ← target`.
-pub(crate) fn load_r11(a: &mut Asm, target: RM) {
-    match target {
-        RM::R(Reg::R11) => {}
-        RM::R(r) => a.mov_rr(Reg::R11, r),
-        RM::M(m) => a.load(Size::S64, Reg::R11, m),
+/// Emits `x` in the configured [`IndirectBranch`] form; the hardened forms go through `r11`.
+pub(crate) fn indirect(a: &mut Asm, sh: &Shared, x: Indirect) {
+    use Reg::R11;
+    match (sh.indirect, x) {
+        (IndirectBranch::Jump, Indirect::Call(t)) => a.call_rm(t),
+        (IndirectBranch::Jump, Indirect::TableJump(r)) => {
+            a.alu(Alu::Add, r, RM::R(R11));
+            a.jmp_rm(RM::R(r));
+        }
+        (mode, x) => {
+            match x {
+                Indirect::Call(RM::R(r)) => a.mov_rr(R11, r),
+                Indirect::Call(RM::M(m)) => a.load(Size::S64, R11, m),
+                Indirect::TableJump(r) => a.alu(Alu::Add, R11, RM::R(r)),
+            }
+            match (mode, x) {
+                (IndirectBranch::Retpoline, Indirect::Call(_)) => a.call(sh.retpoline),
+                (IndirectBranch::Retpoline, Indirect::TableJump(_)) => a.jmp(sh.retpoline),
+                (_, Indirect::Call(_)) => {
+                    a.lfence();
+                    a.call_rm(RM::R(R11));
+                }
+                (_, Indirect::TableJump(_)) => {
+                    a.lfence();
+                    a.jmp_rm(RM::R(R11));
+                }
+            }
+        }
     }
 }
 
@@ -244,7 +255,7 @@ fn emit_prelude(a: &mut Asm, sh: &Shared) -> u32 {
     a.alu_ri(Alu::Sub, Rcx.into(), 1);
     a.jcc(Cond::Ne, copy);
     a.bind(call);
-    indirect_call(a, sh, Rsi.into());
+    indirect(a, sh, Indirect::Call(Rsi.into()));
     // Normal return: rax = result.
     a.load(Size::S64, Rsp, Mem::b(R14, OFF_SAVED_RSP));
     a.load(Size::S64, Rcx, Mem::b(Rsp, 8));
@@ -288,7 +299,7 @@ fn emit_prelude(a: &mut Asm, sh: &Shared) -> u32 {
     }
     a.alu_ri(Alu::Sub, Rsp.into(), 8); // 9 pushes + 8 = 80 bytes: aligned
     a.mov_rr(Rdi, R14);
-    indirect_call(a, sh, Mem::b(R14, OFF_INTERRUPT).into()); // r11 saved above
+    indirect(a, sh, Indirect::Call(Mem::b(R14, OFF_INTERRUPT).into())); // r11 saved above
     a.test32(Rax, Rax); // u32 result: only eax is defined
     a.jcc(Cond::Ne, sh.trap_common);
     a.alu_ri(Alu::Add, Rsp.into(), 8);

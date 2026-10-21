@@ -18,6 +18,7 @@ license = "Apache-2.0"
 k10-ir = { path = "../crates/k10-ir", default-features = false }
 k10-mesh = { path = "../crates/k10-mesh", default-features = false }
 k10-jit = { path = "../crates/k10-jit", default-features = false }
+k10-host = { path = "../crates/k10-host" }
 
 [profile.dev]
 panic = "abort"

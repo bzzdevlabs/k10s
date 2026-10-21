@@ -33,8 +33,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-pub const MAX_KEY: usize = 1024;
-pub const MAX_VALUE: usize = 1 << 20;
+pub use k10_host::{MAX_KEY, MAX_VALUE};
 const OP_PUT: u8 = 1;
 const OP_DEL: u8 = 2;
 const HDR: usize = 8;

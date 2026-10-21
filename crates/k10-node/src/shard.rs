@@ -600,6 +600,7 @@ unsafe fn run_job(f: *mut Fiber, job: &Job) -> Outcome {
                     rng,
                     sched: &mut sched,
                     preempt,
+                    clock: &(*(*f).node).clock,
                 };
                 let r = svc.code.invoke(scratch, inst.slot.tir_mem(), log2, &mut ctx, init);
                 rng = ctx.rng;
@@ -639,6 +640,7 @@ unsafe fn run_job(f: *mut Fiber, job: &Job) -> Outcome {
         rng,
         sched: &mut sched,
         preempt,
+        clock: &(*(*f).node).clock,
     };
     match svc.code.invoke(scratch, inst.slot.tir_mem(), log2, &mut ctx, svc.handle_fn) {
         Ok(_) => Outcome::Ok { status: ctx.status, body: std::mem::take(&mut ctx.output) },

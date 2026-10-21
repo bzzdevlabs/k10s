@@ -349,6 +349,7 @@ mod tests {
             rng: 1,
             sched,
             preempt: &own,
+            clock: &k10_host::clock::GuestClock::new(0, [0; 16]),
         };
         let f = code.export("handle").unwrap();
         let r = std::thread::scope(|s| {
