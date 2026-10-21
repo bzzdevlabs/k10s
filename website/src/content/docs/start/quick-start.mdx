@@ -18,7 +18,7 @@ You need the `k10s` binary ([Installation](/k10s/start/installation/)) and a che
    	title="node"
    	session={`
    $ k10s node --http 127.0.0.1:8080 --data /tmp/k10s-data
-   «dim:k10s: sandbox on: no_new_privs, inherited fds closed; landlock ABI 2: files = data dir rw + /proc/self ro, tcp bind not restricted (needs ABI 4 / Linux 6.7, and fixed ports); seccomp: 83 syscalls allowed on every thread, anything else kills the process»
+   «dim:k10s: sandbox mode=on user=1000 caps=none landlock=abi2 seccomp=kill jit_dump=-»
    «dim:k10s: admin API on the ingress: loopback clients only (health and metrics open)»
    k10s 0.1.0: node \`laptop\` listening on «teal:http://127.0.0.1:8080» (8 shards, backend jit, data /tmp/k10s-data)
    `}

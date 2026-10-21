@@ -27,7 +27,7 @@ Runs a node.
 | `--pin` | off | pin shards to cores |
 | `--timer-res-us N` | `100` | guest clock resolution; `0` = full (trusted tenants only) |
 | `--jit-indirect jump\|lfence\|retpoline` | `jump` | Spectre v2 hardening of JIT indirect branches |
-| `--sandbox on\|log\|off` | `on`, or `$K10S_SANDBOX` | process sandbox (Landlock + seccomp) |
+| `--sandbox on\|seccomp-only\|log\|off` | `on`, or `$K10S_SANDBOX` | process sandbox (Landlock + seccomp) |
 | `--user USER[:GROUP]` | | started as root: switch to USER once the listeners are bound |
 
 **Admin API** (`/_k10s/`; `health` and `metrics` are always open):

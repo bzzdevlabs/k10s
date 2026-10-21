@@ -92,7 +92,8 @@ fn node_apply_status_logs_and_restart() {
     let mut child = spawn();
     wait_up();
     assert_eq!(http::request(&addr, "GET", "/kv/k", b"", Duration::from_secs(5)).unwrap().text(), "v");
-    unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    // A hangup stops it gracefully too.
+    unsafe { libc::kill(child.id() as i32, libc::SIGHUP) };
     assert!(child.wait().unwrap().success());
     let _ = std::fs::remove_dir_all(&dir);
 }

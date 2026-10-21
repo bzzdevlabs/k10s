@@ -41,27 +41,34 @@ bulk-memory helpers, the host API and the runtime's `unsafe` code. Two further l
   become a load-time check (decode with an in-tree length decoder, verify, then seal the code) at the cost of a
   disassembler in the TCB-adjacent path.
 
-**2. Process sandbox of `k10s node` (Linux, `--sandbox on|log|off`, default `on`, or `$K10S_SANDBOX`).**
-- At start: inherited descriptors ≥ 3 are closed, `PR_SET_NO_NEW_PRIVS` is set.
-- Landlock (best effort, logged when the kernel lacks it), applied before the first thread: files are limited to the
-  data directory (read-write, no execution, no special files) and a few read-only `/proc`/`/sys` entries; nothing can
-  be executed. With Landlock ABI ≥ 4 (Linux 6.7) TCP `bind` is limited to the node's own ports (when they are fixed),
-  with ABI ≥ 6 (Linux 6.12) signals and abstract UNIX sockets are scoped to the node.
-- seccomp-bpf on every thread (`SECCOMP_FILTER_FLAG_TSYNC`) once the node runs: an allowlist of 83 syscalls
-  (`SYSCALLS` in `crates/k10-node/src/sandbox.rs`); anything else kills the process (`SIGSYS`). Notably denied:
-  `execve`, `fork`/non-thread `clone`, namespaces, `ptrace`, `process_vm_*`, `mount`, `bpf`, `perf_event_open`,
-  `io_uring`, `keyctl`, modules, `personality`, `bind`/`listen` (no new ports), non-IP sockets, executable `mmap`
-  and writable+executable `mprotect`, x32 and i386 syscalls. Hot-path syscalls take no argument checks, so the
-  kernel's seccomp action cache serves them (no measurable cost; see docs/NODE.md).
-- `log` mode is a dry run: no Landlock, seccomp violations are logged by the kernel (`journalctl -k | grep
-  type=1326`) instead of killing. `off` disables everything.
+**2. Process sandbox of `k10s node` (Linux x86-64, `--sandbox on|seccomp-only|log|off`, default `on`, or
+`$K10S_SANDBOX`).**
+- At start: inherited descriptors ≥ 3 are closed, `PR_SET_NO_NEW_PRIVS` is set. The listeners are bound and the
+  secrets (admin token, cluster key) read; then, still single-threaded: `--user` (groups, gid, uid; root without
+  `--user` is refused), every capability dropped and checked, Landlock, seccomp. Only then are the stores opened, the
+  last bundle reloaded and the threads started, all inside the sandbox.
+- Landlock (required with `on`: the node refuses to start without it; `seccomp-only` runs without it): files are
+  limited to the data directory (read-write, no execution, no special files or symlinks) and a few read-only `/sys`,
+  `/proc/sys` entries and the binary; `/proc/self` is not reachable (its statistics files are opened before);
+  nothing can be executed. With ABI ≥ 6 (Linux 6.12) signals and abstract UNIX sockets are scoped to the node.
+- seccomp-bpf on the single thread, inherited by every thread created afterwards: an allowlist of 95 syscalls
+  (`SYSCALLS` in `crates/k10-node/src/sandbox/seccomp.rs`); anything else kills the process (`SIGSYS`). Notably
+  denied: `execve`, `fork`/non-thread `clone`, namespaces, `ptrace`, `process_vm_*`, `mount`, `bpf`,
+  `perf_event_open`, `io_uring`, `keyctl`, modules, `personality`, `bind`/`listen` (no new ports), sockets other
+  than IPv4/IPv6 stream or datagram, signals to other processes, executable `mmap` and writable+executable
+  `mprotect`, x32 and i386 syscalls. Hot-path syscalls take no argument checks, so the kernel's seccomp action cache
+  serves them (no measurable cost; see docs/NODE.md).
+- `log` mode helps find a missing syscall: no Landlock, calls the filter would kill are logged by the kernel
+  (`journalctl -k | grep type=1326`) and run, while its errno rules (`clone3`, other socket types, `prctl`, `ioctl`,
+  …) apply as in `on`. `off` disables Landlock and seccomp (`--user` still applies).
 - Limits: W^X is checked per `mmap`/`mprotect` call (a JIT needs `mprotect(PROT_EXEC)`, so RW→RX of one mapping and
-  memfd double mapping stay possible); outbound TCP `connect` is not restricted (peers' ports are not known in
-  advance); on kernels booted with `spec_store_bypass_disable=seccomp` the filter also turns on SSBD for the node.
+  memfd double mapping stay possible); TCP `connect` is not restricted (peers' ports are not known in advance);
+  `tkill(SIGABRT)` (musl `abort()`) cannot be limited to the node's own threads; on kernels booted with
+  `spec_store_bypass_disable=seccomp` the filter also turns on SSBD for the node.
 
 **Running a node.** Start it as an unprivileged user, or as root with `--user k10s` (listeners are bound first, then
-real/effective/saved ids drop to the user; the data directory must belong to that user). A systemd unit adds its own
-layer:
+real/effective/saved ids drop to the user; the data directory must belong to that user, a missing one is created for
+it). A systemd unit adds its own layer:
 ```ini
 [Service]
 ExecStart=/usr/local/bin/k10s node --data /var/lib/k10s --http 0.0.0.0:8080

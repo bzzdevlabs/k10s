@@ -232,31 +232,33 @@ status ≥ 0, −1 unknown service, −2 unavailable (crash backoff with nothing
   then bounded at ~2× that by compaction). Deleting entries frees room.
 - `log`: per-service ring (1000 lines / 256 KiB, lines ≤ 4 KiB), optionally echoed to stderr (`--log-stderr`).
 
-## Process sandbox (`k10s node` only; `crates/k10-node/src/sandbox.rs`, SECURITY.md "Defense in depth")
-- `--sandbox on|log|off` (default `on`, or `$K10S_SANDBOX`); `--user USER[:GROUP]` (started as root).
-- Order: close inherited fds ≥ 3 and `PR_SET_NO_NEW_PRIVS` → with `--user`: groups and fs uid/gid of the user (files
-  are created as the user; the data directory must belong to it) → Landlock on the main thread before any thread
-  exists (inherited by all threads): data dir rw, `/proc/self`, `/proc/sys/vm/{max_map_count,overcommit_memory}`,
-  `/sys/devices/system/cpu` and the binary read-only, `K10_JIT_DUMP` rw if set; TCP `bind` limited to the HTTP, admin and
-  peer ports with ABI ≥ 4 → listeners bound, threads started → `setresgid`/`setresuid` to the user (all threads) →
-  seccomp allowlist installed with `SECCOMP_FILTER_FLAG_TSYNC`; threads created later inherit it. One log line
-  states what was applied (Landlock ABI or why not, syscall count, user).
+## Process sandbox (`k10s node` only; `crates/k10-node/src/sandbox/`, SECURITY.md "Defense in depth")
+- `--sandbox on|seccomp-only|log|off` (default `on`, or `$K10S_SANDBOX`); `--user USER[:GROUP]` (started as root).
+- Two-phase start: close inherited fds ≥ 3 and `PR_SET_NO_NEW_PRIVS`, read the secrets, bind the HTTP, admin, gossip
+  and rpc sockets (`Node::bind`, `ClusterSetup::bind`) and open `/proc/self/{smaps_rollup,statm}` → single-threaded
+  (`sandbox::enter`): with `--user` the data directory is created for or must belong to the user, then
+  `setgroups`/`setresgid`/`setresuid` (root without `--user` is refused) → every capability dropped, checked empty →
+  Landlock (`on` only; a kernel without it is an error): data dir and `K10_JIT_DUMP` rw, `/sys/devices/system/cpu`,
+  `/proc/sys/vm/overcommit_memory` and the binary read-only → seccomp allowlist → phase 2 inside the sandbox
+  (`ClusterBound::open`, `Bound::start`): cluster store, node id and incarnation, KV store, bundle reload (JIT),
+  threads, which inherit the filter. One log line states what was applied (mode, user, Landlock ABI, seccomp action).
 - The allowlist is argument-independent for every hot-path syscall (`epoll_wait`, `read`/`write`/`writev`,
   `accept4`, `recvfrom`/`sendto`, `futex`, `madvise`, `clock_gettime`, …), so Linux ≥ 5.11 serves them from the
   seccomp action cache without running the filter. Argument checks only on rare calls: `mmap` (no `PROT_EXEC`),
   `mprotect` (not W+X), `clone` (threads only, no namespaces; `clone3` → `ENOSYS` so glibc falls back to `clone`),
-  `socket` (IPv4/IPv6), `prctl`, `ioctl`, `tgkill` (own pid), `prlimit64` (read only), `sched_setaffinity` (self).
+  `socket` (IPv4/IPv6 stream/datagram), `prctl`, `ioctl`, `tgkill` (own pid), `tkill` (`SIGABRT`), `prlimit64` (read
+  only), `sched_setaffinity` (self).
 - Library users (`Node::start` in tests, `k10s run`, benchmarks) get no sandbox.
 - Cost (i7-7820HQ, Linux 6.1 with IBRS: a bare syscall ≈ 600 ns; shared machine, load 10–35, so medians of 8
   interleaved runs): `getpid` best-of-20 +0–30 ns with the filter, +80 ns when the action cache is defeated
-  (`sandbox::tests::syscall_overhead`); node CPU per request unchanged, on/baseline 1.01 echo, 0.99 chain, 1.00
+  (`sandbox::tests::syscall_overhead`); node CPU per request with/without the sandbox 1.01 echo, 0.99 chain, 1.00
   compute at 64 conns (17.8 / 19.1 / 1404 µs); rps and p50 of echo, chain, compute (1 and 64 conns), a forwarded
-  3-node request and apply → first answer (18.3 vs 19.2 ms) all within run-to-run noise of the pre-sandbox binary. After the filter a
-  request costs ≈ 1 `read`, 1 `writev`, 0.24 `epoll_wait` (+1 `madvise` per `fresh` request); `mmap`/`mprotect`
-  happen only on instance, fiber or thread creation (≈ 1 per 7000 requests).
+  3-node request and apply → first answer (18.3 vs 19.2 ms) all within run-to-run noise of a binary without the
+  sandbox. After the filter a request costs ≈ 1 `read`, 1 `writev`, 0.24 `epoll_wait` (+1 `madvise` per `fresh`
+  request); `mmap`/`mprotect` happen only on instance, fiber or thread creation (≈ 1 per 7000 requests).
 
 ## Shutdown
-SIGINT/SIGTERM (`k10s node`) or `Node::shutdown`: shards stop accepting, close idle connections and answer in-flight
+SIGINT/SIGTERM/SIGHUP (`k10s node`) or `Node::shutdown`: shards stop accepting, close idle connections and answer in-flight
 requests with `connection: close` (up to `drain_timeout`, 5 s, the ticker still preempting), then the ticker is
 joined (it holds pointers into shard-owned fibers), shards exit, and the KV store is flushed and synced.
 

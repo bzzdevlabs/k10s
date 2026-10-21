@@ -33,7 +33,7 @@ pub mod snapshot;
 pub mod sys;
 mod ticker;
 
-pub use node::{ApplyReport, BackendKind, Node, NodeConfig, NodeShared, SnapshotPolicy};
+pub use node::{ApplyReport, BackendKind, Bound, Node, NodeConfig, NodeShared, SnapshotPolicy};
 pub use shard::CallResult;
 /// `NodeConfig::jit_indirect` (re-exported for the CLI).
 pub use k10_jit::IndirectBranch;
