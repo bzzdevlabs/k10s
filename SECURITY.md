@@ -125,35 +125,39 @@ chose: the textbook setting for Spectre. k10s closes the cheap gaps; a shared ad
 boundary, so **one node (machine or VM) per mutually distrustful tenant remains the isolation boundary** for
 side channels.
 
-Mitigated by default (cost: JIT code without `br_table` is byte-for-byte unchanged; a host function gains a few
-register instructions, the clock functions ~2-3 ns per call):
+Mitigated by default (cost: a few register instructions per host function and per `br_table`; measurements in
+bench/README.md):
 - **Guest memory accesses** (Spectre v1): every address is masked by data flow (`base + ((addr + off) & (S - 1))`),
   not by a bounds-check branch, so a mispredicted branch cannot steer a guest load outside its slot.
 - **`br_table`** (Spectre v1): small tables (≤ 8 target runs) compile to compare trees — no table load, no indirect
   jump; jump tables clamp the index with `cmp` + `cmovae` before the table load, so a mispredicted path can neither
   read past the table nor jump to a target derived from foreign memory (sequences in docs/JIT-ABI.md).
-- **Host functions and bulk-memory helpers** (Spectre v1), hosted node and k10-metal: every guest `(ptr, len)` goes
-  through `k10_ir::sem::check_span`, which also zeroes the length with a branch-free mask (`cmp`/`sbb`) behind a
-  mispredicted check; offsets and lengths into host buffers (request body, path, config, call response, KV values)
-  and into fixed host arrays (the KV key buffer) are clamped with `cmp`/`cmova` (`k10_ir::nospec`, inline assembly
-  the optimizer cannot turn back into branches — checked in the release assembly); the interpreter's `br_table`
-  likewise. Host-function, helper and import indices are compile-time constants: there is no guest-indexed host
-  table and no guest-visible handle.
-- **Timer**: `now_ns` and `time_ms` are coarsened to **100 µs** (`time_ms`: 1 ms) with keyed random edges ("fuzzy
-  time", as browsers do for `performance.now()`), and stay monotonic. 100 µs is Chrome's resolution for pages that
-  are not cross-origin isolated: about a thousand cache misses, so a single probe cannot be timed, and the randomized
-  edges defeat clock-edge amplification (spinning until the value changes, then counting iterations), while
-  timeouts, rate limits and latency logging keep useful precision. Trusted single-tenant nodes restore full
-  resolution with `k10s node --timer-res-us 0` (k10-metal: `k10.timer_res_us=0`); any other value sets the step.
+- **Host functions, bulk-memory helpers, the interpreter** (Spectre v1), hosted node and k10-metal alike (one
+  implementation, `k10_host`): every guest `(ptr, len)` goes through `k10_nospec::span`, whose length is zeroed by
+  a branch-free mask behind a mispredicted check; offsets and lengths into host buffers (request body, path, config,
+  call response, KV values) and fixed host arrays (the KV key buffer) are clamped with `k10_nospec::min`. The clamps
+  are inline assembly the optimizer can neither fold nor turn into branches: `cmp`/`sbb`, `cmp`/`cmova` on x86-64,
+  `cmp`/`csel` + `csdb` on aarch64; on other architectures (`k10_nospec::GUARANTEED = false`) they are plain code
+  without that guarantee. Host-function, helper and import indices are compile-time constants: there is no
+  guest-indexed host table and no guest-visible handle.
+- **Timer**: `now_ns` and `time_ms` move in steps of **100 µs** (`time_ms`: 1 ms) whose edges fall at a
+  SipHash-keyed point of each interval (key from `getrandom`, k10-metal: RDRAND, required), monotonic and at most one
+  step ahead. 100 µs is Chrome's resolution for pages without cross-origin isolation, about a thousand cache misses:
+  one probe cannot be timed. The fuzzy edges raise the cost of clock-edge amplification (spinning to an edge, then
+  counting iterations) — each interval adds noise of about `res/√6` — but averaging many measurements still works.
+  Trusted single-tenant nodes restore full resolution with `k10s node --timer-res-us 0` (k10-metal:
+  `k10.timer_res_us=0`); any other value sets the step.
 
-Opt-in (measured on an i7-7820HQ: a host call goes from ~3-6 ns to ~8-12 ns with `lfence`, ~13-15 ns with a
-retpoline; a jump-table dispatch from ~5 ns to ~8 ns / ~16 ns when predictable):
+Opt-in:
 - **Spectre v2 / branch target injection on generated code**: by default a workload can train the branch target
   buffer so that another workload's indirect branch on the same core speculatively runs a chosen target with the
   victim's registers. `k10s node --jit-indirect retpoline` (k10-metal: `k10.jit_indirect=retpoline`) routes every
   indirect branch the JIT emits (jump tables, host-function and helper calls, the interrupt hook, the entry
-  trampoline) through a retpoline; `lfence` serializes before each of them instead (cheaper, but it narrows the
-  window rather than closing it). See docs/JIT-ABI.md for the sequences.
+  trampoline) through a retpoline; `lfence` serializes before each of them instead (cheaper, narrows the window
+  rather than closing it). Caveats: retpolines do not stop return-stack attacks on AMD Zen 1/2 (Branch Type
+  Confusion, Retbleed) or Zen 3/4 (SRSO, "Inception"); AMD-SB-1036 found `lfence; jmp` insufficient on some AMD
+  cores; a retpoline's `ret` to a non-call site is incompatible with user-space CET shadow stacks. Sequences in
+  docs/JIT-ABI.md.
 
 Not mitigated (known gaps):
 - **Spectre v2 and branch history injection in the runtime itself**: the node and the metal kernel are ordinary Rust

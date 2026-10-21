@@ -1542,3 +1542,29 @@ fn status_json() -> String {
     s.push_str("}\n");
     s
 }
+
+/// Runs the host ABI conformance cases (`k10_host::conformance`, also run on the hosted node) on this kernel's `Env`.
+pub fn host_conformance() -> Result<(), String> {
+    use k10_host::conformance as c;
+    let mut mb = k10_ir::ModuleBuilder::new();
+    let handle = mb.func(0, 0, |_| {});
+    mb.export("handle", handle);
+    let prep = Arc::new(engine::prepare(mb.build(), 0)?);
+    let spec = ServiceSpec {
+        name: "selftest-host-abi".into(),
+        code_hash: [0; 32],
+        replicas: 1,
+        mem_log2: 17,
+        max_instances: 1,
+        cpu_ms: 1000,
+        fresh: false,
+        config: c::CONFIG.to_vec(),
+        calls: Default::default(),
+    };
+    let svc = Arc::new(Service::new(&spec, prep, Placement::Local));
+    let req = ReqData { method: c::METHOD, path: c::PATH.to_vec(), body: c::BODY.to_vec() };
+    let mut resp = RespData { status: 200, body: Vec::new() };
+    let cpu = Cpu::default();
+    let mut lvl = Level { svc: &svc, req: &req, resp: &mut resp, last_call: Vec::new(), depth: 0, cpu: &cpu };
+    c::run(&mut lvl)
+}

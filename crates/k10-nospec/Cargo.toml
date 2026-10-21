@@ -1,0 +1,8 @@
+[package]
+name = "k10-nospec"
+description = "Branch-free bounds clamps for code indexing with guest values (Spectre v1); no_std, no dependencies"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

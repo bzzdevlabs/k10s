@@ -10,13 +10,14 @@
 //! assert_eq!((r.status, r.text().as_str()), (200, "hi"));
 //! ```
 //!
-//! Semantics follow the node runtime: an instance's memory persists across requests (unless the service is
-//! `fresh`, in which case every request starts from the snapshot taken after `init`); a trap answers 500 (calls:
-//! -4) and discards the instance; service-to-service calls are POST requests dispatched synchronously to the
-//! callee's instance (a call to a service that is already running — e.g. itself — returns -2, unavailable).
-//! `now_ns`, `time_ms` and `random` are deterministic.
+//! Semantics follow the node runtime (the host functions are `k10_host::dispatch`): an instance's memory persists
+//! across requests (unless the service is `fresh`, in which case every request starts from the snapshot taken after
+//! `init`); a trap answers 500 (calls: -4) and discards the instance; service-to-service calls are POST requests
+//! dispatched synchronously to the callee's instance (a call to a service that is already running — e.g. itself —
+//! returns -2, unavailable). `now_ns`, `time_ms` and `random` are deterministic.
 
-use k10_ir::{sem, Host, Interp, Module, Trap};
+use k10_host::{Env, HostFn, KvRefused, CALL_TRAPPED, CALL_UNAVAILABLE, CALL_UNKNOWN};
+use k10_ir::{Host, Interp, Module, Trap};
 use std::collections::{BTreeMap, HashMap};
 
 /// `req_method()` values.
@@ -24,83 +25,6 @@ pub const GET: i64 = 0;
 pub const POST: i64 = 1;
 pub const PUT: i64 = 2;
 pub const DELETE: i64 = 3;
-
-/// Response body limit (`output_write` beyond it traps with `Host(1)`).
-pub const MAX_BODY: usize = 16 << 20;
-pub const MAX_KEY: usize = 1024;
-pub const MAX_VALUE: usize = 1 << 20;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HostFn {
-    InputLen,
-    InputRead,
-    ReqPath,
-    ReqMethod,
-    OutputWrite,
-    OutputStatus,
-    Call,
-    CallRespLen,
-    CallRespRead,
-    KvGet,
-    KvPut,
-    KvDel,
-    KvAdd,
-    KvCas,
-    Log,
-    NowNs,
-    TimeMs,
-    Random,
-    Config,
-}
-
-/// Name and parameter count of every host function.
-pub const HOST_FUNCTIONS: &[(&str, u8)] = &[
-    ("input_len", 0),
-    ("input_read", 3),
-    ("req_path", 2),
-    ("req_method", 0),
-    ("output_write", 2),
-    ("output_status", 1),
-    ("call", 4),
-    ("call_resp_len", 0),
-    ("call_resp_read", 3),
-    ("kv_get", 4),
-    ("kv_put", 4),
-    ("kv_del", 2),
-    ("kv_add", 3),
-    ("kv_cas", 5),
-    ("log", 2),
-    ("now_ns", 0),
-    ("time_ms", 0),
-    ("random", 0),
-    ("config", 2),
-];
-
-fn host_fn(name: &str) -> Option<HostFn> {
-    use HostFn::*;
-    Some(match name {
-        "input_len" => InputLen,
-        "input_read" => InputRead,
-        "req_path" => ReqPath,
-        "req_method" => ReqMethod,
-        "output_write" => OutputWrite,
-        "output_status" => OutputStatus,
-        "call" => Call,
-        "call_resp_len" => CallRespLen,
-        "call_resp_read" => CallRespRead,
-        "kv_get" => KvGet,
-        "kv_put" => KvPut,
-        "kv_del" => KvDel,
-        "kv_add" => KvAdd,
-        "kv_cas" => KvCas,
-        "log" => Log,
-        "now_ns" => NowNs,
-        "time_ms" => TimeMs,
-        "random" => Random,
-        "config" => Config,
-        _ => return None,
-    })
-}
 
 /// Deployment options of a test service.
 #[derive(Clone, Debug, Default)]
@@ -146,7 +70,7 @@ pub struct TestHost {
     services: HashMap<String, Service>,
     kv: HashMap<String, BTreeMap<Vec<u8>, Vec<u8>>>,
     logs: Vec<(String, String)>,
-    clock_ns: i64,
+    clock_ns: u64,
     rng: u64,
     /// Number of host calls made (all services).
     pub host_calls: u64,
@@ -165,15 +89,7 @@ impl TestHost {
 
     pub fn add_with(&mut self, name: &str, module: Module, cfg: ServiceConfig) -> Result<(), String> {
         let interp = Interp::new(&module).map_err(|e| format!("invalid module: {e}"))?;
-        let mut imports = Vec::new();
-        for im in &module.imports {
-            let f = host_fn(&im.name).ok_or_else(|| format!("unknown host function `{}`", im.name))?;
-            let params = HOST_FUNCTIONS.iter().find(|h| h.0 == im.name).unwrap().1;
-            if im.params != params || im.results != 1 {
-                return Err(format!("host function `{}` imported with the wrong signature", im.name));
-            }
-            imports.push(f);
-        }
+        let imports = k10_host::resolve_imports(&module)?;
         if module.export("handle").is_none() {
             return Err("module does not export `handle`".into());
         }
@@ -267,14 +183,14 @@ impl TestHost {
         }
     }
 
-    fn next_random(&mut self) -> i64 {
+    fn next_random(&mut self) -> u64 {
         // xorshift64*
         let mut x = self.rng;
         x ^= x >> 12;
         x ^= x << 25;
         x ^= x >> 27;
         self.rng = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D) as i64
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
 }
 
@@ -308,160 +224,109 @@ impl<'a> Invocation<'a> {
     }
 }
 
-/// Validates a (ptr, len) range of instance memory and returns it as a slice range.
-fn range(mem: &[u8], ptr: i64, n: i64) -> Result<std::ops::Range<usize>, Trap> {
-    let size = (mem.len() - k10_ir::TAIL_BYTES) as u64;
-    let start = sem::check_range(ptr, n, size)?;
-    Ok(start..start + n as usize)
-}
-
-/// Copies `src[off..off+n]` (clamped) to memory at `dst`; returns the number of bytes copied.
-fn copy_out(mem: &mut [u8], src: &[u8], dst: i64, off: i64, n: i64) -> Result<i64, Trap> {
-    let off = (off.max(0) as usize).min(src.len());
-    let n = (n.max(0) as usize).min(src.len() - off);
-    let r = range(mem, dst, n as i64)?;
-    mem[r].copy_from_slice(&src[off..off + n]);
-    Ok(n as i64)
+impl Invocation<'_> {
+    fn store(&mut self) -> &mut BTreeMap<Vec<u8>, Vec<u8>> {
+        self.host.kv.entry(self.service.clone()).or_default()
+    }
 }
 
 impl Host for Invocation<'_> {
     fn call(&mut self, import: u32, a: &[i64], mem: &mut [u8]) -> Result<i64, Trap> {
         self.host.host_calls += 1;
         let f = self.imports[import as usize];
-        Ok(match f {
-            HostFn::InputLen => self.input.len() as i64,
-            HostFn::InputRead => copy_out(mem, &self.input, a[0], a[1], a[2])?,
-            HostFn::ReqPath => {
-                let n = a[1].max(0).min(self.path.len() as i64);
-                copy_out(mem, &self.path, a[0], 0, n)?;
-                self.path.len() as i64
-            }
-            HostFn::ReqMethod => self.method,
-            HostFn::OutputWrite => {
-                let r = range(mem, a[0], a[1])?;
-                if self.output.len() + r.len() > MAX_BODY {
-                    return Err(Trap::Host(1));
-                }
-                self.output.extend_from_slice(&mem[r]);
-                a[1]
-            }
-            HostFn::OutputStatus => {
-                self.status = a[0];
-                0
-            }
-            HostFn::Call => {
-                let name = mem[range(mem, a[0], a[1])?].to_vec();
-                let body = mem[range(mem, a[2], a[3])?].to_vec();
-                let name = String::from_utf8_lossy(&name).into_owned();
-                let (svc, path) = match name.find('/') {
-                    Some(i) => (name[..i].to_string(), name[i..].to_string()),
-                    None => (name, String::new()),
-                };
-                if !self.host.services.contains_key(&svc) {
-                    self.last_call.clear();
-                    return Ok(if svc == self.service { -2 } else { -1 });
-                }
-                let r = self.host.request(&svc, POST, &path, &body);
-                self.last_call = r.body;
-                if r.trap.is_some() {
-                    self.last_call.clear();
-                    -4
-                } else {
-                    r.status
-                }
-            }
-            HostFn::CallRespLen => self.last_call.len() as i64,
-            HostFn::CallRespRead => copy_out(mem, &self.last_call, a[0], a[1], a[2])?,
-            HostFn::KvGet => {
-                let key = mem[range(mem, a[0], a[1])?].to_vec();
-                if key.len() > MAX_KEY {
-                    return Err(Trap::Host(2));
-                }
-                let store = self.host.kv.entry(self.service.clone()).or_default();
-                match store.get(&key) {
-                    None => -1,
-                    Some(v) => {
-                        let v = v.clone();
-                        copy_out(mem, &v, a[2], 0, a[3])?;
-                        v.len() as i64
-                    }
-                }
-            }
-            HostFn::KvPut => {
-                let key = mem[range(mem, a[0], a[1])?].to_vec();
-                let val = mem[range(mem, a[2], a[3])?].to_vec();
-                if key.len() > MAX_KEY || val.len() > MAX_VALUE {
-                    return Err(Trap::Host(2));
-                }
-                self.host.kv.entry(self.service.clone()).or_default().insert(key, val);
-                0
-            }
-            HostFn::KvDel => {
-                let key = mem[range(mem, a[0], a[1])?].to_vec();
-                if key.len() > MAX_KEY {
-                    return Err(Trap::Host(2));
-                }
-                i64::from(self.host.kv.entry(self.service.clone()).or_default().remove(&key).is_some())
-            }
-            HostFn::KvAdd => {
-                let key = mem[range(mem, a[0], a[1])?].to_vec();
-                if key.len() > MAX_KEY {
-                    return Err(Trap::Host(2));
-                }
-                let store = self.host.kv.entry(self.service.clone()).or_default();
-                let cur = match store.get(&key) {
-                    None => 0,
-                    Some(v) => i64::from_le_bytes(<[u8; 8]>::try_from(&v[..]).map_err(|_| Trap::Host(4))?),
-                };
-                if a[2] != 0 {
-                    store.insert(key, cur.wrapping_add(a[2]).to_le_bytes().to_vec());
-                }
-                cur.wrapping_add(a[2])
-            }
-            HostFn::KvCas => {
-                let key = mem[range(mem, a[0], a[1])?].to_vec();
-                let (exp_len, new_len) = (a[3], a[4]);
-                if exp_len < -1 || new_len < -1 {
-                    return Err(Trap::MemOutOfBounds);
-                }
-                let (e, n) = (exp_len.max(0), new_len.max(0));
-                let buf = mem[range(mem, a[2], e.checked_add(n).ok_or(Trap::MemOutOfBounds)?)?].to_vec();
-                if key.len() > MAX_KEY || e as usize > MAX_VALUE || n as usize > MAX_VALUE {
-                    return Err(Trap::Host(2));
-                }
-                let (exp, new) = buf.split_at(e as usize);
-                let store = self.host.kv.entry(self.service.clone()).or_default();
-                let matches = match (store.get(&key), exp_len >= 0) {
-                    (None, false) => true,
-                    (Some(cur), true) => cur[..] == *exp,
-                    _ => false,
-                };
-                if matches {
-                    if new_len >= 0 {
-                        store.insert(key, new.to_vec());
-                    } else {
-                        store.remove(&key);
-                    }
-                }
-                i64::from(matches)
-            }
-            HostFn::Log => {
-                let line = String::from_utf8_lossy(&mem[range(mem, a[0], a[1])?]).into_owned();
-                self.host.logs.push((self.service.clone(), line));
-                0
-            }
-            HostFn::NowNs => {
-                self.host.clock_ns += 1000;
-                self.host.clock_ns
-            }
-            HostFn::TimeMs => 1_700_000_000_000 + self.host.clock_ns / 1_000_000,
-            HostFn::Random => self.host.next_random(),
-            HostFn::Config => {
-                let n = a[1].max(0).min(self.config.len() as i64);
-                let cfg = self.config.clone();
-                copy_out(mem, &cfg, a[0], 0, n)?;
-                cfg.len() as i64
-            }
-        })
+        k10_host::dispatch(self, f, a, mem)
+    }
+}
+
+impl Env for Invocation<'_> {
+    fn method(&self) -> i64 {
+        self.method
+    }
+    fn path(&self) -> &[u8] {
+        &self.path
+    }
+    fn body(&self) -> &[u8] {
+        &self.input
+    }
+    fn config(&self) -> &[u8] {
+        &self.config
+    }
+    fn output_len(&self) -> usize {
+        self.output.len()
+    }
+    fn output(&mut self, bytes: &[u8]) -> bool {
+        self.output.extend_from_slice(bytes);
+        true
+    }
+    fn set_status(&mut self, status: u16) {
+        self.status = status as i64;
+    }
+    fn call(&mut self, target: Vec<u8>, body: Vec<u8>) -> i64 {
+        let name = String::from_utf8_lossy(&target).into_owned();
+        let (svc, path) = match name.find('/') {
+            Some(i) => (name[..i].to_string(), name[i..].to_string()),
+            None => (name, String::new()),
+        };
+        if !self.host.services.contains_key(&svc) {
+            self.last_call.clear();
+            return if svc == self.service { CALL_UNAVAILABLE } else { CALL_UNKNOWN };
+        }
+        let r = self.host.request(&svc, POST, &path, &body);
+        self.last_call = r.body;
+        if r.trap.is_some() {
+            self.last_call.clear();
+            CALL_TRAPPED
+        } else {
+            r.status
+        }
+    }
+    fn call_response(&self) -> &[u8] {
+        &self.last_call
+    }
+    fn kv_get(&mut self, key: &[u8], f: &mut dyn FnMut(Option<&[u8]>)) {
+        f(self.store().get(key).map(|v| &v[..]))
+    }
+    fn kv_put(&mut self, key: &[u8], value: &[u8]) -> Result<(), KvRefused> {
+        self.store().insert(key.to_vec(), value.to_vec());
+        Ok(())
+    }
+    fn kv_del(&mut self, key: &[u8]) -> bool {
+        self.store().remove(key).is_some()
+    }
+    fn kv_add(&mut self, key: &[u8], delta: i64) -> Result<i64, KvRefused> {
+        let store = self.store();
+        let cur = match store.get(key) {
+            None => 0,
+            Some(v) => i64::from_le_bytes(<[u8; 8]>::try_from(&v[..]).map_err(|_| KvRefused::NotInt)?),
+        };
+        if delta != 0 {
+            store.insert(key.to_vec(), cur.wrapping_add(delta).to_le_bytes().to_vec());
+        }
+        Ok(cur.wrapping_add(delta))
+    }
+    fn kv_cas(&mut self, key: &[u8], expected: Option<&[u8]>, new: Option<&[u8]>) -> Result<bool, KvRefused> {
+        let store = self.store();
+        if store.get(key).map(|v| &v[..]) != expected {
+            return Ok(false);
+        }
+        match new {
+            Some(v) => store.insert(key.to_vec(), v.to_vec()),
+            None => store.remove(key),
+        };
+        Ok(true)
+    }
+    fn log(&mut self, line: &[u8]) {
+        let line = String::from_utf8_lossy(line).into_owned();
+        self.host.logs.push((self.service.clone(), line));
+    }
+    fn now_ns(&mut self) -> u64 {
+        self.host.clock_ns += 1000;
+        self.host.clock_ns
+    }
+    fn time_ms(&mut self) -> u64 {
+        1_700_000_000_000 + self.host.clock_ns / 1_000_000
+    }
+    fn random(&mut self) -> u64 {
+        self.host.next_random()
     }
 }

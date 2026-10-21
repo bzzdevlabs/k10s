@@ -7,7 +7,8 @@
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::arch::{self, cpuid, inb, outb, rdtsc, wrmsr};
-use k10_ir::clock::Res;
+use crate::sync::{Global, SetOnce};
+use k10_host::clock::{EdgeCache, GuestClock};
 
 static TSC_HZ: AtomicU64 = AtomicU64::new(0);
 /// Nanoseconds per TSC tick as a 32.32 fixed-point number.
@@ -139,34 +140,29 @@ pub fn unix_ms() -> u64 {
     BOOT_UNIX_MS.load(Ordering::Relaxed) + now_ms()
 }
 
-/// Guest clock resolution (`k10.timer_res_us`): `Res::ns` (0 = full) and `Res::inv`.
-static GUEST_RES_NS: AtomicU64 = AtomicU64::new(Res::DEFAULT.ns);
-static GUEST_RES_INV: AtomicU64 = AtomicU64::new(Res::DEFAULT.inv);
-/// Secret key of the guest clock's fuzzy edges.
-static GUEST_KEY: AtomicU64 = AtomicU64::new(0);
+/// The guest clock (`now_ns`, `time_ms`), set at boot.
+static GUEST_CLOCK: SetOnce<GuestClock> = SetOnce::new();
+/// Each CPU's current guest-clock intervals.
+static EDGES: [Global<EdgeCache>; crate::percpu::MAX_CPUS] = [const { Global::new(EdgeCache::EMPTY) }; crate::percpu::MAX_CPUS];
 
-/// Sets the guest clock resolution (`k10_ir::clock`; 0 = full) and draws its key.
-pub fn set_guest_clock(res_ns: u64) {
-    let r = Res::new(res_ns);
-    GUEST_RES_INV.store(r.inv, Ordering::Relaxed);
-    GUEST_RES_NS.store(r.ns, Ordering::Relaxed);
-    let key = arch::rdrand().unwrap_or_else(|| rdtsc().wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29));
-    GUEST_KEY.store(key | 1, Ordering::Relaxed);
+/// Installs the guest clock (once, at boot).
+pub fn set_guest_clock(clock: GuestClock) {
+    GUEST_CLOCK.set(clock);
 }
 
-fn guest_res() -> Res {
-    Res { ns: GUEST_RES_NS.load(Ordering::Relaxed), inv: GUEST_RES_INV.load(Ordering::Relaxed) }
+fn guest(read: impl FnOnce(&GuestClock, &mut EdgeCache) -> u64) -> u64 {
+    let clock = GUEST_CLOCK.get().expect("guest clock set at boot");
+    read(clock, &mut EDGES[crate::percpu::id()].borrow_mut())
 }
 
-/// `now_ns` for guests: monotonic, coarsened with fuzzy edges.
+/// `now_ns` for guests.
 pub fn guest_now_ns() -> u64 {
-    k10_ir::clock::coarsen(now_ns(), guest_res(), GUEST_KEY.load(Ordering::Relaxed))
+    guest(|c, e| c.now_ns(now_ns(), e))
 }
 
-/// `time_ms` for guests: Unix ms with fuzzy edges (exact at full resolution).
+/// `time_ms` for guests.
 pub fn guest_unix_ms() -> u64 {
-    let ns = BOOT_UNIX_MS.load(Ordering::Relaxed).saturating_mul(1_000_000).saturating_add(now_ns());
-    k10_ir::clock::coarsen_ms(ns, guest_res(), GUEST_KEY.load(Ordering::Relaxed))
+    guest(|c, e| c.unix_ms(BOOT_UNIX_MS.load(Ordering::Relaxed).saturating_mul(1_000_000).saturating_add(now_ns()), e))
 }
 
 /// Timer interrupt: request preemption if this CPU's running invocation's slice/budget deadline has passed.

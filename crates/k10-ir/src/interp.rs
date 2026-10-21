@@ -546,7 +546,7 @@ impl Interp {
                     }
                     Inst::BrTable { i, start, n } => {
                         // Branch-free clamp to the default slot n (Spectre v1).
-                        let k = crate::nospec::min(fr[i as usize] as u64, n as u64) as usize;
+                        let k = k10_nospec::min(fr[i as usize] as u64, n as u64) as usize;
                         pc = tables[start as usize + k] as usize;
                     }
                     Inst::Safepoint => {

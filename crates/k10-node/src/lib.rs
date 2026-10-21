@@ -13,7 +13,6 @@
 //!   links; services placed elsewhere are [`service::Placement::Remote`] and go through a [`router::RemoteRouter`].
 
 pub mod admin;
-pub mod clock;
 pub mod cluster;
 pub mod coro;
 pub mod demo;

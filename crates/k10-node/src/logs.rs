@@ -7,7 +7,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-pub const MAX_LINE: usize = 4096;
+pub const MAX_LINE: usize = k10_host::MAX_LOG_LINE;
 
 pub struct LogRing {
     service: String,

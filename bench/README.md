@@ -84,3 +84,12 @@ after `LOAD_WAIT_MAX`, 2 h), runs it with the extensions above, and regenerates 
 - Failover probe: a fresh-connection GET every 20 ms from the host through the NodePort. Default `terminationGracePeriodSeconds`, default
   eviction timers (node-monitor-grace 40 s, toleration 300 s). Worker failure waits at most `NODEFAIL_CAP` (390 s) per mode.
 - Preliminary numbers were taken while other agents compiled Rust concurrently: latency/throughput are noisy; redo on a quiet machine.
+
+## Speculation-hardening costs (SECURITY.md, "CPU side channels")
+`K10_BENCH_ONLY=brtable cargo bench -p k10-jit` (i7-7820HQ, loaded machine, minimum of round-robin samples):
+- `br_table` dispatch, predictable index: ~4–5 ns per iteration, compare tree or clamped jump table alike; random
+  index: trees win up to 7 target runs, tables from 9 (hence `br_tree_max` 8).
+- Host call: ~3–6 ns with `--jit-indirect jump`, ~8–12 ns with `lfence`, ~13–15 ns with `retpoline`; jump-table
+  dispatch ~5, ~8 and ~16 ns.
+- Host-function clamps: within noise (±3 ns). `now_ns`/`time_ms` compute a division and a SipHash once per clock
+  interval per shard (cached): nothing measurable per call.

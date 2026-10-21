@@ -11,6 +11,7 @@ use crate::shard::{self, CallResult, Msg, OneShot, ServeDone, ShardShared};
 use crate::cluster::human_bytes;
 use crate::slot::{MemBudget, MemStats, Reservation};
 use crate::sys;
+use k10_host::clock::GuestClock;
 use k10_mesh::{sha256::to_hex, Bundle};
 use std::collections::HashMap;
 use std::io;
@@ -125,7 +126,7 @@ pub struct NodeConfig {
     /// Re-apply `DATA/bundle.k10b` at start (single-node mode). Cluster mode keeps its own store
     /// (`DATA/manifest.k10m` + `DATA/blobs/`) and turns this off.
     pub reload_bundle: bool,
-    /// Guest clock resolution ([`crate::clock`]; default 100 µs, `Duration::ZERO` = full). Process-wide.
+    /// Guest clock resolution (`k10_host::clock`; default 100 µs, `Duration::ZERO` = full).
     pub timer_res: Duration,
     /// JIT indirect-branch form, Spectre v2 hardening (default `Jump`, i.e. none).
     pub jit_indirect: k10_jit::IndirectBranch,
@@ -167,7 +168,7 @@ impl Default for NodeConfig {
             drain_timeout: Duration::from_secs(5),
             idle_spin: Duration::ZERO,
             reload_bundle: true,
-            timer_res: Duration::from_nanos(k10_ir::clock::DEFAULT_RES_NS),
+            timer_res: Duration::from_nanos(k10_host::clock::DEFAULT_RES_NS),
             jit_indirect: k10_jit::IndirectBranch::Jump,
         }
     }
@@ -250,6 +251,8 @@ pub struct NodeShared {
     pub cluster: OnceLock<Weak<dyn ClusterHooks>>,
     /// Why the persisted bundle could not be reloaded at start (the node then serves nothing).
     pub reload_error: OnceLock<String>,
+    /// The guest clock (`now_ns`, `time_ms`) of every invocation on this node.
+    pub clock: GuestClock,
 }
 
 impl NodeShared {
@@ -560,7 +563,9 @@ impl Node {
             }
             BackendKind::Interp => Arc::new(InterpBackend::default()),
         };
-        crate::clock::set_resolution(cfg.timer_res);
+        let mut clock_key = [0u8; 16];
+        sys::fill_random(&mut clock_key)?;
+        let clock = GuestClock::new(cfg.timer_res.as_nanos().min(u64::MAX as u128) as u64, clock_key);
         if let Some(d) = &cfg.data_dir {
             std::fs::create_dir_all(d)?;
         }
@@ -595,6 +600,7 @@ impl Node {
         };
         let budget = MemBudget::new(cfg.mem_limit);
         let shared = Arc::new(NodeShared {
+            clock,
             logs: Logs::new(cfg.log_lines, 256 << 10, cfg.log_stderr),
             cfg,
             backend,

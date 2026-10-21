@@ -2,10 +2,10 @@
 //!
 //! They receive the memory base and mask from `r15`/`r13` (not from `VmCtx`) so that they operate on exactly the
 //! memory the generated code uses. They perform the TIR range checks themselves (docs/TIR.md §2) and return 0 or
-//! a trap code; they never panic. Checks are speculation-safe (`check_span`: length 0 behind a misprediction).
+//! a trap code; they never panic. Checks are speculation-safe (`k10_nospec::span`: length 0 behind a misprediction).
 
-use k10_ir::sem::check_span;
 use k10_ir::Trap;
+use k10_nospec::span;
 
 /// Index of each helper in the blob's address table.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -29,10 +29,10 @@ pub fn helper_addresses() -> [u64; NUM_HELPERS] {
 /// `invoke` before any JIT code runs).
 pub unsafe extern "C" fn mem_copy(base: *mut u8, mask: u64, dst: i64, src: i64, n: i64) -> u32 {
     let size = mask.wrapping_add(1);
-    match (check_span(dst, n, size), check_span(src, n, size)) {
-        (Ok((d, nd)), Ok((s, ns))) => {
+    match (span(dst, n, size), span(src, n, size)) {
+        (Some((d, nd)), Some((s, ns))) => {
             // `nd & ns`: n, or 0 behind a mispredicted check.
-            // SAFETY: check_span guarantees d + n <= S and s + n <= S, and the caller guarantees that `base`
+            // SAFETY: span guarantees d + n <= S and s + n <= S, and the caller guarantees that `base`
             // is valid for S bytes; `copy` has memmove semantics.
             unsafe { core::ptr::copy(base.add(s), base.add(d), nd & ns) };
             0
@@ -47,12 +47,12 @@ pub unsafe extern "C" fn mem_copy(base: *mut u8, mask: u64, dst: i64, src: i64, 
 /// As for [`mem_copy`].
 pub unsafe extern "C" fn mem_fill(base: *mut u8, mask: u64, dst: i64, byte: i64, n: i64) -> u32 {
     let size = mask.wrapping_add(1);
-    match check_span(dst, n, size) {
-        Ok((d, n)) => {
-            // SAFETY: d + n <= S (check_span) and `base` is valid for S bytes.
+    match span(dst, n, size) {
+        Some((d, n)) => {
+            // SAFETY: d + n <= S (span) and `base` is valid for S bytes.
             unsafe { core::ptr::write_bytes(base.add(d), byte as u8, n) };
             0
         }
-        Err(_) => Trap::MemOutOfBounds.code(),
+        None => Trap::MemOutOfBounds.code(),
     }
 }

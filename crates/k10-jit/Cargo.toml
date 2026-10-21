@@ -13,6 +13,7 @@ std = ["dep:libc", "k10-ir/std"]
 [dependencies]
 # Path dependency (not `workspace = true`) so that `default-features = false` is honoured for no_std builds.
 k10-ir = { path = "../k10-ir", default-features = false }
+k10-nospec = { path = "../k10-nospec" }
 libc = { workspace = true, optional = true }
 
 [dev-dependencies]

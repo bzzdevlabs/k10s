@@ -169,6 +169,49 @@ fn host_call_sequences() {
     }
 }
 
+/// Compare tree over non-adjacent duplicate targets with the default in the middle (8 runs), against the
+/// interpreter and the jump-table lowering, on boundary, negative and huge indices.
+#[test]
+fn compare_tree_runs() {
+    let mut mb = ModuleBuilder::new();
+    let mut f = FuncBuilder::new(1, 1);
+    f.ops(&[Block, Block, Block, Block, LocalGet(0)]);
+    // depths: 0 = a, 1 = b, 2 = c, 3 = default.
+    f.br_table(&[0, 1, 0, 3, 1, 3, 2], 3);
+    for k in 0..4 {
+        f.ops(&[End, Const(100 + k), Return]);
+    }
+    let sw = mb.add_func(f);
+    mb.export("sw", sw);
+    let m = mb.build();
+    let it = Interp::new(&m).unwrap();
+    let tree = compile_blob(&m, &opts(IndirectBranch::Jump, 8)).unwrap().code().to_vec();
+    assert_eq!(count(&tree, &[0x4C, 0x8D, 0x1D]), 0, "8 runs: compare tree");
+    for tree_max in [8, 0] {
+        let jit = compile_with(&m, &opts(IndirectBranch::Jump, tree_max)).unwrap();
+        for x in [-2i64, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 1 << 32, i64::MAX, i64::MIN] {
+            let mut im = new_memory(&m, 12);
+            let want = it.invoke(&mut im, 12, &mut H, sw, &[x]);
+            let mut gm = GuardedMem::for_module(&m, 12);
+            let (got, _) = run_jit(&jit, &m, &mut gm, &mut H, sw, &[x], RunOpts::default());
+            assert_eq!(got, want, "tree_max {tree_max} x={x}");
+        }
+    }
+}
+
+/// A `br_table` longer than the code-size limit is refused by validation, never reaching the code generator.
+#[test]
+fn oversized_br_table_is_invalid() {
+    let mut mb = ModuleBuilder::new();
+    let mut f = FuncBuilder::new(1, 0);
+    f.ops(&[Block, LocalGet(0)]);
+    f.br_table(&vec![0; k10_ir::MAX_CODE_BYTES + 1], 0);
+    f.op(End);
+    let sw = mb.add_func(f);
+    mb.export("sw", sw);
+    assert!(matches!(compile_blob(&mb.build(), &opts(IndirectBranch::Jump, 0)), Err(k10_jit::CompileError::Invalid(_))));
+}
+
 #[test]
 fn indirect_branch_names() {
     for mode in MODES {

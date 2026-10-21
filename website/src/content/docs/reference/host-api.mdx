@@ -7,7 +7,8 @@ import { Aside } from '@astrojs/starlight/components';
 
 A module imports host functions by name; the node rejects modules that import unknown names or with the wrong
 parameter count. Every host function returns one `i64`. Pointer and length arguments are addresses in the
-instance's memory, checked like `mem.copy`: an out-of-range span traps `MemOutOfBounds`.
+instance's memory, checked like `mem.copy`: an out-of-range span traps `MemOutOfBounds`. The whole declared span
+is checked, even when fewer bytes would be copied, and lengths are unsigned (a negative one traps).
 
 Ten programs reach these through the [standard prelude](/k10s/ten/prelude/), which declares every one of them.
 
@@ -29,7 +30,7 @@ An instance handles one request at a time; the runtime runs many instances in pa
 | `req_path` | `dst, max` | copies the path suffix (after `/<service>`, query included) to `dst`, at most `max` bytes; its full length |
 | `req_method` | | 0 GET, 1 POST, 2 PUT, 3 DELETE, 4 other. Service calls are POST |
 | `output_write` | `src, n` | appends `n` bytes to the response body; `n`. Over 16 MiB traps `Host(1)` |
-| `output_status` | `code` | sets the response status (default 200); 0 |
+| `output_status` | `code` | sets the response status (default 200; outside 100–599: 500); 0 |
 
 ## Service calls
 

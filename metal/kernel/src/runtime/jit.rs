@@ -30,10 +30,10 @@ use k10_ir::{Module, Trap};
 use k10_jit::{BlobMeta, CompileOptions, IndirectBranch, VmCtx};
 
 use super::engine::HostCalls;
-use super::host::{HostFn, TABLE};
+use super::host::{HostFn, HOST_FNS};
 use crate::arch::paging;
 use crate::mem::frames::{self, Tag, FRAME};
-use crate::sync::IrqLock;
+use crate::sync::{IrqLock, SetOnce};
 use crate::{coro, time};
 
 /// Native stack kept free below the deepest JIT frame for host functions, nested service calls' host-side frames,
@@ -91,26 +91,18 @@ pub struct JitModule {
     pub compile_ns: u64,
 }
 
-/// JIT indirect-branch form (`k10.jit_indirect=jump|lfence|retpoline`).
-static INDIRECT: IrqLock<IndirectBranch> = IrqLock::new(IndirectBranch::Jump);
+/// Code generation options, built once at boot (CPUID exits to the hypervisor).
+static OPTIONS: SetOnce<CompileOptions> = SetOnce::new();
 
-/// Sets the indirect-branch form; call at boot, before any compile.
-pub fn set_indirect(mode: IndirectBranch) {
-    *INDIRECT.lock() = mode;
-}
-
-/// Code generation options: the defaults, with this CPU's optional instructions (CPUID exits to the hypervisor,
-/// so it is asked once) and the boot-time indirect-branch form.
-fn options() -> CompileOptions {
-    static OPTS: IrqLock<Option<CompileOptions>> = IrqLock::new(None);
-    let indirect = *INDIRECT.lock();
-    *OPTS.lock().get_or_insert_with(|| CompileOptions { indirect, ..CompileOptions::default() })
+/// Sets the JIT options from the boot-time indirect-branch form (`k10.jit_indirect`); before any compile.
+pub fn configure(indirect: IndirectBranch) {
+    OPTIONS.set(CompileOptions { indirect, ..CompileOptions::default() });
 }
 
 /// Compiles `m` (validated by the caller; `compile_blob` validates again) and loads it into executable memory.
 pub fn compile(m: &Module, imports: &[HostFn]) -> Result<JitModule, String> {
     let t0 = time::now_ns();
-    let blob = k10_jit::compile_blob(m, &options()).map_err(|e| alloc::format!("jit: {e}"))?;
+    let blob = k10_jit::compile_blob(m, OPTIONS.get().expect("JIT configured at boot")).map_err(|e| alloc::format!("jit: {e}"))?;
     let pages = blob.len().div_ceil(FRAME as usize).max(1);
     let paddr = code_frames(pages).ok_or("jit: out of memory for code")?;
     // SAFETY: freshly allocated frames, identity-mapped writable and not yet executable.
@@ -186,10 +178,10 @@ impl JitModule {
     }
 }
 
-/// Host-function thunk for `TABLE[F]`: `rdi = ctx`, arguments in `rsi, rdx, rcx, r8, r9` (only the function's
+/// Host-function thunk for `HOST_FNS[F]`: `rdi = ctx`, arguments in `rsi, rdx, rcx, r8, r9` (only the function's
 /// declared parameters are passed on).
 unsafe extern "C" fn host_thunk<const F: usize>(ctx: *mut VmCtx, a0: i64, a1: i64, a2: i64, a3: i64, a4: i64) -> i64 {
-    let (_, nparams, f) = TABLE[F];
+    let (_, nparams, f) = HOST_FNS[F];
     let args = [a0, a1, a2, a3, a4];
     // SAFETY: JIT code passes the running invocation's context, whose `user` is that invocation's `Invocation`
     // (alive until `JitModule::invoke` returns); the memory range is the instance memory, not otherwise referenced
@@ -221,7 +213,7 @@ unsafe extern "C" fn interrupt_hook(ctx: *mut VmCtx) -> u32 {
     }
 }
 
-/// One thunk per host function, indexed by `HostFn as usize` (= position in `TABLE`).
+/// One thunk per host function, indexed by `HostFn as usize` (= position in `HOST_FNS`).
 const THUNKS: [k10_jit::HostFn; 19] = [
     host_thunk::<0>,
     host_thunk::<1>,
@@ -245,10 +237,10 @@ const THUNKS: [k10_jit::HostFn; 19] = [
 ];
 
 const _: () = {
-    assert!(TABLE.len() == THUNKS.len());
+    assert!(HOST_FNS.len() == THUNKS.len());
     let mut i = 0;
-    while i < TABLE.len() {
-        assert!(TABLE[i].2 as usize == i);
+    while i < HOST_FNS.len() {
+        assert!(HOST_FNS[i].2 as usize == i);
         i += 1;
     }
 };

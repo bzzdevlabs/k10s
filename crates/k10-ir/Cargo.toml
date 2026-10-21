@@ -10,3 +10,6 @@ default = ["std"]
 std = []
 # Random valid-program generator (`k10_ir::gen`) for differential testing. Always compiled for this crate's tests.
 gen = ["std"]
+
+[dependencies]
+k10-nospec = { path = "../k10-nospec" }

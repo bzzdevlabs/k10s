@@ -94,3 +94,31 @@ impl<T> Global<T> {
         self.0.borrow_mut()
     }
 }
+
+/// A value set once (at boot, before it is read), then read by every CPU without locking.
+pub struct SetOnce<T> {
+    /// 0 = empty, 1 = being set, 2 = set.
+    state: core::sync::atomic::AtomicU8,
+    value: UnsafeCell<core::mem::MaybeUninit<T>>,
+}
+
+unsafe impl<T: Send + Sync> Sync for SetOnce<T> {}
+
+impl<T> SetOnce<T> {
+    pub const fn new() -> Self {
+        SetOnce { state: core::sync::atomic::AtomicU8::new(0), value: UnsafeCell::new(core::mem::MaybeUninit::uninit()) }
+    }
+
+    /// Panics if already set.
+    pub fn set(&self, v: T) {
+        assert!(self.state.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed).is_ok(), "SetOnce: set twice");
+        // SAFETY: state 1 gives this call exclusive access; readers only read after state 2 (Release below).
+        unsafe { (*self.value.get()).write(v) };
+        self.state.store(2, Ordering::Release);
+    }
+
+    pub fn get(&self) -> Option<&T> {
+        // SAFETY: state 2 (Acquire) means the value was fully written and is never written again.
+        (self.state.load(Ordering::Acquire) == 2).then(|| unsafe { (*self.value.get()).assume_init_ref() })
+    }
+}
