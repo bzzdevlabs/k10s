@@ -58,6 +58,10 @@ copies it to `.cache/k10s/bin` (provenance in `k10s.info`: so a concurrent rebui
 - `sizes.sh`: `.ten`/`.k10` sizes, JIT code per module, k10s binary (as built and stripped), data dir.
 Ports: 127.0.0.1:28080 (single node), 28181-28183 / 28281-28283 (UDP gossip) / 28381-28383 (peer TCP) for the cluster (`K10S_PORT_BASE`).
 `k10s/ten/chain.ten` is `examples/chain.ten` + `heap_reset()` (the example leaks a heap allocation per request, see the file header).
+`k10s/ab.py [--same] BASE_BIN NEW_BIN LOADGEN OUT.jsonl [rounds] [dur_s] [port_base]` is an interleaved A/B of two `k10s` binaries (the order
+alternates every round): single node (8 shards) echo, chain and compute at 1 and 64 conns, then 3 nodes (2 shards each) echo via the hosting
+node and forwarded; every record carries rps, p50/p99, node CPU per request and the load average. The new binary runs with a `calls` grant
+and a cluster key; `--same` gives the base the same manifest and key file when it supports them (read from its `help` and an offline `apply`).
 
 Extensions of the k8s/native harness (defaults unchanged): `LAT_TARGETS="echo chain compute"` (k8s, adds `manifests/compute.yaml` on NodePort 30082)
 and `LAT_TARGETS="echo chain compute compute-purego"` (native) add the compute targets; `k8s/latency-open.sh` and `native.py latency-open`

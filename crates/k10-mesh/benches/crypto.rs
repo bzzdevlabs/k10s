@@ -36,7 +36,7 @@ fn bench(name: &str, bytes: usize, mut f: impl FnMut()) {
 fn main() {
     let key = Key::new(&[7; 32]);
     let nonce = [1u8; 12];
-    for size in [16usize, 64, 128, 256, 1024, 1400, 16 << 10, 1 << 20] {
+    for size in [16usize, 64, 128, 192, 256, 384, 512, 1024, 1400, 16 << 10, 1 << 20] {
         let mut buf = vec![0x5au8; size];
         bench(&format!("chacha20-poly1305 seal {size} B"), size, || {
             let t = key.seal(black_box(&nonce), b"len!", black_box(&mut buf));

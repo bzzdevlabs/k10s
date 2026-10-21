@@ -1,6 +1,6 @@
 //! ChaCha20-Poly1305 (RFC 8439) and XChaCha20-Poly1305 in place, detached tag, cipher and MAC fused per batch.
 
-use super::chacha20::{hchacha20, xor_into, ChaCha20, BATCH};
+use super::chacha20::{hchacha20, xor_into, ChaCha20, MAX_BATCH};
 use super::poly1305::Poly1305;
 use super::{ct_eq, zeroize};
 
@@ -8,21 +8,21 @@ pub const TAG_LEN: usize = 16;
 
 /// Cipher and MAC fused per keystream batch; one instance per direction.
 fn run<const OPEN: bool>(c: &ChaCha20, aad: &[u8], data: &mut [u8]) -> [u8; 16] {
-    let mut ks = [0u8; BATCH];
-    c.blocks(0, &mut ks);
+    let mut ks = [0u8; MAX_BATCH];
+    let mut end = c.keystream(0, 64 + data.len(), &mut ks);
     let mut poly = Poly1305::new(ks[..32].try_into().unwrap());
     zeroize(&mut ks[..32]);
     poly.update(aad);
     poly.pad16();
     // Block 0 is the Poly1305 key; the data's keystream starts at block 1.
-    let (mut pos, mut counter, mut i) = (64, 4u32, 0);
+    let (mut pos, mut counter, mut i) = (64, (end / 64) as u32, 0);
     while i < data.len() {
-        if pos == BATCH {
-            c.blocks(counter, &mut ks);
-            counter = counter.wrapping_add(4);
+        if pos == end {
+            end = c.keystream(counter, data.len() - i, &mut ks);
+            counter = counter.wrapping_add((end / 64) as u32);
             pos = 0;
         }
-        let n = (BATCH - pos).min(data.len() - i);
+        let n = (end - pos).min(data.len() - i);
         let chunk = &mut data[i..i + n];
         if OPEN {
             poly.update(chunk);

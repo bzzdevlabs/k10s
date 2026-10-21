@@ -522,10 +522,10 @@ Derived keys, session keys and secret file contents are zeroized when dropped.
   2. every node: `--cluster-key-file NEW --cluster-next-key-file OLD` (seals with NEW, still accepts OLD);
   3. every node: `--cluster-key-file NEW`.
   Neighbouring steps always share a key (links pick it, gossip is opened with either).
-- Cost: ChaCha20 runs four blocks per batch with SSE2 intrinsics on hosted x86-64 (the only `unsafe` in `k10-mesh`;
-  LLVM does not vectorize the rotations itself; portable interleaved lanes on metal), fused with Poly1305; a short
-  record costs one batch. Sealing per record rather than per frame keeps it to one seal/open per write: the first
-  per-frame version cost ≈ 2 µs of mesh CPU per forwarded request (−8 % throughput at c = 64 on the loaded host).
+- Cost: on hosted x86-64 ChaCha20 runs with AVX2 when the CPU has it (detected at run time): two or four blocks side by
+  side for short records, eight per batch for longer ones; else four per batch with SSE2 (these SIMD modules are the
+  only `unsafe` in `k10-mesh`; LLVM does not vectorize the rotations itself); portable interleaved lanes on metal.
+  Poly1305 runs fused with it, batch by batch. Records, not frames, are sealed: one seal and one open per write.
   Numbers: `cargo bench -p k10-mesh --bench crypto` and the table below.
 - `--insecure-unauthenticated-cluster` runs the plaintext protocol (no `Auth`, no sealing) and prints a warning;
   it does not interoperate with keyed nodes (each side drops the other's datagrams and links).
@@ -542,8 +542,8 @@ Derived keys, session keys and secret file contents are zeroized when dropped.
 | SIGSTOP (hung node, no reset), default / tight gossip | first success 270–315 / 57–103 ms (once suspected); 100 % of new probes OK after 260–300 / 47–90 ms; requests stuck on the node fail when it is declared dead (1.1 s / 0.2 s) |
 | `call` latency, c=1 (2 shards per node): ingress → caller → callee same node / other node | p50 50 / 118 µs (17k / 7.8k rps); with `--idle-spin-us 50`: 26 / 109 µs |
 | ingress forwarding, echo via the hosting node / via another node | c=1: p50 34 / 124 µs (25k / 6.7k rps); c=16: 90k / 36k rps (p50 149 / 294 µs); c=64: 91k / 65k rps (p50 516 / 652 µs) |
-| cluster authentication: crypto (`cargo bench`, host load ≈ 10–20) | seal or open of a ≤ 128 B record 0.3–0.5 µs; 1 MiB 400–480 MB/s (ChaCha20 SSE2 0.8–0.9 GB/s, Poly1305 0.9–1.2 GB/s, portable lanes 0.2–0.3 GB/s); gossip datagram (1400 B, XChaCha20) 3.4–4.5 µs |
-| cluster authentication vs 08f2921 (3 nodes × 2 shards, echo, 10 interleaved rounds, host load 9–22; medians) | forwarded c=1 p50 156 / 156 µs; forwarded c=64 51k / 58k rps (spread 9–101k: noise); open loop 4000 rps forwarded p50 700 / 752 µs; mesh-thread CPU per forwarded request +5.8 µs at c=1 (four cold-cache seal/open), +0.4 µs at c=64 (records batch); node CPU per request +6 % / +1 %; local ingress c=1 p50 45 / 46 µs, CPU per request +2 % (noise) |
+| cluster authentication: crypto (`cargo bench`, AVX2, host load ≈ 2) | seal or open of a 16 / 64 / 128 / 256 B record 0.18 / 0.21 / 0.28 / 0.43 µs, 1400 B 1.55 µs; 1 MiB 970 MB/s (ChaCha20 2.4 GB/s, SSE2 1.2 GB/s, Poly1305 1.7 GB/s, portable lanes 0.47 GB/s); gossip datagram (1400 B, XChaCha20) 1.7 µs |
+| cluster authentication and sandbox vs 08f2921 (`bench/k10s/ab.py --same`: 3 nodes × 2 shards, echo, 4 interleaved rounds, host load 5–7; medians) | forwarded c=1 9.1k / 9.5k rps (p50 102 / 98 µs), c=64 106k / 111k rps; node CPU per forwarded request +5 %; the same binary without the key (`--insecure-unauthenticated-cluster`) +3 % / +4 % rps, without seccomp (`--sandbox off`) +2 % / +1 %; read + write syscalls per forwarded request equal (14 at c=1, 3.1 at c=64); local ingress −2 % / −4 % (run-to-run noise ±3 %) |
 | idle 5-node cluster (2 shards each), no services / 20 services × 2 replicas | RSS 2.6–4.7 / 2.8–4.9 MiB per node; CPU ≈ 0.1 % of a core; gossip ≈ 300–350 B/s out and in per node |
 
 A forwarded request crosses six thread hand-offs (shard → mesh → peer mesh → peer shard → peer mesh → mesh → shard),

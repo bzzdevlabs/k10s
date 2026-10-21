@@ -1,4 +1,5 @@
-//! ChaCha20 (RFC 8439) and HChaCha20 (XChaCha draft); 4 blocks per batch: SSE2 on x86-64, scalar lanes elsewhere.
+//! ChaCha20 (RFC 8439) and HChaCha20 (XChaCha draft); 4 blocks per batch (SSE2 on x86-64, scalar lanes elsewhere),
+//! 8 with AVX2 (detected at run time, std builds).
 
 const SIGMA: [u32; 4] = [0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574];
 
@@ -6,6 +7,8 @@ const SIGMA: [u32; 4] = [0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574];
 pub const LANES: usize = 4;
 /// Bytes of keystream per batch.
 pub const BATCH: usize = 64 * LANES;
+/// Most bytes of keystream per [`ChaCha20::keystream`] call.
+pub const MAX_BATCH: usize = 2 * BATCH;
 
 type Lanes = [u32; LANES];
 
@@ -173,13 +176,199 @@ impl ChaCha20 {
         }
     }
 
+    /// Keystream from block `counter` into `out`, sized for `want` more bytes; returns the bytes written.
+    #[inline]
+    pub fn keystream(&self, counter: u32, want: usize, out: &mut [u8; MAX_BATCH]) -> usize {
+        #[cfg(all(feature = "std", target_arch = "x86_64"))]
+        if let Some(n) = avx2::blocks(&self.state, counter, want, out) {
+            return n;
+        }
+        let _ = want;
+        self.blocks(counter, out.first_chunk_mut().unwrap());
+        BATCH
+    }
+
     /// XORs the keystream starting at block `counter` into `data` (encryption and decryption, §2.4).
-    pub fn apply(&self, mut counter: u32, data: &mut [u8]) {
-        let mut ks = [0u8; BATCH];
-        for chunk in data.chunks_mut(BATCH) {
-            self.blocks(counter, &mut ks);
+    pub fn apply(&self, mut counter: u32, mut data: &mut [u8]) {
+        let mut ks = [0u8; MAX_BATCH];
+        while !data.is_empty() {
+            let n = self.keystream(counter, data.len(), &mut ks);
+            let len = n.min(data.len());
+            let (chunk, rest) = core::mem::take(&mut data).split_at_mut(len);
             xor_into(chunk, &ks);
-            counter = counter.wrapping_add(LANES as u32);
+            counter = counter.wrapping_add((n / 64) as u32);
+            data = rest;
+        }
+    }
+}
+
+/// AVX2 keystream: 2 or 4 blocks as side-by-side pairs (short messages) or 8 in lanes (one register per state word).
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[allow(unsafe_code)]
+mod avx2 {
+    use super::{BATCH, MAX_BATCH};
+    use core::arch::x86_64::*;
+
+    /// Fills `out` (128, [`BATCH`] or [`MAX_BATCH`] bytes, returned) if the CPU has AVX2.
+    #[inline]
+    pub fn blocks(state: &[u32; 16], counter: u32, want: usize, out: &mut [u8; MAX_BATCH]) -> Option<usize> {
+        if !std::is_x86_feature_detected!("avx2") {
+            return None;
+        }
+        // SAFETY: AVX2 is present.
+        unsafe {
+            // Two blocks take ~0.4x the time of eight, four ~0.6x: enough for short messages.
+            if want <= 128 {
+                pairs::<1>(state, counter, out);
+                Some(128)
+            } else if want <= BATCH {
+                pairs::<2>(state, counter, out);
+                Some(BATCH)
+            } else {
+                blocks8(state, counter, out);
+                Some(MAX_BATCH)
+            }
+        }
+    }
+
+    // Byte shuffles rotating every 32-bit word left by 16 and by 8.
+    macro_rules! rot16 {
+        () => {
+            _mm256_set_epi8(13, 12, 15, 14, 9, 8, 11, 10, 5, 4, 7, 6, 1, 0, 3, 2, 13, 12, 15, 14, 9, 8, 11, 10, 5, 4, 7, 6, 1, 0, 3, 2)
+        };
+    }
+    macro_rules! rot8 {
+        () => {
+            _mm256_set_epi8(14, 13, 12, 15, 10, 9, 8, 11, 6, 5, 4, 7, 2, 1, 0, 3, 14, 13, 12, 15, 10, 9, 8, 11, 6, 5, 4, 7, 2, 1, 0, 3)
+        };
+    }
+    macro_rules! rotl {
+        ($x:expr, $l:literal, $r:literal) => {{
+            let x = $x;
+            _mm256_or_si256(_mm256_slli_epi32::<$l>(x), _mm256_srli_epi32::<$r>(x))
+        }};
+    }
+    macro_rules! qr {
+        ($a:ident, $b:ident, $c:ident, $d:ident, $r16:ident, $r8:ident) => {
+            $a = _mm256_add_epi32($a, $b);
+            $d = _mm256_shuffle_epi8(_mm256_xor_si256($d, $a), $r16);
+            $c = _mm256_add_epi32($c, $d);
+            $b = rotl!(_mm256_xor_si256($b, $c), 12, 20);
+            $a = _mm256_add_epi32($a, $b);
+            $d = _mm256_shuffle_epi8(_mm256_xor_si256($d, $a), $r8);
+            $c = _mm256_add_epi32($c, $d);
+            $b = rotl!(_mm256_xor_si256($b, $c), 7, 25);
+        };
+    }
+
+    /// Blocks `counter .. counter + 2P` as `P` independent pairs, one state row of a pair per register (chains overlap).
+    #[target_feature(enable = "avx2")]
+    fn pairs<const P: usize>(s: &[u32; 16], counter: u32, out: &mut [u8]) {
+        let (r16, r8) = (rot16!(), rot8!());
+        let row = |w0: u32, w1: u32, w2: u32, w3: u32| _mm_set_epi32(w3 as i32, w2 as i32, w1 as i32, w0 as i32);
+        let a0 = _mm256_broadcastsi128_si256(row(s[0], s[1], s[2], s[3]));
+        let b0 = _mm256_broadcastsi128_si256(row(s[4], s[5], s[6], s[7]));
+        let c0 = _mm256_broadcastsi128_si256(row(s[8], s[9], s[10], s[11]));
+        let d = _mm256_broadcastsi128_si256(row(counter, s[13], s[14], s[15]));
+        let mut d0 = [d; P];
+        for (p, d0) in d0.iter_mut().enumerate() {
+            *d0 = _mm256_add_epi32(d, _mm256_set_epi32(0, 0, 0, 2 * p as i32 + 1, 0, 0, 0, 2 * p as i32));
+        }
+        let mut x = d0.map(|d| [a0, b0, c0, d]);
+        for _ in 0..10 {
+            for v in x.iter_mut() {
+                let [mut a, mut b, mut c, mut d] = *v;
+                qr!(a, b, c, d, r16, r8);
+                // Diagonals into columns: rotate rows b, c, d left by 1, 2, 3 words, then back.
+                b = _mm256_shuffle_epi32::<0b00_11_10_01>(b);
+                c = _mm256_shuffle_epi32::<0b01_00_11_10>(c);
+                d = _mm256_shuffle_epi32::<0b10_01_00_11>(d);
+                qr!(a, b, c, d, r16, r8);
+                b = _mm256_shuffle_epi32::<0b10_01_00_11>(b);
+                c = _mm256_shuffle_epi32::<0b01_00_11_10>(c);
+                d = _mm256_shuffle_epi32::<0b00_11_10_01>(d);
+                *v = [a, b, c, d];
+            }
+        }
+        for (p, [a, b, c, d]) in x.into_iter().enumerate() {
+            let (a, b, c, d) = (_mm256_add_epi32(a, a0), _mm256_add_epi32(b, b0), _mm256_add_epi32(c, c0), _mm256_add_epi32(d, d0[p]));
+            let rows = [
+                _mm256_permute2x128_si256::<0x20>(a, b),
+                _mm256_permute2x128_si256::<0x20>(c, d),
+                _mm256_permute2x128_si256::<0x31>(a, b),
+                _mm256_permute2x128_si256::<0x31>(c, d),
+            ];
+            for (i, r) in rows.into_iter().enumerate() {
+                let at = 128 * p + 32 * i;
+                // SAFETY: each store writes exactly 32 in-bounds bytes.
+                unsafe { _mm256_storeu_si256(out[at..at + 32].as_mut_ptr().cast(), r) };
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
+    fn blocks8(state: &[u32; 16], counter: u32, out: &mut [u8; MAX_BATCH]) {
+        let (r16, r8) = (rot16!(), rot8!());
+        macro_rules! w {
+            ($i:expr) => {
+                _mm256_set1_epi32(state[$i] as i32)
+            };
+        }
+        let init = [
+            w!(0),
+            w!(1),
+            w!(2),
+            w!(3),
+            w!(4),
+            w!(5),
+            w!(6),
+            w!(7),
+            w!(8),
+            w!(9),
+            w!(10),
+            w!(11),
+            _mm256_add_epi32(_mm256_set1_epi32(counter as i32), _mm256_set_epi32(7, 6, 5, 4, 3, 2, 1, 0)),
+            w!(13),
+            w!(14),
+            w!(15),
+        ];
+        let [mut x0, mut x1, mut x2, mut x3, mut x4, mut x5, mut x6, mut x7, mut x8, mut x9, mut x10, mut x11, mut x12, mut x13, mut x14, mut x15] =
+            init;
+        for _ in 0..10 {
+            qr!(x0, x4, x8, x12, r16, r8);
+            qr!(x1, x5, x9, x13, r16, r8);
+            qr!(x2, x6, x10, x14, r16, r8);
+            qr!(x3, x7, x11, x15, r16, r8);
+            qr!(x0, x5, x10, x15, r16, r8);
+            qr!(x1, x6, x11, x12, r16, r8);
+            qr!(x2, x7, x8, x13, r16, r8);
+            qr!(x3, x4, x9, x14, r16, r8);
+        }
+        let x = [x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12, x13, x14, x15];
+        // Per 128-bit half, transpose each group of four words: row j holds block j (low half) and j + 4 (high half).
+        for k in 0..4 {
+            let a = _mm256_add_epi32(x[4 * k], init[4 * k]);
+            let b = _mm256_add_epi32(x[4 * k + 1], init[4 * k + 1]);
+            let c = _mm256_add_epi32(x[4 * k + 2], init[4 * k + 2]);
+            let d = _mm256_add_epi32(x[4 * k + 3], init[4 * k + 3]);
+            let t0 = _mm256_unpacklo_epi32(a, b);
+            let t1 = _mm256_unpacklo_epi32(c, d);
+            let t2 = _mm256_unpackhi_epi32(a, b);
+            let t3 = _mm256_unpackhi_epi32(c, d);
+            let rows = [
+                _mm256_unpacklo_epi64(t0, t1),
+                _mm256_unpackhi_epi64(t0, t1),
+                _mm256_unpacklo_epi64(t2, t3),
+                _mm256_unpackhi_epi64(t2, t3),
+            ];
+            for (j, r) in rows.into_iter().enumerate() {
+                let (lo, hi) = (64 * j + 16 * k, 64 * (j + 4) + 16 * k);
+                // SAFETY: each store writes exactly 16 in-bounds bytes.
+                unsafe {
+                    _mm_storeu_si128(out[lo..lo + 16].as_mut_ptr().cast(), _mm256_castsi256_si128(r));
+                    _mm_storeu_si128(out[hi..hi + 16].as_mut_ptr().cast(), _mm256_extracti128_si256::<1>(r));
+                }
+            }
         }
     }
 }
@@ -327,6 +516,17 @@ mod tests {
             assert_eq!(ks, ks2);
             for j in 0..LANES {
                 assert_eq!(&ks[64 * j..64 * j + 64], &c.block(start.wrapping_add(j as u32))[..], "start {start} lane {j}");
+            }
+            // Every keystream shape (2, 4 and 8 blocks with AVX2, else 4).
+            for (want, avx2) in [(1, 128), (200, BATCH), (4096, MAX_BATCH)] {
+                let mut ks = [0u8; MAX_BATCH];
+                let n = c.keystream(start, want, &mut ks);
+                #[cfg(all(feature = "std", target_arch = "x86_64"))]
+                assert_eq!(n, if std::is_x86_feature_detected!("avx2") { avx2 } else { BATCH });
+                let _ = avx2;
+                for j in 0..n / 64 {
+                    assert_eq!(&ks[64 * j..64 * j + 64], &c.block(start.wrapping_add(j as u32))[..], "start {start} want {want} lane {j}");
+                }
             }
         }
     }

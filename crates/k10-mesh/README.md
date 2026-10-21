@@ -16,7 +16,7 @@ adds a UDP driver, a thread runner and a deterministic simulator. The crate has 
 | `member` | `NodeId`, `Addr` (= `core::net::SocketAddr`), `Capacity`, `Member`, `MemberState` |
 | `wire` | TCP peer protocol framing: `Msg` (borrowed, copy-free), `FrameDecoder` (incremental) |
 | `sha256` | SHA-256, `to_hex`/`from_hex` |
-| `crypto` | ChaCha20 (SSE2 on x86-64), Poly1305, (X)ChaCha20-Poly1305, HMAC/HKDF-SHA256, `ct_eq` (RFC vectors) |
+| `crypto` | ChaCha20 (AVX2 or SSE2 on x86-64), Poly1305, (X)ChaCha20-Poly1305, HMAC/HKDF-SHA256, `ct_eq` (RFC vectors) |
 | `secure` | cluster keys (current + next), `GossipCipher` (sealed datagrams, anti-replay), `Link` (peer-link handshake, sealed records; hosted and metal) |
 | `admin_auth` | signed admin requests: `AdminKey` (client), `AdminVerifier` (clock window, nonce cache), `check_body` |
 | `driver` (std) | `UdpDriver` (caller-owned epoll loop) and `MeshThread` (self-contained thread) |

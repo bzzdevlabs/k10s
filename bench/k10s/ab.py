@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Interleaved A/B of two k10s binaries (single node + 3-node forwarded), default flags.
-Usage: ab.py BASE_BIN NEW_BIN LOADGEN OUT.jsonl [rounds] [dur_s] [port_base]"""
-import hashlib, hmac, json, os, signal, subprocess, sys, tempfile, time, urllib.parse, urllib.request
+Usage: ab.py [--same] BASE_BIN NEW_BIN LOADGEN OUT.jsonl [rounds] [dur_s] [port_base]
+The new binary runs with the `calls` grant and a cluster key; --same gives the base the same manifest and key file
+when it supports them."""
+import hashlib, hmac, json, os, shutil, signal, subprocess, sys, tempfile, time, urllib.parse, urllib.request
 
-BASE, NEW, LG, OUT = sys.argv[1:5]
-ROUNDS = int(sys.argv[5]) if len(sys.argv) > 5 else 4
-DUR = int(sys.argv[6]) if len(sys.argv) > 6 else 10
-PB = int(sys.argv[7]) if len(sys.argv) > 7 else 30000
+ARGS = [a for a in sys.argv[1:] if a != "--same"]
+SAME = len(ARGS) < len(sys.argv) - 1
+BASE, NEW, LG, OUT = ARGS[:4]
+ROUNDS = int(ARGS[4]) if len(ARGS) > 4 else 4
+DUR = int(ARGS[5]) if len(ARGS) > 5 else 10
+PB = int(ARGS[6]) if len(ARGS) > 6 else 30000
 WARM = 2
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 SRC = {"echo": f"{REPO}/examples/echo.ten", "compute": f"{REPO}/examples/compute.ten", "chain": f"{REPO}/bench/k10s/ten/chain.ten"}
@@ -36,9 +40,24 @@ def get(url, key=None):
         return r.read()
 
 
-def admin_key(variant, d):
-    """The new binary signs admin requests; the base serves them unsigned to loopback clients."""
-    return f"{d}/admin.key" if variant == "new" else None
+def caps(binary, d):
+    """What `binary` supports: signed admin requests (every node has an admin key), cluster key, `calls` grants."""
+    h = subprocess.run([binary, "help"], capture_output=True, text=True).stdout
+    c = {"signed": "signed with the admin key" in h, "ckey": "--cluster-key-file" in h}
+    if c["signed"]:
+        subprocess.run([binary, "keygen", "-o", f"{d}/admin.key"], check=True, capture_output=True)
+    with open(f"{d}/probe.k10s", "w") as f:
+        f.write('service probe { code = "echo.k10" memory = 64KiB calls = ["probe"] }\n')
+    # `apply` parses the manifest before connecting: a parse error means no `calls`.
+    env = dict(os.environ, **({"K10S_ADMIN_TOKEN_FILE": f"{d}/admin.key"} if c["signed"] else {}))
+    r = subprocess.run([binary, "apply", f"{d}/probe.k10s", "--node", "127.0.0.1:1"], capture_output=True, text=True, env=env)
+    c["calls"] = "cannot reach node" in r.stderr + r.stdout
+    return c
+
+
+def admin_key(c, d):
+    """Binaries without signed admin requests serve them unsigned to loopback clients."""
+    return f"{d}/admin.key" if c["signed"] else None
 
 
 def wait_up(port, proc):
@@ -53,21 +72,22 @@ def wait_up(port, proc):
     raise SystemExit(f"node on {port} not up")
 
 
-def prep(variant, binary, d):
-    mods = {}
+def prep(variant, binary, d, keys):
     for n, s in SRC.items():
-        mods[n] = f"{d}/{n}.k10"
-        subprocess.run([binary, "build", s, "-o", mods[n]], check=True, capture_output=True)
-    calls = ' calls = ["echo"]' if variant == "new" else ""
+        subprocess.run([binary, "build", s, "-o", f"{d}/{n}.k10"], check=True, capture_output=True)
+    c = caps(binary, d)
+    full = variant == "new" or SAME
+    c["ckey"] &= full; c["calls"] &= full
+    calls = ' calls = ["echo"]' if c["calls"] else ""
     with open(f"{d}/app.k10s", "w") as f:
         f.write(f'service echo {{ code = "echo.k10" memory = 64KiB }}\n'
                 f'service chain {{ code = "chain.k10" memory = 64KiB config = "echo"{calls} }}\n'
                 f'service compute {{ code = "compute.k10" memory = 64KiB cpu_ms = 60000 }}\n')
     with open(f"{d}/echo.k10s", "w") as f:
         f.write('service echo { code = "echo.k10" memory = 64KiB }\n')
-    if variant == "new":
-        for k in ("cluster.key", "admin.key"):
-            subprocess.run([binary, "keygen", "-o", f"{d}/{k}"], check=True, capture_output=True)
+    if c["ckey"]:
+        shutil.copy(keys, f"{d}/cluster.key")
+    return c
 
 
 def node(binary, d, tag, port, extra, key):
@@ -106,8 +126,8 @@ def apply(binary, bundle, addr, key):
     subprocess.run([binary, "apply", bundle, "--node", addr], check=True, capture_output=True, env=env)
 
 
-def single(variant, binary, d, port, rnd, emit):
-    key = admin_key(variant, d)
+def single(variant, binary, d, c, port, rnd, emit):
+    key = admin_key(c, d)
     p = node(binary, d, f"s{rnd}", port, ["--shards", "8"], key)
     apply(binary, f"{d}/app.k10s", f"127.0.0.1:{port}", key)
     time.sleep(0.5)
@@ -119,9 +139,9 @@ def single(variant, binary, d, port, rnd, emit):
     stop([p])
 
 
-def cluster(variant, binary, d, port, rnd, emit):
-    ps, http, key = [], [], admin_key(variant, d)
-    auth = ["--cluster-key-file", f"{d}/cluster.key"] if variant == "new" else []
+def cluster(variant, binary, d, c, port, rnd, emit):
+    ps, http, key = [], [], admin_key(c, d)
+    auth = ["--cluster-key-file", f"{d}/cluster.key"] if c["ckey"] else []
     for i in range(3):
         hp, gp, rp = port + 10 + i, port + 20 + i, port + 30 + i
         extra = ["--shards", "2", "--gossip", f"127.0.0.1:{gp}", "--rpc", f"127.0.0.1:{rp}", "--probe-ms", "200"] + auth
@@ -156,14 +176,16 @@ def main():
     def emit(r):
         out.write(json.dumps(r) + "\n"); out.flush()
         print(f"{r['variant']:4} r{r['round']} {r['case']:22} rps {r['rps']:9.0f} p50 {r['p50']:7} p99 {r['p99']:7} cpu/req {r['cpu_us_req'] or 0:7.2f} err {r['errors']} load {r['load1']}", flush=True)
-    dirs = {}
+    dirs, cs, keys = {}, {}, tempfile.mkdtemp(prefix="ab-key-") + "/cluster.key"
+    subprocess.run([NEW, "keygen", "-o", keys], check=True, capture_output=True)
     for v, b in (("base", BASE), ("new", NEW)):
-        dirs[v] = tempfile.mkdtemp(prefix=f"ab-{v}-"); prep(v, b, dirs[v])
+        dirs[v] = tempfile.mkdtemp(prefix=f"ab-{v}-"); cs[v] = prep(v, b, dirs[v], keys)
+        print(f"{v}: {cs[v]}", flush=True)
     for rnd in range(ROUNDS):
         order = [("base", BASE), ("new", NEW)] if rnd % 2 == 0 else [("new", NEW), ("base", BASE)]
         for v, b in order:
-            single(v, b, dirs[v], PB, rnd, emit)
-            cluster(v, b, dirs[v], PB + 100, rnd, emit)
+            single(v, b, dirs[v], cs[v], PB, rnd, emit)
+            cluster(v, b, dirs[v], cs[v], PB + 100, rnd, emit)
 
 
 main()

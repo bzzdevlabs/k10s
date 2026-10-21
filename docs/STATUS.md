@@ -23,20 +23,20 @@ pre-release, step 8).
 - DoS: per-service memory reservations, bounded overshoot, placement versioned in gossip, rejoin through tombstone
   addresses and `DATA/peers`, KV store with ordered flushes and rewrite-from-memory on I/O errors.
 - Releases: SemVer; tag `vX.Y.Z` on main → stable release, every push to main → `vX.Y.Z-dev.N` pre-release.
+- Performance vs 08f2921 (`bench/k10s/ab.py --same`): single node and local ingress within noise (±3 %); forwarded
+  requests 3–5 % below, the cost of encrypted peer links (~3 %) and seccomp (~2 %), same syscalls per request; ChaCha20
+  runs with AVX2 when present (docs/NODE.md, cluster measurements). Trivial invoke: JIT 7.8 ns on both.
 
 ## Remaining steps, in order (one per session)
 Rules: production-ready (no workarounds), comments only where needed as English one-liners, docs (incl. website/)
-updated with every change and written as the current state, no perf regression (`bench/k10s/ab.py` vs 08f2921), no
-push or tag before step 9, never create namespaces or seek privileges on this machine.
+updated with every change and written as the current state, no perf regression beyond the measured cost of the
+security features (`bench/k10s/ab.py --same` vs 08f2921), no push or tag before step 9, never create namespaces or seek
+privileges on this machine.
 
-7. **Performance** — main is 2–12 % below 08f2921 in `ab.py` runs (noisy) and a trivial invoke costs ~19 ns vs ~10 ns.
-   Bisect 08f2921..main with `cargo bench -p k10-jit` / `crates/k10-node/examples/measure.rs` and `ab.py`, fix the
-   causes without weakening any security property. `ab.py` gains an option to give the base the same manifest
-   (`calls`) and cluster key when the base supports them.
 8. **Integrate** — full suites on both backends, `metal/test.sh`, `metal/cluster-test.sh`; fix the load-sensitive
    flakes (`mesh_abuse::peer_that_never_reads_is_cut_off` on the interpreter, `placement::speed_1000_nodes_10k_replicas`)
-   at their cause; quiet-machine `ab.py` (≥ 4 rounds) vs 08f2921; check README, docs/, SECURITY.md, docs/REPORT.md and
-   every website/ page against the code, current state only.
+   at their cause; quiet-machine `ab.py --same` (≥ 4 rounds) vs 08f2921; check README, docs/, SECURITY.md,
+   docs/REPORT.md and every website/ page against the code, current state only.
 9. **Push** — rewrite the unpushed commits to the commit convention below
    (`git filter-branch --env-filter … --msg-filter "sed '/^Co-Authored-By:/d'" origin/main..main`, which keeps trees
    and merges), push main, watch the release workflow, fix what the first real run shows.
