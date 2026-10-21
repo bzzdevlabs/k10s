@@ -129,6 +129,8 @@ pub struct NodeConfig {
     pub timer_res: Duration,
     /// JIT indirect-branch form, Spectre v2 hardening (default `Jump`, i.e. none).
     pub jit_indirect: k10_jit::IndirectBranch,
+    /// Version reported by `GET /_k10s/status` (the `k10s` binary sets its build version).
+    pub version: String,
 }
 
 impl Default for NodeConfig {
@@ -169,6 +171,7 @@ impl Default for NodeConfig {
             reload_bundle: true,
             timer_res: Duration::from_nanos(k10_ir::clock::DEFAULT_RES_NS),
             jit_indirect: k10_jit::IndirectBranch::Jump,
+            version: env!("CARGO_PKG_VERSION").into(),
         }
     }
 }

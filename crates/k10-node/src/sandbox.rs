@@ -601,6 +601,8 @@ pub const SYSCALLS: &[Sys] = &[
     allow(libc::SYS_newfstatat, "newfstatat"),
     allow(libc::SYS_fstat, "fstat"),
     allow(libc::SYS_statx, "statx"),
+    allow(libc::SYS_stat, "stat"),                             // musl (std::fs::metadata)
+    allow(libc::SYS_lstat, "lstat"),                           // musl (std::fs::symlink_metadata)
     allow(libc::SYS_lseek, "lseek"),
     allow(libc::SYS_fsync, "fsync"),                           // persisted bundle/manifest, directory syncs
     allow(libc::SYS_fdatasync, "fdatasync"),                   // KV group commit

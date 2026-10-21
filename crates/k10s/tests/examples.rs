@@ -47,7 +47,7 @@ fn wait_http(addr: &str, path: &str) {
 }
 
 fn spawn_node(addr: &str, data: &std::path::Path) -> Proc {
-    let child = Command::new(env!("CARGO_BIN_EXE_k10s"))
+    let child = Command::new(k10s_bin())
         .args(["node", "--http", addr, "--data", data.to_str().unwrap(), "--shards", "2"])
         .stderr(Stdio::null())
         .spawn()
@@ -65,7 +65,7 @@ fn examples_on_a_node() {
     let node = spawn_node(&addr, &data);
     let manifest = dir.join("examples.k10s");
     std::fs::write(&manifest, examples_manifest()).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_k10s"))
+    let out = Command::new(k10s_bin())
         .args(["apply", manifest.to_str().unwrap(), "--node", &addr])
         .output()
         .unwrap();
@@ -123,7 +123,7 @@ fn examples_on_a_node() {
 
 /// Applies a manifest file to the node at `addr` with the CLI.
 fn apply(addr: &str, manifest: &std::path::Path) {
-    let out = Command::new(env!("CARGO_BIN_EXE_k10s")).args(["apply", manifest.to_str().unwrap(), "--node", addr]).output().unwrap();
+    let out = Command::new(k10s_bin()).args(["apply", manifest.to_str().unwrap(), "--node", addr]).output().unwrap();
     assert!(out.status.success(), "{} {}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
 }
 
@@ -137,7 +137,7 @@ fn atomic_kv_under_concurrency() {
     const ITEMS: usize = 16;
     let dir = tmpdir("atomic");
     let addr = format!("127.0.0.1:{}", free_port());
-    let child = Command::new(env!("CARGO_BIN_EXE_k10s"))
+    let child = Command::new(k10s_bin())
         .args(["node", "--http", &addr, "--data", dir.join("data").to_str().unwrap(), "--shards", "4"])
         .stderr(Stdio::null())
         .spawn()

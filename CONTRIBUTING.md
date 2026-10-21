@@ -32,19 +32,40 @@ Benchmarks: see `bench/README.md`.
 | `.github/` | workflows (`ci.yml`, `release.yml`) and the pinned toolchains (`actions/toolchains`) |
 
 ## CI, versions and releases
-- **CI** (`.github/workflows/ci.yml`, every pull request) runs `scripts/ci-test.sh unit musl metal-selftest metal`
-  and `scripts/dist.sh`; the same commands work locally. `unit` = all crates in release mode on the JIT and on the
-  interpreter, `#[ignore]`d long tests excluded; `musl` = the same for the static release binary's target. The
-  chaos and soak campaigns (`scripts/ci-test.sh campaign`, ~7 min) also run there but never block. Toolchains are
-  pinned in `.github/actions/toolchains/action.yml` (Rust 1.98.1, Go 1.25.1); change them there.
-- **Releases** (`.github/workflows/release.yml`): every push to `main` publishes the pre-release `vX.Y.Z-dev.N`, a
-  pushed tag `vX.Y.Z` the stable release, once the gating suites pass (`unit`, `musl`, `metal-selftest`). See
-  README.md, "Releases and versions", for the scheme and how to cut a release.
+- **CI** (`.github/workflows/ci.yml`, every pull request) runs `scripts/ci-test.sh unit musl metal-selftest`,
+  `scripts/dist.sh` then `scripts/ci-test.sh dist`; the same commands work locally. `unit` = all crates in release
+  mode on the JIT and on the interpreter, `#[ignore]`d long tests excluded; `musl` = the same for the static
+  binary's target; `dist` = the k10s integration tests against the archived static binary (`K10S_BIN`). Non-blocking:
+  `metal` (metal/test.sh, latency-bound) and the chaos/soak `campaign` (~7 min). Toolchains are pinned in
+  `.github/actions/toolchains/action.yml` (Rust 1.98.1, Go 1.25.1); change them there.
+- **Releases** (`.github/workflows/release.yml`): a push to `main` publishes the pre-release `vX.Y.Z-dev.N` (only
+  for the current head of `main`, and not for a commit that carries the stable tag), a pushed tag `vX.Y.Z` the stable
+  release, once `unit`, `musl`, `dist` and `metal-selftest` pass. Artifacts and images get build-provenance
+  attestations; the newest 10 dev pre-releases and dev images are kept. See README.md, "Releases and versions".
+- **Repository settings** (to apply once, by an admin): stable tags immutable and admin-only, `main` without force
+  pushes or deletion (the build number is the commit count). The workflow creates and prunes dev tags itself, so
+  the tag ruleset excludes them. On GHCR, make the `k10s-bench-*` packages public and give this repository the
+  *Admin* role under "Manage Actions access" (needed to prune old dev images).
+  ```sh
+  gh api -X POST repos/bzzdevlabs/k10s/rulesets --input - <<'EOF'
+  {"name": "stable tags", "target": "tag", "enforcement": "active",
+   "conditions": {"ref_name": {"include": ["refs/tags/v*"], "exclude": ["refs/tags/v*-dev.*"]}},
+   "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}],
+   "rules": [{"type": "creation"}, {"type": "update"}, {"type": "deletion"}]}
+  EOF
+  gh api -X POST repos/bzzdevlabs/k10s/rulesets --input - <<'EOF'
+  {"name": "main", "target": "branch", "enforcement": "active",
+   "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+   "rules": [{"type": "deletion"}, {"type": "non_fast_forward"}]}
+  EOF
+  ```
 - **The version** has one source: `scripts/version.sh`. Never edit the version of only one workspace: use
   `scripts/set-version.sh X.Y.Z`, which also updates both lock files (CI builds with `--locked`). Binaries embed it
   through their build scripts (`scripts/buildinfo.rs`, included by `crates/k10s/build.rs`, `metal/kernel/build.rs`,
-  `metal/mkbundle/build.rs`), which rerun when HEAD, the branch, the tags, the manifests or a crate's `src/` change;
-  `K10S_BUILD_VERSION` / `K10S_BUILD_COMMIT` override it (CI computes it once per run and passes it to every build).
+  `metal/mkbundle/build.rs`). They rerun only when HEAD, the branch, the tags or the manifests change, or when the
+  crate itself is rebuilt: the commit hash is always exact, while `.dirty` reflects the tree at that point (edits
+  elsewhere never trigger rebuilds, and neither workspace rebuilds the other). `K10S_BUILD_VERSION` /
+  `K10S_BUILD_COMMIT` override it (CI computes it once per run and passes it to every build).
   A new binary that should report the version includes the same helper.
 - Do not hand-edit release artifacts: `scripts/dist.sh` builds them all into `dist/` (gitignored) with the version
   checked inside each binary.

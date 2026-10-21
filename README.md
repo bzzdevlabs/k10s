@@ -86,15 +86,16 @@ is the release's version (e.g. `0.1.0`, or `0.1.1-dev.45`).
 | Archive | Contents |
 |---|---|
 | `k10s-V-x86_64-unknown-linux-musl.tar.gz` | `k10s` (CLI, node daemon, Ten compiler, JIT), static: runs on any x86-64 Linux; LICENSE, NOTICE, README.md, SECURITY.md |
-| `k10s-V-x86_64-unknown-linux-gnu.tar.gz` | the same, linked against glibc (built on Ubuntu 24.04) |
+| `k10s-V-x86_64-unknown-linux-gnu.tar.gz` | the same, linked against glibc ≥ 2.34 (Debian 12, Ubuntu 22.04, RHEL 9 and later) |
 | `k10s-examples-V.tar.gz` | [examples/](examples/): Ten sources, the compiled `.k10` modules, `app.k10s` (`k10s apply app.k10s`) |
 | `k10s-metal-V-x86_64.tar.gz` | the bare-metal kernel ([metal/](metal/)): `k10-metal.elf`, `k10-metal-embedded.elf` (test bundle baked in), `bundle.k10b` (19 test services), `mkbundle` (static; pass `--ten-dir examples` or `--no-ten`), `examples/*.ten`, metal README |
 | `k10s-bench-V-linux-amd64.tar.gz` | [bench/](bench/) tools, static Go: workloads `echo` `compute` `chain` `counter` `compute-purego`, and `loadgen` |
 | `k10s-V-src.tar.gz` | the sources of the commit, stamped with its version (`.k10s-version`) for builds without git |
-| `SHA256SUMS` | `sha256sum -c SHA256SUMS --ignore-missing` |
+| `SHA256SUMS` | `sha256sum -c SHA256SUMS --ignore-missing`; build provenance: `gh attestation verify FILE --repo bzzdevlabs/k10s` |
 
 The benchmark workloads are also container images, `ghcr.io/bzzdevlabs/k10s-bench-<workload>:V` (`echo`, `compute`,
-`chain`, `counter`; moving tags `latest` = last stable release, `dev` = last `main` build). The Kubernetes benchmark
+`chain`, `counter`; moving tags `latest` = highest stable release, `dev` = last `main` build; provenance:
+`gh attestation verify oci://IMAGE --repo bzzdevlabs/k10s`). The Kubernetes benchmark
 loads `k10s-bench/<workload>:v1` (and `echo:v2`) into kind: `docker tag` a pulled image to that name, or build them
 with `bench/workloads/build.sh`. Boot the kernel with the QEMU command of [metal/run.sh](metal/run.sh)
 (`-kernel k10-metal-embedded.elf` needs no `-initrd`).
@@ -112,12 +113,11 @@ Cargo workspace version `X.Y.Z` (`[workspace.package]` in [Cargo.toml](Cargo.tom
 
 The version is reported by `k10s --version` (also `k10s version`, `-V`), the node's startup line, the `"version"`
 field of `GET /_k10s/status` (hosted node and bare-metal kernel), the kernel's boot banner (`k10.verbose`),
-`mkbundle --version`, and `-version` of the Go tools. `scripts/version.sh --full`, `--tag`, `--number`, … print its
-parts.
+`mkbundle --version`, and `-version` of the Go tools; `scripts/version.sh --full` prints it.
 
 **Cutting a release** (from `main`): run `scripts/set-version.sh X.Y.Z` (both manifests and their lock files) and
-commit; tag that commit `vX.Y.Z` and push the tag. The release workflow checks the tag against the Cargo version,
-builds, tests and publishes `vX.Y.Z`. Then set the next version (`scripts/set-version.sh X.Y.(Z+1)`, or a minor or
+commit; tag that commit `vX.Y.Z` and push the tag. The release workflow checks that the tag equals the Cargo version
+and is on `main`, then builds, tests, attests and publishes `vX.Y.Z` (marked *Latest* only if it is the highest). Then set the next version (`scripts/set-version.sh X.Y.(Z+1)`, or a minor or
 major bump) so that dev builds carry it. `scripts/dist.sh` builds the same archives locally, into `dist/`.
 
 ## Repository

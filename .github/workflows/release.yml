@@ -1,5 +1,5 @@
-# main -> pre-release vX.Y.Z-dev.N; tag vX.Y.Z (= Cargo version) -> release vX.Y.Z. See README.md.
-# Build (scripts/dist.sh) + gating tests -> GitHub release; skipped if already released; GHCR images never block.
+# main -> pre-release vX.Y.Z-dev.N; tag vX.Y.Z (= Cargo version, on main) -> release vX.Y.Z. See README.md.
+# Build (scripts/dist.sh) + gating tests -> attested release; skipped if already released; GHCR images never block.
 name: release
 
 on:
@@ -48,37 +48,50 @@ jobs:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
         run: |
+          base=$(scripts/version.sh --base)
+          mode=--dev
           if [[ $REF_TYPE == tag ]]; then
-            mode=--stable
-            base=$(scripts/version.sh --base)
             if [[ $REF_NAME != "v$base" ]]; then
-              echo "::error::tag $REF_NAME does not match the Cargo workspace version $base (Cargo.toml and metal/Cargo.toml)"
+              echo "::error::tag $REF_NAME does not match the Cargo workspace version $base"
               exit 1
             fi
-          else
-            mode=--dev
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+              echo "::error::tag $REF_NAME is not on main"
+              exit 1
+            fi
+            mode=--stable
           fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
           scripts/version.sh "$mode" --strict --env | tee -a "$GITHUB_OUTPUT"
-      - name: Already released?
+      - name: Publish?
         id: state
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.v.outputs.K10S_VERSION_TAG }}
           CHANNEL: ${{ steps.v.outputs.K10S_CHANNEL }}
+          BASE: ${{ steps.v.outputs.base }}
         run: |
+          state=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft \
+            --jq 'if .isDraft then "draft" else "published" end' 2> /dev/null || echo none)
+          tagged=$(git rev-parse -q --verify "refs/tags/$TAG^{commit}" || true)
           released=false
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            echo "::notice::release $TAG already exists: nothing to do"
-            released=true
-          elif [[ $CHANNEL == dev ]] && git rev-parse -q --verify "refs/tags/$TAG" > /dev/null; then
-            echo "::notice::tag $TAG already exists: nothing to do"
-            released=true
-          fi
           publish=false
-          if [[ $released == false && ( $GITHUB_REF == refs/heads/main || $GITHUB_REF == refs/tags/v* ) ]]; then
+          if [[ -n $tagged && $tagged != "$GITHUB_SHA" ]]; then
+            echo "::error::tag $TAG already exists on $tagged, not on $GITHUB_SHA"
+            exit 1
+          elif [[ $state == published ]]; then
+            echo "::notice::$TAG is already released"
+            released=true
+          elif [[ $CHANNEL == stable ]]; then
             publish=true
-          elif [[ $released == false ]]; then
-            echo "::notice::$GITHUB_REF: build and test only (releases come from main and from tags vX.Y.Z)"
+          elif [[ $GITHUB_REF != refs/heads/main ]]; then
+            echo "::notice::$GITHUB_REF: build and test only"
+          elif [[ $(git rev-parse origin/main) != "$GITHUB_SHA" ]]; then
+            echo "::notice::main has moved past $GITHUB_SHA: build and test only"
+          elif [[ $(git rev-parse -q --verify "refs/tags/v$BASE^{commit}" || true) == "$GITHUB_SHA" ]]; then
+            echo "::notice::$GITHUB_SHA is the stable release v$BASE: no dev pre-release"
+          else
+            publish=true
           fi
           echo "released=$released" >> "$GITHUB_OUTPUT"
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
@@ -91,7 +104,6 @@ jobs:
     permissions:
       contents: read
     env:
-      # One version for every binary of the run.
       K10S_BUILD_VERSION: ${{ needs.version.outputs.version }}
       K10S_BUILD_COMMIT: ${{ needs.version.outputs.build }}
     steps:
@@ -111,6 +123,27 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  dist-test:
+    name: Tests of the release binary (dist, musl)
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      K10S_BUILD_VERSION: ${{ needs.version.outputs.version }}
+      K10S_BUILD_COMMIT: ${{ needs.version.outputs.build }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/toolchains
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+      - name: scripts/ci-test.sh dist
+        run: scripts/ci-test.sh dist
+
   test:
     name: Tests (${{ matrix.suite }})
     needs: version
@@ -121,8 +154,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Chaos/soak campaigns run in ci.yml, non-blocking.
-        suite: [unit, musl]
+        suite: [unit, musl] # chaos/soak campaigns: ci.yml, non-blocking
     env:
       K10S_BUILD_VERSION: ${{ needs.version.outputs.version }}
       K10S_BUILD_COMMIT: ${{ needs.version.outputs.build }}
@@ -182,11 +214,13 @@ jobs:
 
   publish:
     name: Publish ${{ needs.version.outputs.tag }}
-    needs: [version, build, test, metal]
+    needs: [version, build, dist-test, test, metal]
     if: needs.version.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ needs.version.outputs.tag }}
@@ -203,53 +237,58 @@ jobs:
           name: dist
           path: dist
       - name: Verify the artifacts
-        run: |
-          cd dist
-          sha256sum -c SHA256SUMS
-          ls -l
+        working-directory: dist
+        run: sha256sum -c SHA256SUMS
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
       - name: Release notes
-        run: scripts/release-notes.sh "$TAG" "$GITHUB_SHA" | tee "$RUNNER_TEMP/notes.md"
+        run: |
+          RELEASE_TAGS=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --limit 1000 \
+            --json tagName --jq '.[].tagName') scripts/release-notes.sh "$TAG" "$GITHUB_SHA" | tee "$RUNNER_TEMP/notes.md"
       - name: Create the release
         run: |
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            echo "::notice::release $TAG already exists: not publishing"
-            exit 0
-          fi
+          # Drafts left by an interrupted asset upload.
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq '.[] | select(.draft and .tag_name == env.TAG) | .id' |
+            while read -r id; do
+              echo "deleting orphan draft release $id"
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
+            done
+          latest=false
           args=(--repo "$GITHUB_REPOSITORY" --title "k10s $VERSION" --notes-file "$RUNNER_TEMP/notes.md")
           if [[ $CHANNEL == dev ]]; then
-            # Pre-releases never become "latest".
             args+=(--prerelease --target "$GITHUB_SHA")
           else
+            top=$( (gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases --limit 1000 \
+              --json tagName --jq '.[].tagName' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true
+              echo "$TAG") | sort -V | tail -1)
+            if [[ $top == "$TAG" ]]; then latest=true; fi
             args+=(--verify-tag)
           fi
-          gh release create "$TAG" "${args[@]}" dist/*.tar.gz dist/SHA256SUMS
+          gh release create "$TAG" "${args[@]}" --latest="$latest" dist/*.tar.gz dist/SHA256SUMS
       - name: Prune old development pre-releases
         if: needs.version.outputs.channel == 'dev'
-        run: |
-          # Keep the newest $KEEP_DEV_RELEASES dev pre-releases (by N); delete older ones and their tags.
-          gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName,isPrerelease --jq '
-            [.[] | select(.isPrerelease and (.tagName | test("^v[0-9]+[.][0-9]+[.][0-9]+-dev[.][0-9]+$")))]
-            | sort_by(.tagName | capture("-dev[.](?<n>[0-9]+)$").n | tonumber) | reverse
-            | .[(env.KEEP_DEV_RELEASES | tonumber):] | .[].tagName' |
-          while read -r old; do
-            echo "deleting pre-release $old"
-            gh release delete "$old" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
-          done
+        run: scripts/prune-dev.sh "$KEEP_DEV_RELEASES" releases
 
   images:
     name: Benchmark images (GHCR)
     needs: [version, publish]
-    # Runs after the release and may fail without affecting it.
     continue-on-error: true
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
     env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.version.outputs.tag }}
       VERSION: ${{ needs.version.outputs.version }}
       CHANNEL: ${{ needs.version.outputs.channel }}
       K10S_VERSION_FULL: ${{ needs.version.outputs.full }}
       K10S_REVISION: ${{ github.sha }}
+      KEEP_DEV_IMAGES: "10"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -259,13 +298,27 @@ jobs:
           name: dist
           path: dist
       - name: Build and push ghcr.io/<owner>/k10s-bench-<workload>
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           tar -xzf "dist/k10s-bench-$VERSION-linux-amd64.tar.gz" -C "$RUNNER_TEMP"
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          owner=${GITHUB_REPOSITORY_OWNER,,}
-          # Docker tags cannot hold `+build`: version without it, plus a moving tag.
-          moving=dev
-          if [[ $CHANNEL == stable ]]; then moving=latest; fi
-          scripts/bench-images.sh "$RUNNER_TEMP/k10s-bench-$VERSION-linux-amd64" "ghcr.io/$owner/k10s-bench-" "$VERSION" "$moving" --push
+          # Moving tags follow the releases as they are now: a re-run of an older build never moves them backwards.
+          tags=("$VERSION")
+          if [[ $CHANNEL == dev ]]; then
+            newest=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --limit 1000 --json tagName --jq '.[].tagName' |
+              sed -nE 's/^v[0-9]+\.[0-9]+\.[0-9]+-dev\.([0-9]+)$/\1 &/p' | sort -k1,1n | tail -1)
+            if [[ ${newest#* } == "$TAG" ]]; then tags+=(dev); fi
+          else
+            latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+            if [[ $latest == "$TAG" ]]; then tags+=(latest); fi
+          fi
+          prefix=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/k10s-bench-
+          scripts/bench-images.sh "$RUNNER_TEMP/k10s-bench-$VERSION-linux-amd64" "$prefix" "${tags[@]}" --push |
+            tee "$RUNNER_TEMP/images.sha256"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: ${{ runner.temp }}/images.sha256
+      - name: Prune old development images
+        if: needs.version.outputs.channel == 'dev'
+        run: |
+          scripts/prune-dev.sh "$KEEP_DEV_IMAGES" images \
+            k10s-bench-echo k10s-bench-compute k10s-bench-chain k10s-bench-counter
