@@ -1,6 +1,6 @@
 # JIT ⇄ runtime ABI (x86-64, v1)
 
-Contract between `k10-jit` (TIR → machine code) and the node runtimes (`k10-node`, later `k10-metal`).
+Contract between `k10-jit` (TIR → machine code) and the node runtimes (`k10-node` and `k10-metal`).
 The JIT knows nothing about scheduling, stacks or I/O; it calls hooks. The runtime knows nothing about codegen.
 
 ## Registers inside JIT code

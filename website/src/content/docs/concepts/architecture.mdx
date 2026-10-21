@@ -46,6 +46,8 @@ spec did not change keep their warm instances and counters.
 | `k10-ir` | TIR types, binary codec, validator, reference interpreter, random program generator (`no_std`) |
 | `k10-lang` | the Ten compiler and its standard prelude |
 | `k10-jit` | single-pass TIR → x86-64 compiler: the isolation boundary |
+| `k10-host` | the host API shared by the hosted node and the bare-metal kernel: functions, range rules, guest clock (`no_std`) |
+| `k10-nospec` | branch-free bounds clamps for indexing with guest values (Spectre v1, `no_std`) |
 | `k10-mesh` | SWIM gossip, manifests, bundles, placement, the peer wire protocol (`no_std`, sans-IO) |
 | `k10-node` | the hosted runtime: shards, fibers, instance pools, host API, ingress, KV, peers, sandbox |
 | `k10s` | the single CLI and daemon binary |

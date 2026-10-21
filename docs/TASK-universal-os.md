@@ -18,8 +18,11 @@ the same cluster:
 
 ## 2. Current state (verified facts)
 - Hosted runtime ([NODE.md](NODE.md), `crates/k10-node`, `crates/k10s`): uses only Linux syscalls (epoll, mmap,
-  madvise, memfd, eventfd, sockets). The **only processor-specific code outside the JIT is the fiber context switch
-  in `crates/k10-node/src/coro.rs`** (x86-64 naked function).
+  madvise, memfd, eventfd, sockets). Processor-specific code outside the JIT: the **fiber context switch in
+  `crates/k10-node/src/coro.rs`** (x86-64 naked function) and the **process sandbox's seccomp filter**
+  (`crates/k10-node/src/sandbox/`, x86-64 syscall numbers; a `compile_error!` on any other target), both without a
+  portable fallback; `crates/k10-nospec` (x86-64 and aarch64 asm) and the x86-64 SIMD ChaCha20 in `crates/k10-mesh`
+  fall back to portable code.
 - `crates/k10-jit` exists for **x86-64 only**. The reference interpreter (`crates/k10-ir`, no_std Rust) runs on any
   architecture; measured 7–33× slower than the JIT on compute-heavy services, equal on I/O-bound ones.
 - Ten compiler, gossip/placement (`crates/k10-mesh`), manifests and bundles are plain portable Rust.

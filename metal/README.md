@@ -16,7 +16,7 @@ Measurements: [RESULTS.md](RESULTS.md).
 ## Quick start
 
 ```sh
-./build.sh                 # out/k10-metal.elf (kernel), out/bundle.k10b (18 test services, 4 of them compiled from
+./build.sh                 # out/k10-metal.elf (kernel), out/bundle.k10b (19 test services, 4 of them compiled from
                            # ../examples/*.ten); EMBED=1 also bakes the bundle in
 k10s keygen -o admin.key   # admin key (mode 0600); without one the admin API serves only /_k10s/health
 ADMIN_KEY=admin.key ./run.sh # QEMU/KVM, serial on stdout, host 127.0.0.1:8090 -> guest :80 (PORT=, MEM=, BIOS=);

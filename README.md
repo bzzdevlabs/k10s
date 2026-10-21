@@ -70,7 +70,8 @@ curl '127.0.0.1:8080/compute/?n=1000'
 Try a single service without a node: `k10s run examples/echo.ten --method POST --body hi`.
 Admin requests (`apply`, `status`, `logs`) are signed with the node's admin key: a node creates `DATA/admin.key`
 on first start (or takes `--admin-token-file FILE`); give the CLI the same file (`--admin-token-file` or
-`K10S_ADMIN_TOKEN_FILE`; without `--data`, node and CLI share `~/.local/state/k10s/admin.key`).
+`K10S_ADMIN_TOKEN_FILE`; without `--data`, node and CLI share `admin.key` in the state directory: `$K10S_HOME`, else
+`$XDG_STATE_HOME/k10s`, else `~/.local/state/k10s`).
 
 A cluster: create a key once (`k10s keygen -o cluster.key`), copy it to every node, and start them with
 `--cluster-key-file cluster.key`, `--gossip`, `--rpc` and `--join HOST:PORT` (see [docs/NODE.md](docs/NODE.md));
@@ -78,10 +79,9 @@ then `apply` to any of them. Gossip and peer links are authenticated and encrypt
 Prebuilt binaries: [Releases and versions](#releases-and-versions).
 
 ## Releases and versions
-**Breaking change (`calls` allowlist):** a service may `call` only the services its manifest lists in `calls`
-(none by default). After upgrading, re-apply manifests that use `call` with `calls = [...]` (nodes log a warning for
-every service that imports `call` but is granted nothing), and upgrade every node before applying such a manifest:
-nodes built before `calls` cannot decode it (manifest format 2).
+**`calls` allowlist (manifest format 2):** a service may `call` only the services its manifest lists in
+`calls = [...]` (none by default); nodes log a warning for every service that imports `call` but is granted nothing.
+Nodes built before `calls` cannot decode format-2 manifests: upgrade every node before applying one.
 
 Prebuilt artifacts: [GitHub Releases](https://github.com/bzzdevlabs/k10s/releases). *Latest* is the last stable
 release; every push to `main` also publishes a development pre-release. All binaries are for x86-64 Linux. `V` below
@@ -121,8 +121,9 @@ field of `GET /_k10s/status` (hosted node and bare-metal kernel), the kernel's b
 
 **Cutting a release** (from `main`): run `scripts/set-version.sh X.Y.Z` (both manifests and their lock files) and
 commit; tag that commit `vX.Y.Z` and push the tag. The release workflow checks that the tag equals the Cargo version
-and is on `main`, then builds, tests, attests and publishes `vX.Y.Z` (marked *Latest* only if it is the highest). Then set the next version (`scripts/set-version.sh X.Y.(Z+1)`, or a minor or
-major bump) so that dev builds carry it. `scripts/dist.sh` builds the same archives locally, into `dist/`.
+and is on `main`, then builds, tests, attests and publishes `vX.Y.Z` (marked *Latest* only if it is the highest).
+Then set the next version (`scripts/set-version.sh X.Y.(Z+1)`, or a minor or major bump) so that dev builds carry it.
+`scripts/dist.sh` builds the same archives locally, into `dist/`.
 
 ## Repository
 
@@ -130,6 +131,8 @@ major bump) so that dev builds carry it. `scripts/dist.sh` builds the same archi
 |---|---|
 | [docs/](docs/) | design, specs ([TIR](docs/TIR.md), [host API](docs/HOSTAPI.md), [JIT ABI](docs/JIT-ABI.md), [Ten](docs/TEN.md)), [node runtime](docs/NODE.md), [status](docs/STATUS.md) |
 | [crates/k10-ir](crates/k10-ir) | TIR: codec, validator, reference interpreter, random program generator |
+| [crates/k10-nospec](crates/k10-nospec) | branch-free clamps for host code indexed by guest values (Spectre v1) |
+| [crates/k10-host](crates/k10-host) | the host API, shared by the hosted node and the bare-metal kernel |
 | [crates/k10-lang](crates/k10-lang) | Ten compiler and prelude |
 | [crates/k10-jit](crates/k10-jit) | single-pass TIR → x86-64 compiler (the isolation boundary) |
 | [crates/k10-mesh](crates/k10-mesh) | gossip membership, manifests, bundles, placement, wire protocol |
@@ -137,6 +140,8 @@ major bump) so that dev builds carry it. `scripts/dist.sh` builds the same archi
 | [metal/](metal/) | the node as a bare-metal kernel (PVH, virtio-net, SMP, JIT, cluster member) |
 | [examples/](examples/) | Ten services: hello, echo, compute (SHA-256), chain, counter, todo, nbody, sort |
 | [bench/](bench/) | Kubernetes / bare-process / k10s benchmark harness and results |
+| [editors/vscode](editors/vscode) | VS Code extension for Ten sources and `.k10s` manifests |
+| [website/](website/) | the documentation site (GitHub Pages) |
 
 ## How it is tested
 - Differential testing of the JIT against the reference interpreter on randomly generated programs (1 M modules,
@@ -146,8 +151,8 @@ major bump) so that dev builds carry it. `scripts/dist.sh` builds the same archi
 
 ## Status and limits
 Research prototype. Not yet: per-node identity and signed bundles (one shared cluster key today), TLS, replicated
-storage (KV is node-local), consensus for singletons, hostile multi-tenancy on one node (Spectre-class side channels are only
-partly mitigated), architectures other than x86-64 for the JIT (others run on the interpreter). See
+storage (KV is node-local), consensus for singletons, hostile multi-tenancy on one node (Spectre-class side channels
+are only partly mitigated), architectures other than x86-64 for the JIT (others run on the interpreter). See
 [docs/STATUS.md](docs/STATUS.md) and [SECURITY.md](SECURITY.md).
 
 ## License

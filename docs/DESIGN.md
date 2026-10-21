@@ -63,7 +63,7 @@ feature: idle services cost ≈ 0 RAM.
 
 ### 2.3 CPU scheduling: kernel threads + CFS + cgroups → one thread per core + compiler safepoints
 One OS thread per core (or none at all on bare metal). Each runs a run queue of invocations. Invocations run on small
-pooled stacks only while in flight (idle instances have no stack). The compiler inserts a one-instruction safepoint
+pooled stacks only while in flight (idle instances have no stack). The compiler inserts a compare-and-branch safepoint
 check at function entries and loop headers (`cmp rsp, [ctx.limit]; jb slow`), which doubles as stack-overflow
 check and preemption point: a ticker sets the limit to ∞ to preempt. Blocking host calls (calling another service)
 suspend the invocation by switching stacks — developers write straight-line code; the runtime multiplexes.
@@ -71,7 +71,8 @@ suspend the invocation by switching stacks — developers write straight-line co
 ### 2.4 Resource limits: cgroups → structure
 - Memory: the slot size *is* the limit. Exceeding it is impossible by construction; nothing to account on the
   page-fault path.
-- CPU: per-invocation CPU budget and per-service fair share enforced at safepoints.
+- CPU: per-invocation CPU budget and time slices enforced at safepoints; preempted invocations run round-robin
+  (no per-service share or weight).
 - Stack: per-invocation stack budget checked at function entry.
 
 ### 2.5 Packaging: container images → content-addressed modules
@@ -133,12 +134,14 @@ assembly; the hand-written assembly is reserved for the few places where it matt
 
 Crates:
 - `k10-ir` — TIR types, codec, validator, reference interpreter (no_std + alloc).
+- `k10-nospec` — branch-free clamps for host code indexed by guest values (Spectre v1).
+- `k10-host` — the host API (function table, limits, semantics), shared by the hosted node and `k10-metal` (no_std).
 - `k10-lang` — Ten compiler (source → TIR) and its standard prelude.
 - `k10-jit` — TIR → x86-64 single-pass compiler and invocation trampolines (codegen no_std; exec needs a platform).
 - `k10-mesh` — sans-IO membership gossip, manifests, placement, wire codecs (no_std + alloc), plus a std driver.
 - `k10-node` — the hosted node runtime: shards, scheduler, stacks, instance pool, host API, ingress, KV, peers.
 - `k10s` — the single CLI/daemon binary.
-- `k10-metal` (later) — the node runtime booting without Linux.
+- `k10-metal` (`metal/`, its own workspace) — the node runtime booting without Linux.
 
 ## 4. Out of scope for v0 (deliberately)
 - Hostile multi-tenancy (side channels): the cheap Spectre gaps are closed (SECURITY.md, "CPU side channels": no

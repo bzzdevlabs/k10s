@@ -37,7 +37,7 @@ Runs a node.
 | `--admin-token-file FILE` | the admin key; default `DATA/admin.key` (or `admin.key` in the state directory without `--data`), created with mode 0600 on first start |
 | `--admin ADDR` | serve the admin API on its own listener; the ingress then serves only `/_k10s/health` |
 
-**Cluster mode** (any of these flags turns it on):
+**Cluster mode** (`--gossip`, `--rpc`, `--join` or `--advertise` turns it on; the other flags need it):
 
 | Flag | Default | Meaning |
 |---|---|---|

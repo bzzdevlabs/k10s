@@ -26,7 +26,7 @@ Report vulnerabilities as described in [SECURITY.md](https://github.com/bzzdevla
 |---|---|
 | **Software fault isolation** | the boundary: masked memory, structured control flow, closed host API ([details](/k10s/concepts/isolation/)) |
 | **Machine-code verifier** | an independent checker re-verifies the generated code of every function in the test suites |
-| **Process sandbox** | `k10s node` drops to seccomp (95 syscalls) and Landlock (data directory only) once its listeners are bound |
+| **Process sandbox** | `k10s node` drops to seccomp (96 syscalls) and Landlock (data directory only) once its listeners are bound |
 | **systemd hardening** | an optional unit adds its own layer ([Production setup](/k10s/guides/production/)) |
 
 On bare metal there is no OS layer: hardware NX and W^X for kernel and JIT code are the only extra barrier, so

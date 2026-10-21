@@ -82,7 +82,7 @@ One namespace per service; node-local.
 
 | Trap | Cause |
 |---|---|
-| `Host(1)` | response body over 16 MiB |
+| `Host(1)` | response body, or `call` request body, over 16 MiB |
 | `Host(2)` | key over 1 KiB or value over 1 MiB |
 | `Host(3)` | key-value quota of the service exhausted |
 | `Host(4)` | `kv_add` on a value that is not 8 bytes |

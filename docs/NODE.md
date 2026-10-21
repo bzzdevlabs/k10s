@@ -420,9 +420,11 @@ first use; when both ends dialed at once, the connection dialed by the smaller i
 by its dialer once its requests are answered. Frames are appended to the link's write buffer and written once per
 mesh-loop iteration (batching; edge-triggered epoll, partial writes resume on `EPOLLOUT`). A failed dial (or one
 not connected within 1 s) backs the peer off for 200 ms, doubling up to 5 s.
-**Bounded buffering**: a link is read 64 KiB at a time and the frames are decoded after every read (the decoder
-holds at most one partial frame), with at most 1 MiB read per link per mesh-loop iteration — a link with input
-left is read again on the next iteration, so a peer streaming frames cannot monopolize the thread. Toward a slow
+**Bounded buffering**: a link is read 64 KiB at a time and its received frames are handled before it is read again
+(the decoder holds at most one partial frame plus one read). Each link gets 1 MiB per mesh-loop iteration, counting
+the bytes read and the replies its frames queue (a 20-byte `GetManifest` costs the whole manifest) — a link with
+input left is served again on the next iteration, so a peer streaming frames or requests cannot monopolize the thread
+and delay gossip. Toward a slow
 peer, the written prefix of a write buffer is dropped once it reaches 1 MiB, and a link holding more than 16 MiB of
 unsent bytes gets no new calls (the router skips that peer like a backed-off one: next candidate, else −2;
 `congested_skips`); a frame that would push it past 16 MiB + the maximum frame size (80 MiB: the peer stopped
@@ -459,7 +461,7 @@ applied (version, hash), fetch in progress, last apply error, members (id, state
 addresses, capacity), placement (service → node ids), links (peer, state, outstanding, bytes, unsent), counters
 (gossip packets/bytes, forwarded, retries, failed, local fallback, served for peers, not-here, dial failures,
 congested skips, links overflowed, accept pauses, peer bytes, fetches, applies, link auth failures, gossip datagrams
-rejected: bad tag / stale / replayed), and `"auth"`: `{"mode":"key","key_id":…}` or `{"mode":"insecure"}`. Each service also reports its `rt` id and `placement` (`"local"` or node ids). `GET
+rejected: bad tag / unknown key / stale / replayed / older boot), and `"auth"`: `{"mode":"key","key_id":…}` or `{"mode":"insecure"}`. Each service also reports its `rt` id and `placement` (`"local"` or node ids). `GET
 /_k10s/cluster` renders the same as text; `k10s status` prints it in cluster mode (`--json` for the JSON).
 
 **Tests** (`crates/k10s/tests/cluster.rs`, real `k10s node` processes on ephemeral localhost ports, `--probe-ms 100`):

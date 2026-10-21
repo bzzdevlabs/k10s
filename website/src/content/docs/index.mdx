@@ -31,7 +31,8 @@ import LayerCompare from '~/components/LayerCompare.astro';
 	title="zsh — ~/k10s"
 	session={`
 $ k10s node --http 127.0.0.1:8080 --data /tmp/k10s-data &
-«dim:k10s 0.1.0: node \`laptop\` listening on http://127.0.0.1:8080 (8 shards, backend jit)»
+«dim:k10s 0.1.0+1a2b3c4: node \`laptop\` listening on http://127.0.0.1:8080 (8 shards, backend jit, data /tmp/k10s-data)»
+$ export K10S_ADMIN_TOKEN_FILE=/tmp/k10s-data/admin.key
 $ k10s apply examples/app.k10s
 {"ok":true,"version":1,"added":[«teal:"chain","compute","counter","echo","hello","nbody","sort","todo"»],"warnings":[]}
 $ curl 127.0.0.1:8080/hello/

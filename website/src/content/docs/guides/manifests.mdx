@@ -3,7 +3,6 @@ title: Manifests
 description: The k10s manifest format, every service key with its default, and how apply, versions and updates work.
 ---
 
-import { Aside } from '@astrojs/starlight/components';
 import Terminal from '~/components/Terminal.astro';
 
 A manifest is the **whole desired state** of a node or cluster: the list of services, their code and their
@@ -80,9 +79,3 @@ $ k10s apply bad.k10s
 
 A service whose module imports `call` but whose `calls` grants nothing is reported at every apply and reload: a
 `k10s: warning:` log line, `warnings` in the apply report, and `manifest.warnings` in `/_k10s/status`.
-
-<Aside type="caution" title="Upgrading from manifests without calls">
-	A manifest written before `calls` existed grants nothing, so calls fail with `-1` after an upgrade until it is
-	re-applied with `calls = [...]`. Upgrade every node first: nodes built before `calls` cannot decode a manifest
-	that uses it.
-</Aside>

@@ -71,16 +71,17 @@ Design rationale: [DESIGN.md](DESIGN.md); literature evidence: [research.md](res
 | Component | Path | Rust lines (src / tests) | Status |
 |---|---|---|---|
 | TIR: codec, validator, reference interpreter, random program generator | `crates/k10-ir` | 4.3k / 2.7k | done, `no_std` |
-| Ten compiler + prelude + 8 example services | `crates/k10-lang`, `examples/` | 6.7k / 3.0k | done |
-| Single-pass TIR → x86-64 JIT (the isolation boundary) | `crates/k10-jit` | 3.6k / 3.5k | done, `no_std` codegen |
-| Gossip membership, manifests, bundles, placement, wire protocol, simulator | `crates/k10-mesh` | 4.3k / 0.6k | done, sans-IO, `no_std` |
-| Node runtime (shards, fibers, slots, CoW snapshots, host API, KV, ingress, admin, cluster, JIT backend) | `crates/k10-node` | 10.8k / 1.2k (+ unit tests) | done |
-| `k10s` binary (node, apply, build, run, status, logs) + integration/chaos/soak/abuse suites | `crates/k10s` | 0.6k / 3.8k | done |
-| Bare-metal kernel (PVH, ACPI-free, virtio-net, smoltcp, SMP, JIT, cluster member) | `metal/` | 8.4k | done for VMs |
-| Kubernetes / bare-process / k10s benchmark harness, Go load generator | `bench/` | 3.4k (sh/py/go) | done |
+| Ten compiler + prelude + 8 example services | `crates/k10-lang`, `examples/` | 6.6k / 3.0k | done |
+| Single-pass TIR → x86-64 JIT (the isolation boundary) | `crates/k10-jit` | 3.8k / 7.1k | done, `no_std` codegen |
+| Gossip membership, manifests, bundles, placement, wire protocol, simulator | `crates/k10-mesh` | 7.8k / 0.7k | done, sans-IO, `no_std` |
+| Host API shared by the node and the bare-metal kernel; speculation-safe bounds | `crates/k10-host`, `crates/k10-nospec` | 0.9k (+ unit tests) | done, `no_std` |
+| Node runtime (shards, fibers, slots, CoW snapshots, host API, KV, ingress, admin, cluster, JIT backend) | `crates/k10-node` | 13.3k / 1.6k (+ unit tests) | done |
+| `k10s` binary (node, apply, build, run, status, logs, keygen) + integration/chaos/soak/abuse suites | `crates/k10s` | 0.8k / 4.7k | done |
+| Bare-metal kernel (PVH, ACPI-free, virtio-net, smoltcp, SMP, JIT, cluster member) | `metal/` | 9.6k | done for VMs |
+| Kubernetes / bare-process / k10s benchmark harness, Go load generator | `bench/` | 3.7k (sh/py/go) | done |
 | Research: universal OS image (Tier 1), native hardware (Tier 2) | `docs/research/` | — | done, prototypes on local branches |
 
-About 40k lines of Rust plus 15k lines of tests, written from scratch with no dependencies beyond `libc` (and
+About 47k lines of Rust plus 20k lines of tests, written from scratch with no dependencies beyond `libc` (and
 `smoltcp` in the bare-metal kernel).
 
 ## 3. Measured results
@@ -158,7 +159,7 @@ the caveats. Highlights beyond §0:
   authenticated and encrypted with one shared cluster key (rotatable) and admin requests are signed, but every key
   holder is trusted (no per-node identity, no signed bundles yet).
 - **Storage:** KV is durable but node-local (atomic per node via `kv_add`/`kv_cas`); no replication or consensus yet.
-- **Compute speed:** Ten + baseline JIT is ~1.1–1.6× slower than portable Go and ~4× slower than Go's SHA-256
+- **Compute speed:** Ten + baseline JIT is ~1.1–1.6× slower than portable Go and ~2.5× slower than Go's SHA-256
   assembly; the JIT keeps at most six locals in registers and every memory access pays the mask.
 - **Ecosystem:** workloads must be written in Ten (or compiled to TIR); no Wasm/LLVM front end yet.
 - **Measurements:** Kubernetes ran under Docker Desktop (kind inside a VM whose kernel and port forwarder are not
@@ -167,9 +168,9 @@ the caveats. Highlights beyond §0:
 
 ## 8. Roadmap (recommended order)
 1. **Cluster security:** node identity and signed bundles (done: shared-key authenticated/encrypted gossip and peer
-   links, admin API token).
+   links, signed admin requests).
 2. **Replicated state:** per-service replicated KV (Raft per shard group) and leases for singletons.
-3. **Tier 1 images** (U0–U2): PID-1 mode merged, x86 images, signed A/B updates spread over gossip.
+3. **Tier 1 images** (U0–U2): PID-1 mode in main, x86 images, signed A/B updates spread over gossip.
 4. **arm64:** interpreter everywhere now; arm64 JIT backend (shared by both tiers).
 5. **Tier 2 M1–M2:** UEFI + ACPI + modern virtio + NVMe + durable KV log on the native kernel; then clouds (ENA,
    VMBus, gVNIC).
@@ -186,7 +187,7 @@ Collected from the research reports (details there):
 
 ## 10. Reproduce
 ```bash
-cargo test --release -p k10-ir -p k10-mesh -p k10-lang -p k10-jit -p k10-node -p k10s
+cargo test --release -p k10-nospec -p k10-ir -p k10-host -p k10-mesh -p k10-lang -p k10-jit -p k10-node -p k10s
 ```
 ```bash
 K10S_BACKEND=interp cargo test --release -p k10-node -p k10s

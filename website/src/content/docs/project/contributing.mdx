@@ -17,7 +17,8 @@ cargo test
 K10S_BACKEND=interp cargo test   # the same suites on the reference interpreter
 ```
 
-CI runs `scripts/ci-test.sh unit musl metal-selftest metal` on every pull request.
+CI runs `scripts/ci-test.sh unit musl metal-selftest metal dist` on every pull request (`metal` non-blocking), and
+the non-blocking chaos and soak `campaign` on pull requests and `main`.
 
 ## Rules of thumb
 

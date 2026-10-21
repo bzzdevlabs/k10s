@@ -5,7 +5,8 @@ PROJECT STATE: HARDENING
 Last updated: 2026-10-21. This file is the single place to learn where the project stands and what comes next.
 
 ## State of `main`
-`main` (pushed; latest dev pre-release v0.1.0-dev.125, all release gates green) contains:
+`origin/main` is v0.1.0-dev.125 (all release gates green); local `main` adds the step 8 integration commit (not
+pushed yet, step 9). `main` contains:
 - Isolation: SFI-masked JIT and interpreter, validator, red-team and differential suites, objdump encoder fuzzing and
   SFI verifier tests.
 - Control plane: signed admin requests (HMAC over a per-process audience, method, target, time, nonce and body
@@ -19,24 +20,23 @@ Last updated: 2026-10-21. This file is the single place to learn where the proje
   bounds (`k10-nospec`), per-node SipHash-keyed fuzzy guest clock; one host ABI crate (`k10-host`) for hosted and metal.
 - Defense in depth: two-phase start (bind, then `--user` drop, capability check, Landlock, seccomp, then workloads),
   root refused without `--user`, `--sandbox on|seccomp-only|log|off`.
-- DoS: per-service memory reservations, bounded overshoot, placement versioned in gossip, rejoin through tombstone
-  addresses and `DATA/peers`, KV store with ordered flushes and rewrite-from-memory on I/O errors.
+- DoS: per-service memory reservations, bounded overshoot, placement versioned in gossip (1000 nodes × 10k services
+  in ≈ 80 ms, output pinned by a test), rejoin through tombstone addresses and `DATA/peers`, KV store with ordered
+  flushes and rewrite-from-memory on I/O errors; each peer link gets 1 MiB per mesh-loop iteration (bytes read plus
+  replies queued), so a peer flooding requests cannot stall gossip.
 - Releases: SemVer; tag `vX.Y.Z` on main → stable release, every push to main → `vX.Y.Z-dev.N` pre-release.
-- Performance vs 08f2921 (`bench/k10s/ab.py --same`): single node and local ingress within noise (±3 %); forwarded
-  requests 3–5 % below, the cost of encrypted peer links (~3 %) and seccomp (~2 %), same syscalls per request; ChaCha20
-  runs with AVX2 when present (docs/NODE.md, cluster measurements). Trivial invoke: JIT 7.8 ns on both.
+- Performance vs 08f2921 (`bench/k10s/ab.py --same`, 4 interleaved rounds, host load ≈ 7 from the benchmark itself;
+  medians): single node within ±2.5 %; local ingress −4 %; forwarded requests −5 % at c=1 (CPU per request +7 %) and
+  −2 % at c=64, the cost of encrypted peer links (~3 %) and seccomp (~2 %), same syscalls per request; ChaCha20 runs
+  with AVX2 when present (docs/NODE.md, cluster measurements). Trivial invoke: JIT 7.8 ns on both.
 
 ## Remaining steps, in order (one per session)
 Rules: production-ready (no workarounds), comments only where needed as English one-liners, docs (incl. website/)
 updated with every change and written as the current state, no perf regression beyond the measured cost of the
-security features (`bench/k10s/ab.py --same` vs 08f2921), no stable tag without the user, never create namespaces or seek
-privileges on this machine.
+security features (`bench/k10s/ab.py --same` vs 08f2921), no stable tag without the user, never create namespaces or
+seek privileges on this machine.
 
-8. **Integrate** — full suites on both backends, `metal/test.sh`, `metal/cluster-test.sh`; fix the load-sensitive
-   flakes (`mesh_abuse::peer_that_never_reads_is_cut_off` on the interpreter, `placement::speed_1000_nodes_10k_replicas`)
-   at their cause; quiet-machine `ab.py --same` (≥ 4 rounds) vs 08f2921; check README, docs/, SECURITY.md,
-   docs/REPORT.md and every website/ page against the code, current state only.
-
+9. **Push** — push `main`, watch CI and the release workflow (dev pre-release), fix what they show.
 10. **Optional perf** — shard-owned peer links: each shard dials and reads its own link per peer, the mesh thread keeps
     gossip, fetch and accept; expected 7 → 3 wake-ups per forwarded request (≈ −40 % CPU at 1 conn).
 11. **Decisions (user)** — answer docs/REPORT.md §9 and the open questions of docs/research/universal-os.md §10 and
@@ -76,6 +76,10 @@ privileges on this machine.
 - Untested here (needs root): `k10s node --user U --data NEW_DIR` without `--admin-token-file` creates the data
   directory and `admin.key` owned by U. Metal has no test of the admin nonce-cache 429.
 - Multi-hour soak to rule out the ~40 KB/min RSS drift seen once on a cluster node.
-- Metal has no per-service memory reservations (it shares placement, not the accounting).
+- Metal has no per-service memory reservations (it shares placement, not the accounting), and its peer links have no
+  unsent-byte cap or per-iteration budget (a key holder that stops reading grows the write buffer): port the hosted
+  ones (`LINK_BUDGET`, `LINK_SOFT_CAP`, `LINK_HARD_CAP` in `crates/k10-node/src/cluster/mesh.rs`).
+- The hosted node builds for Linux x86-64 only (seccomp filter, `coro.rs`); Tier 1 needs portable versions
+  (docs/TASK-universal-os.md).
 - Native-hardware open questions for the user: end of docs/research/native-hardware.md; decisions list in
   docs/REPORT.md §9.

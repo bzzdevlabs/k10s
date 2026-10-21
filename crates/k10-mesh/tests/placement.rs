@@ -189,6 +189,35 @@ fn deterministic_across_input_orders() {
     assert_eq!(a, place(&m2, &shuffled));
 }
 
+/// Every node computes placement on its own, so its output is part of the protocol: this pins it for weighted,
+/// memory-bound inputs (stacking, unplaced replicas, both placement versions).
+#[test]
+fn output_is_pinned() {
+    let mut d = Vec::new();
+    for (nodes, cap, version) in [(400u64, 48u64 << 20, 2u8), (7, 6 << 20, 2), (150, 32 << 20, 1)] {
+        let mut members: Vec<Member> = (0..nodes).map(|i| member(i, cap * (1 + i % 5) + i * 4096)).collect();
+        for (i, m) in members.iter_mut().enumerate() {
+            m.placement = version;
+            if i % 11 == 3 {
+                m.state = k10_mesh::MemberState::Suspect;
+            }
+        }
+        let mut m = manifest(3000, 1, 16);
+        for (i, s) in m.services.iter_mut().enumerate() {
+            s.replicas = 1 + (i % 5) as u32;
+            s.mem_log2 = 16 + (i % 4) as u8;
+        }
+        let p = place(&m, &members);
+        for (name, ns) in &p.services {
+            d.extend_from_slice(name.as_bytes());
+            ns.iter().for_each(|n| d.extend_from_slice(&n.0.to_le_bytes()));
+        }
+        d.extend_from_slice(&p.unplaced.to_le_bytes());
+    }
+    let h: String = k10_mesh::sha256::sha256(&d)[..8].iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(h, "b7606a6c9b9388a8");
+}
+
 #[test]
 fn speed_1000_nodes_10k_replicas() {
     let members: Vec<Member> = (0..1000).map(|i| member(i, 64 << 30)).collect();

@@ -8,7 +8,7 @@ existing design choice are welcome — bring measurements.
 cargo build --release -p k10s
 ```
 ```bash
-cargo test -p k10-ir -p k10-mesh -p k10-lang -p k10-jit -p k10-node -p k10s
+cargo test -p k10-nospec -p k10-ir -p k10-host -p k10-mesh -p k10-lang -p k10-jit -p k10-node -p k10s
 ```
 The node and CLI suites run on the JIT by default; run them on the interpreter too:
 ```bash
@@ -22,22 +22,26 @@ Benchmarks: see `bench/README.md`.
 |---|---|
 | `docs/` | design (`DESIGN.md`), specs (`TIR.md`, `HOSTAPI.md`, `JIT-ABI.md`, `TEN.md`), runtime (`NODE.md`), status |
 | `crates/k10-ir` | TIR types, codec, validator, reference interpreter, program generator |
+| `crates/k10-nospec` | branch-free clamps for host code indexed by guest values (Spectre v1) |
+| `crates/k10-host` | the host API, shared by the hosted node and the bare-metal kernel |
 | `crates/k10-lang` | Ten compiler and prelude |
 | `crates/k10-jit` | TIR → x86-64 compiler |
 | `crates/k10-mesh` | gossip, manifests, bundles, placement, wire protocol |
 | `crates/k10-node`, `crates/k10s` | node runtime and the `k10s` binary |
 | `metal/` | the node as a bare-metal kernel |
 | `bench/` | Kubernetes / bare-process / k10s benchmarks |
+| `editors/vscode` | VS Code extension for Ten sources and `.k10s` manifests |
+| `website/` | the documentation site (GitHub Pages) |
 | `scripts/` | versioning, release builds and CI test suites (below) |
-| `.github/` | workflows (`ci.yml`, `release.yml`) and the pinned toolchains (`actions/toolchains`) |
+| `.github/` | workflows (`ci.yml`, `release.yml`, `pages.yml`, `vscode.yml`) and the pinned toolchains (`actions/toolchains`) |
 
 ## CI, versions and releases
 - **CI** (`.github/workflows/ci.yml`, every pull request) runs `scripts/ci-test.sh unit musl metal-selftest`,
   `scripts/dist.sh` then `scripts/ci-test.sh dist`; the same commands work locally. `unit` = all crates in release
-  mode on the JIT and on the interpreter, `#[ignore]`d long tests excluded; `musl` = the same for the static
-  binary's target; `dist` = the k10s integration tests against the archived static binary (`K10S_BIN`). Non-blocking:
-  `metal` (metal/test.sh, latency-bound) and the chaos/soak `campaign` (~7 min). Toolchains are pinned in
-  `.github/actions/toolchains/action.yml` (Rust 1.98.1, Go 1.25.1); change them there.
+  mode on the JIT, the node and CLI also on the interpreter, `#[ignore]`d long tests excluded; `musl` = the same for
+  the static binary's target; `dist` = the k10s integration tests against the archived static binary (`K10S_BIN`).
+  Non-blocking: `metal` (metal/test.sh, latency-bound) and the chaos/soak `campaign` (~7 min). Toolchains are pinned
+  in `.github/actions/toolchains/action.yml` (Rust 1.98.1, Go 1.25.1); change them there.
 - **Releases** (`.github/workflows/release.yml`): a push to `main` publishes the pre-release `vX.Y.Z-dev.N` (only
   for the current head of `main`, and not for a commit that carries the stable tag), a pushed tag `vX.Y.Z` the stable
   release, once `unit`, `musl`, `dist` and `metal-selftest` pass. Artifacts and images get build-provenance
@@ -73,7 +77,7 @@ Benchmarks: see `bench/README.md`.
 ## Rules of thumb
 - **The validator and the JIT are the security boundary.** Any change to `crates/k10-ir/src/validate.rs` or
   `crates/k10-jit` must keep the differential test (`tests/diff.rs`) and the red-team suite (`tests/redteam.rs`)
-  green, and should run a release soak (see `crates/k10-jit` docs) before merging.
+  green, and should run a release soak (`soak` in `tests/diff.rs`) before merging.
 - Minimal dependencies: the core crates have none besides `libc`; justify any new one in the PR.
 - Every `unsafe` block states its invariants in a comment.
 - `crates/k10-ir/src/types.rs` (TIR) and `docs/JIT-ABI.md` are frozen interfaces: changes need a design discussion.

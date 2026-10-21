@@ -60,10 +60,11 @@ import Terminal from '~/components/Terminal.astro';
    <Terminal
    	session={`
    $ sudo systemctl enable --now k10s
-   $ journalctl -u k10s -n 3 -o cat
-   k10s: sandbox mode=on user=998 caps=none landlock=abi2 seccomp=kill jit_dump=-
+   $ journalctl -u k10s -n 4 -o cat
    k10s: cluster key id 9c66ecc2b991cd9e
-   k10s 0.1.0: node \`node-1\` listening on http://0.0.0.0:8080 (8 shards, backend jit, data /var/lib/k10s)
+   k10s: sandbox mode=on user=998 caps=none landlock=abi2 seccomp=kill jit_dump=-
+   k10s: admin API on http://10.0.0.1:8081: requests signed with the key in /etc/k10s/admin.key
+   k10s 0.1.0+1a2b3c4: node \`node-1\` listening on http://0.0.0.0:8080 (8 shards, backend jit, data /var/lib/k10s)
    `}
    />
 
@@ -92,7 +93,7 @@ import Terminal from '~/components/Terminal.astro';
 `--sandbox on` (the default) applies, in order: close inherited descriptors and set `no_new_privs`, read the secrets
 and bind every listener, drop to `--user` when started as root (root without `--user` is refused), drop every
 capability, Landlock (files limited to the data directory, read-write, nothing executable), then a seccomp allowlist
-of 95 syscalls. The stores, the last bundle and every thread start inside the sandbox. Anything outside the
+of 96 syscalls. The stores, the last bundle and every thread start inside the sandbox. Anything outside the
 allowlist kills the process: `execve`, `fork`, namespaces, `ptrace`, `mount`, `bpf`, `io_uring`, new listening
 sockets, executable `mmap`; sockets other than IPv4/IPv6 stream or datagram are refused.
 

@@ -11,12 +11,14 @@
 //! per loop iteration (batching); a link that fails to connect puts its peer in a short backoff (200 ms, doubling
 //! up to 5 s) during which the router avoids it.
 //!
-//! **Bounded buffering.** Reads decode frames after every `read` (the decoder holds at most one partial frame) and
-//! take at most [`READ_BUDGET`] bytes per link per loop iteration (a link with more pending input is read again on
-//! the next iteration, so one fast sender cannot starve the others). Toward a slow peer, a link holding more than
-//! [`LINK_SOFT_CAP`] unsent bytes gets no new calls (the router treats the peer like a backed-off one: next
-//! candidate, else −2); a frame that would push it past [`LINK_HARD_CAP`] (a peer that stopped reading) closes the
-//! link and backs the peer off. Accept failures (`EMFILE`) pause the listener ([`sys::AcceptPause`]).
+//! **Bounded buffering.** A link's received frames are handled before more is read (the decoder holds at most one
+//! partial frame plus one `read`), and each link gets [`LINK_BUDGET`] bytes per loop iteration, counting the bytes
+//! read and the replies its frames queue (a 20-byte `GetManifest` costs the whole manifest); a link with input left
+//! is served again on the next iteration, so one peer cannot starve gossip or the other links. Toward a slow peer,
+//! a link holding more than [`LINK_SOFT_CAP`] unsent bytes gets no new calls (the router treats the peer like a
+//! backed-off one: next candidate, else −2); a frame that would push it past [`LINK_HARD_CAP`] (a peer that stopped
+//! reading) closes the link and backs the peer off. Accept failures (`EMFILE`) pause the listener
+//! ([`sys::AcceptPause`]).
 //!
 //! ## Routing (shard → `MeshMsg::Forward`)
 //! Candidates, in order: the service's placed replicas that are Alive (least outstanding requests on the link,
@@ -71,8 +73,8 @@ const BACKOFF_MAX_MS: u64 = 5_000;
 /// Extra peers tried beyond the placed replicas.
 const MAX_EXTRA_ATTEMPTS: usize = 3;
 const VIEW_EVERY_NS: u64 = 250_000_000;
-/// Bytes read from one link per loop iteration (then the link is read again on the next iteration).
-const READ_BUDGET: usize = 1 << 20;
+/// Bytes read from, plus replies queued to, one link per loop iteration (then it is served again on the next one).
+const LINK_BUDGET: usize = 1 << 20;
 /// Unsent bytes beyond which a link gets no new calls (the peer is avoided like a backed-off one).
 const LINK_SOFT_CAP: usize = 16 << 20;
 /// Unsent bytes a link may hold at most: a frame that would exceed it closes the link (the peer stopped reading).
@@ -234,7 +236,7 @@ pub(crate) struct Mesh {
     last_view: u64,
     view_dirty: bool,
     stopping: bool,
-    /// Links that used up their read budget with input left (edge-triggered: no new event would come for it).
+    /// Links that used up their budget with input left (edge-triggered: no new event would come for it).
     read_again: Vec<(u32, u32)>,
     /// Accepted links in their handshake, oldest first (may hold closed or finished ones).
     unauth: VecDeque<(u32, u32)>,
@@ -412,7 +414,7 @@ impl Mesh {
                     _ => {}
                 }
             }
-            // Links whose read budget ran out last time (fairness: after this iteration's events).
+            // Links whose budget ran out last time (fairness: after this iteration's events).
             for (li, gen) in std::mem::take(&mut self.read_again) {
                 if self.link_live(li, gen) {
                     self.read_link(li);
@@ -1263,84 +1265,69 @@ impl Mesh {
         true
     }
 
-    /// Reads from a link and handles every complete frame after each `read` (the decoder never holds more than
-    /// one partial frame plus one read). At most [`READ_BUDGET`] bytes per call: if input may remain, the link is
-    /// queued in `read_again` (edge-triggered epoll will not report the bytes already in the socket again).
+    /// Serves a link: handles the frames already received, then reads more, until the link is drained or has used
+    /// [`LINK_BUDGET`] (bytes read plus replies queued to it), in which case it is queued in `read_again`
+    /// (edge-triggered epoll will not report the bytes already in the socket or the decoder again).
     fn read_link(&mut self, li: u32) {
         let Some(gen) = self.links[li as usize].as_ref().map(|l| l.gen) else { return };
-        let mut budget = READ_BUDGET;
-        let mut frames: Vec<(u64, In)> = Vec::new();
+        let mut budget = LINK_BUDGET;
+        // A short read drained the socket: a new edge comes with new data.
+        let mut more = true;
         loop {
-            let mut closed = false;
-            let mut more = false;
-            let mut fail: Option<LinkError> = None;
-            {
+            loop {
+                if budget == 0 {
+                    self.read_again.push((li, gen));
+                    return;
+                }
                 let l = self.links[li as usize].as_mut().unwrap();
-                match sys::read(l.fd.raw(), &mut self.rbuf) {
-                    Ok(0) => closed = true,
-                    Ok(n) => {
-                        l.bytes_in += n as u64;
-                        self.cs.stats.peer_bytes_in.fetch_add(n as u64, Relaxed);
-                        l.sec.feed(&self.rbuf[..n]);
-                        budget = budget.saturating_sub(n);
-                        // A short read drained the socket: a new edge comes with new data.
-                        more = n == self.rbuf.len();
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-                    Err(_) => closed = true,
-                }
                 let held = l.sec.held();
-                loop {
-                    match l.sec.next(&mut l.wbuf) {
-                        Ok(Some(LinkEvent::Up(member))) => frames.push((0, In::Hello(member))),
-                        Ok(Some(LinkEvent::Frame(f))) => match f.msg() {
-                            Ok(m) => frames.push((f.request_id, In::from(m))),
-                            Err(_) => {
-                                closed = true;
-                                break;
-                            }
-                        },
-                        Ok(None) => break,
-                        Err(e) => {
-                            fail = Some(e);
-                            closed = true;
-                            break;
-                        }
-                    }
-                }
+                let ev = match l.sec.next(&mut l.wbuf) {
+                    Ok(Some(LinkEvent::Up(member))) => Ok(Some((0, In::Hello(member)))),
+                    Ok(Some(LinkEvent::Frame(f))) => f.msg().map(|m| Some((f.request_id, In::from(m)))).map_err(|_| None),
+                    Ok(None) => Ok(None),
+                    Err(e) => Err(Some(e)),
+                };
                 // The handshake released bytes held in the write buffer.
                 if l.sec.held() != held && !l.dirty {
                     l.dirty = true;
                     self.dirty.push(li);
                 }
-            }
-            if let Some(e) = fail {
-                if matches!(e, LinkError::WrongPeer(_)) {
-                    // The dialed address now belongs to another node (restarted with a new id).
-                    return self.close_link(li, false, false);
+                let unsent = l.unsent();
+                match ev {
+                    Ok(Some((id, m))) => {
+                        self.on_frame(li, id, m);
+                        let Some(l) = self.links[li as usize].as_ref().filter(|l| l.gen == gen) else { return };
+                        budget = budget.saturating_sub(l.unsent().saturating_sub(unsent));
+                    }
+                    Ok(None) => break,
+                    Err(Some(LinkError::WrongPeer(_))) => {
+                        // The dialed address now belongs to another node (restarted with a new id).
+                        return self.close_link(li, false, false);
+                    }
+                    Err(Some(e)) => {
+                        if self.links[li as usize].as_ref().unwrap().sec.is_auth_failure(&e) {
+                            self.auth_failed(li, &e.to_string());
+                        }
+                        return self.close_link(li, true, false);
+                    }
+                    Err(None) => return self.close_link(li, true, false),
                 }
-                if self.links[li as usize].as_ref().unwrap().sec.is_auth_failure(&e) {
-                    self.auth_failed(li, &e.to_string());
-                }
-            }
-            for (id, m) in frames.drain(..) {
-                if !self.link_live(li, gen) {
-                    return;
-                }
-                self.on_frame(li, id, m);
-            }
-            if !self.link_live(li, gen) {
-                return;
-            }
-            if closed {
-                return self.close_link(li, true, false);
             }
             if !more {
                 return;
             }
-            if budget == 0 {
-                self.read_again.push((li, gen));
-                return;
+            let l = self.links[li as usize].as_mut().unwrap();
+            match sys::read(l.fd.raw(), &mut self.rbuf) {
+                Ok(0) => return self.close_link(li, true, false),
+                Ok(n) => {
+                    l.bytes_in += n as u64;
+                    self.cs.stats.peer_bytes_in.fetch_add(n as u64, Relaxed);
+                    l.sec.feed(&self.rbuf[..n]);
+                    budget = budget.saturating_sub(n);
+                    more = n == self.rbuf.len();
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return,
+                Err(_) => return self.close_link(li, true, false),
             }
         }
     }

@@ -91,12 +91,28 @@ fn ln(x: f64) -> f64 {
     e as f64 * LN2 + 2.0 * s * p
 }
 
-/// `−ln(u) / w` for `u = hash(key, node)` in (0,1): the lowest cost is the highest weighted-HRW score `w / −ln(u)`.
+/// Relative margin on [`hrw_lower`]: far above the rounding error of `ln` and of the products, so pruning never
+/// changes a result.
+const PRUNE_MARGIN: f64 = 1.0 - 1e-9;
+
+/// `u = hash(key, node)` in (0,1).
 #[inline]
-fn hrw_cost(key: u64, node_key: u64, inv_w: f64) -> f64 {
+fn hrw_u(key: u64, node_key: u64) -> f64 {
     let h = mix64(key ^ node_key);
-    let u = ((h >> 11) as f64 + 0.5) * (1.0 / (1u64 << 53) as f64);
+    ((h >> 11) as f64 + 0.5) * (1.0 / (1u64 << 53) as f64)
+}
+
+/// `−ln(u) / w`: the lowest cost is the highest weighted-HRW score `w / −ln(u)`.
+#[inline]
+fn hrw_cost(u: f64, inv_w: f64) -> f64 {
     -ln(u) * inv_w
+}
+
+/// A lower bound of [`hrw_cost`] without the logarithm (`−ln(u) ≥ 1 − u`), less the margin: a node whose bound is
+/// not below the best cost so far cannot replace it, which skips `ln` for almost every node.
+#[inline]
+fn hrw_lower(u: f64, inv_w: f64) -> f64 {
+    (1.0 - u) * inv_w * PRUNE_MARGIN
 }
 
 fn name_key(name: &str) -> u64 {
@@ -153,13 +169,21 @@ pub fn place(manifest: &Manifest, members: &[Member]) -> Placement {
                     continue;
                 }
                 if !holds[ni] {
-                    let cost = hrw_cost(skey, node_keys[ni], inv_w[ni]);
+                    let u = hrw_u(skey, node_keys[ni]);
+                    if hrw_lower(u, inv_w[ni]) >= best_cost {
+                        continue;
+                    }
+                    let cost = hrw_cost(u, inv_w[ni]);
                     if cost < best_cost {
                         best = ni;
                         best_cost = cost;
                     }
                 } else if best == usize::MAX {
-                    let cost = hrw_cost(rkey, node_keys[ni], inv_w[ni]);
+                    let u = hrw_u(rkey, node_keys[ni]);
+                    if hrw_lower(u, inv_w[ni]) >= stack_cost {
+                        continue;
+                    }
+                    let cost = hrw_cost(u, inv_w[ni]);
                     if cost < stack_cost {
                         stack = ni;
                         stack_cost = cost;

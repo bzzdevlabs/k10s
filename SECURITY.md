@@ -23,7 +23,8 @@ In scope — please report:
 SFI is the isolation boundary; its trusted base is the validator, the code generator, the x86-64 encoder, the
 bulk-memory helpers, the host API and the runtime's `unsafe` code. Two further layers bound the damage of a bug there.
 
-**1. Machine-code assurance (tests, `crates/k10-jit/tests/xdis*`; skipped without `/usr/bin/objdump`).**
+**1. Machine-code assurance (tests, `crates/k10-jit/tests/xdis*`; need GNU objdump, `$K10_OBJDUMP` else
+`/usr/bin/objdump`: skipped without it, failed under `CI` or `K10_REQUIRE_OBJDUMP`).**
 - `xdis_encoder`: differential fuzzing of the encoder against GNU objdump (random forms, all registers, every
   addressing special case, immediate/displacement boundaries); seeded, `K10_FUZZ_LONG=1` for 2 M instructions.
 - `xdis_sfi`: a VeriWasm-style verifier, independent of the code generator, re-checks the JIT-ABI invariants on the
@@ -51,7 +52,7 @@ bulk-memory helpers, the host API and the runtime's `unsafe` code. Two further l
   limited to the data directory (read-write, no execution, no special files or symlinks) and a few read-only `/sys`,
   `/proc/sys` entries and the binary; `/proc/self` is not reachable (its statistics files are opened before);
   nothing can be executed. With ABI ≥ 6 (Linux 6.12) signals and abstract UNIX sockets are scoped to the node.
-- seccomp-bpf on the single thread, inherited by every thread created afterwards: an allowlist of 95 syscalls
+- seccomp-bpf on the single thread, inherited by every thread created afterwards: an allowlist of 96 syscalls
   (`SYSCALLS` in `crates/k10-node/src/sandbox/seccomp.rs`); anything else kills the process (`SIGSYS`). Notably
   denied: `execve`, `fork`/non-thread `clone`, namespaces, `ptrace`, `process_vm_*`, `mount`, `bpf`,
   `perf_event_open`, `io_uring`, `keyctl`, modules, `personality`, `bind`/`listen` (no new ports), sockets other
@@ -98,15 +99,15 @@ Out of scope by design (documented in `docs/DESIGN.md`):
   channels" below. Workloads on one node are assumed to belong to one organization; use separate nodes (separate
   machines or VMs) per mutually distrustful tenant. A cheap bypass of the listed mitigations is in scope.
 
-## Control plane: who may deploy (docs/NODE.md "Authentication")
+## Control plane: who may deploy (docs/NODE.md "Ingress and admin", "Cluster authentication")
 - **Admin API** (`/_k10s/*`: apply, status, logs, cluster, bench): every request is signed with the node's admin
   key (HMAC-SHA256 over the node process's random audience, method, target, time, nonce and the body's SHA-256;
   hosted: `--admin-token-file`, else `DATA/admin.key` created with mode 0600; metal: fw_cfg `opt/k10s/admin_key`).
   Audience, signature, clock window (60 s) and nonce cache are checked on the request head before any body is read,
   the body against its signed hash after: the key never travels, and a captured request can be neither altered nor
   replayed, on that node, another node sharing the key, or the node after a restart. Open without credentials:
-  `health`, `audience` (what requests are signed for), and `metrics` on the dedicated admin listener (`--admin ADDR`, which also takes the admin API off the
-  ingress). A metal node without an admin key serves only `health`.
+  `health`, `audience` (what requests are signed for), and `metrics` on the dedicated admin listener (`--admin ADDR`,
+  which also takes the admin API off the ingress). A metal node without an admin key serves only `health`.
 - **Cluster** (gossip UDP, peer TCP): a shared 32-byte key (`k10s keygen`, `--cluster-key-file`, metal fw_cfg
   `opt/k10s/cluster_key`), plus a next key while rotating (`--cluster-next-key-file`, `opt/k10s/cluster_next_key`);
   cluster mode refuses to start without one unless `--insecure-unauthenticated-cluster`. Gossip datagrams are sealed
@@ -114,10 +115,10 @@ Out of scope by design (documented in `docs/DESIGN.md`):
   bound, default 300 s, at least 1 s) or replayed. Peer links run a mutual handshake on fresh nonces and are then
   encrypted and authenticated record by record (ChaCha20-Poly1305, per-direction keys, counter nonces: no injection,
   replay, reordering or reflection); nothing is served on a link before the peer has proved it holds the key, and
-  unauthenticated input is capped (one `Auth` frame, then one 256-byte record; 128 handshaking links at most, 16 on metal). A
-  desired state can only be announced by a key holder, and its manifest and code blobs are still checked against
-  their SHA-256 when fetched. Key material is zeroized when dropped; metal reads secrets from fw_cfg, never from the
-  kernel command line, and fails a link rather than use a weak nonce when RDRAND fails.
+  unauthenticated input is capped (one `Auth` frame, then one 256-byte record; 128 handshaking links at most, 16 on
+  metal). A desired state can only be announced by a key holder, and its manifest and code blobs are still checked
+  against their SHA-256 when fetched. Key material is zeroized when dropped; metal reads secrets from fw_cfg, never
+  from the kernel command line, and fails a link rather than use a weak nonce when RDRAND fails.
 
 Not covered (open):
 - **Every key holder is fully trusted**: a node with the cluster key can announce desired states, run code
@@ -190,11 +191,13 @@ Not mitigated (known gaps):
 ## Denial of service: what bounds one workload (details in `docs/NODE.md`)
 - **Memory**: every service placed on a node reserves one instance (`2^memory` + 4 KiB) of `--mem`; burst instances
   share the remainder, so a service under heavy concurrency can exhaust the shared pool but never another service's
-  reservation. Operator applies whose reservations do not fit are rejected (reloaded and cluster states run over-committed, reported); placement charges the same footprint.
+  reservation. Operator applies whose reservations do not fit are rejected (reloaded and cluster states run
+  over-committed, reported); placement charges the same footprint.
   Per service: `max_instances`, KV quota (`--kv-max`), wait queue (10 000), host copies (16 MiB).
 - **CPU**: 2 ms time slices (preemption at JIT safepoints), per-request `cpu_ms` budget, crash-loop backoff.
 - **Connections**: node-wide buffer budget (`--conn-buffer-max`), per-connection head/body limits and timeouts,
-  `max_conns`; peer links have read/write caps.
+  `max_conns`; each peer link is served at most 1 MiB (bytes read plus replies queued) per mesh-loop iteration, so
+  one busy peer cannot starve the others, and its unsent bytes are capped.
 - **Not isolated yet**: the shared pool, the connection buffer budget and CPU are first come, first served between
   services (no per-service share or weight); snapshots and prepared code are outside `--mem` (bounded per service
   version by the manifest); KV is bounded per service, not node-wide.
