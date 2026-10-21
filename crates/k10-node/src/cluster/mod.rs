@@ -9,9 +9,10 @@
 //!   [`NodeShared::apply_cluster`] — on every desired-state change and on membership changes (batched in a short
 //!   window, `ClusterConfig::debounce`). Services whose spec and placement did not change keep running untouched.
 //!
-//! Start-up: [`ClusterSetup::bind`] (sockets, store, node id) → `Node::start_with_router(cfg, setup.router())` →
-//! [`ClusterSetup::start`]. Shutdown: [`Cluster::leave`] (gossip `Left`, local re-placement without this node, a
-//! grace period while peers converge), then `Node::shutdown` (drains in-flight requests), then [`Cluster::stop`].
+//! Start-up: [`ClusterSetup::bind`] (sockets) → process sandbox → [`ClusterBound::open`] (store, node id,
+//! incarnation) → `Node::start_with_router(cfg, setup.router())` → [`ClusterSetup::start`]. Shutdown:
+//! [`Cluster::leave`] (gossip `Left`, local re-placement without this node, a grace period while peers converge), then
+//! `Node::shutdown` (drains in-flight requests), then [`Cluster::stop`].
 
 pub mod mesh;
 pub mod router;
@@ -649,8 +650,28 @@ pub fn detect_ip() -> IpAddr {
     }
 }
 
-/// Sockets, store and identity, created before the node starts (so that bind errors surface early and the router
-/// can be installed in the node).
+/// Cluster sockets, bound with the node's listeners before the process sandbox.
+pub struct ClusterBound {
+    cfg: ClusterConfig,
+    inbox: Arc<MeshInbox>,
+    udp: UdpSocket,
+    listener: sys::Fd,
+}
+
+impl ClusterBound {
+    /// After the sandbox, before the node serves (so the cluster status is attached as soon as the ingress answers):
+    /// the store, the node id and the persisted incarnation.
+    pub fn open(self, data: Option<&Path>) -> io::Result<ClusterSetup> {
+        let ClusterBound { cfg, inbox, udp, listener } = self;
+        let id = store::node_id(data)?;
+        let store = Store::open(data)?;
+        // A restarted node keeps its id: start above any incarnation it used before (refutes stale Dead records).
+        let incarnation = store.next_incarnation(sys::wall_ms())?;
+        Ok(ClusterSetup { cfg, inbox, udp, listener, store, id, incarnation })
+    }
+}
+
+/// Sockets, store and identity, ready before the node starts (the router is installed in the node).
 pub struct ClusterSetup {
     cfg: ClusterConfig,
     inbox: Arc<MeshInbox>,
@@ -662,7 +683,7 @@ pub struct ClusterSetup {
 }
 
 impl ClusterSetup {
-    pub fn bind(cfg: ClusterConfig, data: Option<&Path>) -> io::Result<ClusterSetup> {
+    pub fn bind(cfg: ClusterConfig) -> io::Result<ClusterBound> {
         if cfg.key.is_none() && !cfg.insecure {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -671,14 +692,10 @@ impl ClusterSetup {
                  reach the gossip and rpc ports is trusted)",
             ));
         }
-        let id = store::node_id(data)?;
-        let store = Store::open(data)?;
-        // A restarted node keeps its id: start above any incarnation it used before (refutes stale Dead records).
-        let incarnation = store.next_incarnation(sys::wall_ms())?;
         let udp = UdpSocket::bind(cfg.gossip_bind).map_err(|e| io::Error::new(e.kind(), format!("gossip {}: {e}", cfg.gossip_bind)))?;
         let listener =
             sys::tcp_listen(&cfg.rpc_bind, 1024).map_err(|e| io::Error::new(e.kind(), format!("rpc {}: {e}", cfg.rpc_bind)))?;
-        Ok(ClusterSetup { cfg, inbox: Arc::new(MeshInbox::new()?), udp, listener, store, id, incarnation })
+        Ok(ClusterBound { cfg, inbox: Arc::new(MeshInbox::new()?), udp, listener })
     }
 
     pub fn id(&self) -> NodeId {

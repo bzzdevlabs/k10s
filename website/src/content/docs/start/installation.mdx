@@ -91,9 +91,9 @@ Every release publishes these files. `V` is the version (`0.1.0`, or `0.1.1-dev.
 
 - **x86-64 Linux** for the JIT. On other architectures, `--backend interp` runs services on the reference
   interpreter.
-- **Process sandbox:** `k10s node` confines itself with seccomp and, when the kernel has it, Landlock (Linux
-  5.13+; TCP port rules need 6.7+). It logs what it applied at start-up. See
-  [Production setup](/k10s/guides/production/).
+- **Process sandbox:** `k10s node` confines itself with Landlock (Linux 5.13+, `landlock` in the kernel's LSM list)
+  and seccomp, and logs what it applied at start-up; on a kernel without Landlock, run it with
+  `--sandbox seccomp-only`. See [Production setup](/k10s/guides/production/).
 
 <Aside>
 	Nothing else is needed on a node: no container runtime, no CNI plugin, no etcd. The same binary is the CLI you

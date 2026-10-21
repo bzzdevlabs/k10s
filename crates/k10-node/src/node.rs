@@ -540,6 +540,16 @@ pub struct Node {
 /// Result of [`Node::invoke`].
 pub type InvokeResult = CallResult;
 
+/// A node whose listeners are bound ([`Node::bind`]) and which has not started yet.
+pub struct Bound {
+    cfg: NodeConfig,
+    listeners: Vec<sys::Fd>,
+    addr: SocketAddr,
+    admin_listener: Option<sys::Fd>,
+    admin_addr: Option<SocketAddr>,
+    max_maps: u64,
+}
+
 impl Node {
     /// Starts the shards, the ticker and the KV flusher, binds the HTTP listeners and reloads the last applied
     /// bundle from the data directory.
@@ -549,6 +559,40 @@ impl Node {
 
     /// Starts a node whose non-local service invocations go to `router` (cluster mode).
     pub fn start_with_router(cfg: NodeConfig, router: Arc<dyn RemoteRouter>) -> io::Result<Node> {
+        Node::bind(cfg)?.start(router)
+    }
+
+    /// First half of a start: binds the HTTP and admin listeners and reads what the process sandbox will hide; no
+    /// thread, no file, no workload code yet.
+    pub fn bind(cfg: NodeConfig) -> io::Result<Bound> {
+        let shards_n = cfg.shards.max(1);
+        // Every shard's listener (port 0: the first bind picks the port).
+        let mut listeners = Vec::new();
+        let mut addr = cfg.http;
+        for _ in 0..shards_n {
+            let l = sys::tcp_listen_reuseport(&addr, 4096)?;
+            if addr.port() == 0 {
+                addr = sys::local_addr(l.raw())?;
+            }
+            listeners.push(l);
+        }
+        let admin_listener = match cfg.admin_listen {
+            Some(a) => Some(sys::tcp_listen(&a, 1024).map_err(|e| io::Error::new(e.kind(), format!("admin listener {a}: {e}")))?),
+            None => None,
+        };
+        let admin_addr = match &admin_listener {
+            Some(l) => Some(sys::local_addr(l.raw())?),
+            None => None,
+        };
+        sys::open_proc_self();
+        Ok(Bound { max_maps: sys::max_map_count(), cfg, listeners, addr, admin_listener, admin_addr })
+    }
+}
+
+impl Bound {
+    /// Second half: KV store, the persisted bundle (JIT, instances) and the threads.
+    pub fn start(self, router: Arc<dyn RemoteRouter>) -> io::Result<Node> {
+        let Bound { cfg, listeners, addr, admin_listener, admin_addr, max_maps } = self;
         sys::ignore_sigpipe();
         let shards_n = cfg.shards.max(1);
         let backend: Arc<dyn Backend> = match cfg.backend {
@@ -568,29 +612,10 @@ impl Node {
             std::fs::create_dir_all(d)?;
         }
         let kv = KvStore::open(cfg.data_dir.as_ref().map(|d| d.join("kv")).as_deref(), cfg.kv.clone())?;
-        // Bind every listener before starting threads (port 0: the first bind picks the port).
-        let mut listeners = Vec::new();
-        let mut addr = cfg.http;
-        for _ in 0..shards_n {
-            let l = sys::tcp_listen_reuseport(&addr, 4096)?;
-            if addr.port() == 0 {
-                addr = sys::local_addr(l.raw())?;
-            }
-            listeners.push(l);
-        }
-        let admin_listener = match cfg.admin_listen {
-            Some(a) => Some(sys::tcp_listen(&a, 1024).map_err(|e| io::Error::new(e.kind(), format!("admin listener {a}: {e}")))?),
-            None => None,
-        };
-        let admin_addr = match &admin_listener {
-            Some(l) => Some(sys::local_addr(l.raw())?),
-            None => None,
-        };
         let mut shard_shared = Vec::new();
         for i in 0..shards_n {
             shard_shared.push(Arc::new(ShardShared::new(i)?));
         }
-        let max_maps = sys::max_map_count();
         let cfg_max_fibers = cfg.max_fibers;
         let conn_buffer_max = match cfg.conn_buffer_max {
             0 => default_conn_buffer_max(cfg.mem_limit),
@@ -667,7 +692,9 @@ impl Node {
         }
         Ok(Node { shared, shard_threads, ticker: Some(tk) })
     }
+}
 
+impl Node {
     pub fn shared(&self) -> &Arc<NodeShared> {
         &self.shared
     }

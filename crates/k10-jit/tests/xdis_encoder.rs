@@ -1,29 +1,25 @@
 //! Differential fuzzing of the x86-64 encoder (`k10_jit::x64`) against objdump: each random instruction must decode
 //! to exactly the expected length and Intel text (all GPRs incl. spl/bpl/sil/dil and r8-r15, xmm0-15, rsp/r12 SIB
 //! and rbp/r13 disp8 cases, disp8/disp32 and imm sign-extension boundaries, jump and RIP-relative targets).
-//! `K10_FUZZ_SEED`, `K10_FUZZ_ITERS` (default 30 000); `K10_FUZZ_LONG=1`: 2 000 000. Skipped without objdump.
+//! `K10_FUZZ_SEED`, `K10_FUZZ_ITERS` (default 30 000); `K10_FUZZ_LONG=1`: 2 000 000.
 
 mod xdis;
 
 use k10_jit::x64::*;
 use Reg::*;
 
-struct Rng(u64);
+/// Instruction-form choices on top of the generator's RNG.
+struct Rng(k10_ir::gen::Rng);
 
 impl Rng {
     fn next(&mut self) -> u64 {
-        // splitmix64
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
+        self.0.next_u64()
     }
     fn below(&mut self, n: u64) -> u64 {
-        self.next() % n
+        self.0.below(n)
     }
     fn pick<T: Copy>(&mut self, xs: &[T]) -> T {
-        xs[self.below(xs.len() as u64) as usize]
+        self.0.pick(xs)
     }
     fn bool(&mut self) -> bool {
         self.next() & 1 == 1
@@ -107,17 +103,23 @@ const CONDS: [Cond; 16] = [
 // ---------------------------------------------------------------------------------------- expected objdump text
 
 fn r64(r: Reg) -> &'static str {
-    ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"][r.id() as usize]
+    ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"]
+        [r.id() as usize]
 }
 fn r32(r: Reg) -> &'static str {
-    ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi", "r8d", "r9d", "r10d", "r11d", "r12d", "r13d", "r14d", "r15d"][r.id() as usize]
+    [
+        "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi", "r8d", "r9d", "r10d", "r11d", "r12d", "r13d", "r14d",
+        "r15d",
+    ][r.id() as usize]
 }
 fn r16(r: Reg) -> &'static str {
-    ["ax", "cx", "dx", "bx", "sp", "bp", "si", "di", "r8w", "r9w", "r10w", "r11w", "r12w", "r13w", "r14w", "r15w"][r.id() as usize]
+    ["ax", "cx", "dx", "bx", "sp", "bp", "si", "di", "r8w", "r9w", "r10w", "r11w", "r12w", "r13w", "r14w", "r15w"]
+        [r.id() as usize]
 }
 /// 8-bit names with REX (without it spl/bpl/sil/dil would decode as ah/ch/dh/bh).
 fn r8(r: Reg) -> &'static str {
-    ["al", "cl", "dl", "bl", "spl", "bpl", "sil", "dil", "r8b", "r9b", "r10b", "r11b", "r12b", "r13b", "r14b", "r15b"][r.id() as usize]
+    ["al", "cl", "dl", "bl", "spl", "bpl", "sil", "dil", "r8b", "r9b", "r10b", "r11b", "r12b", "r13b", "r14b", "r15b"]
+        [r.id() as usize]
 }
 fn xmm(x: Xmm) -> String {
     format!("xmm{}", x.0)
@@ -314,15 +316,26 @@ fn gen(a: &mut Asm, g: &mut Rng, labels: &[Label]) -> Expect {
             Expect { rip: rip_of(RM::M(m)), ..x(format!("lea({d:?},{m:?})"), format!("lea {},{}", r64(d), mem_str(m))) }
         }
         16..=19 => {
-            let (op, d) = (g.pick(&[Alu::Add, Alu::Or, Alu::Adc, Alu::Sbb, Alu::And, Alu::Sub, Alu::Xor, Alu::Cmp]), g.reg());
+            let (op, d) =
+                (g.pick(&[Alu::Add, Alu::Or, Alu::Adc, Alu::Sbb, Alu::And, Alu::Sub, Alu::Xor, Alu::Cmp]), g.reg());
             let src: RM = if g.bool() { RM::R(g.reg()) } else { RM::M(g.mem(true, labels)) };
             a.alu(op, d, src);
-            Expect { rip: rip_of(src), ..x(format!("alu({op:?},{d:?},{src:?})"), format!("{} {},{}", alu_name(op), r64(d), rm64(src))) }
+            Expect {
+                rip: rip_of(src),
+                ..x(format!("alu({op:?},{d:?},{src:?})"), format!("{} {},{}", alu_name(op), r64(d), rm64(src)))
+            }
         }
         20 => {
-            let (op, m, s) = (g.pick(&[Alu::Add, Alu::Or, Alu::Adc, Alu::Sbb, Alu::And, Alu::Sub, Alu::Xor, Alu::Cmp]), g.mem(true, labels), g.reg());
+            let (op, m, s) = (
+                g.pick(&[Alu::Add, Alu::Or, Alu::Adc, Alu::Sbb, Alu::And, Alu::Sub, Alu::Xor, Alu::Cmp]),
+                g.mem(true, labels),
+                g.reg(),
+            );
             a.alu_mr(op, m, s);
-            Expect { rip: rip_of(RM::M(m)), ..x(format!("alu_mr({op:?},{m:?},{s:?})"), format!("{} {},{}", alu_name(op), sized("QWORD", m), r64(s))) }
+            Expect {
+                rip: rip_of(RM::M(m)),
+                ..x(format!("alu_mr({op:?},{m:?},{s:?})"), format!("{} {},{}", alu_name(op), sized("QWORD", m), r64(s)))
+            }
         }
         21..=23 => {
             let op = g.pick(&[Alu::Add, Alu::Or, Alu::Adc, Alu::Sbb, Alu::And, Alu::Sub, Alu::Xor, Alu::Cmp]);
@@ -330,7 +343,10 @@ fn gen(a: &mut Asm, g: &mut Rng, labels: &[Label]) -> Expect {
             let imm = g.imm32();
             if g.bool() {
                 a.alu_ri(op, dst, imm);
-                x(format!("alu_ri({op:?},{dst:?},{imm})"), format!("{} {},{}", alu_name(op), rm64(dst), hex(imm as i64 as u64)))
+                x(
+                    format!("alu_ri({op:?},{dst:?},{imm})"),
+                    format!("{} {},{}", alu_name(op), rm64(dst), hex(imm as i64 as u64)),
+                )
             } else {
                 a.alu_ri32(op, dst, imm);
                 let d = match dst {
@@ -361,7 +377,10 @@ fn gen(a: &mut Asm, g: &mut Rng, labels: &[Label]) -> Expect {
             let src: RM = if g.bool() { RM::R(g.reg()) } else { RM::M(g.mem(false, labels)) };
             let imm = g.imm32();
             a.imul_i(d, src, imm);
-            x(format!("imul_i({d:?},{src:?},{imm})"), format!("imul {},{},{}", r64(d), rm64(src), hex(imm as i64 as u64)))
+            x(
+                format!("imul_i({d:?},{src:?},{imm})"),
+                format!("imul {},{},{}", r64(d), rm64(src), hex(imm as i64 as u64)),
+            )
         }
         28 | 29 => {
             let op = g.pick(&[Unary::Not, Unary::Neg, Unary::Mul, Unary::Imul, Unary::Div, Unary::Idiv]);
@@ -410,7 +429,10 @@ fn gen(a: &mut Asm, g: &mut Rng, labels: &[Label]) -> Expect {
             let (c, d) = (g.cond(), g.reg());
             let src: RM = if g.bool() { RM::R(g.reg()) } else { RM::M(g.mem(true, labels)) };
             a.cmov(c, d, src);
-            Expect { rip: rip_of(src), ..x(format!("cmov({c:?},{d:?},{src:?})"), format!("cmov{} {},{}", cc(c), r64(d), rm64(src))) }
+            Expect {
+                rip: rip_of(src),
+                ..x(format!("cmov({c:?},{d:?},{src:?})"), format!("cmov{} {},{}", cc(c), r64(d), rm64(src)))
+            }
         }
         35 => {
             let d = g.reg();
@@ -515,10 +537,16 @@ fn gen(a: &mut Asm, g: &mut Rng, labels: &[Label]) -> Expect {
             let rm: RM = if g.bool() { RM::R(g.reg()) } else { RM::M(g.mem(true, labels)) };
             if w == 45 {
                 a.movq_to_xmm(v, rm);
-                Expect { rip: rip_of(rm), ..x(format!("movq_to_xmm({v:?},{rm:?})"), format!("movq {},{}", xmm(v), rm64(rm))) }
+                Expect {
+                    rip: rip_of(rm),
+                    ..x(format!("movq_to_xmm({v:?},{rm:?})"), format!("movq {},{}", xmm(v), rm64(rm)))
+                }
             } else {
                 a.movq_from_xmm(rm, v);
-                Expect { rip: rip_of(rm), ..x(format!("movq_from_xmm({rm:?},{v:?})"), format!("movq {},{}", rm64(rm), xmm(v))) }
+                Expect {
+                    rip: rip_of(rm),
+                    ..x(format!("movq_from_xmm({rm:?},{v:?})"), format!("movq {},{}", rm64(rm), xmm(v)))
+                }
             }
         }
         47..=49 => {
@@ -538,7 +566,10 @@ fn gen(a: &mut Asm, g: &mut Rng, labels: &[Label]) -> Expect {
             } else {
                 let m = g.mem(true, labels);
                 a.sd_m(op, d, m);
-                Expect { rip: rip_of(RM::M(m)), ..x(format!("sd_m({op:?},{d:?},{m:?})"), format!("{n} {},{}", xmm(d), sized("QWORD", m))) }
+                Expect {
+                    rip: rip_of(RM::M(m)),
+                    ..x(format!("sd_m({op:?},{d:?},{m:?})"), format!("{n} {},{}", xmm(d), sized("QWORD", m)))
+                }
             }
         }
         50 => {
@@ -556,7 +587,10 @@ fn gen(a: &mut Asm, g: &mut Rng, labels: &[Label]) -> Expect {
             let d = g.xmm();
             let rm: RM = if g.bool() { RM::R(g.reg()) } else { RM::M(g.mem(true, labels)) };
             a.cvtsi2sd(d, rm);
-            Expect { rip: rip_of(rm), ..x(format!("cvtsi2sd({d:?},{rm:?})"), format!("cvtsi2sd {},{}", xmm(d), rm64(rm))) }
+            Expect {
+                rip: rip_of(rm),
+                ..x(format!("cvtsi2sd({d:?},{rm:?})"), format!("cvtsi2sd {},{}", xmm(d), rm64(rm)))
+            }
         }
         53 => {
             let (d, s) = (g.reg(), g.xmm());
@@ -579,7 +613,7 @@ fn gen(a: &mut Asm, g: &mut Rng, labels: &[Label]) -> Expect {
 
 /// Emits `n` random instructions (labels at random boundaries), disassembles and compares; returns `n`.
 fn run_batch(objdump: &std::path::Path, seed: u64, n: usize) -> usize {
-    let mut g = Rng(seed);
+    let mut g = Rng(k10_ir::gen::Rng::new(seed));
     let mut a = Asm::new();
     let labels: Vec<Label> = (0..64).map(|_| a.new_label()).collect();
     let mut bound = 0;
@@ -598,23 +632,30 @@ fn run_batch(objdump: &std::path::Path, seed: u64, n: usize) -> usize {
     }
     let label_pos: Vec<u32> = labels.iter().map(|&l| a.bound(l).unwrap()).collect();
     let code = a.finish().expect("finish");
-    let insns = xdis::disassemble(objdump, &code);
+    let insns = xdis::disassemble_many(objdump, &[&code]).remove(0);
     let mut k = 0; // index into insns
     for (start, end, e) in &exp {
-        let insn = insns.get(k).unwrap_or_else(|| panic!("seed {seed:#x}: objdump stopped before {} at {start:#x}", e.call));
+        let insn =
+            insns.get(k).unwrap_or_else(|| panic!("seed {seed:#x}: objdump stopped before {} at {start:#x}", e.call));
         let bytes = &code[*start as usize..*end as usize];
         let ctx = || format!("seed {seed:#x}, {} at {start:#x}, bytes {:02x?}", e.call, bytes);
-        assert_eq!(insn.addr, *start as u64, "{}: instruction boundary mismatch (objdump: {:?})", ctx(), insn.text);
-        assert_eq!(insn.len(), (end - start) as usize, "{}: length mismatch, objdump decoded {:?}", ctx(), insn.text);
+        assert_eq!(insn.addr, *start as u64, "{}: instruction boundary mismatch (objdump: {:?})", ctx(), insn.text());
+        assert_eq!(insn.end(), *end as u64, "{}: length mismatch, objdump decoded {:?}", ctx(), insn.text());
         let mut want = e.text.clone();
         if let Some(l) = e.jump {
             want = want.replace("{T}", &hex(label_pos[l.0 as usize] as u64));
         }
-        let mut got = insn.text.clone();
+        let mut got = insn.text();
         if let Some(l) = e.rip {
             // `[rip+0x…]` prints the raw displacement; the `# 0x…` comment is the resolved target.
             let target = label_pos[labels.iter().position(|&x| x == l).unwrap()] as u64;
-            assert_eq!(insn.comment_target, Some(target), "{}: RIP-relative target (objdump: {:?})", ctx(), insn.text);
+            assert_eq!(
+                insn.comment_target,
+                Some(target),
+                "{}: RIP-relative target (objdump: {:?})",
+                ctx(),
+                insn.text()
+            );
             if let (Some(i), Some(j)) = (got.find("[rip+"), got.find(']')) {
                 got.replace_range(i..=j, "[rip+?]");
             }
@@ -628,14 +669,14 @@ fn run_batch(objdump: &std::path::Path, seed: u64, n: usize) -> usize {
 
 #[test]
 fn encoder_matches_objdump() {
-    let Some(objdump) = xdis::objdump() else {
-        eprintln!("objdump not found: skipped (set K10_OBJDUMP)");
-        return;
-    };
+    let Some(objdump) = xdis::tool("encoder_matches_objdump") else { return };
     let seed: u64 = std::env::var("K10_FUZZ_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(0x5EED_10C5);
     let long = std::env::var_os("K10_FUZZ_LONG").is_some();
-    let total: usize =
-        std::env::var("K10_FUZZ_ITERS").ok().and_then(|s| s.parse().ok()).unwrap_or(if long { 2_000_000 } else { 30_000 });
+    let total: usize = std::env::var("K10_FUZZ_ITERS").ok().and_then(|s| s.parse().ok()).unwrap_or(if long {
+        2_000_000
+    } else {
+        30_000
+    });
     let batch = 20_000.min(total).max(1);
     let mut done = 0;
     let mut i = 0u64;
@@ -649,10 +690,7 @@ fn encoder_matches_objdump() {
 /// Exhaustive bases x indexes x displacements x registers for `mov r64,[m]`, `mov [m],r8` and `lea`.
 #[test]
 fn addressing_modes_exhaustive() {
-    let Some(objdump) = xdis::objdump() else {
-        eprintln!("objdump not found: skipped (set K10_OBJDUMP)");
-        return;
-    };
+    let Some(objdump) = xdis::tool("addressing_modes_exhaustive") else { return };
     let mut a = Asm::new();
     let mut exp = Vec::new();
     let regs = Reg::ALL;
@@ -681,11 +719,11 @@ fn addressing_modes_exhaustive() {
         }
     }
     let code = a.finish().unwrap();
-    let insns = xdis::disassemble(&objdump, &code);
+    let insns = xdis::disassemble_many(&objdump, &[&code]).remove(0);
     assert_eq!(insns.len(), exp.len());
     for (insn, (start, want)) in insns.iter().zip(&exp) {
         assert_eq!(insn.addr, *start as u64);
-        assert_eq!(&insn.text, want, "bytes {:02x?}", insn.bytes);
+        assert_eq!(&insn.text(), want, "bytes {:02x?}", insn.bytes);
     }
     eprintln!("addressing modes: {} instructions identical", exp.len());
 }
@@ -693,18 +731,15 @@ fn addressing_modes_exhaustive() {
 /// The harness itself: one flipped REX bit must change what objdump reports.
 #[test]
 fn harness_detects_a_flipped_rex_bit() {
-    let Some(objdump) = xdis::objdump() else {
-        eprintln!("objdump not found: skipped (set K10_OBJDUMP)");
-        return;
-    };
+    let Some(objdump) = xdis::tool("harness_detects_a_flipped_rex_bit") else { return };
     let m = Mem::b(R12, 0x10);
     let mut a = Asm::new();
     a.load(Size::S64, Rax, m);
     let mut code = a.finish().unwrap();
     let want = format!("mov rax,{}", sized("QWORD", m));
-    assert_eq!(xdis::disassemble(&objdump, &code)[0].text, want);
+    assert_eq!(xdis::disassemble_many(&objdump, &[&code])[0][0].text(), want);
     code[0] ^= 0x01; // REX.B: r12 -> rsp
-    let got = xdis::disassemble(&objdump, &code)[0].text.clone();
+    let got = xdis::disassemble_many(&objdump, &[&code])[0][0].text();
     assert_ne!(got, want);
     assert_eq!(got, "mov rax,QWORD PTR [rsp+0x10]");
 }

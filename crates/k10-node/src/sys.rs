@@ -264,7 +264,7 @@ pub fn pwrite_all(fd: &Fd, mut buf: &[u8], mut off: u64) -> io::Result<()> {
 pub fn rss_bytes() -> u64 {
     match rss_pss_bytes() {
         (0, _) => {
-            let s = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
+            let s = read_proc_self(1);
             let resident: u64 = s.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
             resident * PAGE as u64
         }
@@ -272,9 +272,45 @@ pub fn rss_bytes() -> u64 {
     }
 }
 
+/// `/proc/self/{smaps_rollup,statm}` descriptors, opened once: the process sandbox hides /proc/self afterwards.
+fn proc_self() -> &'static [Fd; 2] {
+    static FDS: std::sync::OnceLock<[Fd; 2]> = std::sync::OnceLock::new();
+    FDS.get_or_init(|| {
+        [c"/proc/self/smaps_rollup", c"/proc/self/statm"].map(|p| {
+            // SAFETY: valid C string; a failed open yields -1, which reads as empty.
+            Fd(unsafe { libc::open(p.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) })
+        })
+    })
+}
+
+/// Opens the `/proc/self` statistics files now (before the sandbox).
+pub fn open_proc_self() {
+    proc_self();
+}
+
+/// Re-reads `/proc/self/smaps_rollup` (0) or `statm` (1) from offset 0.
+fn read_proc_self(i: usize) -> String {
+    let fd = proc_self()[i].0;
+    let mut buf = vec![0u8; 4096];
+    let mut len = 0;
+    loop {
+        if len == buf.len() {
+            buf.resize(len * 2, 0);
+        }
+        // SAFETY: writes at most buf.len() - len bytes into buf[len..].
+        let n = unsafe { libc::pread(fd, buf[len..].as_mut_ptr().cast(), buf.len() - len, len as libc::off_t) };
+        if n <= 0 {
+            break;
+        }
+        len += n as usize;
+    }
+    buf.truncate(len);
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 /// (Rss, Pss) in bytes from `/proc/self/smaps_rollup` (Pss counts pages shared between mappings fractionally).
 pub fn rss_pss_bytes() -> (u64, u64) {
-    let s = std::fs::read_to_string("/proc/self/smaps_rollup").unwrap_or_default();
+    let s = read_proc_self(0);
     let mut rss = 0;
     let mut pss = 0;
     for line in s.lines() {
