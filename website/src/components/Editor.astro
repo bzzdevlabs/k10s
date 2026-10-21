@@ -1,0 +1,395 @@
+---
+// Drawn VS Code window with the Ten & k10s extension: explorer, highlighted file, diagnostic squiggle and hover.
+import Window from './Window.astro';
+import { highlight } from '../lib/highlight';
+import { fileIcons, folderIcons } from '../lib/icons';
+
+interface Diag {
+	line: number;
+	col: number;
+	len: number;
+	message: string;
+	help?: string;
+}
+interface Props {
+	file: string;
+	code: string;
+	lang?: 'ten' | 'k10s';
+	tree?: string;
+	diag?: Diag;
+	caption?: string;
+}
+const { file, code, lang = 'ten', tree = '', diag, caption } = Astro.props;
+
+const rows = code.replace(/^\n/, '').replace(/\n\s*$/, '').split('\n');
+const indent = Math.min(...rows.filter((r) => r.trim()).map((r) => r.length - r.trimStart().length));
+const src = rows.map((r) => r.slice(indent)).join('\n');
+const decorations = diag
+	? [
+			{
+				start: { line: diag.line - 1, character: diag.col - 1 },
+				end: { line: diag.line - 1, character: diag.col - 1 + diag.len },
+				properties: { class: 'squiggle' },
+			},
+		]
+	: [];
+const html = await highlight(src, lang, decorations);
+const lineCount = src.split('\n').length;
+
+const ext = (name: string) => name.split('.').pop() ?? '';
+const entries = tree
+	.split('\n')
+	.filter((l) => l.trim())
+	.map((l) => {
+		const depth = (l.length - l.trimStart().length) / 2;
+		let name = l.trim();
+		const active = name.endsWith(' *');
+		if (active) name = name.slice(0, -2);
+		const dir = name.endsWith('/');
+		if (dir) name = name.slice(0, -1);
+		const icon = dir ? folderIcons[name.replace(/^\./, '')]?.[1] : fileIcons[ext(name)];
+		return { depth, name, dir, active, icon };
+	});
+const langName = lang === 'ten' ? 'Ten' : 'k10s manifest';
+const problems = diag ? 1 : 0;
+---
+
+<Window title={`${file} — k10s — Visual Studio Code`} variant="editor" caption={caption}>
+	<div class="vsc" style={`--lines:${lineCount}`}>
+		<nav class="activity" aria-hidden="true">
+			<svg viewBox="0 0 24 24"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8zm0 0v5h5" /></svg>
+			<svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="5.5" /><path d="m15 15 5 5" /></svg>
+			<svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2" /><circle cx="6" cy="18" r="2" /><circle cx="18" cy="9" r="2" /><path d="M6 8v8m12-5c0 4-6 3-10.5 6" /></svg>
+			<svg viewBox="0 0 24 24"><path d="M4 4h7v7H4zm9 2h7v7h-7zM4 13h7v7H4zm9 2h7v5h-7z" /></svg>
+		</nav>
+		<aside class="explorer" aria-hidden="true">
+			<div class="ex-head">Explorer</div>
+			<ul>
+				{
+					entries.map((e) => (
+						<li class:list={{ active: e.active }} style={`--depth:${e.depth}`}>
+							{e.dir ? <span class="chev">›</span> : <span class="chev" />}
+							{e.icon ? (
+								<span class="ico" set:html={e.icon} />
+							) : (
+								<span class:list={['ico', e.dir ? 'ico-dir' : 'ico-file']} />
+							)}
+							<span class:list={['nm', { err: e.active && problems }]}>{e.name}</span>
+							{e.active && problems > 0 && <span class="badge">{problems}</span>}
+						</li>
+					))
+				}
+			</ul>
+		</aside>
+		<section class="main">
+			<div class="tabs">
+				<div class="tab">
+					<span class="ico" set:html={fileIcons[lang]} />
+					<span class:list={{ err: problems }}>{file}</span>
+					{problems > 0 && <span class="badge">{problems}</span>}
+					<span class="x">×</span>
+				</div>
+			</div>
+			<div class="crumbs">k10s › examples › {file}</div>
+			<div class="code">
+				<div class="gutter" aria-hidden="true">{Array.from({ length: lineCount }, (_, i) => <span>{i + 1}</span>)}</div>
+				<div class="src">
+					<Fragment set:html={html} />
+					{
+						diag && (
+							<div class="hover" style={`--l:${diag.line};--c:${diag.col - 1}`}>
+								<p>
+									{diag.message} <span class="srcname">{lang}</span>
+								</p>
+								{diag.help && <p class="help">help: {diag.help}</p>}
+								<p class="actions">
+									<span>View Problem</span>
+									<span>Quick Fix…</span>
+								</p>
+							</div>
+						)
+					}
+				</div>
+			</div>
+			<div class="panel">
+				<div class="ptabs">
+					<span class="on">Problems {problems > 0 && <span class="count">{problems}</span>}</span>
+					<span>Output</span>
+					<span>Terminal</span>
+				</div>
+				{
+					diag ? (
+						<div class="prow">
+							<span class="dot" /> {diag.message}
+							<span class="meta">
+								{lang} [Ln {diag.line}, Col {diag.col}]
+							</span>
+						</div>
+					) : (
+						<div class="prow none">No problems have been detected in the workspace.</div>
+					)
+				}
+			</div>
+			<footer class="status">
+				<span>⎇ main</span>
+				<span>⊗ {problems} ⚠ 0</span>
+				<span class="grow"></span>
+				<span>Ln {diag?.line ?? 1}, Col {diag?.col ?? 1}</span>
+				<span>Spaces: 4</span>
+				<span>UTF-8</span>
+				<span>{langName}</span>
+			</footer>
+		</section>
+	</div>
+</Window>
+
+<style>
+	.vsc {
+		--lh: 1.25rem;
+		display: grid;
+		grid-template-columns: 2.6rem 11rem minmax(0, 1fr);
+		font: 0.78rem/1.4 var(--sl-font);
+		color: #cccccc;
+		min-width: 36rem;
+	}
+	.activity {
+		background: #333333;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 1.1rem;
+		padding-top: 0.8rem;
+	}
+	.activity svg {
+		width: 1.35rem;
+		fill: none;
+		stroke: #858585;
+		stroke-width: 1.6;
+	}
+	.activity svg:first-child {
+		stroke: #fff;
+	}
+	.explorer {
+		background: #252526;
+		border-right: 1px solid #1e1e1e;
+	}
+	.ex-head {
+		padding: 0.55rem 1rem;
+		font-size: 0.68rem;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+	}
+	.explorer ul {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+	}
+	.explorer li {
+		display: flex;
+		align-items: center;
+		gap: 0.3rem;
+		height: 1.4rem;
+		margin: 0;
+		padding-inline-start: calc(0.5rem + var(--depth) * 0.75rem);
+		white-space: nowrap;
+	}
+	.explorer li.active {
+		background: #37373d;
+		outline: 1px solid #007fd4;
+		outline-offset: -1px;
+	}
+	.chev {
+		width: 0.7rem;
+		color: #c5c5c5;
+		transform: rotate(90deg);
+		text-align: center;
+	}
+	.ico {
+		display: inline-flex;
+		width: 1rem;
+		height: 1rem;
+		flex: none;
+	}
+	.ico :global(svg) {
+		width: 100%;
+		height: 100%;
+	}
+	.ico-file {
+		background: linear-gradient(#8a8a8a, #8a8a8a) center/0.6rem 0.75rem no-repeat;
+		opacity: 0.6;
+		border-radius: 1px;
+	}
+	.ico-dir {
+		background: #dcb67a;
+		clip-path: polygon(0 20%, 40% 20%, 50% 32%, 100% 32%, 100% 85%, 0 85%);
+	}
+	.nm.err,
+	.tab .err {
+		color: #f48771;
+	}
+	.badge {
+		margin-inline-start: auto;
+		margin-inline-end: 0.6rem;
+		color: #f48771;
+		font-size: 0.7rem;
+	}
+	.main {
+		display: flex;
+		flex-direction: column;
+		min-width: 0;
+		background: #1e1e1e;
+	}
+	.tabs {
+		display: flex;
+		background: #252526;
+		height: 2.1rem;
+	}
+	.tab {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		padding-inline: 0.8rem;
+		background: #1e1e1e;
+		border-top: 1px solid #26a69a;
+	}
+	.tab .badge {
+		margin: 0;
+	}
+	.tab .x {
+		margin-inline-start: 0.4rem;
+		opacity: 0.7;
+	}
+	.crumbs {
+		padding: 0.15rem 1rem;
+		font-size: 0.72rem;
+		color: #a9a9a9;
+	}
+	.code {
+		display: grid;
+		grid-template-columns: 3rem minmax(0, 1fr);
+		padding-block: 0.3rem 1.2rem;
+		font: 0.8rem/var(--lh) var(--sl-font-mono);
+		position: relative;
+		flex: 1;
+		min-height: calc((var(--lines) + 5.5) * var(--lh));
+	}
+	.gutter {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-end;
+		padding-inline-end: 1.1rem;
+		color: #6e7681;
+	}
+	.src {
+		position: relative;
+		min-width: 0;
+	}
+	.src :global(pre) {
+		margin: 0;
+		padding: 0;
+		background: transparent !important;
+		border: 0;
+		overflow: visible;
+		font: inherit;
+	}
+	.src :global(code) {
+		font: inherit;
+		background: none;
+		padding: 0;
+	}
+	.src :global(.line) {
+		display: inline-block;
+		min-height: var(--lh);
+	}
+	.src :global(.squiggle) {
+		text-decoration: underline wavy #f14c4c;
+		text-decoration-skip-ink: none;
+		text-underline-offset: 0.25em;
+	}
+	.hover {
+		position: absolute;
+		top: calc(var(--l) * var(--lh) + 0.2rem);
+		left: calc(var(--c) * 1ch);
+		z-index: 2;
+		max-width: 30rem;
+		background: #252526;
+		border: 1px solid #454545;
+		border-radius: 3px;
+		box-shadow: 0 2px 8px #000000a0;
+		font: 0.78rem/1.45 var(--sl-font);
+		color: #cccccc;
+	}
+	.hover p {
+		margin: 0;
+		padding: 0.45rem 0.7rem 0;
+	}
+	.hover .help {
+		color: #9cdcfe;
+	}
+	.srcname {
+		color: #8b949e;
+	}
+	.hover .actions {
+		display: flex;
+		gap: 1rem;
+		margin-top: 0.45rem;
+		padding-block: 0.35rem;
+		border-top: 1px solid #454545;
+		color: #3794ff;
+	}
+	.panel {
+		border-top: 1px solid #414141;
+		padding: 0.3rem 1rem 0.5rem;
+		font-size: 0.75rem;
+	}
+	.ptabs {
+		display: flex;
+		gap: 1.3rem;
+		text-transform: uppercase;
+		font-size: 0.68rem;
+		letter-spacing: 0.04em;
+		color: #969696;
+		margin-bottom: 0.4rem;
+	}
+	.ptabs .on {
+		color: #e7e7e7;
+		border-bottom: 1px solid #e7e7e7;
+		padding-bottom: 0.2rem;
+	}
+	.count {
+		background: #4d4d4d;
+		border-radius: 1rem;
+		padding: 0 0.4rem;
+		margin-inline-start: 0.2rem;
+	}
+	.prow {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		white-space: nowrap;
+	}
+	.prow.none {
+		color: #969696;
+	}
+	.prow .dot {
+		width: 0.7rem;
+		height: 0.7rem;
+		border-radius: 50%;
+		border: 2px solid #f14c4c;
+	}
+	.meta {
+		color: #8b949e;
+	}
+	.status {
+		display: flex;
+		gap: 1rem;
+		padding: 0.15rem 0.7rem;
+		background: #00796b;
+		color: #fff;
+		font-size: 0.72rem;
+		white-space: nowrap;
+	}
+	.grow {
+		flex: 1;
+	}
+</style>

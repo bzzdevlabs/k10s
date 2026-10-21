@@ -1,0 +1,87 @@
+---
+title: Key-value storage
+description: The durable, per-service key-value store, with atomic counters, compare-and-swap loops, durability and quotas.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Each service has a durable key-value namespace named after the service. It survives redeployments and restarts,
+and every instance of the service on the node shares it.
+
+## Counters
+
+`kv_add_int` is one atomic host call on an 8-byte integer value. Concurrent instances, on every shard, never lose
+an update:
+
+```ten title="counter.ten"
+export fn handle() {
+    out_int(kv_add_int("count", 1));
+    out_str("\n");
+}
+```
+
+`kv_add_int(key, 0)` reads the value without writing; an absent key counts as `0`.
+
+## Values
+
+```ten
+kv_write("greeting", "hello", 5);
+let v = kv_read("greeting");          // a heap copy, or null if absent
+if v != null {
+    out(v, last_len());
+}
+kv_delete("greeting");
+```
+
+`kv_put_int` and `kv_get_int` store integers as decimal text, which `kv_add_int` cannot update (it traps
+`Host(4)` on a value that is not exactly 8 bytes).
+
+## Read-modify-write
+
+A `kv_read` followed by a `kv_write` is **not** atomic: another instance may write in between. Use a
+compare-and-swap loop: read, compute the new value, swap only if the key still holds what you read.
+
+```ten
+// Appends one byte to a value, whatever other instances do concurrently.
+fn append(key: str, b: i64) {
+    loop {
+        let old = kv_read(key);
+        let n = last_len();
+        let buf = alloc(n + 1);
+        if old != null { memcpy(buf, old, n); }
+        buf[n] = b;
+        let exp_len = select(old != null, n, -1);   // -1: the key must still be absent
+        if kv_cas_bytes(key, old, exp_len, buf, n + 1) == 1 {
+            return;
+        }
+    }
+}
+```
+
+`kv_cas_bytes(key, expected, exp_len, new, new_len)` returns 1 when it swapped, 0 when the value had changed.
+`exp_len = -1` means "the key must be absent", `new_len = -1` deletes on a match. The
+[todo example](/k10s/ten/examples/#a-rest-api) maintains an index of ids this way.
+
+## Guarantees
+
+- **Linearizable per node.** Every `kv_*` call on a namespace takes effect at a single point, whatever shard or
+  instance makes it, and is logged in that order.
+- **Durable, with group commit.** Writes return once buffered; a flusher batches for 2 ms and `fdatasync`s. A
+  crash can lose the last ≈ 2 ms of acknowledged writes, never reorder them: a restart recovers a prefix in the
+  order they were made.
+- **Self-healing log.** Each namespace is an append-only, checksummed log, compacted when it exceeds twice the live
+  size. After an I/O error the namespace is marked degraded (`kv_durable: false` in status) and rewritten from
+  memory with backoff until the disk accepts it again.
+
+## Limits
+
+| Limit | Value |
+|---|---|
+| key | 1 KiB (else trap `Host(2)`) |
+| value | 1 MiB (else trap `Host(2)`) |
+| live bytes per service | 256 MiB, `--kv-max` (0 = unlimited); a write over it traps `Host(3)` and stores nothing |
+
+<Aside type="caution" title="Node-local">
+	Replicas of a service on different cluster nodes have separate namespaces. Replicated storage and consensus are
+	on the [roadmap](/k10s/project/roadmap/). Without `--data`, the store is memory-only.
+</Aside>

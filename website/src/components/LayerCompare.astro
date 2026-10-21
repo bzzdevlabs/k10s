@@ -1,0 +1,148 @@
+---
+// What runs on one node: the Kubernetes stack next to k10s (docs/DESIGN.md §1 and §3).
+const kube = [
+	['Control plane', ['etcd', 'kube-apiserver', 'scheduler', 'controller-manager', 'CoreDNS']],
+	['Node agents', ['kubelet', 'containerd', 'shims', 'kube-proxy', 'CNI daemon']],
+	['Network', ['veth', 'bridge', 'iptables / IPVS', 'VXLAN', 'conntrack', 'sidecars']],
+	['Per pod', ['pause', 'process', 'libc', 'language runtime', 'image layers']],
+	['Isolation', ['namespaces', 'cgroups', 'page tables', 'CFS', 'probes']],
+	['Guest OS', ['Linux']],
+] as const;
+const k10s = [
+	['mesh', 'gossip membership · desired state · place(manifest, members)'],
+	['net', 'HTTP ingress · one multiplexed link per peer'],
+	['exec', 'per-core shards · fibers · safepoint preemption'],
+	['code', 'TIR → x86-64, single pass, shared by all instances'],
+	['mem', 'one address space of power-of-two slots'],
+	['host API', 'the only way out of a slot'],
+] as const;
+---
+
+<figure class="k-figure not-content">
+	<div class="cmp">
+		<div class="col kube">
+			<header>
+				<span class="tag">Kubernetes</span>
+				<strong>a node, plus its control plane</strong>
+			</header>
+			{
+				kube.map(([layer, items]) => (
+					<div class="row">
+						<span class="lbl">{layer}</span>
+						<span class="chips">
+							{items.map((i) => (
+								<span class="chip">{i}</span>
+							))}
+						</span>
+					</div>
+				))
+			}
+			<footer><b class="k-num">583 MiB</b> idle · <b class="k-num">21.9 %</b> of a core</footer>
+		</div>
+		<div class="col k10s">
+			<header>
+				<span class="tag">k10s</span>
+				<strong>one 1.7 MB static binary</strong>
+			</header>
+			{
+				k10s.map(([layer, what]) => (
+					<div class="row">
+						<span class="lbl">{layer}</span>
+						<span class="what">{what}</span>
+					</div>
+				))
+			}
+			<div class="row os">
+				<span class="lbl">OS</span>
+				<span class="what">Linux, or none: the same runtime boots as its own kernel</span>
+			</div>
+			<footer><b class="k-num">1.3 MiB</b> idle · <b class="k-num">0.10 %</b> of a core</footer>
+		</div>
+	</div>
+	<figcaption>Isolation moves from the MMU into the compiler, and most of the stack has nothing left to do.</figcaption>
+</figure>
+
+<style>
+	.cmp {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+		gap: 1rem;
+	}
+	.col {
+		display: flex;
+		flex-direction: column;
+		gap: 0.4rem;
+		padding: 1rem;
+		border-radius: 0.8rem;
+		background: var(--k-surface);
+		border: 1px solid var(--k-line);
+		color: var(--k-ink);
+	}
+	.kube {
+		--c: var(--k-kube);
+	}
+	.k10s {
+		--c: var(--k-teal);
+		border-color: color-mix(in srgb, var(--k-teal) 55%, var(--k-line));
+		box-shadow: 0 0 2.5rem -1rem color-mix(in srgb, var(--k-teal) 60%, transparent);
+	}
+	header {
+		display: flex;
+		align-items: baseline;
+		gap: 0.6rem;
+		margin-bottom: 0.4rem;
+		font-size: var(--sl-text-sm);
+	}
+	.tag {
+		font: 700 0.7rem/1 var(--sl-font-mono);
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--c);
+	}
+	.row {
+		display: grid;
+		grid-template-columns: 6.2rem 1fr;
+		gap: 0.5rem;
+		align-items: start;
+		padding: 0.45rem 0.55rem;
+		border-radius: 0.45rem;
+		background: color-mix(in srgb, var(--c) 9%, var(--k-surface-2));
+		border-left: 3px solid color-mix(in srgb, var(--c) 70%, transparent);
+	}
+	.lbl {
+		font: 600 0.72rem/1.5 var(--sl-font-mono);
+		color: var(--c);
+	}
+	.chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.25rem;
+	}
+	.chip {
+		font-size: 0.7rem;
+		line-height: 1.3;
+		padding: 0.12rem 0.4rem;
+		border-radius: 0.3rem;
+		background: var(--k-surface);
+		border: 1px solid var(--k-line);
+	}
+	.what {
+		font-size: 0.78rem;
+		line-height: 1.5;
+	}
+	.os {
+		border-left-style: dashed;
+		background: transparent;
+		border: 1px dashed var(--k-line);
+		border-left: 3px dashed color-mix(in srgb, var(--c) 70%, transparent);
+	}
+	footer {
+		margin-top: auto;
+		padding-top: 0.6rem;
+		font-size: 0.78rem;
+		color: var(--k-ink-dim);
+	}
+	footer b {
+		color: var(--c);
+	}
+</style>

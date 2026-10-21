@@ -1,0 +1,126 @@
+---
+title: k10s
+description: Run services on a fleet of machines for a fraction of what Kubernetes costs. Workloads are isolated by the compiler, so containers, sidecars and the control plane have nothing left to do.
+template: splash
+hero:
+  title: Kubernetes, minus the layers.
+  tagline: k10s runs services on a fleet of machines for a fraction of what Kubernetes costs. Workloads are isolated by the compiler instead of processes, so containers, sidecars and the control plane have nothing left to do.
+  image:
+    file: ../../assets/logo.svg
+  actions:
+    - text: Get started
+      link: /k10s/start/quick-start/
+      icon: right-arrow
+    - text: Why k10s
+      link: /k10s/start/introduction/
+      variant: minimal
+    - text: GitHub
+      link: https://github.com/bzzdevlabs/k10s
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import Terminal from '~/components/Terminal.astro';
+import Editor from '~/components/Editor.astro';
+import Bench from '~/components/Bench.astro';
+import LayerCompare from '~/components/LayerCompare.astro';
+
+<Terminal
+	animate
+	title="zsh — ~/k10s"
+	session={`
+$ k10s node --http 127.0.0.1:8080 --data /tmp/k10s-data &
+«dim:k10s 0.1.0: node \`laptop\` listening on http://127.0.0.1:8080 (8 shards, backend jit)»
+$ k10s apply examples/app.k10s
+{"ok":true,"version":1,"added":[«teal:"chain","compute","counter","echo","hello","nbody","sort","todo"»],"warnings":[]}
+$ curl 127.0.0.1:8080/hello/
+hello
+$ curl -X POST 127.0.0.1:8080/counter/
+1
+`}
+/>
+
+## Why it is fast
+
+<CardGrid>
+	<Card title="Isolated by the compiler" icon="padlock">
+		Every memory access is masked into the instance's own slot. Thousands of instances share one address space,
+		and switching between them is a function call.
+	</Card>
+	<Card title="Instances, not containers" icon="rocket">
+		An instance is a memory slot plus shared machine code: kilobytes of RAM, microseconds to start.
+		Scale-to-zero is the default.
+	</Card>
+	<Card title="No control plane" icon="random">
+		Desired state spreads by gossip, membership is SWIM, and placement is a pure function every node computes on
+		its own. Self-healing falls out of membership changes.
+	</Card>
+	<Card title="Calls are function calls" icon="forward-slash">
+		Service-to-service calls on a node cost 0.45 µs. Across nodes: one authenticated, multiplexed link per peer.
+		No DNS, no virtual IPs, no sidecars.
+	</Card>
+	<Card title="One small binary" icon="download">
+		Node, JIT, compiler and CLI ship as one 1.7 MB static binary. A service ships as a module of a few hundred
+		bytes.
+	</Card>
+	<Card title="Linux optional" icon="server">
+		The same runtime boots as its own kernel: 694 KB, ready about 3 ms after kernel entry, serving HTTP in 3 MiB
+		of RAM.
+	</Card>
+</CardGrid>
+
+## Measured on one laptop
+
+<Bench only={['idle-mem', 'replica-mem', 'deploy', 'hop', 'failover']} />
+
+Full results, method and caveats: [Benchmarks](/k10s/project/benchmarks/).
+
+## Where the savings come from
+
+<LayerCompare />
+
+## Write services in Ten
+
+Ten is a small C-like language: typed pointers, structs, `i64` and `f64`, no garbage collector and no runtime.
+Its compiler runs in your editor too, so mistakes show up as you type.
+
+<Editor
+	file="greet.ten"
+	tree={`k10s/
+  examples/
+    app.k10s
+    echo.ten
+    greet.ten *
+    todo.ten`}
+	code={`// greet.ten: answers "hello, <name>" and counts visits.
+buffer name: [u8; 64];
+
+export fn handle() {
+    heap_reset();
+    let n = query_str("name", name, countof(name));
+    out_str("hello, ");
+    if n > 0 { out(name, n); } else { out_str("world"); }
+    let visits = kv_add_int("visits", 1);
+    out_str(" (visit #");
+    out_int(visits * 1.5);
+    out_str(")\\n");
+}`}
+	diag={{
+		line: 11,
+		col: 13,
+		len: 12,
+		message: 'mismatched operand types `i64` and `f64` for `*`',
+		help: 'Ten never converts implicitly: use `x as f64` or `y as i64`',
+	}}
+	caption="The VS Code extension runs the real k10s compiler, built to WebAssembly."
+/>
+
+## Next steps
+
+<CardGrid>
+	<LinkCard title="Quick start" description="Run a node and deploy eight services in two minutes." href="/k10s/start/quick-start/" />
+	<LinkCard title="Your first service" description="Write, run, build and deploy a Ten service." href="/k10s/start/first-service/" />
+	<LinkCard title="Architecture" description="How a node turns TIR into isolated, preemptible instances." href="/k10s/concepts/architecture/" />
+	<LinkCard title="The Ten language" description="A tour of the language and its standard prelude." href="/k10s/ten/overview/" />
+</CardGrid>

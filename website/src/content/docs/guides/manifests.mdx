@@ -1,0 +1,88 @@
+---
+title: Manifests
+description: The k10s manifest format, every service key with its default, and how apply, versions and updates work.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Terminal from '~/components/Terminal.astro';
+
+A manifest is the **whole desired state** of a node or cluster: the list of services, their code and their
+limits. `k10s apply` compiles it with the code it references into one bundle and sends it to a node.
+
+```k10s title="app.k10s"
+# Comments start with '#'. `code` paths are relative to this file.
+service hello   { code = "hello.ten"   memory = 64KiB }
+service echo    { code = "echo.ten"    memory = 1MiB  replicas = 2 }
+service compute { code = "compute.ten" memory = 64KiB cpu_ms = 60000 }
+service chain   { code = "chain.ten"   memory = 64KiB config = "echo" calls = ["echo"] }
+service session {
+    code = "session.k10"
+    memory = 256KiB
+    fresh = true
+    max_instances = 512
+}
+```
+
+## Service keys
+
+| Key | Default | Meaning |
+|---|---|---|
+| `code` | required | a `.ten` source (compiled by the CLI) or a precompiled `.k10` module |
+| `memory` | `1MiB` | the slot size: the instance's whole memory and its hard limit. A power of two from `4KiB` to `64GiB`; units `B`, `KiB`, `MiB`, `GiB` |
+| `replicas` | `1` | in a cluster, how many distinct nodes run the service |
+| `max_instances` | `64` | instances of the service on one node; more requests wait in a queue |
+| `cpu_ms` | `1000` | CPU budget of one request in milliseconds; over it, the request traps `Interrupted` |
+| `fresh` | `false` | start every request from the snapshot taken after `init()` |
+| `config` | `""` | bytes the service reads with `config()` / `read_config()` |
+| `calls` | `[]` | services this one may `call`; `["*"]` allows any (discouraged) |
+
+Service names use `[a-z0-9-]`, 1 to 63 characters. They are also the first path segment at the ingress
+(`/hello/…`) and the name of the service's key-value namespace.
+
+## Applying
+
+<Terminal
+	session={`
+$ k10s apply app.k10s --node 127.0.0.1:8080
+{"ok":true,"version":3,"added":["session"],"updated":[],"removed":[],"unchanged":["chain","compute","echo","hello"],"warnings":[]}
+`}
+/>
+
+The node decodes the bundle, validates every module (imports, exports, memory), prepares the new code (modules
+are reused by hash), then swaps the service table atomically:
+
+- **unchanged** services keep their warm instances, counters and runtime;
+- **updated** services are retired: in-flight and queued requests finish on the old version, new requests go to
+  the new one, and no request sees a mix;
+- **removed** services drain the same way, then free their memory. Their key-value data stays on disk.
+
+The bundle is persisted (`DATA/bundle.k10b`, fsynced) and re-applied when the node starts.
+
+## Versions
+
+`k10s apply` asks for *current version + 1*. An explicit version lower than the current one is refused (409);
+the same version with the same content is a no-op. In a cluster, the highest version wins on every node; ties are
+broken by content hash.
+
+## Errors
+
+Nothing is sent when the manifest or a Ten file does not compile, and the node refuses a bundle before touching
+anything if a module is invalid (422) or the reservations do not fit in `--mem` (422).
+
+<Terminal
+	session={`
+$ k10s apply bad.k10s
+«red:k10s: bad.k10s: line 1: memory must be a power of two, got 61440 bytes»
+`}
+/>
+
+## Warnings
+
+A service whose module imports `call` but whose `calls` grants nothing is reported at every apply and reload: a
+`k10s: warning:` log line, `warnings` in the apply report, and `manifest.warnings` in `/_k10s/status`.
+
+<Aside type="caution" title="Upgrading from manifests without calls">
+	A manifest written before `calls` existed grants nothing, so calls fail with `-1` after an upgrade until it is
+	re-applied with `calls = [...]`. Upgrade every node first: nodes built before `calls` cannot decode a manifest
+	that uses it.
+</Aside>

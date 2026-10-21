@@ -1,0 +1,131 @@
+---
+title: Your first service
+description: Write a Ten service, run it locally, fix a compile error, then deploy it with a manifest.
+---
+
+import { Steps, Aside, FileTree } from '@astrojs/starlight/components';
+import Terminal from '~/components/Terminal.astro';
+
+You will write `greet`, a service that answers `hello, <name>` and counts its visits in the node's durable
+key-value store.
+
+## Write it
+
+```ten title="greet.ten"
+// greet.ten: answers "hello, <name>" and counts visits.
+buffer name: [u8; 64];
+
+export fn handle() {
+    heap_reset();
+    let n = query_str("name", name, countof(name));
+    out_str("hello, ");
+    if n > 0 { out(name, n); } else { out_str("world"); }
+    let visits = kv_add_int("visits", 1);
+    out_str(" (visit #");
+    out_int(visits);
+    out_str(")\n");
+}
+```
+
+- `export fn handle()` is the entry point: the node calls it once per request.
+- `buffer name: [u8; 64]` is 64 bytes of static, zeroed memory inside the instance's slot.
+- `query_str`, `out_str`, `kv_add_int` and friends come from the [standard prelude](/k10s/ten/prelude/), always
+  available. `heap_reset()` frees the per-request heap that `query_str` uses to read the path.
+- `kv_add_int` is one atomic host call: concurrent instances never lose an update.
+
+## Run it
+
+`k10s run` compiles the file and runs one request in-process, with an in-memory key-value store:
+
+<Terminal
+	session={`
+$ k10s run greet.ten --path '/?name=Ada'
+hello, Ada (visit #1)
+«dim:k10s: HTTP 200 (22 bytes, 0.087 ms)»
+$ k10s run greet.ten
+hello, world (visit #1)
+«dim:k10s: HTTP 200 (24 bytes, 0.078 ms)»
+`}
+/>
+
+## Read a compile error
+
+Ten never converts between `i64` and `f64` implicitly. Change `out_int(visits)` to `out_int(visits * 1.5)` and
+build again:
+
+<Terminal
+	session={`
+$ k10s build greet.ten
+«red:error»«bold:: mismatched operand types \`i64\` and \`f64\` for \`*\`»
+  «blue:-->» greet.ten:11:13
+   «blue:|»
+«blue:11 |»     out_int(visits * 1.5);
+   «blue:|»             «red:^^^^^^^^^^^^»
+   «blue:=» «bold:help»: Ten never converts implicitly: use \`x as f64\` or \`y as i64\`
+
+«dim:k10s: could not compile \`greet.ten\` (1 error)»
+`}
+/>
+
+Diagnostics point at the exact span, suggest a fix, and several errors are reported per run. The
+[VS Code extension](/k10s/guides/editor/) shows the same messages as you type. Revert the change and build the module:
+
+<Terminal
+	session={`
+$ k10s build greet.ten
+«dim:k10s: wrote greet.k10 (932 bytes: 13 functions, exports [handle], imports [req_path, output_write, kv_add], min memory 8KiB)»
+`}
+/>
+
+The whole service is 932 bytes of [TIR](/k10s/reference/tir/). Only the prelude functions it reaches are kept, and
+it imports exactly three host functions.
+
+## Deploy it
+
+<Steps>
+
+1. Declare the service in a manifest next to the source:
+
+   ```k10s title="greet.k10s"
+   service greet { code = "greet.ten" memory = 64KiB }
+   ```
+
+   <FileTree>
+   - greet.ten
+   - greet.k10s
+   </FileTree>
+
+2. Apply it to a running node ([Quick start](/k10s/start/quick-start/) shows how to start one):
+
+   <Terminal
+   	session={`
+   $ k10s apply greet.k10s
+   {"ok":true,"version":2,"added":["greet"],"updated":[],"removed":["chain","compute","counter","echo","hello","nbody","sort","todo"],"unchanged":[],"warnings":[]}
+   `}
+   />
+
+   A manifest is the **whole** desired state: services it does not list are removed. To keep the examples, add
+   `greet` to `examples/app.k10s` instead.
+
+3. Call it:
+
+   <Terminal
+   	session={`
+   $ curl '127.0.0.1:8080/greet/?name=Ada'
+   hello, Ada (visit #1)
+   $ curl '127.0.0.1:8080/greet/?name=Grace'
+   hello, Grace (visit #2)
+   `}
+   />
+
+</Steps>
+
+<Aside type="tip" title="Updates are atomic">
+	Edit `greet.ten` and apply again. In-flight requests finish on the old version, new ones go to the new one, and
+	the visit counter survives: the key-value namespace belongs to the service name, not to a version.
+</Aside>
+
+## Next
+
+- [Manifests](/k10s/guides/manifests/): memory, replicas, CPU budgets, config and `calls`.
+- [The Ten language](/k10s/ten/overview/): everything the compiler accepts.

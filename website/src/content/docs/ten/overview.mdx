@@ -1,0 +1,142 @@
+---
+title: Ten at a glance
+description: A tour of Ten, the small systems language of k10s, in five short programs.
+---
+
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import Terminal from '~/components/Terminal.astro';
+
+Ten is a small systems language: C-level control, typed pointers and structs, `i64` and `f64`, no garbage
+collector, no runtime and no hidden costs. It compiles to [TIR](/k10s/reference/tir/), which each node compiles to
+machine code.
+
+Safety *for the platform* comes from TIR's sandbox: a bug in a Ten program can only corrupt that instance's own
+memory. So Ten can stay close to the machine (raw pointers, no bounds checks) while k10s stays safe.
+
+## The smallest service
+
+```ten title="hello.ten"
+export fn handle() {
+    out_str("hello");
+}
+```
+
+`handle` is called once per request. The whole module is one five-instruction function: `out_str` is a
+*forwarder* in the prelude, so the call compiles straight to the `output_write` host function.
+
+## Values, structs and pointers
+
+```ten title="points.ten"
+struct Point { x: f64, y: f64 }
+
+buffer pts: [Point; 16];
+
+fn norm(p: *Point) -> f64 {
+    return sqrt(p.x * p.x + p.y * p.y);
+}
+
+export fn handle() {
+    heap_reset();
+    let n = min(query_int("n", 3), countof(pts));
+    let total = 0.0;
+    for i in 0..n {
+        pts[i].x = i as f64;
+        pts[i].y = 1.0;
+        total += norm(pts + i);
+    }
+    out_f64(total, 3);
+    out_byte('\n');
+}
+```
+
+<Terminal
+	session={`
+$ k10s run points.ten --path '/?n=4'
+7.813
+«dim:k10s: HTTP 200 (6 bytes, 0.056 ms)»
+`}
+/>
+
+- Value types are `i64`, `f64`, pointers `*T` and `str`. Small integer types (`u8`, `i32`…) exist only in memory:
+  loading one widens it to `i64`.
+- `p.x` auto-dereferences a struct pointer; `pts + i` advances by `i * sizeof(Point)`.
+- There are **no implicit numeric conversions**: `i as f64` is required, and `1` where an `f64` is expected is an
+  error with a hint to write `1.0`.
+
+## State lives in the slot
+
+```ten title="limit.ten"
+const LIMIT = 3;
+global hits: i64 = 0;
+data GREETING = "hello\n";
+
+export fn handle() {
+    hits += 1;
+    if hits > LIMIT {
+        status(429);
+        out_str("slow down\n");
+        return;
+    }
+    out_str(GREETING);
+}
+```
+
+`global`, `data` and `buffer` items live in the instance's memory. An instance is reused across requests, so
+`hits` counts the requests *this instance* served. For state shared by all instances and durable across restarts,
+use the [key-value store](/k10s/guides/storage/); for a clean slate on every request, mark the service `fresh`.
+
+## The heap
+
+```ten title="list.ten"
+struct Node { value: i64, next: *Node }
+
+fn push(head: *Node, v: i64) -> *Node {
+    let n = alloc(sizeof(Node)) as *Node;
+    n.value = v;
+    n.next = head;
+    return n;
+}
+
+export fn handle() {
+    heap_reset();
+    let list: *Node = null;
+    for i in 0..5 { list = push(list, i * i); }
+    let sum = 0;
+    let p = list;
+    while p != null {
+        sum += p.value;
+        p = p.next;
+    }
+    out_int(sum);
+}
+```
+
+The prelude's allocator uses size classes over a bump pointer. Calling `heap_reset()` at the top of `handle` turns
+the heap into a per-request arena: no frees, no leaks.
+
+## Calling another service
+
+```ten
+let st = call_svc("echo", null, 0);
+if st == 200 {
+    out_call_resp();
+}
+```
+
+`call_svc` suspends the caller until the response arrives, on the same node in under a microsecond. The callee
+must be listed in the manifest's `calls`. See [Service calls](/k10s/guides/calls/).
+
+<Aside type="tip" title="Try it">
+	Every example on this page runs as is with `k10s run FILE.ten`. The repository's
+	[examples/](https://github.com/bzzdevlabs/k10s/tree/main/examples) has more: SHA-256, n-body, sorting, a
+	REST to-do API.
+</Aside>
+
+## Go further
+
+<CardGrid>
+	<LinkCard title="Types" href="/k10s/ten/types/" description="Lexical rules, value and storage types, casts." />
+	<LinkCard title="Syntax" href="/k10s/ten/syntax/" description="Items, statements, expressions and precedence." />
+	<LinkCard title="Builtins" href="/k10s/ten/builtins/" description="sizeof, memcpy, select, bit operations…" />
+	<LinkCard title="Standard prelude" href="/k10s/ten/prelude/" description="Host API, allocation, I/O, parsing, KV." />
+</CardGrid>

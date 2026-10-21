@@ -1,0 +1,48 @@
+---
+title: Status and roadmap
+description: Where k10s stands, its known limits, and the recommended order of the next steps.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="caution" title="Research prototype">
+	k10s works end to end (a hosted node, a cluster, a bare-metal kernel) and is heavily tested, but it has not run
+	in production. Read the limits below before you rely on it.
+</Aside>
+
+## What is tested
+
+- **Isolation:** the JIT against the reference interpreter on 1,000,000 random modules, zero mismatches;
+  800,000 adversarial memory programs; a red-team suite of 14 attack classes; an independent machine-code
+  verifier.
+- **Runtime:** unit, integration and multi-process cluster tests on both backends: node kill, graceful leave,
+  restart with the same data, concurrent applies, re-apply under load with 0 failed requests.
+- **Chaos:** 20 minutes on 5 nodes, 2,585 fault rounds (SIGKILL, SIGSTOP, leave and join, re-applies): 0
+  invariant violations, 0 wrong bodies.
+- **Abuse:** output bombs, log spam, infinite loops, crash loops, KV bombs, slowloris, hostile bundles, call
+  cycles, fd exhaustion, peers that never read: a well-behaved neighbour kept 0 errors.
+
+## Limits
+
+| Area | Today |
+|---|---|
+| tenancy | one organization per node; Spectre-class side channels only partly mitigated |
+| cluster identity | one shared key; no per-node identity, no signed bundles, no TLS |
+| storage | key-value store durable but node-local; no replication, no consensus for singletons |
+| compute | 1.1–1.6× slower than portable Go on CPU-bound code |
+| ecosystem | Ten or TIR only; no Wasm or LLVM front end |
+| platforms | JIT on x86-64; other architectures on the interpreter; bare metal on VM guests only |
+
+## Roadmap
+
+1. **Cluster security:** per-node identity and signed bundles, on top of today's authenticated and encrypted gossip
+   and peer links.
+2. **Replicated state:** a replicated key-value store per service (Raft per shard group) and leases for singletons.
+3. **Images:** a PID-1 mode and signed A/B OS updates spread over gossip.
+4. **arm64:** a JIT backend shared by hosted and bare-metal nodes.
+5. **Native bare metal:** UEFI, ACPI, modern virtio, NVMe and a durable key-value log; then cloud NICs.
+6. **Performance:** register allocation in the JIT, 32-bit TIR operations, cheaper cross-node forwarding.
+7. **Ecosystem:** a Wasm → TIR translator, so Rust, C, Go and Zig can target k10s.
+
+The full report, with the evidence behind each claim, is
+[docs/REPORT.md](https://github.com/bzzdevlabs/k10s/blob/main/docs/REPORT.md).

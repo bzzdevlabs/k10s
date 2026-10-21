@@ -1,0 +1,161 @@
+---
+// Kubernetes (kind, 1 node) vs k10s on one laptop, from bench/results/COMPARISON.md. Bars are linear.
+interface Row {
+	id: string;
+	label: string;
+	kube: number;
+	k10s: number;
+	kubeText: string;
+	k10sText: string;
+	higher?: boolean;
+}
+const rows: Row[] = [
+	{ id: 'idle-mem', label: 'Idle platform memory', kube: 583, k10s: 1.3, kubeText: '583 MiB', k10sText: '1.3 MiB' },
+	{ id: 'idle-cpu', label: 'Idle CPU', kube: 21.9, k10s: 0.1, kubeText: '21.9 %', k10sText: '0.10 %' },
+	{ id: 'replica-mem', label: 'Memory per echo replica', kube: 11014, k10s: 10.2, kubeText: '11.0 MiB', k10sText: '10.2 KiB' },
+	{ id: 'deploy', label: 'Deploy → first HTTP 200', kube: 1170, k10s: 24, kubeText: '1.17 s', k10sText: '24 ms' },
+	{ id: 'scale', label: '100 services → all serving', kube: 17600, k10s: 28, kubeText: '17.6 s', k10sText: '28 ms' },
+	{ id: 'echo', label: 'echo, 64 connections', kube: 87, k10s: 180, kubeText: '87 k req/s', k10sText: '180 k req/s', higher: true },
+	{ id: 'hop', label: 'Service-to-service hop', kube: 25.6, k10s: 171, kubeText: '25.6 k req/s', k10sText: '171 k req/s', higher: true },
+	{ id: 'cpu', label: 'CPU per echo request', kube: 47, k10s: 20, kubeText: '47 µs', k10sText: '20 µs' },
+	{ id: 'failover', label: 'Hung node → replaced (3 nodes)', kube: 353, k10s: 1.1, kubeText: '353 s', k10sText: '1.1 s' },
+	{ id: 'rollout', label: 'Rolling update', kube: 3.7, k10s: 0.022, kubeText: '3.7 s, 11 failed', k10sText: '22 ms, 0 failed' },
+	{ id: 'artifact', label: 'Echo artifact', kube: 2.4e6, k10s: 157, kubeText: '2.4 MB image', k10sText: '157 B module' },
+];
+interface Props {
+	only?: string[];
+}
+const { only } = Astro.props;
+const shown = only ? rows.filter((r) => only.includes(r.id)) : rows;
+const pct = (v: number, r: Row) => Math.max((v / Math.max(r.kube, r.k10s)) * 100, 0.6);
+const factor = (r: Row) => {
+	const f = r.higher ? r.k10s / r.kube : r.kube / r.k10s;
+	return f >= 10 ? `${Math.round(f).toLocaleString('en-US')}×` : `${f.toFixed(1)}×`;
+};
+---
+
+<figure class="k-figure not-content">
+	<div class="legend">
+		<span><i class="kube"></i>Kubernetes v1.34 (kind)</span>
+		<span><i class="k10s"></i>k10s</span>
+	</div>
+	<div class="rows">
+		{
+			shown.map((r) => (
+				<div class="row">
+					<div class="lbl">
+						{r.label}
+						<span class="f">
+							{factor(r)} {r.higher ? 'faster' : 'less'}
+						</span>
+					</div>
+					<div class="bars">
+						<div class="bar kube" style={`--w:${pct(r.kube, r)}%`}>
+							<span class="k-num">{r.kubeText}</span>
+						</div>
+						<div class="bar k10s" style={`--w:${pct(r.k10s, r)}%`}>
+							<span class="k-num">{r.k10sText}</span>
+						</div>
+					</div>
+				</div>
+			))
+		}
+	</div>
+	<figcaption>One i7-7820HQ laptop, each suite started on an idle machine (bench/run-final.sh). Linear scale.</figcaption>
+</figure>
+
+<style>
+	.legend {
+		display: flex;
+		gap: 1.2rem;
+		font-size: var(--sl-text-xs);
+		color: var(--k-ink-dim);
+		margin-bottom: 0.6rem;
+	}
+	.legend i {
+		display: inline-block;
+		width: 0.7rem;
+		height: 0.7rem;
+		border-radius: 2px;
+		margin-inline-end: 0.35rem;
+		vertical-align: -0.05rem;
+	}
+	.rows {
+		display: grid;
+		gap: 0.15rem;
+		padding: 0.6rem 1rem;
+		border-radius: 0.8rem;
+		background: var(--k-surface);
+		border: 1px solid var(--k-line);
+	}
+	.row {
+		display: grid;
+		grid-template-columns: minmax(9rem, 15rem) 1fr;
+		gap: 1rem;
+		align-items: center;
+		padding-block: 0.5rem;
+		border-bottom: 1px solid color-mix(in srgb, var(--k-line) 60%, transparent);
+	}
+	.row:last-child {
+		border-bottom: 0;
+	}
+	.lbl {
+		display: flex;
+		flex-direction: column;
+		font-size: 0.82rem;
+		color: var(--k-ink);
+	}
+	.f {
+		font: 700 0.72rem var(--sl-font-mono);
+		color: var(--k-teal);
+	}
+	.bars {
+		display: grid;
+		gap: 0.25rem;
+	}
+	.bar {
+		position: relative;
+		height: 1.15rem;
+		display: flex;
+		align-items: center;
+	}
+	.bar::before {
+		content: '';
+		height: 100%;
+		width: calc(var(--w) * 0.66);
+		border-radius: 0.25rem;
+		background: var(--c);
+		flex: none;
+	}
+	.bar span {
+		padding-inline-start: 0.5rem;
+		font: 0.72rem var(--sl-font-mono);
+		color: var(--k-ink-dim);
+		white-space: nowrap;
+	}
+	.kube,
+	.legend .kube {
+		--c: color-mix(in srgb, var(--k-kube) 75%, transparent);
+		background: none;
+	}
+	.legend .kube {
+		background: var(--c);
+	}
+	.k10s,
+	.legend .k10s {
+		--c: var(--k-teal);
+	}
+	.legend .k10s {
+		background: var(--c);
+	}
+	.bar.k10s span {
+		color: var(--k-ink);
+		font-weight: 600;
+	}
+	@media (max-width: 40rem) {
+		.row {
+			grid-template-columns: 1fr;
+			gap: 0.4rem;
+		}
+	}
+</style>

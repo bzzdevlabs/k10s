@@ -1,0 +1,119 @@
+---
+title: Production setup
+description: Run a k10s node as an unprivileged, sandboxed service with an admin token, a cluster key and systemd hardening.
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+import Terminal from '~/components/Terminal.astro';
+
+<Steps>
+
+1. **Create a user and the secrets.** Keys are 32 random bytes as hex; `keygen` writes them with mode 0600 and never
+   overwrites a file.
+
+   ```bash
+   sudo useradd --system --home /var/lib/k10s k10s
+   sudo install -d -o k10s -g k10s -m 0700 /etc/k10s
+   sudo -u k10s k10s keygen -o /etc/k10s/admin.token
+   sudo -u k10s k10s keygen -o /etc/k10s/cluster.key   # same file on every node
+   ```
+
+2. **Install a systemd unit.** The node binds its ports, then confines itself; the unit adds its own layer.
+
+   ```ini title="/etc/systemd/system/k10s.service"
+   [Unit]
+   Description=k10s node
+   After=network-online.target
+   Wants=network-online.target
+
+   [Service]
+   ExecStart=/usr/local/bin/k10s node --data /var/lib/k10s --http 0.0.0.0:8080 \
+     --admin 10.0.0.1:8081 --admin-token-file /etc/k10s/admin.token \
+     --cluster-key-file /etc/k10s/cluster.key --advertise 10.0.0.1 \
+     --join 10.0.0.1:7946,10.0.0.2:7946,10.0.0.3:7946
+   User=k10s
+   StateDirectory=k10s
+   NoNewPrivileges=yes
+   ProtectSystem=strict
+   ProtectHome=yes
+   PrivateTmp=yes
+   PrivateDevices=yes
+   ProtectKernelTunables=yes
+   ProtectKernelModules=yes
+   ProtectControlGroups=yes
+   RestrictAddressFamilies=AF_INET AF_INET6
+   RestrictNamespaces=yes
+   LockPersonality=yes
+   # The JIT maps code RW then RX: leave MemoryDenyWriteExecute off.
+   CapabilityBoundingSet=
+   LimitNOFILE=65536
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+   For a port below 1024, set `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` and
+   `AmbientCapabilities=CAP_NET_BIND_SERVICE` instead.
+
+3. **Start it and read what it applied.**
+
+   <Terminal
+   	session={`
+   $ sudo systemctl enable --now k10s
+   $ journalctl -u k10s -n 3 -o cat
+   k10s: sandbox on: no_new_privs, inherited fds closed; landlock ABI 2: files = data dir rw + /proc/self ro, tcp bind not restricted (needs ABI 4 / Linux 6.7, and fixed ports); seccomp: 83 syscalls allowed on every thread, anything else kills the process
+   k10s: cluster authentication: key id 9c66ecc2b991cd9e (gossip sealed with XChaCha20-Poly1305, peer links authenticated and encrypted with ChaCha20-Poly1305)
+   k10s 0.1.0: node \`node-1\` listening on http://0.0.0.0:8080 (8 shards, backend jit, data /var/lib/k10s)
+   `}
+   />
+
+4. **Deploy from your machine** with the same token:
+
+   ```bash
+   k10s apply app.k10s --node 10.0.0.1:8081 --admin-token-file admin.token
+   ```
+
+   The CLI also reads `$K10S_ADMIN_TOKEN_FILE` or `$K10S_ADMIN_TOKEN`.
+
+</Steps>
+
+## Ports
+
+| Port | Protocol | Who needs it |
+|---|---|---|
+| `--http` (8080) | TCP | clients of your services; `/_k10s/health` |
+| `--admin` | TCP | operators and scrapers only |
+| `--gossip` (7946) | UDP | other nodes |
+| `--rpc` (7947) | TCP | other nodes |
+
+## The process sandbox
+
+`--sandbox on` (the default) applies, in order: close inherited descriptors, `no_new_privs`, Landlock (files limited
+to the data directory, read-write, nothing executable; with ABI 4+ TCP `bind` limited to the node's ports), bind the
+listeners, drop to `--user` when started as root, then a seccomp allowlist of 83 syscalls on every thread.
+Anything else kills the process: `execve`, `fork`, namespaces, `ptrace`, `mount`, `bpf`, `io_uring`, new
+listening sockets, executable `mmap`.
+
+- `--sandbox log` is a dry run: violations are logged by the kernel (`journalctl -k | grep type=1326`).
+- `--sandbox off` disables it. Library users (`k10s run`, tests, benchmarks) get no sandbox.
+- The hot-path syscalls take no argument checks, so the kernel's seccomp cache serves them: no measurable cost.
+
+## Sizing
+
+- `--mem` caps instance memory (default: physical RAM). Every placed service reserves one instance; size it for
+  the reservations plus the bursts you expect, and watch `k10s_memory_refused_total`.
+- `--shards` defaults to the available parallelism. `--pin` pins shards to cores.
+- `--kv-max` (256 MiB) bounds each service's key-value data; `--conn-buffer-max` bounds HTTP buffering node-wide.
+
+## What to back up
+
+The data directory holds everything a node needs to restart: the applied bundle (`bundle.k10b`, or `manifest.k10m`
+and `blobs/` in cluster mode), the key-value logs (`kv/`), and in cluster mode the node id, incarnation and known
+peers. A replacement node with an empty directory joins and fetches the desired state from its peers; only the
+node-local key-value data is lost.
+
+<Aside type="caution" title="No TLS yet">
+	Neither the admin API nor the ingress speaks TLS. Keep `--admin` on a private network, or put both behind a TLS
+	proxy. A local reverse proxy makes remote clients look like loopback ones: always configure a token in that
+	setup.
+</Aside>

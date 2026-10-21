@@ -1,0 +1,119 @@
+---
+title: Bare metal
+description: Boot the k10s node runtime as its own kernel in QEMU/KVM, with no Linux underneath, and join it to a cluster.
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+import Terminal from '~/components/Terminal.astro';
+
+With isolation done by the compiler, a node needs from the OS only memory, a timer, a NIC and a console. So the same
+runtime also boots **as its own kernel**: `k10-metal`. No processes, no system calls, no user/kernel boundary, no
+per-workload page tables: one identity-mapped address space on up to 8 cores, polling virtio queues directly. In a
+cloud, where every node is already a VM, this deletes the guest Linux.
+
+| | k10-metal | Linux guest, same QEMU setup |
+|---|---|---|
+| image | 694 KB, JIT and cluster layer included | 8.2 MB kernel + 0.9 MB initramfs |
+| kernel entry → ready | about 3 ms | about 1.25 s |
+| QEMU start → first HTTP 200 | median 96 ms | 1,437 ms |
+| smallest `-m` that serves under load | 3 MiB | 88 MiB |
+
+## Boot it
+
+<Steps>
+
+1. Build the kernel and a bundle of test services (from `metal/`):
+
+   ```bash
+   ./build.sh
+   ```
+
+2. Boot it in QEMU/KVM with an admin token. The serial console is on stdout; host port 8090 forwards to the guest's
+   port 80.
+
+   ```bash
+   T=$(openssl rand -hex 16)
+   APPEND="k10.verbose k10.admin_token=$T" ./run.sh
+   ```
+
+   <Terminal
+   	variant="qemu"
+   	title="QEMU — k10-metal (serial)"
+   	cwd="~/k10s/metal"
+   	session={`
+   «teal:k10-metal ready 4.38ms» vm->kmain=53.7ms svc=19 src=initrd engine=jit cpus=1 used=836K img=708K ram=65023K
+   [log] hello from the log service
+   apply: manifest v2: 2 service(s), 2 here: echo, hello
+   `}
+   />
+
+3. Call it like any node:
+
+   ```bash
+   curl localhost:8090/hello/
+   curl 'localhost:8090/sha/?n=1000'
+   curl -H "Authorization: Bearer $T" localhost:8090/_k10s/status
+   curl -H "Authorization: Bearer $T" --data-binary @out/bundle.k10b localhost:8090/_k10s/apply
+   ```
+
+</Steps>
+
+`SMP=4 ./run.sh` boots four CPUs: CPU 0 runs the network, CPU-heavy requests are spread over all four.
+`./test.sh` runs the in-kernel self tests and the end-to-end checks.
+
+## Join a cluster
+
+The guest is a full cluster member next to Linux-hosted nodes: gossip membership, desired state fetched from
+peers, the same placement, forwarding both ways.
+
+The guest sits behind QEMU's user networking, so its gossip, peer and HTTP ports are forwarded to the host and it
+advertises those host addresses. Two hosted nodes and one guest:
+
+```bash
+k10s keygen -o cluster.key
+k10s node --http 127.0.0.1:19001 --gossip 127.0.0.1:19101 --rpc 127.0.0.1:19201 --mem 64MiB --cluster-key-file cluster.key &
+k10s node --http 127.0.0.1:19002 --gossip 127.0.0.1:19102 --rpc 127.0.0.1:19202 --mem 64MiB --cluster-key-file cluster.key --join 127.0.0.1:19101 &
+qemu-system-x86_64 … \
+  -netdev user,id=n0,hostfwd=tcp:127.0.0.1:19003-:80,hostfwd=udp:127.0.0.1:19103-:7946,hostfwd=tcp:127.0.0.1:19203-:7947 \
+  -append "k10.join=127.0.0.1:19101 k10.gossip=127.0.0.1:19103 k10.rpc=127.0.0.1:19203 k10.http=127.0.0.1:19003 k10.mem=67108864 k10.cluster_key=$(cat cluster.key)"
+curl --data-binary @out/bundle.k10b localhost:19001/_k10s/apply
+```
+
+`./cluster-test.sh` runs two hosted nodes and one guest through join, apply, routing, failover and rejoin.
+
+## Kernel command line
+
+| Option | Meaning |
+|---|---|
+| `k10.verbose` | boot banner, phases, apply log (serial output costs about 15 µs per byte) |
+| `k10.engine=jit\|interp` | execution engine (default `jit`) |
+| `k10.smp=N` | use at most N CPUs |
+| `k10.spin_us=N` | busy-poll window before halting (default 50) |
+| `k10.jit_indirect=jump\|lfence\|retpoline` | Spectre v2 hardening of JIT indirect branches |
+| `k10.timer_res_us=N` | guest clock resolution (default 100; 0 = full) |
+| `k10.admin_token=TOKEN` | bearer token for `/_k10s/*` except `health`; without it the admin API answers 403 |
+| `k10.join=HOST:PORT,…` | cluster seeds; with `k10.gossip=`, `k10.rpc=`, `k10.http=` (advertised addresses) |
+| `k10.cluster_key=HEX` | the hosted nodes' `k10s keygen` key (or `k10.insecure_unauthenticated_cluster`) |
+| `k10.node_id=HEX`, `k10.probe_ms=N`, `k10.suspicion_mult=N`, `k10.mem=BYTES` | identity and tuning |
+| `k10.selftest`, `k10.exit_on_ready` | test modes |
+
+The bundle comes from QEMU's `-initrd`, else from a bundle baked in at build time (`EMBED=1`); with neither, the
+node starts empty and waits for `POST /_k10s/apply`.
+
+## Inside
+
+- **Boot:** PVH entry (what Firecracker and Cloud Hypervisor boot), identity-mapped 4 GiB, long mode, SSE for JIT
+  code.
+- **Memory:** a tagged frame allocator shared by the heap and the instance slots; NX everywhere, the kernel and JIT
+  code W^X, page 0 unmapped.
+- **Time:** kvmclock, a tickless one-shot LAPIC timer armed only for the next deadline; an idle node takes no timer
+  interrupts.
+- **NIC:** legacy virtio-net with fixed buffers (nothing allocated per packet), smoltcp for TCP/IP, the same
+  HTTP/1.1 ingress and host API as the hosted node.
+
+<Aside type="caution" title="v0 limits">
+	VM guests only (PVH, legacy virtio-net, 4 GiB mapped). No storage driver: the key-value store is in memory. No
+	DHCP, IPv4 only, no TLS. The cluster key and admin token sit on the kernel command line. There is no OS layer
+	under the kernel, so the independent verification of the JIT's output matters most here. Full list:
+	[metal/README.md](https://github.com/bzzdevlabs/k10s/blob/main/metal/README.md).
+</Aside>
