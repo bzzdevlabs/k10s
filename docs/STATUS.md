@@ -5,8 +5,9 @@ PROJECT STATE: HARDENING
 Last updated: 2026-10-21. This file is the single place to learn where the project stands and what comes next.
 
 ## State of `main`
-`origin/main` is v0.1.0-dev.125 (all release gates green); local `main` adds the step 8 integration commit (not
-pushed yet, step 9). `main` contains:
+`main` is pushed; every push publishes a dev pre-release (v0.1.0-dev.127 = 23bd4fb, the step 8 integration: ci,
+release, pages and vscode workflows green; glibc, musl, metal, bench, examples and source archives and `SHA256SUMS`).
+`main` contains:
 - Isolation: SFI-masked JIT and interpreter, validator, red-team and differential suites, objdump encoder fuzzing and
   SFI verifier tests.
 - Control plane: signed admin requests (HMAC over a per-process audience, method, target, time, nonce and body
@@ -36,7 +37,6 @@ updated with every change and written as the current state, no perf regression b
 security features (`bench/k10s/ab.py --same` vs 08f2921), no stable tag without the user, never create namespaces or
 seek privileges on this machine.
 
-9. **Push** — push `main`, watch CI and the release workflow (dev pre-release), fix what they show.
 10. **Optional perf** — shard-owned peer links: each shard dials and reads its own link per peer, the mesh thread keeps
     gossip, fetch and accept; expected 7 → 3 wake-ups per forwarded request (≈ −40 % CPU at 1 conn).
 11. **Decisions (user)** — answer docs/REPORT.md §9 and the open questions of docs/research/universal-os.md §10 and
