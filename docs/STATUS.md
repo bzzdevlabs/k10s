@@ -19,7 +19,7 @@ pre-release, step 8).
 - Releases: SemVer; tag `vX.Y.Z` on main → stable release, every push to main → `vX.Y.Z-dev.N` pre-release.
 
 ## Remaining steps, in order (one per session)
-Rules: production-ready (no workarounds), comments only where needed as English one-liners, docs updated with every
+Rules: production-ready (no workarounds), comments only where needed as English one-liners, docs (incl. website/) updated with every
 change and written as the current state, no perf regression (`bench/k10s/ab.py` vs 08f2921), no push or tag before
 step 8, never create namespaces or seek privileges on this machine.
 
