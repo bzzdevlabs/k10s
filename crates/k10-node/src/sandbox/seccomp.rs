@@ -523,8 +523,8 @@ mod tests {
             }
             assert_eq!(r(libc::SYS_prctl, [libc::PR_SET_NAME as u64, 0, 0, 0, 0, 0]), RET_ALLOW);
             assert_eq!(r(libc::SYS_prctl, [libc::PR_SET_DUMPABLE as u64, 1, 0, 0, 0, 0]), eperm);
-            assert_eq!(r(libc::SYS_ioctl, [3, libc::FIONBIO, 0, 0, 0, 0]), RET_ALLOW);
-            assert_eq!(r(libc::SYS_ioctl, [0, libc::TIOCSTI, 0, 0, 0, 0]), RET_ERRNO | libc::ENOTTY as u32);
+            assert_eq!(r(libc::SYS_ioctl, [3, libc::FIONBIO as u64, 0, 0, 0, 0]), RET_ALLOW);
+            assert_eq!(r(libc::SYS_ioctl, [0, libc::TIOCSTI as u64, 0, 0, 0, 0]), RET_ERRNO | libc::ENOTTY as u32);
             assert_eq!(r(libc::SYS_sched_setaffinity, [1, 0, 0, 0, 0, 0]), eperm);
             assert_eq!(r(libc::SYS_prlimit64, [0, 3, 0x1_0000_0000, 0, 0, 0]), eperm, "high word");
             assert_eq!(r(libc::SYS_tgkill, [pid as u64, 77, 6, 0, 0, 0]), RET_ALLOW);
@@ -635,11 +635,11 @@ mod tests {
                 extern "C" fn body(_: *mut libc::c_void) -> *mut libc::c_void {
                     std::ptr::null_mut()
                 }
-                let mut t: libc::pthread_t = 0;
-                if libc::pthread_create(&mut t, std::ptr::null(), body, std::ptr::null_mut()) != 0 {
+                let mut t = std::mem::MaybeUninit::<libc::pthread_t>::uninit();
+                if libc::pthread_create(t.as_mut_ptr(), std::ptr::null(), body, std::ptr::null_mut()) != 0 {
                     return 7;
                 }
-                libc::pthread_join(t, std::ptr::null_mut());
+                libc::pthread_join(t.assume_init(), std::ptr::null_mut());
                 // The JIT's sequence: RW mapping, written, then RX.
                 let p = libc::mmap(std::ptr::null_mut(), 4096, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1, 0);
                 *(p as *mut u8) = 0xC3; // ret
