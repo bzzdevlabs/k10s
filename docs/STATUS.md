@@ -5,8 +5,7 @@ PROJECT STATE: HARDENING
 Last updated: 2026-10-21. This file is the single place to learn where the project stands and what comes next.
 
 ## State of `main`
-Local `main` contains `origin/main` plus the security hardening below; it is not pushed yet (pushing publishes a dev
-pre-release, step 8).
+`main` (pushed; latest dev pre-release v0.1.0-dev.125, all release gates green) contains:
 - Isolation: SFI-masked JIT and interpreter, validator, red-team and differential suites, objdump encoder fuzzing and
   SFI verifier tests.
 - Control plane: signed admin requests (HMAC over a per-process audience, method, target, time, nonce and body
@@ -30,16 +29,14 @@ pre-release, step 8).
 ## Remaining steps, in order (one per session)
 Rules: production-ready (no workarounds), comments only where needed as English one-liners, docs (incl. website/)
 updated with every change and written as the current state, no perf regression beyond the measured cost of the
-security features (`bench/k10s/ab.py --same` vs 08f2921), no push or tag before step 9, never create namespaces or seek
+security features (`bench/k10s/ab.py --same` vs 08f2921), no stable tag without the user, never create namespaces or seek
 privileges on this machine.
 
 8. **Integrate** — full suites on both backends, `metal/test.sh`, `metal/cluster-test.sh`; fix the load-sensitive
    flakes (`mesh_abuse::peer_that_never_reads_is_cut_off` on the interpreter, `placement::speed_1000_nodes_10k_replicas`)
    at their cause; quiet-machine `ab.py --same` (≥ 4 rounds) vs 08f2921; check README, docs/, SECURITY.md,
    docs/REPORT.md and every website/ page against the code, current state only.
-9. **Push** — rewrite the unpushed commits to the commit convention below
-   (`git filter-branch --env-filter … --msg-filter "sed '/^Co-Authored-By:/d'" origin/main..main`, which keeps trees
-   and merges), push main, watch the release workflow, fix what the first real run shows.
+
 10. **Optional perf** — shard-owned peer links: each shard dials and reads its own link per peer, the mesh thread keeps
     gossip, fetch and accept; expected 7 → 3 wake-ups per forwarded request (≈ −40 % CPU at 1 conn).
 11. **Decisions (user)** — answer docs/REPORT.md §9 and the open questions of docs/research/universal-os.md §10 and
