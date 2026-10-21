@@ -45,7 +45,8 @@ step 8, never create namespaces or seek privileges on this machine.
 7. **Integrate** — full suites on both backends, `metal/test.sh`, `metal/cluster-test.sh`; look into the
    `mesh_abuse::peer_that_never_reads_is_cut_off` interpreter flake under load (a node declared dead, ~1 run in 20; it
    would block the release gate); quiet-machine `bench/k10s/ab.py` (≥ 4 rounds) vs a 08f2921 build; README and
-   docs/REPORT.md numbers.
+   docs/REPORT.md numbers; check README, docs/, SECURITY.md and every website/ page against the code (calls, auth,
+   sandbox, reservations, releases), current state only.
 8. **Push** — rewrite the unpushed commits to the commit convention below
    (`git filter-branch --env-filter … --msg-filter "sed '/^Co-Authored-By:/d'" origin/main..main`, which keeps trees
    and merges), push main, watch the release workflow, fix what the first real run shows.
