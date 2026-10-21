@@ -1,0 +1,97 @@
+---
+title: Observability
+description: Status, logs, Prometheus metrics and health checks of a k10s node.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Terminal from '~/components/Terminal.astro';
+
+The runtime runs the code, so it sees every request, trap, timeout and CPU overrun directly. Health is a fact, not
+a probe.
+
+## Status
+
+`k10s status` (or `GET /_k10s/status`) returns JSON: the node and build, the manifest version and hash, and for
+every service its placement, instances (live, idle, peak), queue, requests, successes, errors, traps, CPU budget
+interrupts, instances created, destroyed and reclaimed, CPU and `init` time, backoff, memory reservation and use,
+and key-value keys and durability. Node-wide sections cover memory, HTTP, execution, the key-value store and each
+shard.
+
+<Terminal
+	session={`
+$ k10s status --json | jq '.services[] | select(.name == "todo") | {instances, requests, ok, traps, mem_used, kv_keys}'
+{
+  "instances": {
+    "live": 2,
+    "idle": 2,
+    "peak": 2
+  },
+  "requests": 2,
+  "ok": 2,
+  "traps": 0,
+  "mem_used": 2105344,
+  "kv_keys": 3
+}
+`}
+/>
+
+In cluster mode, `k10s status` prints members, placement, links and routing counters as text
+([example](/k10s/start/cluster/)); `--json` gives the JSON, with a `cluster` section.
+
+## Logs
+
+A service writes log lines with `log_str` (the `log` host function). Each service keeps a ring of the last 1,000
+lines (256 KiB); traps are logged there too. `--log-stderr` also echoes them to the node's stderr.
+
+<Terminal
+	session={`
+$ k10s logs shop
+1792509805540 checkout started
+1792509805552 checkout started
+`}
+/>
+
+Each line starts with its Unix time in milliseconds.
+
+## Metrics
+
+`GET /_k10s/metrics` serves Prometheus text. It is open without a token (read-only counters), so a scraper needs no
+secret that can deploy code; use `--admin ADDR` to keep it off the public interface.
+
+<Terminal
+	session={`
+$ curl -s 127.0.0.1:8080/_k10s/metrics | grep shop
+k10s_service_requests_total{service="shop"} 2
+k10s_service_ok_total{service="shop"} 2
+k10s_service_errors_total{service="shop"} 0
+k10s_service_traps_total{service="shop"} 0
+k10s_service_instances{service="shop"} 1
+`}
+/>
+
+```yaml title="prometheus.yml"
+scrape_configs:
+  - job_name: k10s
+    metrics_path: /_k10s/metrics
+    static_configs:
+      - targets: ['10.0.0.1:8080', '10.0.0.2:8080', '10.0.0.3:8080']
+```
+
+| Family | Series |
+|---|---|
+| per service | `k10s_service_requests_total`, `_ok_total`, `_errors_total`, `_traps_total`, `_cpu_interrupts_total`, `_instances_created_total`, `_instances_reclaimed_total`, `_cpu_seconds_total`, `_instances`, `_instances_idle`, `_queue`, `_memory_reserved_bytes`, `_memory_bytes`, `_kv_durable` |
+| HTTP | `k10s_http_responses_total` (by status class), `k10s_http_connections`, `k10s_http_buffered_bytes`, `k10s_http_buffer_refused_total` |
+| execution | `k10s_invocations_total`, `k10s_preemptions_total`, `k10s_calls_total`, `k10s_timeouts_total`, `k10s_fibers` |
+| memory | `k10s_rss_bytes`, `k10s_slots_used`, `k10s_slot_bytes`, `k10s_memory_limit_bytes`, `k10s_memory_reserved_bytes`, `k10s_memory_shared_used_bytes`, `k10s_memory_committed_bytes`, `k10s_memory_refused_total` |
+| code and state | `k10s_manifest_version`, `k10s_code_modules`, `k10s_code_exec_bytes`, `k10s_kv_keys`, `k10s_kv_log_bytes`, `k10s_kv_errors_total`, `k10s_kv_degraded` |
+
+## Health
+
+`GET /_k10s/health` answers `ok` with status 200 while the node serves. It is always open, including on the ingress
+when the admin API has its own listener.
+
+<Aside type="tip" title="Alert on facts">
+	`k10s_service_traps_total` and `k10s_service_cpu_interrupts_total` count failures the runtime observed itself.
+	`k10s_kv_degraded > 0` means a disk stopped accepting writes; `k10s_memory_refused_total` growing means `--mem`
+	is too small for the bursts you see.
+</Aside>

@@ -1,0 +1,56 @@
+---
+title: Releases and versions
+description: How k10s versions are computed, what each release contains, and how a release is cut.
+---
+
+import { Steps } from '@astrojs/starlight/components';
+
+Versions follow [SemVer](https://semver.org). `scripts/version.sh` computes them from the Cargo workspace version
+`X.Y.Z` and git:
+
+| Commit | Version | Channel |
+|---|---|---|
+| tagged `vX.Y.Z` | `X.Y.Z` | stable release, *Latest* on GitHub |
+| any other commit on `main` | `X.Y.Z-dev.N`, with `N` = the commit count | development pre-release |
+| after `vX.Y.Z` is released, until the version is bumped | `X.Y.(Z+1)-dev.N` | dev builds always sort after the last release |
+
+Binaries add the commit as build metadata (`k10s 0.1.0+1a2b3c4`); `.dirty` marks a build from a modified tree,
+and a build without git reports `X.Y.Z-dev.0+unknown`. Docker image tags drop the `+…` part.
+
+The version appears in `k10s --version`, the node's start-up line, the `version` field of `/_k10s/status` (hosted
+and bare metal), the kernel's boot banner, `mkbundle --version` and `-version` of the Go tools.
+
+## Artifacts
+
+Every release publishes the [archives listed on the installation page](/k10s/start/installation/#release-archives)
+and `SHA256SUMS`. The benchmark workloads are also container images, `ghcr.io/bzzdevlabs/k10s-bench-<workload>:V`
+(`echo`, `compute`, `chain`, `counter`), with the moving tags `latest` (last stable release) and `dev` (last `main`
+build). `scripts/dist.sh` builds the same archives locally into `dist/`.
+
+## Cutting a release
+
+<Steps>
+
+1. On `main`, set the version in both Cargo workspaces and their lock files, then commit:
+
+   ```bash
+   scripts/set-version.sh 0.2.0
+   ```
+
+2. Tag that commit and push the tag. The release workflow checks the tag against the Cargo version, builds, tests
+   and publishes it.
+
+   ```bash
+   git tag v0.2.0 && git push origin v0.2.0
+   ```
+
+3. Set the next version so development builds carry it:
+
+   ```bash
+   scripts/set-version.sh 0.2.1
+   ```
+
+</Steps>
+
+The VS Code extension is released separately: a `vscode-vX.Y.Z` tag on `main`, matching its `package.json`,
+publishes the `.vsix`.

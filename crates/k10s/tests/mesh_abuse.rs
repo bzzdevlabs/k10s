@@ -237,10 +237,9 @@ fn fd_exhaustion_does_not_spin() {
     }
     let pid = child.id() as i32;
     let _guard = Kill(&mut child);
-    wait_for("node up", Duration::from_secs(20), || {
-        http::request(&http, "GET", "/_k10s/health", b"", Duration::from_secs(2)).is_ok_and(|r| r.status == 200)
-    });
-    let st = http::request(&http, "GET", "/_k10s/status", b"", Duration::from_secs(5)).unwrap().text();
+    let status = || http::request(&http, "GET", "/_k10s/status", b"", Duration::from_secs(2)).map(|r| r.text());
+    wait_for("cluster up", Duration::from_secs(20), || status().is_ok_and(|s| s.contains("\"cluster\":{")));
+    let st = status().unwrap();
     let rpc = {
         let s = &st[st.find("\"cluster\":{").unwrap()..];
         let r = s.find("\"rpc\":\"").unwrap() + 7;

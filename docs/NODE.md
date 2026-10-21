@@ -28,34 +28,25 @@ placement and peer links on top of it.
   slots (measured: 70 KB RSS per instance instead of 4.4 KB). Physical memory = pages actually touched.
   `--mem SIZE` caps the address space handed to live instances (sum of `S + 4 KiB`; default: physical RAM), with
   per-service reservations (below).
-- **Memory reservations** (`slot::MemBudget`). Every service placed on the node reserves one instance,
-  `S + 4 KiB` (what it needs to serve; its snapshot is captured from that instance), out of `--mem`; burst instances
-  beyond a service's reservation come from the shared remainder (`--mem` − reservations). So a service with many
-  concurrent requests can fill the shared pool but never another service's reservation: every service can always
-  create its first instance. The sum of the reservations must fit (address space, like `--mem` itself: 100k
-  services of 64 KiB reserve 6.6 GiB, so very dense nodes need `--mem` above physical RAM): a single-node apply that
-  does not fit is rejected (422, `memory reservations do not fit: N service(s) … reserve X … --mem is Y`), and in
-  cluster mode placement charges exactly this footprint per replica against each node's advertised capacity
-  (`--mem`), so it never places a service where its reservation cannot fit (a cluster apply is never refused: should
-  the inputs disagree,
-  what does not fit runs without a reservation). Services placed on other nodes reserve nothing (they only run here
-  as a fallback, from the shared pool); stacked replicas (more replicas than nodes) reserve one instance per node,
-  the rest of their placement share is shared-pool headroom. Accounting: one atomic `committed` = active reservations
-  + burst instances (+ instances of replaced versions still finishing); a burst instance is created only while
-  `committed + its size ≤ --mem` (one compare-exchange; the charge is kept in the slot's padding: no per-instance
-  memory, no per-request work). A request that finds no memory for a new instance waits for one of the service's
-  instances (like at `max_instances`) when it has some, else fails (503 / call −2). A burst instance that finishes a
-  job moves into its service's reservation when that has a free unit; idle reclaim destroys burst instances first.
-  An apply that adds reservations while burst instances hold the shared pool is honoured at once (a reserved
-  instance is always allowed, so `committed` may exceed `--mem` by the new reservations); until the node is back
-  within its budget, shards destroy idle burst instances (on the table change and every 250 ms) and burst instances
-  as soon as their job ends (unless it is the last instance of a service with queued requests). Status:
-  `memory.mem_reserved`, `mem_shared_used`, `mem_shared_limit`, `mem_committed`, `mem_refused` (creations refused for
-  lack of memory), per service `mem_reserved`, `mem_used`, `mem_shared`; metrics `k10s_memory_{limit,reserved,
-  shared_used,committed}_bytes`, `k10s_memory_refused_total`, `k10s_service_memory_{reserved_,}bytes`. Outside
-  `--mem` (bounded separately): snapshots (≤ 2 × the non-zero pages of one instance per service version), prepared
-  code and data segments (per module), KV (`--kv-max` per service), connection buffers (`--conn-buffer-max`
-  node-wide), fiber stacks (`max_fibers` per shard).
+- **Memory reservations** (`slot::MemBudget`):
+  - every service placed on the node reserves one instance (`S + 4 KiB`) of `--mem`; burst instances share the
+    rest, so a busy service can exhaust the shared pool but never another service's reservation;
+  - an operator apply whose reservations exceed `--mem` is refused (422) before any code is prepared; the reloaded
+    bundle and cluster states are installed in full, over-committed (one instance each, no burst), logged
+    `DEGRADED` and reported (`memory.mem_overcommit`, `k10s_memory_overcommit_bytes`); a failed reload is reported
+    (`reload_error`, `k10s_reload_failed`);
+  - placement charges the same footprint per replica (placement version 2; see "Placement");
+  - burst instances are created only while committed bytes fit; a request that finds no memory waits for one of
+    the service's instances, and queued requests fail at once (503) when the last instance goes and no memory is
+    left for a replacement;
+  - after an apply that adds reservations while bursts hold the pool, idle burst instances are destroyed at once and
+    busy ones when their request ends: `--mem` is exceeded by at most the instances mid-request at apply time, until
+    those requests finish; a replaced version's instances still running count as retiring (bounding bursts, not
+    triggering relief), so updates do not count twice;
+  - status `memory.mem_{limit,reserved,shared_used,shared_limit,committed,retiring,overcommit,refused}` and per
+    service `mem_{reserved,used,shared}`; matching `k10s_memory_*` metrics;
+  - outside `--mem` (bounded separately): snapshots, prepared code, KV (`--kv-max`), connection buffers
+    (`--conn-buffer-max`), fiber stacks.
 - **Copy-on-write snapshots**: after `init()`, an instance's resident non-zero pages are written into a sparse
   `memfd` (`extent` = up to the last non-zero page). New instances either *map* it `MAP_PRIVATE|MAP_FIXED` over their
   slot prefix (pages only read stay shared by all instances) or *copy* its non-zero pages. Freeing a mapped slot maps
@@ -145,6 +136,11 @@ status ≥ 0, −1 unknown service, −2 unavailable (crash backoff with nothing
   allocation. A denied call gets −1 and an empty response, exactly like an unknown service, without looking the
   name up, so whether such a service exists changes neither the result nor the path taken. HTTP ingress is not
   restricted (any client of the node reaches any service).
+- **Upgrade (breaking change)**: a manifest written before `calls` grants nothing, so after an upgrade its callers'
+  calls fail with −1 until it is re-applied with `calls`. Every apply and every reload of a stored state reports each
+  service whose module imports `call` but is granted nothing: a `k10s: warning:` log line, `warnings` in the apply
+  report and `manifest.warnings` in `/_k10s/status` (metal: a serial line and the apply report). A manifest that uses
+  `calls` is encoded as format 2, which nodes built before `calls` cannot decode: upgrade every node first.
 - **Deadlines**: each call gets `min(now + call_timeout (5 s), caller's deadline)`; ingress requests 30 s. A timed-out
   waiter is resumed with −3 and removed from the wait queue; a late reply is dropped (token gone). This breaks call
   cycles that exhaust instances (A→B→A with `max_instances = 1`): the inner call times out and everything unwinds.
@@ -181,7 +177,7 @@ status ≥ 0, −1 unknown service, −2 unavailable (crash backoff with nothing
 - Routing: `/<service>/<rest>` → service (404 if unknown). Error mapping: −1 → 404, −2 → 503, −3 → 504, −4 → 500.
 - Admin (`/_k10s/`): `GET status` (JSON: node, build version, manifest version/hash, per service: instances
   live/idle/peak, queue, snapshot, requests/ok/errors/traps/interrupted/created/destroyed/reclaimed, CPU, backoff,
-  KV keys; memory: RSS,
+  KV keys and durability; memory: RSS,
   slots used, slot bytes, reserved, snapshot-mapped; HTTP, execution and KV counters; per shard), `GET metrics`
   (Prometheus text), `GET logs/<svc>`, `GET health`, `POST apply`.
 - **Admin access** (`admin::gate`, decided on the request head before any body is read or reserved; a refusal
@@ -220,11 +216,20 @@ status ≥ 0, −1 unknown service, −2 unavailable (crash backoff with nothing
   is done in place); a torn/corrupt tail is truncated at the last good
   record. **Group commit**: `kv_put`/`kv_del` return once the record is buffered; the flusher batches for 2 ms, writes
   every dirty log and `fdatasync`s them. **Durability window**: an acknowledged write can be lost if the process or
-  machine dies within ≈ 2 ms + write + fsync time. Compaction rewrites a log from the map when it exceeds 2× the live
-  size (and 1 MiB). Without `--data` the store is memory-only. **Per-service quota**: a `kv_put` that would push a
-  namespace past its live-bytes quota (default 256 MiB, `--kv-max`, 0 = unlimited) traps `Host(3)` and stores nothing,
-  so one service cannot fill the node's memory/disk (it bounds live bytes; the log is then bounded at ~2× that by
-  compaction). Deleting entries frees room.
+  machine dies within ≈ 2 ms + write + fsync time; a restart recovers a prefix of the writes in the order they were
+  made (appends and compactions go through one lock), never an older value over a newer one. Compaction rewrites a
+  log from the map when it exceeds 2× the live size (and 1 MiB): `<svc>.log.tmp`, fsync, rename over the log, fsync
+  of the directory (a new log's directory entry is fsynced too); a failed compaction leaves the log as it was and is
+  retried once the log has grown by another live size (at least 1 MiB). **I/O errors**: after a failed write, fsync
+  or directory sync the log is not trusted (the kernel may have dropped the pages): the namespace is *degraded*
+  (`kv_durable: false` in status, `k10s_service_kv_durable 0`, `kv.degraded`, `kv.errors`), stops appending, and the
+  flusher rewrites the whole log from memory the same way, retrying with backoff (10 ms doubling to 5 s) until a
+  rewrite and its directory sync succeed; entering and leaving that state is logged once each. Shutdown tries once
+  more; if that fails too, the writes made since the log degraded are lost (logged). Without `--data` the store is
+  memory-only. **Per-service quota**: a
+  `kv_put` that would push a namespace past its live-bytes quota (default 256 MiB, `--kv-max`, 0 = unlimited) traps
+  `Host(3)` and stores nothing, so one service cannot fill the node's memory/disk (it bounds live bytes; the log is
+  then bounded at ~2× that by compaction). Deleting entries frees room.
 - `log`: per-service ring (1000 lines / 256 KiB, lines ≤ 4 KiB), optionally echoed to stderr (`--log-stderr`).
 
 ## Process sandbox (`k10s node` only; `crates/k10-node/src/sandbox.rs`, SECURITY.md "Defense in depth")
@@ -350,8 +355,8 @@ changes. Code: `cluster/mod.rs` (config, applier, operator apply, status), `clus
 It refuses to start without `--cluster-key-file FILE` (the same `k10s keygen` key on every node) unless
 `--insecure-unauthenticated-cluster` is given (see "Cluster authentication").
 `ClusterSetup::bind` (sockets, store, id) → `Node::start_with_router(cfg, setup.router())` → `setup.start(node)`.
-- Identity: a random `NodeId` persisted in `DATA/node-id`; the incarnation starts at the wall clock in ms, so a
-  restarted node (same id) refutes the Dead/Left records of its previous life.
+- Identity: a random `NodeId` persisted in `DATA/node-id`; each life starts at a higher incarnation (see below), so
+  a restarted node (same id) refutes the Dead/Left records of its previous life.
 - The member advertises its gossip, rpc and http addresses (IP: `--advertise`, else the bind IP, else — wildcard bind —
   the source address of the default route, else 127.0.0.1) and its capacity: `mem_bytes = --mem`, `cores = --shards`.
 - Tuning: `--probe-ms N` (gossip protocol period, default 200; probe timeout = 0.4 N), `--suspicion-mult N` (default 4),
@@ -359,17 +364,13 @@ It refuses to start without `--cluster-key-file FILE` (the same `k10s keygen` ke
 - The stored desired state (`DATA/manifest.k10m` + `DATA/blobs/`) is applied at start (placed over this node alone)
   and announced with `set_desired`: the highest version in the cluster wins, so a whole-cluster restart converges
   on the newest one. `DATA/bundle.k10b` (single-node mode) is not used.
-- **Joining through several members.** Give every node, the first one included, the same `--join a,b,c` list of a
-  few members' gossip addresses (a node skips its own address; while it knows no other live member it re-contacts
-  the list every second, so the first node simply waits for the others): no node then depends on one seed being up
-  when it (re)starts. In addition, each node remembers the gossip addresses of the members it last saw alive
-  (`DATA/peers`, up to 16, rewritten at most once per second when membership changes, never emptied) and contacts
-  them at start besides `--join`: a restarted node rejoins its cluster even when its seeds are down or moved, or when
-  it was started without `--join` (the bootstrap node; before this, such a node restarted on another address formed
-  a one-node cluster of its own, forever). Once it has joined, its seed list goes back to `--join` alone, so stale
-  remembered addresses are not retried. Nodes also re-contact dead members now and then at their old address (also
-  those that died before they joined or restarted, learned from syncs), which heals partitions and finds a node
-  restarted on its old address.
+- **Joining and rejoining.** Give every node, the first one included, the same `--join a,b,c` list (a node skips
+  its own address). Each node also keeps the gossip addresses of up to 16 live members in `DATA/peers` (previous
+  ones kept while live, the rest random; stamped with the cluster key id, ignored on mismatch) and contacts them
+  at start and whenever it is isolated, so a restarted node rejoins even with dead, moved or no seeds. Reconnects
+  (one sync per second, round-robin, per-address backoff 1 s → 60 s) try seeds that are not live, dead members and
+  tombstones (which keep the last address for an hour). The incarnation is persisted (`DATA/incarnation`) and
+  starts above both the wall clock and the previous life's, so a clock stepped back cannot hide a restart.
 
 **Desired state.** `POST /_k10s/apply` (`k10s apply`) works on any node: decode, version = highest known + 1 (stored,
 applied or announced by gossip) when the bundle says 0 (an explicit version must be higher; the same version and
@@ -384,7 +385,10 @@ persists (no fsync: a torn file fails its hash at load and is fetched again) and
 the larger hash wins on every node. Blobs no longer referenced by the current manifest are deleted (except blobs
 younger than 60 s and those of the manifest being fetched, which are pinned).
 
-**Placement.** On every desired-state change and on every change of the live member set (ids + capacity; Alive and
+**Placement.** Members advertise their placement version; `place` uses the lowest live one (version 2 charges
+`2^memory + 4 KiB` per replica, version 1 `2^memory`), so mixed-version clusters agree during a rolling upgrade
+(the version rides in the top byte of `cores`: older nodes show newer members with an inflated core count).
+On every desired-state change and on every change of the live member set (ids + capacity + placement version; Alive and
 Suspect count, like in `place`), batched in a 50 ms window (`ClusterConfig::debounce`; bounds the delay, not
 extended by later events), the applier computes `place(manifest, live members)` and calls
 `NodeShared::apply_cluster(bundle, placement)`: services placed on this node get `Placement::Local`, the others

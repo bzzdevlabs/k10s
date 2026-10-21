@@ -9,7 +9,7 @@
 //! instances are destroyed.
 
 use crate::exec::{Backend, Code};
-use crate::host::{resolve_imports, Request};
+use crate::host::{resolve_imports, HostFn, Request};
 use crate::kv::KvNs;
 use crate::logs::LogRing;
 use crate::slot::Reservation;
@@ -71,6 +71,8 @@ pub struct ServiceRt {
     pub init_fn: Option<u32>,
     /// The module's `min_mem_log2`.
     pub min_mem_log2: u8,
+    /// The module imports the `call` host function.
+    pub imports_call: bool,
     /// Data segments `(offset, bytes)`.
     pub data: Vec<(usize, Vec<u8>)>,
     pub kv: Arc<KvNs>,
@@ -125,11 +127,12 @@ impl ServiceRt {
             handle_fn,
             init_fn,
             min_mem_log2: 12,
+            imports_call: false,
             data,
             kv,
             log,
             placement: Placement::Local,
-            mem_res: Reservation::new(0, 0),
+            mem_res: Reservation::new(0),
             snapshot: OnceLock::new(),
             live: AtomicU32::new(0),
             peak: AtomicU32::new(0),
@@ -160,8 +163,15 @@ impl ServiceRt {
         self.spec.cpu_ms as u64 * 1_000_000
     }
 
-    /// Reserves capacity for one more instance (node-wide `max_instances`, crash backoff).
-    pub fn try_reserve(&self, now: u64) -> Result<(), NoInstance> {
+    /// The module imports `call` but the manifest grants it nothing (e.g. a manifest written before `calls`).
+    pub fn call_warning(&self) -> Option<String> {
+        (self.imports_call && self.spec.calls.is_none()).then(|| {
+            format!("service `{}` imports `call` but its manifest grants no `calls`: every call it makes fails (-1)", self.name())
+        })
+    }
+
+    /// Counts one more live instance (node-wide `max_instances`, crash backoff).
+    pub fn try_add_live(&self, now: u64) -> Result<(), NoInstance> {
         if self.retired.load(Acquire) {
             return Err(NoInstance::Retired);
         }
@@ -184,8 +194,8 @@ impl ServiceRt {
         }
     }
 
-    /// Like [`ServiceRt::try_reserve`] but ignores retirement (used to drain the queue of a retired version).
-    pub fn try_reserve_draining(&self, now: u64) -> bool {
+    /// [`ServiceRt::try_add_live`] ignoring retirement (drains the queue of a retired version).
+    pub fn try_add_live_draining(&self, now: u64) -> bool {
         if now < self.backoff_until.load(Relaxed) {
             return false;
         }
@@ -199,12 +209,13 @@ impl ServiceRt {
         false
     }
 
-    pub fn release(&self) {
-        self.live.fetch_sub(1, AcqRel);
+    /// SeqCst: pairs with `push_waiter` then a `live` check (a queued request never waits on no instance).
+    pub fn sub_live(&self) {
+        self.live.fetch_sub(1, SeqCst);
     }
 
-    /// Releases one instance only if more than `keep` would remain (idle reclaim keeps a warm instance).
-    pub fn release_above(&self, keep: u32) -> bool {
+    /// Uncounts one instance only if more than `keep` remain (idle reclaim keeps a warm instance).
+    pub fn sub_live_above(&self, keep: u32) -> bool {
         let mut cur = self.live.load(Relaxed);
         while cur > keep {
             match self.live.compare_exchange_weak(cur, cur - 1, AcqRel, Relaxed) {
@@ -312,6 +323,7 @@ pub struct Prepared {
     pub init_fn: Option<u32>,
     pub data: Vec<(usize, Vec<u8>)>,
     pub min_mem_log2: u8,
+    pub imports_call: bool,
 }
 
 /// Decodes, validates and prepares one code blob: imports must be known host functions, `handle` must be exported
@@ -333,5 +345,6 @@ pub fn prepare_blob(backend: &dyn Backend, blob: &[u8]) -> Result<Prepared, Stri
     let init_fn = check_export("init")?;
     let code = backend.prepare(&m, &info, &imports)?;
     let data = m.data.iter().filter(|d| !d.bytes.is_empty()).map(|d| (d.offset as usize, d.bytes.clone())).collect();
-    Ok(Prepared { code, handle_fn, init_fn, data, min_mem_log2: m.min_mem_log2 })
+    let imports_call = imports.contains(&HostFn::Call);
+    Ok(Prepared { code, handle_fn, init_fn, data, min_mem_log2: m.min_mem_log2, imports_call })
 }

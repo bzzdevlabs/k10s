@@ -1,0 +1,66 @@
+---
+title: Builtins
+description: The functions and constants built into the Ten compiler.
+---
+
+Builtins compile directly to TIR instructions. User functions may shadow builtin functions such as `sqrt`.
+
+## Sizes and layout
+
+| Builtin | Meaning |
+|---|---|
+| `sizeof(T)` | size of a type in bytes, as a constant |
+| `sizeof(item)` | total size of a `data` or `buffer` item |
+| `sizeof("lit")` | length of a string literal |
+| `sizeof(variable)` | 8 for a value, 16 for a `str` |
+| `offsetof(Struct, field)` | byte offset of a field |
+| `countof(item)` | number of elements of a `data` or `buffer` item |
+| `__heap_base` | first heap address (constant, 16-aligned) |
+| `memsize()` | the instance's memory size `S` |
+
+## Memory
+
+| Builtin | Meaning |
+|---|---|
+| `memcpy(dst, src, n)` | copy `n` bytes, overlapping ranges allowed (TIR `mem.copy`) |
+| `memset(dst, byte, n)` | fill `n` bytes (TIR `mem.fill`) |
+
+Both trap `MemOutOfBounds` if a range leaves the instance's memory.
+
+## Arithmetic and bits
+
+| Builtin | Meaning |
+|---|---|
+| `sqrt(f)`, `fabs(f)` | on `f64` |
+| `clz(x)`, `ctz(x)`, `popcnt(x)` | bit counts; `clz(0) == ctz(0) == 64` |
+| `rotl(x, n)`, `rotr(x, n)` | rotations |
+| `ult ule ugt uge (a, b)` | unsigned comparisons, on `i64` or pointers |
+| `udiv(a, b)`, `urem(a, b)` | unsigned division; trap on zero |
+| `to_bits(f)`, `from_bits(i)` | reinterpret `f64` ↔ `i64` bits, free |
+
+## Control
+
+| Builtin | Meaning |
+|---|---|
+| `select(c, a, b)` | `c != 0 ? a : b` without a branch; evaluates all three, in order |
+| `unreachable()` | trap `Unreachable`; counts as diverging for return checks |
+| `str(p, n)` | builds a `str` from a pointer and a length |
+
+## Example
+
+```ten
+// Round x up to a power-of-two alignment without a branch.
+fn align_pow2(x: i64, a: i64) -> i64 {
+    return (x + a - 1) & ~(a - 1);
+}
+
+// Number of decimal digits of a non-negative integer.
+fn digits(v: i64) -> i64 {
+    let n = 1;
+    while uge(v, 10) {
+        v = udiv(v, 10);
+        n += 1;
+    }
+    return n;
+}
+```

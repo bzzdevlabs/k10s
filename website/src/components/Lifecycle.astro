@@ -1,0 +1,115 @@
+---
+// Life of an instance on one node (docs/NODE.md "Execution").
+const states = [
+	{ id: 'none', x: 8, y: 124, t: 'no instance', s: '0 bytes' },
+	{ id: 'create', x: 184, y: 124, t: 'create', s: 'slot · data or snapshot · init()' },
+	{ id: 'busy', x: 400, y: 44, t: 'busy', s: 'handle() on a fiber' },
+	{ id: 'idle', x: 400, y: 204, t: 'idle', s: 'no stack, pages it touched' },
+	{ id: 'gone', x: 600, y: 44, t: 'destroyed', s: 'memory may be corrupt' },
+	{ id: 'reclaimed', x: 600, y: 204, t: 'reclaimed', s: 'slot back to the pool' },
+];
+const W = 136;
+const H = 52;
+---
+
+<figure class="k-figure not-content">
+	<svg viewBox="0 0 740 290" role="img" aria-labelledby="lc-t">
+		<title id="lc-t">Instance lifecycle: created on demand, reused, destroyed on a trap, reclaimed when idle</title>
+		<defs>
+			<marker id="lc-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+				<path d="M0 0 10 5 0 10z" class="ah" />
+			</marker>
+		</defs>
+		<path d="M144 150 H180" class="e" marker-end="url(#lc-a)" />
+		<path d="M320 138 C356 120 364 84 396 74" class="e" marker-end="url(#lc-a)" />
+		<path d="M450 100 V200" class="e" marker-end="url(#lc-a)" />
+		<path d="M500 200 V100" class="e" marker-end="url(#lc-a)" />
+		<path d="M536 70 H596" class="e bad" marker-end="url(#lc-a)" />
+		<path d="M536 230 H596" class="e" marker-end="url(#lc-a)" />
+		<path d="M668 40 C668 8 76 8 76 120" class="e dash" marker-end="url(#lc-a)" />
+		<text x="148" y="142" class="l">request</text>
+		<text x="336" y="92" class="l">run</text>
+		<text x="440" y="148" class="l" text-anchor="end">response</text>
+		<text x="440" y="162" class="l dim" text-anchor="end">fresh: reset to snapshot</text>
+		<text x="510" y="156" class="l">next request</text>
+		<text x="566" y="62" class="l bad" text-anchor="middle">trap</text>
+		<text x="566" y="222" class="l" text-anchor="middle">30 s idle</text>
+		<text x="372" y="30" class="l dim" text-anchor="middle">replaced on demand · after 3 consecutive traps, backoff 100 ms → 30 s</text>
+		{
+			states.map((s) => (
+				<g transform={`translate(${s.x} ${s.y})`}>
+					<rect width={W} height={H} rx="10" class:list={['st', s.id]} />
+					<text x={W / 2} y="22" class="t" text-anchor="middle">
+						{s.t}
+					</text>
+					<text x={W / 2} y="40" class="s" text-anchor="middle">
+						{s.s}
+					</text>
+				</g>
+			))
+		}
+		<text x="736" y="278" class="l dim" text-anchor="end">keeps warm_instances (1) alive</text>
+	</svg>
+	<figcaption>Instances cost kilobytes and start in microseconds, so scale-to-zero is the default, not a feature.</figcaption>
+</figure>
+
+<style>
+	svg {
+		width: 100%;
+		height: auto;
+		font-family: var(--sl-font);
+	}
+	.st {
+		fill: var(--k-surface);
+		stroke: var(--k-line);
+		stroke-width: 1.2;
+	}
+	.st.busy {
+		fill: color-mix(in srgb, var(--k-teal) 22%, var(--k-surface));
+		stroke: var(--k-teal);
+	}
+	.st.idle {
+		fill: color-mix(in srgb, var(--k-teal) 8%, var(--k-surface));
+		stroke: color-mix(in srgb, var(--k-teal) 60%, transparent);
+	}
+	.st.gone {
+		stroke: var(--k-rose);
+	}
+	.st.none {
+		stroke-dasharray: 4 3;
+	}
+	.t {
+		font: 700 12.5px var(--sl-font-mono);
+		fill: var(--k-ink);
+	}
+	.s {
+		font-size: 9.5px;
+		fill: var(--k-ink-dim);
+	}
+	.e {
+		fill: none;
+		stroke: var(--k-ink-dim);
+		stroke-width: 1.4;
+	}
+	.e.bad {
+		stroke: var(--k-rose);
+	}
+	.e.dash {
+		stroke-dasharray: 4 4;
+		opacity: 0.7;
+	}
+	.ah {
+		fill: var(--k-ink-dim);
+	}
+	.l {
+		font: 600 10px var(--sl-font-mono);
+		fill: var(--k-ink);
+	}
+	.l.dim {
+		fill: var(--k-ink-dim);
+		font-weight: 400;
+	}
+	.l.bad {
+		fill: var(--k-rose);
+	}
+</style>

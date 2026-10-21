@@ -332,7 +332,7 @@ pub struct Cluster {
     fetch: Option<Fetch>,
     store: Store,
     placement_due: Option<u64>,
-    live_fp: Vec<(NodeId, u64, u32)>,
+    live_fp: Vec<(NodeId, u64, u32, u8)>,
     applied: Option<(u64, [u8; 32])>,
     placement: Vec<(String, Vec<NodeId>)>,
     unplaced: u64,
@@ -614,8 +614,8 @@ impl Cluster {
             }
         }
         if membership {
-            let mut fp: Vec<(NodeId, u64, u32)> =
-                self.gossip.live_members().iter().map(|m| (m.id, m.capacity.mem_bytes, m.capacity.cores)).collect();
+            let mut fp: Vec<(NodeId, u64, u32, u8)> =
+                self.gossip.live_members().iter().map(|m| (m.id, m.capacity.mem_bytes, m.capacity.cores, m.placement)).collect();
             fp.sort();
             if fp != self.live_fp {
                 self.live_fp = fp;

@@ -12,10 +12,17 @@
 //!   `fdatasync`s the files. **Durability window**: an acknowledged write can be lost if the process or machine dies
 //!   within `flush_interval` + write + fsync time (default 2 ms + a few ms) — the same contract as a database with
 //!   asynchronous commit. Shutdown flushes and syncs everything.
-//! * **Compaction**: when a log exceeds `2 × live size` (and `compact_min` bytes), the flusher snapshots the map
-//!   (under the lock, a memory copy), writes it to `<service>.log.tmp`, fsyncs, renames it over the log and fsyncs the
-//!   directory. Records written meanwhile stay in `pending` and go to the new file on the next flush (the flusher is
-//!   the only writer, so ordering is preserved).
+//! * **Ordering**: the open log files live in one mutex (`StoreShared::logs`). A flush (flusher thread, `flush_now`,
+//!   shutdown) holds it from taking `pending` to the last fsync, so batches and compaction swaps hit the disk in the
+//!   order the writes were made, and a restart recovers a prefix of them.
+//! * **Rewrite** (compaction and recovery): the flush snapshots the map (under the lock, a memory copy), writes it to
+//!   `<service>.log.tmp`, fsyncs, renames it over the log and fsyncs the directory; the records the snapshot covers
+//!   then leave `pending`. Compaction runs when a log exceeds `2 × live size` (and `compact_min`); a failure before
+//!   the rename changes nothing and is retried once the log has grown by another `max(live size, compact_min)`.
+//! * **Degraded log**: after a failed write, fsync or post-rename directory sync, the file can no longer be trusted
+//!   (the kernel may have dropped the pages) and the map is the only good copy. The namespace stops appending, drops
+//!   its `pending` records (the map has them), reports `durable() == false`, and the flusher retries a full rewrite
+//!   with exponential backoff until one succeeds. Each state change is logged once.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -101,7 +108,22 @@ struct Inner {
     log_bytes: u64,
     /// Records not yet written to the file.
     pending: Vec<u8>,
+    /// No compaction is attempted below this log size (raised after a failure).
+    compact_at: u64,
 }
+
+/// Flush-side state of a namespace's log.
+#[derive(Default)]
+struct Log {
+    file: Option<File>,
+    /// Failures since the log was last good; non-zero means degraded.
+    failures: u32,
+    /// `mono_ns` of the next rewrite attempt while degraded.
+    retry_at: u64,
+}
+
+const RETRY_MIN_NS: u64 = 10_000_000;
+const RETRY_MAX_NS: u64 = 5_000_000_000;
 
 /// Why an atomic read-modify-write ([`KvNs::add`], [`KvNs::cas`]) stored nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,6 +138,8 @@ pub enum KvError {
 struct Signal {
     dirty: AtomicBool,
     stop: AtomicBool,
+    /// `mono_ns` of the earliest rewrite retry (0: none).
+    retry_at: AtomicU64,
     lock: Mutex<()>,
     cv: Condvar,
 }
@@ -124,18 +148,22 @@ struct Signal {
 pub struct KvNs {
     name: String,
     /// Records are logged (the store has a directory).
-    durable: bool,
+    logged: bool,
     /// Per-service live-bytes quota (0 = unlimited); see [`KvConfig::max_bytes`].
     max_bytes: u64,
     inner: Mutex<Inner>,
-    /// Only the flusher (and shutdown) touch the file.
-    file: Mutex<Option<File>>,
+    healthy: AtomicBool,
     signal: Arc<Signal>,
 }
 
 impl KvNs {
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Writes reach disk within the group-commit window: false without a log, or while the log is degraded.
+    pub fn durable(&self) -> bool {
+        self.logged && self.healthy.load(Ordering::Acquire)
     }
 
     /// Looks `key` up and passes the value (if any) to `f` while the namespace is locked.
@@ -156,7 +184,7 @@ impl KvNs {
             let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             self.put_locked(&mut g, key, val)
         };
-        if ok && self.durable {
+        if ok && self.logged {
             self.mark_dirty();
         }
         ok
@@ -168,7 +196,7 @@ impl KvNs {
             let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             self.del_locked(&mut g, key)
         };
-        if existed && self.durable {
+        if existed && self.logged {
             self.mark_dirty();
         }
         existed
@@ -194,7 +222,7 @@ impl KvNs {
             }
             new
         };
-        if self.durable {
+        if self.logged {
             self.mark_dirty();
         }
         Ok(new)
@@ -224,7 +252,7 @@ impl KvNs {
                 None => self.del_locked(&mut g, key),
             }
         };
-        if wrote && self.durable {
+        if wrote && self.logged {
             self.mark_dirty();
         }
         Ok(true)
@@ -238,7 +266,7 @@ impl KvNs {
         if self.max_bytes != 0 && new_live > self.max_bytes {
             return false; // quota exceeded: nothing is mutated
         }
-        if self.durable {
+        if self.logged {
             encode_rec(&mut g.pending, OP_PUT, key, val);
             g.log_bytes += add;
         }
@@ -258,7 +286,7 @@ impl KvNs {
     fn del_locked(&self, g: &mut Inner, key: &[u8]) -> bool {
         let Some(old) = g.map.remove(key) else { return false };
         g.live_bytes -= rec_size(key.len(), old.len());
-        if self.durable {
+        if self.logged {
             encode_rec(&mut g.pending, OP_DEL, key, &[]);
             g.log_bytes += rec_size(key.len(), 0);
         }
@@ -293,6 +321,8 @@ struct StoreShared {
     cfg: KvConfig,
     namespaces: Mutex<HashMap<String, Arc<KvNs>>>,
     signal: Arc<Signal>,
+    /// Open logs by namespace; held for a whole flush (see the module doc).
+    logs: Mutex<HashMap<String, Log>>,
     flushes: AtomicU64,
     compactions: AtomicU64,
     errors: AtomicU64,
@@ -313,6 +343,7 @@ pub struct KvStats {
     pub flushes: u64,
     pub compactions: u64,
     pub errors: u64,
+    pub degraded: usize,
 }
 
 impl KvStore {
@@ -326,9 +357,11 @@ impl KvStore {
             signal: Arc::new(Signal {
                 dirty: AtomicBool::new(false),
                 stop: AtomicBool::new(false),
+                retry_at: AtomicU64::new(0),
                 lock: Mutex::new(()),
                 cv: Condvar::new(),
             }),
+            logs: Mutex::new(HashMap::new()),
             flushes: AtomicU64::new(0),
             compactions: AtomicU64::new(0),
             errors: AtomicU64::new(0),
@@ -347,8 +380,8 @@ impl KvStore {
                 }
             }
             for name in names {
-                let ns = store.ns(&name);
-                replay(&ns, &d.join(format!("{name}.log")))?;
+                let file = replay(&store.ns(&name), &d.join(format!("{name}.log")))?;
+                store.shared.logs.lock().unwrap().insert(name, Log { file: Some(file), ..Log::default() });
             }
             let sh = store.shared.clone();
             let h = std::thread::Builder::new().name("k10s-kv".into()).spawn(move || crate::sys::run_or_abort("kv-flusher", || flusher(sh)))?;
@@ -364,10 +397,10 @@ impl KvStore {
             .or_insert_with(|| {
                 Arc::new(KvNs {
                     name: service.to_string(),
-                    durable: self.shared.dir.is_some(),
+                    logged: self.shared.dir.is_some(),
                     max_bytes: self.shared.cfg.max_bytes,
                     inner: Mutex::new(Inner::default()),
-                    file: Mutex::new(None),
+                    healthy: AtomicBool::new(true),
                     signal: self.shared.signal.clone(),
                 })
             })
@@ -382,6 +415,7 @@ impl KvStore {
             s.keys += i.map.len();
             s.live_bytes += i.live_bytes;
             s.log_bytes += i.log_bytes;
+            s.degraded += (ns.logged && !ns.durable()) as usize;
         }
         s.flushes = self.shared.flushes.load(Ordering::Relaxed);
         s.compactions = self.shared.compactions.load(Ordering::Relaxed);
@@ -389,9 +423,9 @@ impl KvStore {
         s
     }
 
-    /// Writes and syncs everything now (also used by tests).
+    /// Flushes now, after any flush in progress (a degraded log is only rewritten once its retry is due).
     pub fn flush_now(&self) {
-        flush_all(&self.shared, true);
+        flush_all(&self.shared, false);
     }
 
     /// Flushes, syncs and stops the flusher thread.
@@ -402,10 +436,19 @@ impl KvStore {
             let _g = sig.lock.lock().unwrap_or_else(|e| e.into_inner());
             sig.cv.notify_all();
         }
-        if let Some(h) = self.flusher.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        let flusher = self.flusher.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let first = flusher.is_some();
+        if let Some(h) = flusher {
             let _ = h.join();
         }
-        flush_all(&self.shared, false);
+        flush_all(&self.shared, true);
+        if first {
+            for ns in self.shared.namespaces.lock().unwrap_or_else(|e| e.into_inner()).values() {
+                if !ns.durable() {
+                    eprintln!("k10s: kv `{}`: stopped with a degraded log; writes since it degraded are lost", ns.name);
+                }
+            }
+        }
     }
 }
 
@@ -415,7 +458,7 @@ impl Drop for KvStore {
     }
 }
 
-fn replay(ns: &KvNs, path: &Path) -> io::Result<()> {
+fn replay(ns: &KvNs, path: &Path) -> io::Result<File> {
     let f = File::open(path)?;
     let file_len = f.metadata()?.len();
     let mut r = BufReader::with_capacity(1 << 16, f);
@@ -470,8 +513,7 @@ fn replay(ns: &KvNs, path: &Path) -> io::Result<()> {
         f.set_len(good)?;
         f.sync_all()?;
     }
-    *ns.file.lock().unwrap() = Some(f);
-    Ok(())
+    Ok(f)
 }
 
 fn flusher(sh: Arc<StoreShared>) {
@@ -480,7 +522,14 @@ fn flusher(sh: Arc<StoreShared>) {
         {
             let mut g = sig.lock.lock().unwrap_or_else(|e| e.into_inner());
             while !sig.dirty.load(Ordering::Acquire) && !sig.stop.load(Ordering::Acquire) {
-                g = sig.cv.wait(g).unwrap_or_else(|e| e.into_inner());
+                let at = sig.retry_at.load(Ordering::Acquire);
+                if at == 0 {
+                    g = sig.cv.wait(g).unwrap_or_else(|e| e.into_inner());
+                } else if let Some(left) = at.checked_sub(crate::sys::mono_ns()).filter(|&ns| ns > 0) {
+                    g = sig.cv.wait_timeout(g, Duration::from_nanos(left)).unwrap_or_else(|e| e.into_inner()).0;
+                } else {
+                    break;
+                }
             }
         }
         if sig.stop.load(Ordering::Acquire) {
@@ -488,83 +537,140 @@ fn flusher(sh: Arc<StoreShared>) {
         }
         // Batch window: let concurrent writers join this commit group.
         std::thread::sleep(sh.cfg.flush_interval);
-        flush_all(&sh, true);
+        flush_all(&sh, false);
     }
 }
 
-fn flush_all(sh: &StoreShared, compact: bool) {
+/// One flush of every namespace; `last` (shutdown) skips compaction and retries degraded logs without waiting.
+fn flush_all(sh: &StoreShared, last: bool) {
     let Some(dir) = sh.dir.as_ref() else { return };
+    let mut logs = sh.logs.lock().unwrap_or_else(|e| e.into_inner());
     sh.signal.dirty.store(false, Ordering::Release);
     let nss: Vec<Arc<KvNs>> = sh.namespaces.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
     let mut to_sync: Vec<Arc<KvNs>> = Vec::new();
     for ns in nss {
+        if !logs.contains_key(&ns.name) {
+            logs.insert(ns.name.clone(), Log::default());
+        }
+        let log = logs.get_mut(&ns.name).unwrap();
+        if log.failures > 0 {
+            if last || crate::sys::mono_ns() >= log.retry_at {
+                match rewrite(log, &ns, dir).and_then(|()| sync_dir(dir)) {
+                    Ok(()) => {
+                        log.failures = 0;
+                        ns.healthy.store(true, Ordering::Release);
+                        eprintln!("k10s: kv `{}`: log rewritten, writes are durable again", ns.name);
+                    }
+                    Err(e) => degrade(sh, &ns, log, "rewrite", e),
+                }
+            } else {
+                ns.inner.lock().unwrap_or_else(|e| e.into_inner()).pending.clear();
+            }
+            continue;
+        }
         let (buf, want_compact) = {
             let mut g = ns.inner.lock().unwrap_or_else(|e| e.into_inner());
-            let wc = compact && g.log_bytes > sh.cfg.compact_min && g.log_bytes > 2 * g.live_bytes;
+            let wc = !last
+                && g.log_bytes > sh.cfg.compact_min
+                && g.log_bytes > 2 * g.live_bytes
+                && g.log_bytes >= g.compact_at;
             (std::mem::take(&mut g.pending), wc)
         };
         if !buf.is_empty() {
-            let mut fg = ns.file.lock().unwrap_or_else(|e| e.into_inner());
-            if fg.is_none() {
-                match OpenOptions::new().create(true).append(true).open(dir.join(format!("{}.log", ns.name))) {
-                    Ok(f) => *fg = Some(f),
-                    Err(e) => {
-                        eprintln!("k10s: kv `{}`: cannot open log: {e}", ns.name);
-                        sh.errors.fetch_add(1, Ordering::Relaxed);
-                        continue;
-                    }
+            match append(log, dir, &ns.name, &buf) {
+                Ok(()) => to_sync.push(ns.clone()),
+                Err(e) => {
+                    degrade(sh, &ns, log, "write", e);
+                    continue;
                 }
             }
-            if let Err(e) = fg.as_mut().unwrap().write_all(&buf) {
-                eprintln!("k10s: kv `{}`: write failed: {e}", ns.name);
-                sh.errors.fetch_add(1, Ordering::Relaxed);
-            }
-            to_sync.push(ns.clone());
         }
         if want_compact {
-            if let Err(e) = compact_ns(&ns, dir) {
-                eprintln!("k10s: kv `{}`: compaction failed: {e}", ns.name);
-                sh.errors.fetch_add(1, Ordering::Relaxed);
-            } else {
-                sh.compactions.fetch_add(1, Ordering::Relaxed);
+            match rewrite(log, &ns, dir) {
+                Ok(()) => match sync_dir(dir) {
+                    Ok(()) => {
+                        sh.compactions.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(e) => degrade(sh, &ns, log, "directory sync", e),
+                },
+                Err(e) => {
+                    eprintln!("k10s: kv `{}`: compaction failed: {e}", ns.name);
+                    sh.errors.fetch_add(1, Ordering::Relaxed);
+                    let mut g = ns.inner.lock().unwrap_or_else(|e| e.into_inner());
+                    g.compact_at = g.log_bytes + g.live_bytes.max(sh.cfg.compact_min);
+                }
             }
         }
     }
     for ns in to_sync {
-        if let Some(f) = ns.file.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-            if let Err(e) = f.sync_data() {
-                eprintln!("k10s: kv `{}`: fsync failed: {e}", ns.name);
-                sh.errors.fetch_add(1, Ordering::Relaxed);
+        let log = logs.get_mut(&ns.name).unwrap();
+        if log.failures == 0 {
+            if let Err(e) = log.file.as_ref().unwrap().sync_data() {
+                degrade(sh, &ns, log, "fsync", e);
             }
         }
+    }
+    let next = logs.values().filter(|l| l.failures > 0).map(|l| l.retry_at).min().unwrap_or(0);
+    let sig = &sh.signal;
+    if sig.retry_at.swap(next, Ordering::AcqRel) != next && next != 0 {
+        let _g = sig.lock.lock().unwrap_or_else(|e| e.into_inner());
+        sig.cv.notify_one();
     }
     sh.flushes.fetch_add(1, Ordering::Relaxed);
 }
 
-fn compact_ns(ns: &KvNs, dir: &Path) -> io::Result<()> {
-    let snapshot = {
-        let mut g = ns.inner.lock().unwrap_or_else(|e| e.into_inner());
+/// Marks the log of `ns` degraded after `what` failed, and schedules the next rewrite.
+fn degrade(sh: &StoreShared, ns: &KvNs, log: &mut Log, what: &str, e: io::Error) {
+    sh.errors.fetch_add(1, Ordering::Relaxed);
+    if log.failures == 0 {
+        ns.healthy.store(false, Ordering::Release);
+        eprintln!("k10s: kv `{}`: {what} failed ({e}); not durable until its log is rewritten", ns.name);
+    }
+    log.failures += 1;
+    log.retry_at = crate::sys::mono_ns() + (RETRY_MIN_NS << (log.failures - 1).min(20)).min(RETRY_MAX_NS);
+    ns.inner.lock().unwrap_or_else(|e| e.into_inner()).pending.clear();
+}
+
+fn append(log: &mut Log, dir: &Path, name: &str, buf: &[u8]) -> io::Result<()> {
+    if log.file.is_none() {
+        log.file = Some(OpenOptions::new().create(true).append(true).open(dir.join(format!("{name}.log")))?);
+        sync_dir(dir)?;
+    }
+    log.file.as_mut().unwrap().write_all(buf)
+}
+
+fn sync_dir(dir: &Path) -> io::Result<()> {
+    File::open(dir)?.sync_all()
+}
+
+/// Replaces the log of `ns` with a snapshot of its map; nothing changes unless the rename succeeds.
+fn rewrite(log: &mut Log, ns: &KvNs, dir: &Path) -> io::Result<()> {
+    let (snapshot, covered, old_log) = {
+        let g = ns.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut buf = Vec::with_capacity(g.live_bytes as usize);
         for (k, v) in &g.map {
             encode_rec(&mut buf, OP_PUT, k, v);
         }
-        // Everything pending is included in the snapshot.
-        g.pending.clear();
-        g.log_bytes = buf.len() as u64;
-        g.live_bytes = buf.len() as u64;
-        buf
+        (buf, g.pending.len(), g.log_bytes)
     };
     let tmp = dir.join(format!("{}.log.tmp", ns.name));
-    let dst = dir.join(format!("{}.log", ns.name));
-    {
-        let mut f = File::create(&tmp)?;
+    let renamed = File::create(&tmp).and_then(|mut f| {
         f.write_all(&snapshot)?;
         f.sync_all()?;
-    }
-    let mut fg = ns.file.lock().unwrap_or_else(|e| e.into_inner());
-    fs::rename(&tmp, &dst)?;
-    File::open(dir)?.sync_all()?;
-    *fg = Some(OpenOptions::new().append(true).open(&dst)?);
+        fs::rename(&tmp, dir.join(format!("{}.log", ns.name)))?;
+        Ok(f)
+    });
+    log.file = Some(match renamed {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
+    });
+    let mut g = ns.inner.lock().unwrap_or_else(|e| e.into_inner());
+    g.pending.drain(..covered);
+    g.log_bytes = g.log_bytes - old_log + snapshot.len() as u64;
+    g.compact_at = 0;
     Ok(())
 }
 
@@ -847,5 +953,210 @@ mod tests {
         for i in 0..1000u32 {
             assert!(b.put(format!("k{i}").as_bytes(), &val), "unlimited quota");
         }
+    }
+
+    /// Last value of each key in a log of 8-byte puts, or an error if a key's value goes backwards in the file.
+    fn replay_u64(p: &Path) -> Result<HashMap<Vec<u8>, u64>, String> {
+        let b = match fs::read(p) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+            r => r.map_err(|e| e.to_string())?,
+        };
+        let mut last = HashMap::new();
+        let mut i = 0;
+        while i + HDR <= b.len() {
+            let len = u32::from_le_bytes(b[i..i + 4].try_into().unwrap()) as usize;
+            if i + HDR + len > b.len() {
+                break;
+            }
+            let body = &b[i + HDR..i + HDR + len];
+            let klen = u16::from_le_bytes([body[1], body[2]]) as usize;
+            let (k, v) = (&body[3..3 + klen], &body[3 + klen..]);
+            let x = u64::from_le_bytes(v.try_into().map_err(|_| format!("bad record at {i}"))?);
+            if let Some(prev) = last.insert(k.to_vec(), x) {
+                if x <= prev {
+                    return Err(format!("{}: {x} logged after {prev}", String::from_utf8_lossy(k)));
+                }
+            }
+            i += HDR + len;
+        }
+        Ok(last)
+    }
+
+    /// `flush_now` from two threads plus the flusher, with and without compactions, keeps the log ordered and complete.
+    #[test]
+    fn concurrent_flushes_keep_log_order() {
+        flush_order_run(1 << 20);
+        flush_order_run(8 << 10);
+    }
+
+    /// After each `flush_now`, the log holds every key at least at the round done before it, never going backwards.
+    fn flush_order_run(compact_min: u64) {
+        const KEYS: u64 = 64;
+        let key = |k: u64| format!("k{k}").into_bytes();
+        let d = tmpdir("order");
+        let cfg = KvConfig { flush_interval: Duration::from_millis(1), compact_min, ..KvConfig::default() };
+        let s = Arc::new(KvStore::open(Some(&d), cfg.clone()).unwrap());
+        let a = s.ns("o");
+        let done = Arc::new(AtomicU64::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let (a, done, stop) = (a.clone(), done.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut r = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    r += 1;
+                    for k in 0..KEYS {
+                        assert!(a.put(&key(k), &r.to_le_bytes()));
+                    }
+                    done.store(r, Ordering::Release);
+                }
+                r
+            })
+        };
+        let checkers: Vec<_> = (0..2)
+            .map(|_| {
+                let (s, log, done, stop) = (s.clone(), d.join("o.log"), done.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    let t0 = std::time::Instant::now();
+                    while !stop.load(Ordering::Relaxed) && t0.elapsed() < Duration::from_millis(800) {
+                        let before = done.load(Ordering::Acquire);
+                        s.flush_now();
+                        let err = match replay_u64(&log) {
+                            Err(e) => Some(e),
+                            Ok(m) => (0..KEYS)
+                                .find(|&k| m.get(&key(k)).copied().unwrap_or(0) < before)
+                                .map(|k| format!("k{k} = {:?} after flush_now, round {before} done", m.get(&key(k)))),
+                        };
+                        if let Some(e) = err {
+                            stop.store(true, Ordering::Relaxed);
+                            return Err(format!("after {:?}: {e}", t0.elapsed()));
+                        }
+                    }
+                    Ok(())
+                })
+            })
+            .collect();
+        let errs: Vec<String> = checkers.into_iter().filter_map(|c| c.join().unwrap().err()).collect();
+        stop.store(true, Ordering::Relaxed);
+        let last = writer.join().unwrap();
+        s.shutdown();
+        drop(s);
+        assert!(errs.is_empty(), "compact_min {compact_min}: {errs:?}");
+        let s = KvStore::open(Some(&d), cfg).unwrap();
+        let a = s.ns("o");
+        for k in 0..KEYS {
+            assert_eq!(a.get(&key(k)), Some(last.to_le_bytes().to_vec()), "compact_min {compact_min}: k{k}");
+        }
+        drop(s);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// A failed compaction (`<svc>.log.tmp` cannot be created) keeps the log intact, backs off, and loses nothing.
+    #[test]
+    fn failed_compaction_keeps_log() {
+        let d = tmpdir("cfail");
+        let cfg = KvConfig { flush_interval: Duration::from_millis(1), compact_min: 4096, ..KvConfig::default() };
+        let rounds = |a: &KvNs, r: std::ops::Range<u32>| {
+            for round in r {
+                for i in 0..100u32 {
+                    let _ = a.put(format!("key{i}").as_bytes(), format!("value-{round}-{i}").as_bytes());
+                }
+            }
+        };
+        {
+            let s = KvStore::open(Some(&d), cfg.clone()).unwrap();
+            let a = s.ns("c");
+            fs::create_dir(d.join("c.log.tmp")).unwrap();
+            rounds(&a, 0..50);
+            s.flush_now();
+            let st = s.stats();
+            assert!(st.errors >= 1 && st.compactions == 0, "{st:?}");
+            assert_eq!(fs::metadata(d.join("c.log")).unwrap().len(), a.sizes().1, "log size accounting");
+            s.flush_now();
+            assert_eq!(s.stats().errors, st.errors, "no retry until the log grows");
+            assert!(a.durable(), "the log itself is intact");
+            fs::remove_dir(d.join("c.log.tmp")).unwrap();
+            rounds(&a, 50..60);
+            let _ = a.put(b"key7", b"last");
+            s.flush_now();
+            assert!(s.stats().compactions >= 1);
+            s.shutdown();
+        }
+        let s = KvStore::open(Some(&d), cfg).unwrap();
+        let a = s.ns("c");
+        assert_eq!(a.len(), 100);
+        assert_eq!(a.get(b"key7"), Some(b"last".to_vec()));
+        assert_eq!(a.get(b"key99"), Some(b"value-59-99".to_vec()));
+        drop(s);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    fn wait_until(what: &str, cond: impl Fn() -> bool) {
+        let t0 = std::time::Instant::now();
+        while !cond() {
+            assert!(t0.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Swaps the open log of `ns` for `file`, and blocks rewrites with a directory at `<ns>.log.tmp`.
+    fn inject(s: &KvStore, d: &Path, ns: &str, file: File) {
+        fs::create_dir(d.join(format!("{ns}.log.tmp"))).unwrap();
+        s.shared.logs.lock().unwrap().get_mut(ns).unwrap().file = Some(file);
+    }
+
+    /// A failed write degrades the log; once rewrites can succeed, the flusher rewrites it on its own timer.
+    #[test]
+    fn failed_write_is_rewritten_by_the_flusher() {
+        let d = tmpdir("wfail");
+        let p = d.join("w.log");
+        let s = KvStore::open(Some(&d), KvConfig { flush_interval: Duration::from_millis(1), ..KvConfig::default() }).unwrap();
+        let a = s.ns("w");
+        assert!(a.put(b"k", &1u64.to_le_bytes()));
+        s.flush_now();
+        assert!(a.durable());
+        inject(&s, &d, "w", File::open(&p).unwrap());
+        assert!(a.put(b"k", &2u64.to_le_bytes()));
+        assert!(a.put(b"b", &2u64.to_le_bytes()));
+        s.flush_now();
+        assert!(!a.durable() && s.stats().degraded == 1 && s.stats().errors >= 1);
+        fs::remove_dir(d.join("w.log.tmp")).unwrap();
+        wait_until("the rewrite", || a.durable());
+        let m = replay_u64(&p).unwrap();
+        assert_eq!((m[&b"k"[..]], m[&b"b"[..]]), (2, 2), "on disk before shutdown");
+        assert_eq!(s.stats().degraded, 0);
+        drop(s);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// A failed fsync degrades the log until a rewrite succeeds; failing rewrites back off meanwhile.
+    #[test]
+    fn failed_fsync_degrades_until_rewritten() {
+        let d = tmpdir("sfail");
+        let p = d.join("f.log");
+        let s = KvStore::open(Some(&d), KvConfig { flush_interval: Duration::from_millis(1), ..KvConfig::default() }).unwrap();
+        let a = s.ns("f");
+        assert!(a.put(b"k", &1u64.to_le_bytes()));
+        s.flush_now();
+        inject(&s, &d, "f", OpenOptions::new().write(true).open("/dev/null").unwrap());
+        assert!(a.put(b"k", &2u64.to_le_bytes()));
+        s.flush_now();
+        assert!(!a.durable() && s.stats().degraded == 1);
+        let (t0, mut v) = (std::time::Instant::now(), 2u64);
+        while t0.elapsed() < Duration::from_millis(300) {
+            v += 1;
+            assert!(a.put(b"k", &v.to_le_bytes()));
+            assert!(!a.durable());
+        }
+        let errors = s.stats().errors;
+        assert!((1..=12).contains(&errors), "rewrites back off: {errors} errors in 300 ms");
+        fs::remove_dir(d.join("f.log.tmp")).unwrap();
+        wait_until("the rewrite", || a.durable());
+        assert_eq!(replay_u64(&p).unwrap()[&b"k"[..]], v);
+        drop(s);
+        let s = KvStore::open(Some(&d), KvConfig::default()).unwrap();
+        assert_eq!(s.ns("f").get(b"k"), Some(v.to_le_bytes().to_vec()));
+        drop(s);
+        let _ = fs::remove_dir_all(&d);
     }
 }

@@ -1,0 +1,115 @@
+---
+// One k10s node, layer by layer (docs/DESIGN.md §3).
+const layers = [
+	{ k: 'mesh', c: 'amber', d: 'gossip membership · manifest · blob store · place(manifest, members) → local replicas' },
+	{ k: 'net', c: 'indigo', d: 'HTTP/1.1 ingress on every shard · peer links, framed and multiplexed · virtio queues on metal' },
+	{ k: 'exec', c: 'teal', d: 'per-core shard · run queue · pooled fiber stacks · 2 ms slices, safepoint preemption · trap unwinding' },
+	{ k: 'code', c: 'teal', d: 'TIR → x86-64 in one pass, cached by hash, shared by every instance on every shard' },
+	{ k: 'mem', c: 'rose', d: 'one address space of [slot][slot][slot]… · lazily committed · copy-on-write snapshots after init' },
+	{ k: 'host API', c: 'rose', d: 'input / output · call(service) · kv · log · time · random · config: the only way out of a slot' },
+];
+const threads = ['shard 0', 'shard 1', 'shard 2', 'shard 3', 'ticker', 'KV flusher', 'mesh'];
+---
+
+<figure class="k-figure not-content">
+	<div class="node">
+		<header>
+			<strong>k10s node</strong>
+			<span>one process, or one bare-metal kernel</span>
+		</header>
+		<ol>
+			{
+				layers.map((l) => (
+					<li style={`--c:var(--k-${l.c})`}>
+						<code>{l.k}</code>
+						<span>{l.d}</span>
+					</li>
+				))
+			}
+		</ol>
+		<footer>
+			<span class="lbl">threads</span>
+			{threads.map((t) => <span class:list={['th', { shard: t.startsWith('shard') }]}>{t}</span>)}
+		</footer>
+	</div>
+</figure>
+
+<style>
+	.node {
+		padding: 1rem;
+		border-radius: 0.9rem;
+		background: var(--k-surface);
+		border: 1px solid var(--k-line);
+		color: var(--k-ink);
+	}
+	header {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: baseline;
+		gap: 0.3rem 0.8rem;
+		margin-bottom: 0.8rem;
+	}
+	header span {
+		font-size: var(--sl-text-xs);
+		color: var(--k-ink-dim);
+	}
+	ol {
+		display: grid;
+		gap: 0.35rem;
+		list-style: none;
+		margin: 0;
+		padding: 0;
+	}
+	li {
+		display: grid;
+		grid-template-columns: 5.5rem 1fr;
+		gap: 0.8rem;
+		align-items: center;
+		margin: 0;
+		padding: 0.55rem 0.75rem;
+		border-radius: 0.5rem;
+		background: color-mix(in srgb, var(--c) 10%, var(--k-surface-2));
+		border-left: 3px solid var(--c);
+	}
+	code {
+		font: 700 0.78rem var(--sl-font-mono);
+		color: var(--c);
+		background: none;
+		padding: 0;
+	}
+	li span {
+		font-size: 0.8rem;
+		line-height: 1.45;
+	}
+	footer {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.35rem;
+		align-items: center;
+		margin-top: 0.9rem;
+	}
+	.lbl {
+		font: 600 0.68rem var(--sl-font-mono);
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--k-ink-dim);
+		margin-inline-end: 0.3rem;
+	}
+	.th {
+		font: 0.7rem var(--sl-font-mono);
+		padding: 0.15rem 0.5rem;
+		border-radius: 1rem;
+		border: 1px solid var(--k-line);
+		color: var(--k-ink-dim);
+	}
+	.th.shard {
+		border-color: color-mix(in srgb, var(--k-teal) 60%, transparent);
+		color: var(--k-ink);
+	}
+	@media (max-width: 30rem) {
+		li {
+			grid-template-columns: 1fr;
+			gap: 0.2rem;
+		}
+	}
+</style>

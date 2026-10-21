@@ -1,0 +1,74 @@
+---
+title: Examples
+description: The example services of the repository, from a five-instruction hello to a concurrent REST API over the key-value store.
+---
+
+import { Code, Tabs, TabItem } from '@astrojs/starlight/components';
+import hello from '../../../../../examples/hello.ten?raw';
+import echo from '../../../../../examples/echo.ten?raw';
+import counter from '../../../../../examples/counter.ten?raw';
+import chain from '../../../../../examples/chain.ten?raw';
+import todo from '../../../../../examples/todo.ten?raw';
+import compute from '../../../../../examples/compute.ten?raw';
+import app from '../../../../../examples/app.k10s?raw';
+
+Every service below lives in [examples/](https://github.com/bzzdevlabs/k10s/tree/main/examples) and is deployed
+by one manifest. The sources on this page are the repository's files, verbatim.
+
+| Service | Shows |
+|---|---|
+| `hello` | the smallest module: one host call |
+| `echo` | methods, streaming the request body |
+| `counter` | durable, atomic state with `kv_add`; a one-time migration in `init` |
+| `chain` | service-to-service calls, `config`, the `calls` allowlist |
+| `todo` | a REST API: path parsing, JSON output, compare-and-swap loops |
+| `compute` | CPU-bound work: a SHA-256 chain |
+| `nbody`, `sort` | floating point and memory-heavy loops |
+
+<Code code={app} lang="k10s" title="examples/app.k10s" />
+
+## Request and response
+
+<Tabs>
+<TabItem label="hello.ten">
+<Code code={hello} lang="ten" title="examples/hello.ten" />
+</TabItem>
+<TabItem label="echo.ten">
+<Code code={echo} lang="ten" title="examples/echo.ten" />
+</TabItem>
+</Tabs>
+
+## State and calls
+
+<Tabs>
+<TabItem label="counter.ten">
+<Code code={counter} lang="ten" title="examples/counter.ten" />
+</TabItem>
+<TabItem label="chain.ten">
+<Code code={chain} lang="ten" title="examples/chain.ten" />
+</TabItem>
+</Tabs>
+
+## A REST API
+
+`todo` stores items under `item/<id>`, hands out ids with `kv_add`, and keeps an index of live ids that every
+instance updates with compare-and-swap loops, so concurrent requests never lose an update.
+
+<details>
+<summary>examples/todo.ten ({todo.trimEnd().split("\n").length} lines)</summary>
+
+<Code code={todo} lang="ten" title="examples/todo.ten" />
+
+</details>
+
+## CPU-bound work
+
+<details>
+<summary>examples/compute.ten ({compute.trimEnd().split("\n").length} lines)</summary>
+
+<Code code={compute} lang="ten" title="examples/compute.ten" />
+
+</details>
+
+Ten's SHA-256 takes about 2.5× as long as Go's hand-written assembly, and 1.1–1.6× as long as portable Go: the
+baseline JIT keeps at most six locals in registers and every memory access pays the mask.

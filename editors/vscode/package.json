@@ -1,0 +1,109 @@
+{
+  "name": "k10s-ten",
+  "displayName": "Ten & k10s",
+  "description": "Syntax highlighting, live compiler diagnostics, file and folder icons for Ten (.ten) sources and k10s (.k10s) manifests",
+  "version": "0.1.0",
+  "publisher": "bzzdevlabs",
+  "license": "Apache-2.0",
+  "icon": "icons/extension.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bzzdevlabs/k10s.git",
+    "directory": "editors/vscode"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "keywords": [
+    "ten",
+    "k10s",
+    "tir"
+  ],
+  "main": "./src/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "ten",
+        "aliases": [
+          "Ten",
+          "ten"
+        ],
+        "extensions": [
+          ".ten"
+        ],
+        "configuration": "./language-configuration/ten.json",
+        "icon": {
+          "light": "./icons/ten.svg",
+          "dark": "./icons/ten.svg"
+        }
+      },
+      {
+        "id": "k10s",
+        "aliases": [
+          "k10s manifest",
+          "k10s"
+        ],
+        "extensions": [
+          ".k10s"
+        ],
+        "configuration": "./language-configuration/k10s.json",
+        "icon": {
+          "light": "./icons/k10s.svg",
+          "dark": "./icons/k10s.svg"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "ten",
+        "scopeName": "source.ten",
+        "path": "./syntaxes/ten.tmLanguage.json"
+      },
+      {
+        "language": "k10s",
+        "scopeName": "source.k10s",
+        "path": "./syntaxes/k10s.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "k10s.materialIcons.add",
+        "title": "Add Folder Icons to Material Icon Theme",
+        "category": "Ten & k10s"
+      },
+      {
+        "command": "k10s.materialIcons.remove",
+        "title": "Remove Folder Icons from Material Icon Theme",
+        "category": "Ten & k10s"
+      }
+    ],
+    "configuration": {
+      "title": "Ten & k10s",
+      "properties": {
+        "ten.validate": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "Check Ten files with the k10s compiler as you type (syntax, names, types, includes)."
+        },
+        "k10s.validate": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "Check k10s manifests as you type, including that every service's `code` file exists and compiles."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "./build.sh",
+    "test": "node test/checker.test.js"
+  }
+}

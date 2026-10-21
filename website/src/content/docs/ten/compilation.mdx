@@ -1,0 +1,92 @@
+---
+title: Compilation and diagnostics
+description: How the Ten compiler lays out memory, what it optimizes for a single-pass JIT, its limits, and its error messages.
+---
+
+import Terminal from '~/components/Terminal.astro';
+
+## Memory layout
+
+```text
+[0, 16)  reserved: null
+globals  8 bytes each
+data
+string literals
+buffers  8-aligned
+__heap_base (16-aligned) … memsize()   the heap grows up to the slot size
+```
+
+Only items reachable from the exports are laid out. Initial bytes become TIR data segments (zeros trimmed, runs
+closer than 16 bytes merged). The module's minimum memory is the smallest power of two at least
+`__heap_base + 4096` (and at least 4 KiB): the static area plus 4 KiB of heap. The manifest's `memory` may be
+larger.
+
+## What the compiler does
+
+- **Dead code is dropped.** Everything not reachable from `export fn`s (functions, host imports, statics, the
+  unused part of the prelude) disappears. Each host import appears once, and only if it is called.
+- **Forwarders are inlined away.** A function whose body is a single call passing its parameters through is
+  redirected to the inner function: `out_str("hi")` is a direct `output_write` host call.
+- **Code is shaped for a single-pass JIT:**
+  - constants are folded (never into an operation that would trap);
+  - constant address offsets (struct fields, constant indices, `+ c`) become load/store immediates;
+  - power-of-two scales, multiplications, `udiv` and `urem` become shifts and masks;
+  - conditions become `br_if` on inverted comparisons and short-circuit branch chains; `&&`/`||` between cheap
+    0/1 operands become branch-free `&`/`|`;
+  - loops are rotated: one backward `br_if` per iteration;
+  - locals and temporaries reuse TIR local slots, and `local.tee` replaces `set`/`get` pairs.
+- Every emitted module passes `k10_ir::validate`.
+
+## Limits
+
+| Limit | Value |
+|---|---|
+| nesting of expressions and blocks | 200 levels |
+| parameter values per function | 255 |
+| values per host import | 5 |
+| TIR locals per function | 65,536 |
+| TIR operand stack and nesting | 1,024 |
+| code per function | 1 MiB |
+| errors reported per run | 100 |
+
+## Diagnostics
+
+Errors are rendered rustc-style, with the span, a caret and, when there is one, a suggestion. Syntax errors
+recover, so one run reports several.
+
+<Terminal
+	session={`
+$ k10s build demo.ten
+«red:error»«bold:: cannot find \`totl\` in this scope»
+ «blue:-->» demo.ten:3:12
+  «blue:|»
+«blue:3 |»     return totl + 1;
+  «blue:|»            «red:^^^^»
+  «blue:=» «bold:help»: did you mean \`total\`?
+
+«dim:k10s: could not compile \`demo.ten\` (1 error)»
+$ k10s build greet.ten
+«red:error»«bold:: function \`kv_add_int\` takes 2 arguments but 1 argument was given»
+ «blue:-->» greet.ten:7:18
+  «blue:|»
+«blue:7 |»     let visits = kv_add_int("visits");
+  «blue:|»                  «red:^^^^^^^^^^^^^^^^^^^^»
+  «blue:=» «bold:help»: the signature is \`fn kv_add_int(key: str, delta: i64) -> i64\`
+`}
+/>
+
+They cover syntax, unknown names and types (with "did you mean"), type mismatches (with conversion hints), arity,
+missing returns, invalid assignment targets, `break` outside loops, duplicate definitions, recursive structs and
+constants, data initializer ranges and entry-point signatures.
+
+## As a library
+
+```rust
+k10_lang::compile(src: &str, path: Option<&Path>) -> Result<k10_ir::Module, Vec<Diagnostic>>
+k10_lang::compile_file(path: &Path) -> Result<Module, Vec<Diagnostic>>   // resolves `include`
+Diagnostic { file, line, col, len, message, help }                       // 1-based line and column
+render_diagnostics(&diags, &sources)                                     // the rendering above
+```
+
+With the `testhost` cargo feature, `k10_lang::testhost::TestHost` runs compiled services on the reference
+interpreter with an in-memory implementation of the whole host API: unit tests for services, without a node.

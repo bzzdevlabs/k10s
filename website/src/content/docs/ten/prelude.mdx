@@ -1,0 +1,94 @@
+---
+title: Standard prelude
+description: The functions every Ten program can use without an import, from the host API to allocation, I/O, parsing and the key-value store.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The prelude ([`std.ten`](https://github.com/bzzdevlabs/k10s/blob/main/crates/k10-lang/src/std.ten)) is always
+available, and everything a program does not reach is dropped at compile time.
+
+## Host API
+
+Every [host function](/k10s/reference/host-api/) is declared with its host name and parameters: `input_len`,
+`input_read`, `req_path`, `req_method`, `output_write`, `output_status`, `call`, `call_resp_len`, `call_resp_read`,
+`kv_get`, `kv_put`, `kv_del`, `kv_add`, `kv_cas`, `log`, `now_ns`, `time_ms`, `random`, `config`.
+
+Constants: `GET POST PUT DELETE OTHER_METHOD`, `CALL_UNKNOWN CALL_UNAVAILABLE CALL_TIMEOUT CALL_TRAPPED`,
+`I64_MIN I64_MAX`.
+
+## Allocation
+
+Power-of-two size classes with an 8-byte header and per-class free lists over a bump pointer; 8-byte aligned.
+
+| Function | |
+|---|---|
+| `alloc(n) -> *u8` | traps when memory is exhausted |
+| `try_alloc(n) -> *u8` | `null` instead of trapping |
+| `zalloc(n) -> *u8` | zeroed |
+| `free(p)` | return a block to its free list |
+| `heap_reset()` | free everything: call it first in `handle` for a per-request arena |
+| `heap_used() -> i64` | bytes in use |
+
+## Output
+
+| Function | |
+|---|---|
+| `out(p, n)` | append `n` bytes to the response |
+| `out_str(s: str)` | `out_str("hi\n")`, `out_str(DATA)`, `out_str(str(p, n))` |
+| `out_byte(c)`, `out_int(v)`, `out_hex(v)` | one byte, a decimal, a hexadecimal |
+| `out_hex_bytes(p, n)` | bytes as hexadecimal |
+| `out_f64(x, prec)` | a float with `prec` decimals |
+| `out_json_str(p, n)` | a quoted, escaped JSON string |
+| `out_body()` | stream the request body to the response |
+| `status(code)` | set the HTTP status (default 200) |
+
+## Input
+
+| Function | |
+|---|---|
+| `read_body() -> *u8` | the body, on the heap, NUL-terminated |
+| `read_path() -> *u8` | the path suffix including `?query`, NUL-terminated |
+| `last_len() -> i64` | length of the last buffer returned by `read_body`, `read_path`, `kv_read`, `call_read`, `read_config` |
+| `query_int(name: str, default) -> i64` | `?n=123`, Go `Atoi` rules, else `default` |
+| `query_str(name: str, dst, max) -> i64` | copy a query value into `dst`; its length or `-1` |
+| `query_find(path, n, name)` | locate a query parameter in a path |
+| `read_config() -> *u8` | the service's config bytes from the manifest |
+
+## Parsing and formatting
+
+| Function | |
+|---|---|
+| `parse_int(p, n)` | lenient decimal parse |
+| `is_int(p, n)` | strict check, overflow-checked |
+| `itoa(v, dst)`, `utoa(v, dst)`, `fmt_hex(v, dst)` | format an integer; return the length written |
+| `hex_bytes(p, n, dst)`, `fmt_f64(x, prec, dst)` | format bytes or a float; return the length written |
+
+## Bytes
+
+`mem_eq(a, b, n)`, `find_byte(p, n, b)`, `strlen(p)`, `str_eq(p, n, s: str)`, `starts_with(p, n, s: str)`,
+`copy_str(dst, s: str)`, `is_digit(c)`, `is_space(c)`, `fnv1a(p, n)` (64-bit hash).
+
+## Key-value store and calls
+
+| Function | |
+|---|---|
+| `kv_read(key: str) -> *u8` | the value on the heap, or `null`; length in `last_len()` |
+| `kv_write(key: str, p, n)` | store a value |
+| `kv_get_int(key, default)`, `kv_put_int(key, v)` | integers as decimal text |
+| `kv_delete(key)` | remove a key |
+| `kv_add_int(key, delta) -> i64` | atomic add on an 8-byte integer value; `delta = 0` reads |
+| `kv_cas_bytes(key, exp, exp_len, new, new_len) -> 1 \| 0` | atomic compare-and-swap; `exp_len = -1`: must be absent; `new_len = -1`: delete |
+| `call_svc(name: str, req, n) -> i64` | call a service: its status, or a negative error |
+| `call_read() -> *u8`, `out_call_resp()` | read or forward the last call's response |
+| `log_str(s: str)` | a line in the service log |
+
+<Aside type="caution" title="Read-modify-write">
+	Instances of a service run concurrently, so `kv_read` followed by `kv_write` is not atomic. Use `kv_add_int`
+	for counters and a `kv_cas_bytes` retry loop for anything else; see [Key-value storage](/k10s/guides/storage/).
+	`kv_add_int` traps `Host(4)` on a value that is not 8 bytes long, such as one written by `kv_put_int`.
+</Aside>
+
+## Misc
+
+`min`, `max`, `abs`, `fmin`, `fmax`, `align_up(x, a)`.

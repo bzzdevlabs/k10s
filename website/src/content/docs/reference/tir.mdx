@@ -1,0 +1,82 @@
+---
+title: TIR
+description: The k10s intermediate representation - one value type, structured control flow, masked memory, designed for single-pass compilation.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+TIR is what services ship as. It is validated and compiled to machine code on each node. Its design goals:
+trivially validatable, compilable in a single pass to good machine code, compact, and safe under software fault
+isolation. Any language can target it; Ten is the first.
+
+## Values
+
+One value type: **`i64`**. `f64` values travel as their IEEE-754 bit patterns and float instructions reinterpret
+their operands. Booleans are `i64`: comparisons produce 1 or 0, conditions treat non-zero as true.
+
+## Memory
+
+Each instance has one linear memory of `S = 2^k` bytes (`k` chosen at deployment, at least the module's
+`min_mem_log2`, between 12 and 36) followed by an 8-byte tail. A load or store with address `a` and immediate
+offset `o` touches
+
+```text
+e = ((a + o) mod 2^64) & (S - 1)
+```
+
+There are **no out-of-bounds traps** for loads and stores: masking makes every address valid. Memory starts zeroed
+and data segments are copied at instantiation. `mem.copy` and `mem.fill` trap `MemOutOfBounds` when a range does
+not fit.
+
+## Module
+
+```text
+Module { min_mem_log2, imports[], funcs[], exports[], data[] }
+Import { name, params (0..=5), results (0|1) }       host functions, resolved by name at load
+Func   { params (0..=255), results (0|1), locals, code[] }
+Export { name, func }                                  a defined function
+Data   { offset, bytes }                               within 2^min_mem_log2
+```
+
+The binary form starts with `K10M`, a version byte and `min_mem_log2`; integers are LEB128. A `hello` module is
+52 bytes.
+
+## Instructions
+
+| Group | Instructions |
+|---|---|
+| control | `unreachable nop block loop if else end br br_if br_table return call` |
+| stack and locals | `drop select local.get local.set local.tee const` |
+| memory | `load8_u/s load16_u/s load32_u/s load64 store8 store16 store32 store64 mem.copy mem.fill mem.size` |
+| integer | `add sub mul div_s div_u rem_s rem_u and or xor shl shr_s shr_u rotl rotr clz ctz popcnt eqz eq ne lt gt le ge (signed and unsigned) ext8_s ext16_s ext32_s` |
+| float | `f.add f.sub f.mul f.div f.sqrt f.neg f.abs f.eq f.lt f.le f.from_i f.to_i` |
+
+Integer arithmetic wraps. Division by zero traps `DivByZero`; `div_s(MIN, -1) = MIN`. Shift counts are `b & 63`.
+`f.to_i` truncates toward zero and saturates (NaN gives 0).
+
+## The key simplification
+
+The operand stack is **empty at every control-flow join**: its height must be 0 at `block`, `loop`, `else`, `end`
+and `br`, and 1 at `if`, `br_if` and `br_table` (the consumed value). Branches never carry values; values flow
+through locals. A single-pass compiler therefore never reconciles register states at merges.
+
+## Safepoints and traps
+
+Function entry and every `loop` are safepoints, where an invocation may be preempted or interrupted (time slices,
+CPU budget); this is invisible except through timing. Traps abort the invocation: `Unreachable`, `DivByZero`,
+`StackOverflow` (at least 1000 frames of a small function), `MemOutOfBounds` (bulk operations), `Interrupted`
+(CPU budget), `Host(code)`.
+
+## Validation
+
+Magic and version; `12 ≤ min_mem_log2 ≤ 36`; data within the minimum memory; at most 5 parameters and 1 result per
+import, 1 result per function; unique exports of defined functions; well-formed instructions; locals, call targets
+and branch depths in range; balanced nesting; the stack discipline above; nesting and operand stack at most 1024;
+at most 65,536 locals and 1 MiB of code per function.
+
+<Aside type="tip" title="Specifications">
+	The normative documents are [docs/TIR.md](https://github.com/bzzdevlabs/k10s/blob/main/docs/TIR.md) (opcodes
+	and encoding), [docs/JIT-ABI.md](https://github.com/bzzdevlabs/k10s/blob/main/docs/JIT-ABI.md) (the contract
+	between the JIT and the runtime) and
+	[docs/HOSTAPI.md](https://github.com/bzzdevlabs/k10s/blob/main/docs/HOSTAPI.md).
+</Aside>

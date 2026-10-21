@@ -1,0 +1,95 @@
+---
+title: Items, statements and expressions
+description: Everything that can appear at the top level of a Ten file, every statement, and the operator precedence table.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+## Items
+
+Top-level items can appear in any order.
+
+```ten
+import fn output_write(src: *u8, n: i64) -> i64;   // a host function, at most 5 values
+fn add(a: i64, b: i64) -> i64 { return a + b; }
+export fn handle() { }                              // an entry point
+const LIMIT = 100;                                  // compile-time i64 or f64
+const RATIO: f64 = 1.0;
+global hits: i64 = 0;                               // one value-type cell in memory
+global p: *u8 = null;
+data HELLO = "hello\n";                             // static bytes: HELLO is a *u8, sizeof(HELLO) == 6
+data K: [u32; 4] = [1, 2, 3];                       // static array; missing elements are 0
+data T: [i16] = [-2, 300];                          // length inferred from the list
+buffer scratch: [u8; 4096];                         // static zeroed storage: scratch is a *u8
+buffer one: Point;                                  // a single element: one is a *Point
+struct Point { x: f64, y: f64 }                     // C layout, natural alignment
+include "lib/util.ten";                             // relative to the including file, each file once
+```
+
+- **Entry points** are `export fn handle()` (required) and `export fn init()` (optional, run once per instance
+  before it serves). Both take no parameters and return nothing or an `i64`.
+- **Constant expressions** (in `const`, global initializers, `data` elements and array lengths) may use literals,
+  other constants, `sizeof`, `offsetof`, `countof`, arithmetic, comparisons, `&&`, `||` and casts. Division by
+  zero is an error.
+- `data` and `buffer` memory is mutable. `data` elements must fit their type: `[u8]` rejects `256`.
+- **Scopes:** user code sees its own items first, then the prelude's; the prelude only sees itself. A user
+  `fn min(…)` shadows the prelude's for user code without breaking prelude functions that use theirs. Duplicates
+  within one scope are errors, and built-in type names cannot be redefined.
+
+## Statements
+
+```ten
+let x = 1;
+let y: f64 = 2.0;
+let z: i64;                       // zero-initialized
+let s: str = "abc";
+x = x + 1;
+x += 2;                           // also -= *= /= %= &= |= ^= <<= >>= >>>=
+p.x = 1.5;  p[3].y = 2.0;  *q = 7;  buf[i] = 'a';  g = 5;
+if c { } else if d { } else { }
+while c { }
+loop { }
+for i in a..b { }
+break;  continue;  return;  return x;
+f(x);                             // an expression statement must be a call
+{ }                               // a block opens a new scope
+```
+
+- Locals are block-scoped and may shadow: `let x = x + 1;` reads the outer `x`.
+- `for i in a..b` evaluates `a`, then `b`, once, and runs with `i = a … b-1` (nothing if `a >= b`). `i` is a fresh
+  immutable `i64`.
+- A compound assignment to memory evaluates the address once: `a[f()] += g()` calls `f` before `g`.
+- A function that returns a value must `return` on every path. The checker understands `return`,
+  `unreachable()`, `loop` without `break`, `while` with a constant true condition and no `break`, and `if`/`else`
+  where both branches diverge.
+
+## Expressions
+
+Precedence from low to high; every binary operator is left-associative.
+
+| Level | Operators |
+|---|---|
+| 1 | `\|\|` |
+| 2 | `&&` |
+| 3 | `== != < <= > >=` (non-associative: `a < b < c` is an error) |
+| 4 | `\|` |
+| 5 | `^` |
+| 6 | `&` |
+| 7 | `<< >> >>>` |
+| 8 | `+ -` |
+| 9 | `* / %` |
+| 10 | `as` (postfix: `-x as f64` is `(-x) as f64`) |
+| 11 | unary `- ! ~ *` |
+| 12 | call `f(…)`, field `.f`, index `[i]` |
+
+<Aside type="caution" title="Unlike C">
+	Bitwise operators bind tighter than comparisons: `x & 1 == 0` means `(x & 1) == 0`.
+</Aside>
+
+- **Integers** wrap. `/` and `%` are signed and trap on a zero divisor (`MIN / -1 == MIN`, `MIN % -1 == 0`). Shift
+  counts are taken modulo 64; `>>` is arithmetic and `>>>` logical.
+- **Floats** support `+ - * /`, unary `-` and comparisons (IEEE-754, round to nearest even). Comparisons with NaN
+  are false, except `!=`.
+- `&&` and `||` short-circuit and yield `0` or `1`.
+- **Evaluation order is left to right everywhere**: operands, call arguments, `select` arguments, and the address
+  before the value in stores. Expressions cannot assign variables; only calls have side effects.

@@ -1,0 +1,102 @@
+---
+// From source to running instances.
+const steps = [
+	{ k: 'source', name: 'hello.ten', note: 'Ten, a small C-like language' },
+	{ k: 'tool', name: 'k10s build', note: 'k10-lang compiler' },
+	{ k: 'artifact', name: 'hello.k10', note: 'TIR module · 52 bytes' },
+	{ k: 'tool', name: 'k10s apply', note: 'manifest + modules, to any node' },
+	{ k: 'net', name: 'gossip', note: 'desired state + blobs by SHA-256' },
+	{ k: 'tool', name: 'validate + JIT', note: 'x86-64 on each node, once per module' },
+	{ k: 'run', name: 'instances', note: 'kilobytes, microseconds' },
+];
+---
+
+<figure class="k-figure not-content">
+	<ol class="pipe">
+		{
+			steps.map((s) => (
+				<li class={s.k}>
+					<code>{s.name}</code>
+					<span>{s.note}</span>
+				</li>
+			))
+		}
+	</ol>
+</figure>
+
+<style>
+	.pipe {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.5rem 1.6rem;
+		list-style: none;
+		padding: 0;
+		margin: 0;
+		counter-reset: step;
+	}
+	li {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+		gap: 0.2rem;
+		flex: 1 1 8.5rem;
+		margin: 0;
+		padding: 0.7rem 0.8rem;
+		border-radius: 0.6rem;
+		background: var(--k-surface);
+		border: 1px solid var(--k-line);
+		color: var(--k-ink);
+	}
+	li:not(:last-child)::after {
+		content: '→';
+		position: absolute;
+		right: -1.25rem;
+		top: 50%;
+		translate: 0 -50%;
+		color: var(--k-ink-dim);
+	}
+	code {
+		font: 600 0.8rem var(--sl-font-mono);
+		background: none;
+		padding: 0;
+		color: var(--c, var(--k-ink));
+	}
+	span {
+		font-size: 0.72rem;
+		line-height: 1.35;
+		color: var(--k-ink-dim);
+	}
+	.source,
+	.artifact {
+		--c: var(--k-teal);
+	}
+	.tool {
+		--c: var(--k-indigo);
+		border-style: dashed;
+	}
+	.net {
+		--c: var(--k-amber);
+	}
+	@media (max-width: 40rem) {
+		.pipe {
+			flex-direction: column;
+			gap: 1.3rem;
+		}
+		li {
+			flex: none;
+		}
+		li:not(:last-child)::after {
+			content: '↓';
+			right: auto;
+			left: 1rem;
+			top: auto;
+			bottom: -1.25rem;
+			translate: none;
+		}
+	}
+	.run {
+		--c: var(--k-teal);
+		background: color-mix(in srgb, var(--k-teal) 14%, var(--k-surface));
+		border-color: color-mix(in srgb, var(--k-teal) 50%, var(--k-line));
+	}
+</style>

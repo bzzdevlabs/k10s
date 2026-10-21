@@ -1,0 +1,156 @@
+---
+title: A cluster in five minutes
+description: Start three k10s nodes that share a key, apply to any of them, and watch them agree on placement without a control plane.
+---
+
+import { Steps, Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import Terminal from '~/components/Terminal.astro';
+import ClusterDiagram from '~/components/ClusterDiagram.astro';
+
+A k10s cluster is a set of equal nodes. There is no control plane to install: nodes find each other by gossip,
+every node accepts `apply` and HTTP, and every node computes the same placement on its own.
+
+<ClusterDiagram />
+
+<Steps>
+
+1. **Create a cluster key** once and copy it to every node. Gossip and peer links are authenticated and encrypted
+   with it.
+
+   <Terminal
+   	session={`
+   $ k10s keygen -o cluster.key
+   «dim:k10s: wrote a new key to cluster.key (mode 0600)»
+   `}
+   />
+
+2. **Start the nodes.** Give every node, the first one included, the same `--join` list.
+
+   <Tabs syncKey="cluster">
+   <TabItem label="Three machines">
+
+   On each machine (`--advertise` is the address peers should use to reach it):
+
+   ```bash
+   k10s node --data /var/lib/k10s --http 0.0.0.0:8080 \
+     --cluster-key-file cluster.key --advertise 10.0.0.1 \
+     --join 10.0.0.1:7946,10.0.0.2:7946,10.0.0.3:7946
+   ```
+
+   Gossip uses UDP 7946 and peer links TCP 7947 by default (`--gossip`, `--rpc`).
+
+   </TabItem>
+   <TabItem label="One laptop">
+
+   Three nodes on localhost, each with its own ports and data directory:
+
+   ```bash
+   for i in 1 2 3; do
+     k10s node --name node-$i --data /tmp/k10s-$i \
+       --http 127.0.0.1:808$i --gossip 127.0.0.1:794$i --rpc 127.0.0.1:795$i \
+       --join 127.0.0.1:7941,127.0.0.1:7942,127.0.0.1:7943 \
+       --cluster-key-file cluster.key &
+   done
+   ```
+
+   </TabItem>
+   </Tabs>
+
+   Each node logs its peers as they come up:
+
+   <Terminal
+   	title="node-1"
+   	session={`
+   «dim:k10s: cluster authentication: key id 9c66ecc2b991cd9e (gossip sealed with XChaCha20-Poly1305, peer links authenticated and encrypted with ChaCha20-Poly1305)»
+   k10s: mesh: member 3e17a7349398c75b «green:up» (http 127.0.0.1:8082, rpc 127.0.0.1:7952)
+   k10s: mesh: member ce6ddcefbb2ee3bc «green:up» (http 127.0.0.1:8083, rpc 127.0.0.1:7953)
+   `}
+   />
+
+3. **Apply to any node.** The node validates the bundle, applies it locally, then announces the new version by
+   gossip; the others fetch the manifest and the modules they lack from their peers.
+
+   <Terminal
+   	session={`
+   $ k10s apply examples/app.k10s --node 127.0.0.1:8082
+   {"ok":true,"version":1,"added":["chain","compute","counter","echo","hello","nbody","sort","todo"],...,"cluster":true}
+   `}
+   />
+
+   <Terminal
+   	title="node-1"
+   	session={`
+   k10s: mesh: desired state v1 (779a951340b3) from 3e17a7349398c75b: fetching
+   k10s: mesh: fetched desired state v1 in «teal:0.4 ms»
+   k10s: cluster: v1 applied over 3 member(s); local: [echo,todo]; changed: +["chain", "compute", "counter", "echo", "hello", "nbody", "sort", "todo"] ~[] -[]
+   `}
+   />
+
+4. **Call any node.** A request for a service placed elsewhere takes exactly one hop over the peer link.
+
+   <Terminal
+   	session={`
+   $ curl 127.0.0.1:8081/hello/
+   hello
+   `}
+   />
+
+5. **Inspect the cluster.** In cluster mode, `status` prints members, placement and links:
+
+   <Terminal
+   	session={`
+   $ k10s status --node 127.0.0.1:8081
+   node 939cb8d63bf2fe10 \`node-1\`  http 127.0.0.1:8081  gossip 127.0.0.1:7941  rpc 127.0.0.1:7951
+   auth: cluster key id 9c66ecc2b991cd9e
+   desired v1 (779a951340b3, from 3e17a7349398c75b)   applied v1 (779a951340b3)
+
+   members: 3 live / 3 known
+     ID                STATE       INCARNATION  GOSSIP            RPC               HTTP                MEM CORES
+     3e17a7349398c75b  «green:alive»     1792508449557  127.0.0.1:7942    127.0.0.1:7952    127.0.0.1:8082  62.7GiB     8
+     939cb8d63bf2fe10  «green:alive»     1792508449557  127.0.0.1:7941    127.0.0.1:7951    127.0.0.1:8081  62.7GiB     8  «dim:(this node)»
+     ce6ddcefbb2ee3bc  «green:alive»     1792508449560  127.0.0.1:7943    127.0.0.1:7953    127.0.0.1:8083  62.7GiB     8
+
+   placement:
+     chain                    3e17a7349398c75b
+     compute                  3e17a7349398c75b
+     counter                  3e17a7349398c75b
+     echo                     ce6ddcefbb2ee3bc «teal:939cb8d63bf2fe10*»
+     hello                    ce6ddcefbb2ee3bc
+     nbody                    ce6ddcefbb2ee3bc
+     sort                     ce6ddcefbb2ee3bc
+     todo                     «teal:939cb8d63bf2fe10*»
+     «dim:(* = this node)»
+
+   links:
+     3e17a7349398c75b  «green:up»         accepted outstanding 0     in    11.9KiB out       543B
+     ce6ddcefbb2ee3bc  «green:up»         dialed   outstanding 0     in       122B out       122B
+
+   memory: --mem 62.7GiB, reserved 2.0MiB, burst 0B of 62.7GiB shared
+   routing: forwarded 1 (retries 0, failed 0, local fallback 0), served for peers 0, not-here 0
+   gossip: sent 86 pkts / 7.3KiB, received 86 pkts / 7.2KiB
+   `}
+   />
+
+   `echo` has `replicas = 2` in the manifest, so it runs on two distinct nodes. Ask any other node: the placement
+   is identical.
+
+</Steps>
+
+## Break something
+
+- **Kill a node** (`kill -9`). Its connections reset, requests in flight on them fail, and new requests go
+  straight to the next node of each service's ranking. Once gossip declares the node dead, every survivor
+  recomputes placement and starts the missing replicas.
+- **Freeze a node** (`kill -STOP`). It is avoided as soon as gossip suspects it, about one probe period later;
+  in the benchmark a hung node's workloads were replaced elsewhere in **1.1 s** (Kubernetes: 353 s).
+- **Stop a node gracefully** (`kill -TERM`). It announces `Left`, forwards its own traffic while peers converge,
+  drains in-flight requests and exits: zero failed requests.
+- **Restart it** with the same data directory. It keeps its id, starts at a higher incarnation, catches up on any
+  manifest applied while it was down, and rejoins through the peers it remembers even if its seeds are gone.
+
+<Aside type="caution" title="Trusted networks only without a key">
+	`--insecure-unauthenticated-cluster` starts cluster mode without a key. Anyone who can reach the gossip or peer
+	ports can then deploy code. Use it only on an isolated test network.
+</Aside>
+
+Learn how it works in [Cluster: gossip and placement](/k10s/concepts/cluster/).

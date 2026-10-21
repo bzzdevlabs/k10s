@@ -1,0 +1,88 @@
+---
+title: Host API
+description: The host functions a module may import - the only way a workload interacts with anything outside its memory slot.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A module imports host functions by name; the node rejects modules that import unknown names or with the wrong
+parameter count. Every host function returns one `i64`. Pointer and length arguments are addresses in the
+instance's memory, checked like `mem.copy`: an out-of-range span traps `MemOutOfBounds`.
+
+Ten programs reach these through the [standard prelude](/k10s/ten/prelude/), which declares every one of them.
+
+## Exports a module provides
+
+| Export | |
+|---|---|
+| `handle()` | required; called once per request. Its result, if any, is ignored |
+| `init()` | optional; called once when an instance is created, before it serves. For `fresh` services, the memory after `init` is the snapshot every request starts from |
+
+An instance handles one request at a time; the runtime runs many instances in parallel.
+
+## Request and response
+
+| Function | Parameters | Returns |
+|---|---|---|
+| `input_len` | | length of the request body |
+| `input_read` | `dst, off, n` | copies body bytes `[off, off+n)` (clamped to the body) to `dst`; bytes copied |
+| `req_path` | `dst, max` | copies the path suffix (after `/<service>`, query included) to `dst`, at most `max` bytes; its full length |
+| `req_method` | | 0 GET, 1 POST, 2 PUT, 3 DELETE, 4 other. Service calls are POST |
+| `output_write` | `src, n` | appends `n` bytes to the response body; `n`. Over 16 MiB traps `Host(1)` |
+| `output_status` | `code` | sets the response status (default 200); 0 |
+
+## Service calls
+
+| Function | Parameters | Returns |
+|---|---|---|
+| `call` | `name_ptr, name_len, req_ptr, req_len` | calls service `name` (optionally `name/path`) and suspends until it answers: its status (≥ 0), or -1 unknown or not granted, -2 unavailable, -3 timeout, -4 callee trapped |
+| `call_resp_len` | | length of the last call's response body |
+| `call_resp_read` | `dst, off, n` | copies bytes of the last call's response; bytes copied |
+
+A service may call only the services in its manifest's `calls` list. Any other call returns -1 with an empty
+response, exactly like a service that does not exist.
+
+## Key-value store
+
+One namespace per service; node-local.
+
+| Function | Parameters | Returns |
+|---|---|---|
+| `kv_get` | `kptr, klen, dst, max` | value length, or -1 if absent; copies `min(len, max)` bytes to `dst` |
+| `kv_put` | `kptr, klen, vptr, vlen` | 0 |
+| `kv_del` | `kptr, klen` | 1 if the key existed, else 0 |
+| `kv_add` | `kptr, klen, delta` | the new value of an 8-byte little-endian integer (absent counts as 0); `delta = 0` only reads |
+| `kv_cas` | `kptr, klen, buf, exp_len, new_len` | 1 if replaced, 0 if the value did not match |
+
+- `kv_cas`: host functions take at most five parameters, so `buf` holds the expected value followed by the new
+  one. `exp_len = -1`: the key must be absent. `new_len = -1`: delete on a match.
+- Keys up to 1 KiB and values up to 1 MiB (else `Host(2)`); a write over the service's quota traps `Host(3)` and
+  stores nothing; `kv_add` on a value that is not 8 bytes traps `Host(4)`.
+- All `kv_*` calls on a namespace are linearizable on a node. `kv_add` and `kv_cas` are atomic read-modify-writes;
+  `kv_get` followed by `kv_put` is not.
+
+## Misc
+
+| Function | Parameters | Returns |
+|---|---|---|
+| `log` | `ptr, len` | 0; appends a line to the service log |
+| `now_ns` | | monotonic nanoseconds, in steps of the guest clock resolution (100 µs by default) |
+| `time_ms` | | wall-clock Unix milliseconds (at least 1 ms steps) |
+| `random` | | 64 random bits |
+| `config` | `dst, max` | copies the service's config bytes from the manifest; their full length |
+
+<Aside type="note" title="A coarse clock on purpose">
+	`now_ns` advances in steps of `--timer-res-us`, each step landing at a random point of its interval: monotonic,
+	at most one step ahead of real time, and much less useful for timing side channels. `--timer-res-us 0` gives full
+	resolution to trusted single-tenant nodes.
+</Aside>
+
+## Trap codes
+
+| Trap | Cause |
+|---|---|
+| `Host(1)` | response body over 16 MiB |
+| `Host(2)` | key over 1 KiB or value over 1 MiB |
+| `Host(3)` | key-value quota of the service exhausted |
+| `Host(4)` | `kv_add` on a value that is not 8 bytes |
+| `Host(0x7FFF)` | internal error in a host function |

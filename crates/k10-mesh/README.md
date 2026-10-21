@@ -76,10 +76,11 @@ addr    = 4 ip[4] port:u16 | 6 ip[16] port:u16;  raddr = 0 port:u16 (same IP as 
   The state is split into self-contained chunks, and the first chunk asks for a reply. A joiner also syncs at
   about +1, +2, +4 … s until it reaches the normal interval. A datagram from a sender we have never heard of
   triggers a sync with it (at most one per second). Remote "dead" records only make us *suspect*, which leaves
-  room for refutation. From time to time a sync goes to a recently dead member or to an unreachable seed, which
-  heals partitions. Dead records of members a node never knew (it joined or restarted after they died) are kept
-  aside for these reconnects only (at most 256, `dead_retain_ms`, never re-shared), so a member that comes back at
-  its address is found even when every member that saw it die has restarted since.
+  room for refutation. Reconnects heal partitions and restarts: one sync per `join_retry_ms`, round-robin over the
+  addresses of dead members, tombstones (which keep the last address of failed members, also learned from syncs),
+  seeds that are not live and, while isolated, the fallback seeds; each address backs off 1 s → 60 s.
+- **Placement version.** The top byte of a member's `cores` varint carries the placement algorithm version it
+  implements (0 from older nodes = 1); `place` uses the lowest live version.
 - **Leave.** `Left` is sent to 16 random members, which re-gossip it.
 - **Desired-state pointer.** `(version, hash, origin)`: the highest version wins, and ties go to the larger
   hash.
@@ -102,10 +103,11 @@ vectored writes of large blobs.
 
 ## Manifest
 
-The binary format is canonical: services are sorted by name, so `hash = sha256(encode())`. The decoder is
-strict and bounded. Format 2 adds each service's `calls` list; a manifest without any is encoded as format 1 (the
-original bytes, so older manifests keep their hash and decode with empty lists). The operator text format
-(`k10s apply`) looks like this:
+The binary format is canonical: services are sorted by name and varints minimal, so `hash = sha256(encode())`.
+The decoder is strict and bounded. Format 2 adds each service's `calls` grant: an "any" flag bit, or strictly
+increasing indices into the sorted service list (existing and canonical by construction, 4 bytes each in memory).
+A manifest without any grant is encoded as format 1 (the original bytes, so older manifests keep their hash and
+decode with nothing granted). The operator text format (`k10s apply`) looks like this:
 
 ```
 service echo {
