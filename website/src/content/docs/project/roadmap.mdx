@@ -44,5 +44,15 @@ import { Aside } from '@astrojs/starlight/components';
 6. **Performance:** register allocation in the JIT, 32-bit TIR operations, cheaper cross-node forwarding.
 7. **Ecosystem:** a Wasm → TIR translator, so Rust, C, Go and Zig can target k10s.
 
+## Platform decisions
+
+- **Network:** wired Ethernet only (DHCPv4 or a static address); no Wi-Fi.
+- **Boot:** UEFI and legacy BIOS. Images ship unsigned: turn Secure Boot off, or sign the image with your own key and
+  enroll it.
+- **Order:** x86-64 first, then arm64 and the Raspberry Pi 4/5; i386 and armv7 are best effort, on the interpreter.
+- **Updates:** OS images are signed by the k10s release key and spread over gossip like code.
+- **One image:** a single installed image boots the Linux-based tier or the native kernel, chosen from the hardware
+  found at boot.
+
 The full report, with the evidence behind each claim, is
 [docs/REPORT.md](https://github.com/bzzdevlabs/k10s/blob/main/docs/REPORT.md).

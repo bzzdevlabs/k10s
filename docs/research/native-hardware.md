@@ -1,7 +1,7 @@
 # k10-metal on physical hardware (Tier 2): research report
 
 Answers [TASK-native-hardware.md](../TASK-native-hardware.md). Date: 2026-10-19.
-Companion: [TASK-universal-os.md](../TASK-universal-os.md) (Tier 1, Linux as a driver layer).
+Companion: [TASK-universal-os.md](../TASK-universal-os.md) (Tier 1, Linux as a driver layer). The decisions are in §11.
 
 ## How to read this report
 
@@ -550,7 +550,7 @@ Ranked by coverage ÷ effort. Effort is for a production-quality driver with int
 - **Recommendation:**
   - Keep the first-tier drivers (virtio, NVMe, AHCI, Intel, Realtek) in Rust in the kernel. They are on the boot and performance path.
   - Define the in-kernel driver interface now (`NetDevice` / `BlockDevice` traits, DMA allocation from slot-like contiguous regions), so that a "TIR driver host" can implement the same traits later.
-  - Build the IOMMU support in M4 or later, and pilot one long-tail driver as a TIR workload.
+  - Build the IOMMU support in M4, then pilot one long-tail driver as a TIR workload.
 
 ### 5.3 Where Tier 1 is simply better (Q10)
 
@@ -565,7 +565,7 @@ Ranked by coverage ÷ effort. Effort is for a production-quality driver with int
 - 32-bit x86 and armv7: k10-metal is long-mode only, and the JIT is 64-bit.
 - Any machine whose devices are not on the Tier 2 list.
 
-**Suggested glue [estimate]:** the UEFI loader can enumerate PCI through the firmware's PCI I/O protocol before ExitBootServices. With a "supported devices" table, it could boot k10-metal when the NIC (and disk, if needed) is supported, and chain-load the Tier 1 Linux image otherwise. One installed image would then cover both tiers (open question 8).
+**Suggested glue [estimate]:** the UEFI loader can enumerate PCI through the firmware's PCI I/O protocol before ExitBootServices. With a "supported devices" table, it could boot k10-metal when the NIC (and disk, if needed) is supported, and chain-load the Tier 1 Linux image otherwise. One installed image then covers both tiers: decided (§11), layout in universal-os.md §8.4.
 
 ---
 
@@ -575,7 +575,7 @@ Ranked by coverage ÷ effort. Effort is for a production-quality driver with int
 
 | Service | Finding | Recommendation |
 |---|---|---|
-| IOMMU | DMAR/IVRS/IORT tables; minimal DMA remapping is 2–5k lines (§5.2). Firmware may hand over with VT-d off | Not needed for M1–M4; required for TIR drivers and >255-thread x2APIC servers |
+| IOMMU | DMAR/IVRS/IORT tables; minimal DMA remapping is 2–5k lines (§5.2). Firmware may hand over with VT-d off | VT-d in M4; required for TIR drivers and >255-thread x2APIC servers |
 | Microcode | BIOS is Intel's preferred loader; OS early-load is optional. Lost on reset. Redistribution in binary form is allowed. https://github.com/intel/Intel-Linux-Processor-Microcode-Data-Files , https://docs.kernel.org/arch/x86/microcode.html [doc] | Rely on firmware updates; optional early load from the boot bundle later |
 | CPU frequency | Once firmware enables HWP it cannot be disabled until reset; otherwise the CPU stays at the BIOS P-state (often no turbo). https://docs.kernel.org/admin-guide/pm/intel_pstate.html [doc] | ~50 lines: enable HWP (IA32_PM_ENABLE, HWP_REQUEST/EPP) if present |
 | Idle | `hlt` today. MWAIT C-states without `_CST` use per-model tables (intel_idle). https://docs.kernel.org/admin-guide/pm/intel_idle.html [doc] | Later, for power |
@@ -603,7 +603,7 @@ Ranked by coverage ÷ effort. Effort is for a production-quality driver with int
 ### 6.3 Remote management
 
 - For the "very simple system" goal, the admin plane is the cluster itself: apply, status and logs through any node.
-- Gossip and peer links are unauthenticated today [code: metal/README.md limitations]. On physical LANs this becomes the main security gap: open question 5.
+- Gossip and peer links are authenticated and encrypted with the shared cluster key, and admin requests are signed [code: metal/README.md]. On physical LANs the remaining gap is that every key holder is trusted (no per-node identity yet).
 
 ### 6.4 Persistent storage (Q13)
 
@@ -751,13 +751,14 @@ Efforts are for one experienced engineer, in weeks, and are [estimate]s. They gr
 - **Boot:**
   - Production UEFI loader: kernel and bundle from the ESP, command line from LoadOptions or a config file, GOP info, AP trampoline reservation.
   - Multiboot2 shim for BIOS via GRUB/Limine. Keep PVH.
+  - Tier selector (universal-os.md §8.4): `tier=auto|linux|metal`, PCI enumeration against the supported-device table, chain-load of the Tier 1 UKI, boot-counted fallback to `linux`.
 - **Platform:**
   - Map all RAM and every BAR (UC).
   - Coalesced memory map with no 64-entry cap.
   - ACPI tables: MADT CPUs with targeted SIPI, `MAX_CPUS` ≥ 64, x2APIC (MSR interface, accept x2APIC handover), FADT reset/S5, SPCR console, HPET/PM-timer fallback.
   - PCI: ECAM full scan, 64-bit BARs.
-- **Devices:** virtio 1.x net + blk + mmio v2.
-- **Network:** DHCP and a command-line static IP. Remove the QEMU-only exits.
+- **Devices:** virtio 1.x net + blk + mmio v2, behind `NetDevice`/`BlockDevice` traits (queue count, DMA from slot-like contiguous regions) that a TIR driver host can implement later.
+- **Network:** DHCPv4 and a static IP from `k10s.conf` on the ESP or the command line; IPv4 only. Remove the QEMU-only exits.
 - **Test plan:**
   - `test.sh` and `cluster-test.sh` under SeaBIOS PVH, OVMF `pc`/`q35` (`-kernel` and ESP), modern-only and legacy NICs, microvm (mmio), and Firecracker + Cloud Hypervisor if installable without root.
   - One real VM at Hetzner or Vultr (modern virtio) and at DigitalOcean (BIOS).
@@ -771,11 +772,11 @@ Efforts are for one experienced engineer, in weeks, and are [estimate]s. They gr
 **M2: durable storage (3–4 weeks).**
 - Work:
   - NVMe production driver (MSI-X, queue per CPU later), virtio-blk, AHCI.
-  - GPT and the k10s data partition.
-  - Segmented KV log sharing the hosted record codec.
-  - A/B kernel slots read by the loader.
+  - GPT and the `K10S-DATA` partition (own type GUID); other partitions are left alone.
+  - Segmented KV log sharing the hosted record codec (`no_std` crate); Tier 1 switches `K10S-DATA` from ext4 to the same log (`O_DIRECT` + `fdatasync`).
+  - Raw A/B kernel slots in `K10S-DATA`, read by the loader.
 - Test plan: QEMU NVMe/AHCI/virtio-blk, plus a crash-injection test (kill QEMU during writes, then verify replay).
-- Exit criteria: KV survives reboot and crash with the hosted durability contract; a self-update from the cluster switches the A/B slot.
+- Exit criteria: KV survives reboot and crash with the hosted durability contract; a self-update from the cluster switches the A/B slot; a machine switched between tiers keeps its KV state.
 
 **M3: big-cloud NICs (12–16 weeks, in market order).**
 - Work:
@@ -794,7 +795,7 @@ Efforts are for one experienced engineer, in weeks, and are [estimate]s. They gr
   - UDP log console.
   - Watchdog (IPMI/WDAT).
   - HWP enable.
-  - Optional IOMMU (VT-d) groundwork.
+  - IOMMU (VT-d) DMA remapping.
 - Test plan: the reference machines of §8 (1–4), plus a hardware CI rack: PXE or USB boot, power cycling through smart plugs or the BMC.
 - Exit criteria: each reference machine boots from USB/NVMe, gets DHCP, joins the cluster, serves at line rate for 24 h, survives cable unplug/replug, and reboots cleanly.
 
@@ -819,7 +820,7 @@ Efforts are for one experienced engineer, in weeks, and are [estimate]s. They gr
 - Test plan: real boards with a serial console. QEMU raspi4b for boot, SMP and SD only.
 - Exit criteria: boots from SD, serves, and joins a cluster on Pi 4 and Pi 5. On 4 GB/8 GB boards, DMA stays within the limits.
 
-**Optional on demand:** 10/25G NICs (ice without DDP, bnxt, mlx5/mcx-style), megaraid_sas/mpi3mr/smartpqi, xHCI + USB mass storage, TIR drivers with IOMMU.
+**Optional on demand:** 10/25G NICs (ice without DDP, bnxt, mlx5/mcx-style) with RSS and per-CPU queues, megaraid_sas/mpi3mr/smartpqi, xHCI + USB mass storage, a pilot long-tail driver as a TIR workload behind the M4 IOMMU.
 
 **Total to "clouds + curated x86 + Pi + arm64 JIT":** ≈ 50–70 engineer-weeks [estimate].
 
@@ -843,7 +844,7 @@ Efforts are for one experienced engineer, in weeks, and are [estimate]s. They gr
 
 ---
 
-## 11. Risks and open questions for the architect
+## 11. Risks and decisions
 
 **Risks [estimate]:**
 1. **QEMU passing ≠ hardware passing.**
@@ -857,19 +858,20 @@ Efforts are for one experienced engineer, in weeks, and are [estimate]s. They gr
    - GCP gen 3+ is gVNIC/NVMe only.
    - Each needs continuous updates.
 4. **Weak memory ordering on arm64:** device rings written assuming x86 TSO, plus non-coherent DMA on the Pi.
-5. **Security on physical networks:** unauthenticated gossip and peer links; HTTP admin API with no TLS.
+5. **Security on physical networks:** gossip and peer links are authenticated and encrypted and admin requests are signed, but with one shared cluster key (no per-node identity) and an HTTP admin API with no TLS.
 6. **JIT trust:** a second backend doubles the compiler TCB; mitigate with a machine-code verifier.
 
-**Open questions:**
-1. Is Secure Boot a requirement for any target user? If yes: shim review, EV certificate, 2023 CA, plus a policy on the ring-0 JIT.
-2. Is legacy BIOS boot in scope? It is needed for AWS x86 defaults, DigitalOcean, Azure Gen1 and older servers, and means adding the Multiboot2 shim + GRUB/Limine on the image.
-3. Storage ownership: may k10-metal own a whole disk, or must it coexist with other partitions? Who writes the ESP — the Tier 1 image builder for both tiers?
-4. Addressing on bare metal: DHCP only, or static configuration files on the ESP? IPv6?
-5. Cluster authentication and encryption: needed before any "install on any device" story. Out of this task's scope, but it blocks real deployments.
-6. Do we commit now to driver interfaces that allow TIR drivers later, and to IOMMU work in M4?
-7. Priority: Raspberry Pi (cheap, popular, needs the arm64 port first) vs x86 bare metal (servers and mini-PCs, reuses x86).
-8. Should the UEFI loader decide between Tier 2 and Tier 1 at boot from the PCI device list (one universal image)? This needs the Tier 1 image layout to agree.
-9. Scaling on big servers: CPU 0 does all network I/O today, and multi-queue NICs (RSS) are needed for 10G+. Is that in scope for Tier 2 drivers v1?
+**Decisions** (summary of both tiers in REPORT.md §9):
+1. **Secure Boot:** not required in v1. k10-metal and the loader ship unsigned; the docs explain how to turn Secure Boot off or sign with an own key and enroll it (sbctl, MOK). No own Microsoft-signed shim.
+2. **Legacy BIOS:** in scope. M1 adds the Multiboot2 shim and GRUB/Limine on the image.
+3. **Storage ownership:** k10-metal writes only its own GPT partitions (`K10S-DATA` with its own type GUID, next to the ESP) and leaves other partitions alone. The Tier 1 image builder writes the ESP for both tiers; k10-metal never writes FAT (raw A/B kernel slots in `K10S-DATA`).
+4. **Addressing:** DHCPv4 by default and a static IP from `k10s.conf` on the ESP or the command line; IPv4 only on Tier 2 (Tier 1 gets IPv6 from kernel SLAAC).
+5. **Cluster authentication and encryption:** in place: gossip and peer links authenticated and encrypted with the shared, rotatable cluster key, signed admin requests. OS images are signed by the k10s release key (universal-os.md §10).
+6. **Driver interfaces:** `NetDevice`/`BlockDevice` traits with DMA from slot-like regions from M1; first-tier drivers stay in Rust in the kernel; IOMMU (VT-d) in M4, then a TIR-driver pilot on demand.
+7. **Priority:** x86 first. The milestones run in order M1 → M7: clouds and curated x86 before arm64 and the Pi (Pi users get Tier 1 at U3).
+8. **One universal image:** yes. The loader picks the tier from the PCI device list (`tier=auto|linux|metal`) with the layout of universal-os.md §8.4.
+9. **Multi-queue NICs:** not in Tier 2 v1. One queue, network I/O on CPU 0 (enough for 1 GbE); RSS and per-CPU queues come with 10G+ NICs on demand.
+10. **Out of Tier 2:** Wi-Fi (not supported in either tier) and 32-bit targets (Tier 1 best effort, interpreter only).
 
 ---
 

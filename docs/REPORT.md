@@ -172,18 +172,36 @@ the caveats. Highlights beyond §0:
 2. **Replicated state:** per-service replicated KV (Raft per shard group) and leases for singletons.
 3. **Tier 1 images** (U0–U2): PID-1 mode in main, x86 images, signed A/B updates spread over gossip.
 4. **arm64:** interpreter everywhere now; arm64 JIT backend (shared by both tiers).
-5. **Tier 2 M1–M2:** UEFI + ACPI + modern virtio + NVMe + durable KV log on the native kernel; then clouds (ENA,
-   VMBus, gVNIC).
+5. **Tier 2 M1–M2:** UEFI + BIOS + ACPI + modern virtio + NVMe + durable KV log on the native kernel; then clouds
+   (ENA, VMBus, gVNIC) and curated x86 bare metal before the Pi.
 6. **Performance:** register allocation in the JIT, 32-bit TIR ops, cheaper cross-node forwarding (fewer hand-offs).
 7. **Ecosystem:** a Wasm → TIR translator so existing languages (Rust, C, Go, Zig) can target k10s.
 
-## 9. Decisions for you
-Collected from the research reports (details there):
-- Is Secure Boot required? Is legacy BIOS boot in scope? Is Wi-Fi a requirement?
-- Own minimal kernel for Tier 1 from the start, or distro kernels first?
-- Which trust root signs images and authenticates joining nodes?
-- Raspberry Pi first or x86 bare metal first? Keep i386 and armv7 at all?
-- Should OS images travel over gossip or from a release URL?
+## 9. Decisions
+Platform decisions for both tiers (rationale in research/universal-os.md §10 and research/native-hardware.md §11):
+- **Secure Boot:** not required in v1. Images ship unsigned; the docs explain how to disable Secure Boot or sign the
+  image with an own key and enroll it (sbctl, MOK). No own Microsoft-signed shim.
+- **Legacy BIOS:** in scope for both tiers (Tier 1 through GRUB, Tier 2 through a Multiboot2 shim).
+- **Wi-Fi:** not supported; wired Ethernet only (USB Ethernet adapters on Tier 1).
+- **Tier 1 kernel:** our own Linux 6.18 LTS kernels (`vm` and `metal` configs) from U1; the Debian kernel is kept as
+  the bootstrap and fallback flavour.
+- **Trust root:** OS images are signed (ed25519 over the image hash) by the k10s release key, whose public key is
+  built into the image; operators may pin an extra key for their own builds. Joining nodes are authenticated by the
+  cluster key in `k10s.conf` (the shared, rotatable key of today); per-node identity stays roadmap item 1.
+- **Image distribution:** over gossip, as signed content-addressed blobs fetched with `GetBlob`, like code.
+- **Order:** x86 first in both tiers (Tier 1 U1 before the Pi in U3; Tier 2 M1 → M7 in order: clouds and curated x86
+  before arm64 and the Pi).
+- **i386 and armv7:** best effort, Tier 1 only, interpreter only (U5); no 32-bit JIT.
+- **One installed image for both tiers:** the Tier 1 builder owns the ESP, the UEFI loader picks the tier from the PCI
+  device list (`tier=auto|linux|metal`), and both tiers share one raw segmented-log `K10S-DATA` format.
+- **Disks:** k10s uses only its own GPT partitions (ESP and `K10S-DATA`) and leaves other partitions alone.
+- **Addressing:** DHCPv4 by default, static `ip=` in `k10s.conf` or on the command line; IPv6 by kernel SLAAC on
+  Tier 1, IPv4 only on Tier 2.
+- **Entropy:** `GRND_INSECURE` only for non-key seeds; keys, nonces and node secrets use blocking `getrandom`;
+  hardware RNG drivers are built into the kernels.
+- **Drivers:** `NetDevice`/`BlockDevice` traits and slot-like DMA regions from M1 so TIR drivers can implement them
+  later; first-tier drivers in Rust in the kernel; IOMMU (VT-d) in M4.
+- **Multi-queue NICs:** not in Tier 2 v1 (one queue, network I/O on CPU 0); RSS comes with 10G+ NICs on demand.
 
 ## 10. Reproduce
 ```bash

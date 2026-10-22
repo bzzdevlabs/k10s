@@ -3,7 +3,7 @@
 Answers [TASK-universal-os.md](../TASK-universal-os.md). Date: 2026-10-19.
 Companion: [native-hardware.md](native-hardware.md) (Tier 2, k10-metal on physical hardware). Where the two overlap
 (arm64 JIT, Secure Boot, ESP layout, storage format) this report refers to it instead of repeating it, and §8.4
-answers its open question 8 (one image, the loader picks the tier).
+is the layout of one image for both tiers (the loader picks the tier). The decisions are in §10.
 
 ## How to read this report
 
@@ -405,8 +405,8 @@ to one product's distribution dies with the product's priorities.**
   `iface`, `net=none`, `watchdog`, `on_exit`, plus any `k10s node` flag.
 - **First boot** [estimate]: a node with `join` joins the cluster and receives desired state by gossip (the existing
   path); a node without `join` starts as a one-node cluster. Next steps: a "maintenance" state that waits for an
-  operator `apply`/`join` on the admin API (Talos), and **cluster authentication before any "install on any device"
-  story** — gossip and peer links are unauthenticated today [code].
+  operator `apply`/`join` on the admin API (Talos). Joining needs the cluster key from `k10s.conf`: gossip and peer
+  links are authenticated and encrypted with the shared cluster key [code].
 - **Finding a headless node** [estimate]: (1) the console banner prints the address; (2) the DHCP request carries the
   hostname (router DNS); (3) mDNS `_k10s._tcp.local` announcement (~200 lines, receive-and-answer only); (4) members
   list on any node: once one node is known, `k10s status` lists everyone.
@@ -441,8 +441,8 @@ to one product's distribution dies with the product's priorities.**
 
 - **Attack surface** [measured + code]: no shell, no SSH, no other process; root filesystem = initramfs in RAM (writes
   vanish at reboot); the only listeners are the node's HTTP ingress/admin API, gossip UDP and peer TCP.
-- **Needed before deployment on untrusted networks** [estimate]: authenticated + encrypted gossip/peer links and an
-  authenticated admin API (mTLS like Talos), signed images (§4.5).
+- **Untrusted networks:** gossip and peer links are authenticated and encrypted, admin requests are signed [code];
+  signed images (§4.5) come with U2.
 - **Kernel hardening:** `lockdown=integrity`, module signature enforcement (our modules signed at build time, or
   Debian's signed modules), no `/dev/mem`, kexec only of signed kernels. Lockdown blocks nothing k10s uses
   (epoll, memfd, madvise, sockets, `finit_module` of signed modules) [doc + code].
@@ -662,37 +662,39 @@ covers hangs; a crash of PID 1 panics the kernel, which reboots (`panic=5`).
 - Storage: `K10S-DATA` by GPT name; ext4 now, the shared raw segmented-log format later (both tiers).
 - Updates: signed, content-addressed image blobs over gossip; A/B UKI files with boot counting (UEFI), A/B FAT
   partitions with `tryboot` (Pi), GRUB `next_entry` + `fallback` on BIOS; commit after rejoining; phased by placement.
-- Security: no shell/SSH/processes, RAM root, lockdown=integrity, signed modules, signed images; authenticated mesh and
-  admin API before untrusted networks; Secure Boot later (below).
+- Security: no shell/SSH/processes, RAM root, lockdown=integrity, signed modules, signed images; authenticated,
+  encrypted mesh and signed admin requests; no Secure Boot requirement in v1 (below).
 
 **Secure Boot** [doc + estimate]: shipping our own Microsoft-signed shim needs a legal entity, an EV certificate, a
 shim-review pass and the 2023 UEFI CA (the 2011 CA stopped signing in June 2026), plus justifying a ring-0-free but
-JIT-generating node. For v1: Secure Boot off, or **Debian's signed shim + GRUB + kernel with our initramfs** (should
-work because that chain does not verify the initrd — untested here; lockdown then allows only Debian-signed modules,
-which is what the Debian-kernel flavour uses), or MOK enrollment of our own key on machines the user controls. Same conclusion as
-native-hardware.md §0.2.
+JIT-generating node. Decided (§10): v1 ships unsigned and the docs explain how to turn Secure Boot off or sign the
+image with an own key and enroll it (sbctl, MOK) on machines the user controls. Debian's signed shim + GRUB + kernel
+with our initramfs should also boot (that chain does not verify the initrd — untested here; lockdown then allows only
+Debian-signed modules), but it is not a supported path. Same conclusion as native-hardware.md §0.2.
 
-### 8.4 One installed image for both tiers (answer to native-hardware.md open question 8)
+### 8.4 One installed image for both tiers
 
-Proposal [estimate], compatible with both prototypes:
+The decided layout (§10), compatible with both prototypes [estimate]:
 
 ```
 K10S-BOOT (ESP, FAT32, 256 MiB):
   /EFI/BOOT/BOOTX64.EFI | BOOTAA64.EFI   k10boot (Tier 2 loader + tier selector)
   /EFI/Linux/k10s-a.efi, k10s-b.efi      Tier 1 UKIs (A/B, boot-counted), also bootable by systemd-boot/firmware
-  /k10s/metal-a.elf, metal-b.elf         Tier 2 kernels (A/B)
+  /k10s/metal.elf                        Tier 2 kernel written at install (fallback; A/B slots are raw, in K10S-DATA)
   /k10s/tier                             auto | linux | metal
   /k10s.conf                             node config, read by both tiers
   /boot/grub/grub.cfg + BIOS boot part.  BIOS: Tier 1 by default; Tier 2 via the Multiboot2 shim when tier=metal
   (Pi: config.txt, firmware, DTBs, kernel8.img on the same FAT partition — Pi boots Tier 1 directly)
-K10S-DATA: shared persistent store (raw segmented log, one partition type GUID for both tiers)
+K10S-DATA: shared persistent store (raw segmented log + Tier 2 A/B kernel slots, one partition type GUID for both tiers)
 ```
 
 - `tier=auto`: the loader enumerates PCI through the firmware before `ExitBootServices`; if the NIC (and the disk, when
   `K10S-DATA` exists) are on the Tier 2 list it boots k10-metal, otherwise it `LoadImage`s the Tier 1 UKI — no Linux
   boot-protocol code in the loader. A node that fails Tier 2 health checks twice pins `tier=linux` (boot counting).
 - Both tiers announce `tier` and `arch` in gossip capacity metadata, so placement and the update agent can target them.
-- The Tier 1 image builder owns the ESP layout for both tiers (native-hardware.md open question 3).
+- The Tier 1 image builder owns the ESP layout for both tiers. k10-metal never writes FAT: its updates go to raw A/B
+  slots in `K10S-DATA`, which the loader reads through the firmware's Block I/O protocol (native-hardware.md §6.4).
+- k10s writes only its own GPT partitions (ESP, `K10S-DATA`); other partitions on the disk are left alone.
 
 ---
 
@@ -700,17 +702,17 @@ K10S-DATA: shared persistent store (raw segmented log, one partition type GUID f
 
 | Milestone | Content | Exit criteria | Effort |
 |---|---|---|---|
-| **U0** PID 1 mode in main | review and merge `pid1.rs` (split: init, modules + hotplug, dhcp, config); SNTP; entropy handling; tests that run PID 1 logic in a user+mount namespace or a QEMU smoke job | QEMU CI: boot → apply → serve → powerdown on Debian and k10s kernels; DHCP renew test | 2–3 weeks |
-| **U1** x86-64 images | kernel CI (6.18 LTS, `vm` + `metal` configs, signed modules, pinned build metadata); image builder (BIOS+UEFI, UKI); firmware bundle; Realtek/Intel mini-PC bring-up | images < 5 MB (`vm`) / < 40 MB (`metal`); boot-to-serve < 1 s in QEMU; real mini-PC serves after a cold boot | 3–4 weeks |
-| **U2** updates | signed image blobs over gossip, A/B UKIs + boot counting, commit-after-rejoin, rollout waves, GRUB fallback on BIOS | kill power at every step of an update: the node always comes back on a good image; 20-node QEMU rollout with one bad image stops after the first wave | 3–4 weeks |
+| **U0** PID 1 mode in main | review and merge `pid1.rs` (split: init, modules + hotplug, dhcp, config); SNTP; entropy (`GRND_INSECURE` for non-key seeds only, hwrng drivers built in); tests that run PID 1 logic in a user+mount namespace or a QEMU smoke job | QEMU CI: boot → apply → serve → powerdown on Debian and k10s kernels; DHCP renew test | 2–3 weeks |
+| **U1** x86-64 images | kernel CI (6.18 LTS, `vm` + `metal` configs, signed modules, pinned build metadata); image builder (BIOS+UEFI, UKI, the §8.4 ESP layout for both tiers, ext4 `K10S-DATA` until the shared log of native-hardware.md M2); firmware bundle; Realtek/Intel mini-PC bring-up | images < 5 MB (`vm`) / < 40 MB (`metal`); boot-to-serve < 1 s in QEMU; real mini-PC serves after a cold boot | 3–4 weeks |
+| **U2** updates | image blobs signed by the release key (ed25519, operator-pinned extra keys) over gossip, A/B UKIs + boot counting, commit-after-rejoin, rollout waves, GRUB fallback on BIOS | kill power at every step of an update: the node always comes back on a good image; 20-node QEMU rollout with one bad image stops after the first wave | 3–4 weeks |
 | **U3** arm64 + Pi 4/5 (interpreter) | multi-arch commit merged; arm64 kernel config + Pi boot files; `tryboot` A/B; Pi watchdog; arm64 CI under qemu-user + one Pi runner | Pi 4 and Pi 5 join an x86 cluster, survive power cuts, update A/B | 3–4 weeks (+ hardware) |
 | **U4** arm64 JIT | shared with Tier 2 (native-hardware.md M6) | differential suites pass under qemu-user and on Graviton/Pi; red-team suite green | 6–10 weeks |
 | **U5** best-effort tier | Pi 3 (USB Ethernet), armv7, i386 (BIOS) images, interpreter only | boots and serves on a Pi 3B+ and an old PC | 1–2 weeks |
-| **U6** Secure Boot | MOK flow documented; decide on shim review | — | depends on the decision |
+| **U6** Secure Boot docs | how to turn Secure Boot off, and how to sign the image with an own key and enroll it (sbctl, MOK); no own shim | under OVMF with Microsoft keys enrolled, both documented flows boot the image | 1 week |
 
 ---
 
-## 10. Risks and open questions for the architect
+## 10. Risks and decisions
 
 **Risks** [estimate]:
 1. **Kernel maintenance is now ours** for the `vm`/`metal` configs: LTS bumps, CVE tracking, config drift per board.
@@ -720,23 +722,29 @@ K10S-DATA: shared persistent store (raw segmented log, one partition type GUID f
    shipped, curated set.
 3. **PID 1 bugs are fatal** (a panic reboots the machine): keep PID 1 code small, `catch_unwind` around init steps, the
    node's fail-stop already exists, and the watchdog covers hangs.
-4. **Unauthenticated cluster traffic** on home/office networks: blocks "install on any device".
+4. **One shared cluster key** on home/office networks: gossip and peer links are authenticated and encrypted [code],
+   but every key holder is trusted and a stolen node exposes the key until it is rotated (no per-node identity yet).
 5. **Hardware diversity** (USB Ethernet on Pi 3, Realtek revisions, carrier detection, DHCP servers that unicast):
    QEMU cannot model it; budget for a small device lab.
 6. **32-bit decline**: i386 has no distro kernels anymore; keep it best-effort or drop it.
 
-**Open questions:**
-1. Is Wi-Fi a requirement for any target (home users with Pis)? It means a supplicant inside k10s or one exception
-   process — both large.
-2. Kernel flavours: is the 1.5–2 s and ~50 MiB cost of distro kernels acceptable on bare metal in exchange for Secure
-   Boot and zero kernel maintenance, or do we commit to our own `metal` kernel from U1?
-3. Should the image blob be distributed by the cluster (gossip, like code) — implying every node stores images for
-   other architectures — or fetched from a release URL?
-4. Cluster bootstrap: which trust root signs images and authenticates nodes joining (per-cluster key in `k10s.conf`)?
-5. Do we keep i386 and armv7 at all (no JIT, shrinking hardware), or stop at "best effort, interpreter only"?
-6. One installed image for both tiers (§8.4): agree with the Tier 2 owner on the ESP layout, the `tier` switch and the
-   shared `K10S-DATA` format before either builder is written.
-7. Entropy policy: is `GRND_INSECURE` acceptable for runtime seeds (not keys) to avoid boot stalls on RNG-less boards?
+**Decisions** (summary of both tiers in REPORT.md §9):
+1. **Wi-Fi:** not supported. Wired Ethernet only, USB Ethernet adapters included; no supplicant in k10s and no
+   exception process.
+2. **Kernel:** our own 6.18 LTS kernels (`vm` and `metal` configs) from U1; the Debian kernel stays as the bootstrap
+   and fallback flavour. Secure Boot is not required in v1 (§8.3).
+3. **Image distribution:** by the cluster over gossip, as content-addressed blobs like code; the desired state names
+   one image hash per arch and peers fetch it with `GetBlob`.
+4. **Trust root:** images are signed (ed25519 over the hash) by the k10s release key, whose public key is built into
+   the image; operators may pin an extra key for their own builds. Joining nodes are authenticated by the cluster key
+   in `k10s.conf` (today's shared, rotatable key); per-node identity is a later roadmap item.
+5. **i386 and armv7:** best effort, interpreter only, U5; no 32-bit JIT, never Tier 2.
+6. **One installed image for both tiers:** the §8.4 layout. The Tier 1 builder owns the ESP, `k10boot` picks the tier
+   (`tier=auto|linux|metal`), Tier 2 A/B kernel slots are raw in `K10S-DATA`, and both tiers share the raw
+   segmented-log format defined in native-hardware.md M2 (Tier 1 uses ext4 until then).
+7. **Entropy:** `GRND_INSECURE` only for non-key seeds; keys, nonces and node secrets (cluster and admin keys, the
+   guest-clock key) keep blocking `getrandom`; hardware RNG drivers are built into our kernels.
+8. **Order:** x86 first (U1 before the Pi in U3); legacy BIOS stays in scope (GRUB).
 
 ---
 

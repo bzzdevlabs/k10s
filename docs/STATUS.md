@@ -2,7 +2,7 @@
 
 PROJECT STATE: HARDENING
 
-Last updated: 2026-10-21. This file is the single place to learn where the project stands and what comes next.
+Last updated: 2026-10-22. This file is the single place to learn where the project stands and what comes next.
 
 ## State of `main`
 `main` is pushed; every push publishes a dev pre-release (v0.1.0-dev.127 = 23bd4fb, the step 8 integration: ci,
@@ -39,12 +39,12 @@ seek privileges on this machine.
 
 10. **Optional perf** — shard-owned peer links: each shard dials and reads its own link per peer, the mesh thread keeps
     gossip, fetch and accept; expected 7 → 3 wake-ups per forwarded request (≈ −40 % CPU at 1 conn).
-11. **Decisions (user)** — answer docs/REPORT.md §9 and the open questions of docs/research/universal-os.md §10 and
-    docs/research/native-hardware.md; record the answers in docs/REPORT.md.
-12. **Tier 1 universal image** (docs/TASK-universal-os.md, plan in docs/research/universal-os.md §9; prototypes on
-    branch `research/universal-os`): milestones U0 → U1 → U2 → U3 → U4 (= Tier 2 M6) → U5 → U6, one session each.
-13. **Tier 2 native hardware** (docs/TASK-native-hardware.md, plan in docs/research/native-hardware.md §9; prototypes
-    on branch `research/native-hardware`): milestones M1 → M2 → M5 → M6 → M7 → M3 → M4, one session each.
+12. **Tier 1 universal image** (docs/TASK-universal-os.md, plan in docs/research/universal-os.md §9, decisions in
+    docs/REPORT.md §9; prototypes on branch `research/universal-os`): milestones U0 → U1 → U2 → U3 → U4 (= Tier 2 M6)
+    → U5 → U6, one session each.
+13. **Tier 2 native hardware** (docs/TASK-native-hardware.md, plan in docs/research/native-hardware.md §9, decisions
+    in docs/REPORT.md §9; prototypes on branch `research/native-hardware`): milestones M1 → M2 → M3 → M4 → M5 → M6 →
+    M7 (x86 first), one session each.
 14. **Final audit** — adversarial in-depth audit of the whole code base (isolation, JIT, host ABI, crypto and peer
     protocol, admin API, sandbox, KV durability, metal, release pipeline), every finding verified by independent
     refutation before it is reported, then fixed.
@@ -81,5 +81,3 @@ seek privileges on this machine.
   ones (`LINK_BUDGET`, `LINK_SOFT_CAP`, `LINK_HARD_CAP` in `crates/k10-node/src/cluster/mesh.rs`).
 - The hosted node builds for Linux x86-64 only (seccomp filter, `coro.rs`); Tier 1 needs portable versions
   (docs/TASK-universal-os.md).
-- Native-hardware open questions for the user: end of docs/research/native-hardware.md; decisions list in
-  docs/REPORT.md §9.
