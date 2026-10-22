@@ -644,8 +644,9 @@ serves both tiers.
    └─ loader: GRUB (BIOS) | systemd-boot or Tier 2 loader (UEFI) | Pi firmware (config.txt, autoboot.txt)
         └─ Linux kernel (k10s "vm" or "metal" config, or a distro kernel), cmdline: k10s.KEY=VALUE … panic=5
              └─ initramfs (RAM, read-only by convention): /init = k10s, /lib/modules subset, /lib/firmware subset
-                  └─ k10s PID 1: mounts · signals · modalias cold/hotplug + modprobe helper · DHCP/SNTP/mDNS · config · data ·
-                     watchdog · power button · update agent · k10s node (shards, mesh, KV)  — one process
+                  └─ k10s PID 1 (privileged): mounts · signals · modalias cold/hotplug + modprobe helper · DHCP/SNTP ·
+                     config · data · watchdog · power button · update agent
+                       └─ k10s node (child, sandboxed: --user, no capabilities, Landlock, seccomp): shards, mesh, KV
 ```
 
 ### 8.2 PID 1 state machine
@@ -653,8 +654,9 @@ serves both tiers.
 `boot → mounts → coldplug → network (DHCP or static, retry forever in the background) → config (ESP) → data
 partition → time (SNTP, non-blocking) → node start → [update agent: verify, write inactive slot, reboot into it] →
 commit after rejoining the mesh → … → shutdown (signal) → drain → sync → reboot(2)`. Failures never stop the node
-from starting: no network → it serves nothing but keeps retrying; no data partition → memory-only state; the watchdog
-covers hangs; a crash of PID 1 panics the kernel, which reboots (`panic=5`).
+from starting: no network → it serves nothing but keeps retrying; no data partition → memory-only state; a node that
+exits is restarted with backoff; the watchdog (petted while the node answers its health check) covers hangs; a crash
+of PID 1 panics the kernel, which reboots (`panic=5`). Implemented in U0: docs/OS.md.
 
 ### 8.3 Configuration, update, storage, security (summary)
 

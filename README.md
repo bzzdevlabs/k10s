@@ -15,7 +15,8 @@ kube-proxy, sidecars, probes, and a control plane to manage it all. k10s isolate
 - Calls between services on a node are function calls; across nodes, one multiplexed connection per peer.
 - **No control plane**: desired state spreads by gossip, membership is SWIM, and placement is a pure function every
   node computes on its own. Self-healing falls out of membership changes.
-- The same runtime also boots **as its own kernel** (`metal/`), with no Linux underneath.
+- The same runtime also boots **as its own kernel** (`metal/`), with no Linux underneath, or as the only program
+  (PID 1) of a minimal Linux image (`os/`, [docs/OS.md](docs/OS.md)).
 
 Design rationale: [docs/DESIGN.md](docs/DESIGN.md) · evidence from the literature: [docs/research.md](docs/research.md)
 
@@ -129,15 +130,16 @@ Then set the next version (`scripts/set-version.sh X.Y.(Z+1)`, or a minor or maj
 
 | Path | What |
 |---|---|
-| [docs/](docs/) | design, specs ([TIR](docs/TIR.md), [host API](docs/HOSTAPI.md), [JIT ABI](docs/JIT-ABI.md), [Ten](docs/TEN.md)), [node runtime](docs/NODE.md), [status](docs/STATUS.md) |
+| [docs/](docs/) | design, specs ([TIR](docs/TIR.md), [host API](docs/HOSTAPI.md), [JIT ABI](docs/JIT-ABI.md), [Ten](docs/TEN.md)), [node runtime](docs/NODE.md), [PID 1 mode](docs/OS.md), [status](docs/STATUS.md) |
 | [crates/k10-ir](crates/k10-ir) | TIR: codec, validator, reference interpreter, random program generator |
 | [crates/k10-nospec](crates/k10-nospec) | branch-free clamps for host code indexed by guest values (Spectre v1) |
 | [crates/k10-host](crates/k10-host) | the host API, shared by the hosted node and the bare-metal kernel |
 | [crates/k10-lang](crates/k10-lang) | Ten compiler and prelude |
 | [crates/k10-jit](crates/k10-jit) | single-pass TIR → x86-64 compiler (the isolation boundary) |
 | [crates/k10-mesh](crates/k10-mesh) | gossip membership, manifests, bundles, placement, wire protocol |
-| [crates/k10-node](crates/k10-node), [crates/k10s](crates/k10s) | node runtime and the `k10s` binary |
+| [crates/k10-node](crates/k10-node), [crates/k10s](crates/k10s) | node runtime and the `k10s` binary (also PID 1 of a Linux image) |
 | [metal/](metal/) | the node as a bare-metal kernel (PVH, virtio-net, SMP, JIT, cluster member) |
+| [os/](os/) | the k10s Linux kernel configuration and build, the initramfs builder, PID 1 tests under QEMU ([docs/OS.md](docs/OS.md)) |
 | [examples/](examples/) | Ten services: hello, echo, compute (SHA-256), chain, counter, todo, nbody, sort |
 | [bench/](bench/) | Kubernetes / bare-process / k10s benchmark harness and results |
 | [editors/vscode](editors/vscode) | VS Code extension for Ten sources and `.k10s` manifests |

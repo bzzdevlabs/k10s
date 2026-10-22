@@ -1,6 +1,6 @@
 ---
 title: Bare metal
-description: Boot the k10s node runtime as its own kernel in QEMU/KVM, with no Linux underneath, and join it to a cluster.
+description: Boot the k10s node runtime as its own kernel in QEMU/KVM, or as the only program (PID 1) of a minimal Linux image.
 ---
 
 import { Steps, Aside } from '@astrojs/starlight/components';
@@ -142,4 +142,54 @@ node starts empty and waits for `POST /_k10s/apply`.
 	DHCP, IPv4 only, no TLS. There is no OS layer
 	under the kernel, so the independent verification of the JIT's output matters most here. Full list:
 	[metal/README.md](https://github.com/bzzdevlabs/k10s/blob/main/metal/README.md).
+</Aside>
+
+## On a Linux kernel (PID 1 mode)
+
+Where k10-metal has no driver yet, Linux can be the driver layer and `k10s` the only program of the image: no shell,
+no udev, no systemd. Started by the kernel as `/init`, k10s loads drivers by modalias, reads `k10s.conf` from a
+`K10S-BOOT` partition, mounts `K10S-DATA` for its state, runs DHCP and SNTP, and starts the node as a sandboxed child
+(its own user, no capabilities, Landlock, seccomp), restarting it if it exits. The power button drains the node and
+powers off. [docs/OS.md](https://github.com/bzzdevlabs/k10s/blob/main/docs/OS.md) has the boot sequence and every
+key.
+
+<Steps>
+
+1. Build the k10s kernel (Linux 6.18, profile for QEMU/KVM guests; needs flex, bison, bc and the libelf headers),
+   from the repository:
+
+   ```bash
+   os/kbuild.sh   # prints target/os/kernel-x86_64-vm/arch/x86/boot/bzImage
+   ```
+
+2. Make an initramfs with the static `k10s` (the musl release archive) as `/init`, and your admin key, since the
+   image has no shell to read a generated one:
+
+   ```bash
+   k10s keygen -o admin.key
+   printf 'admin-token-file=/etc/admin.key\n' > k10s.conf
+   python3 os/mkinitramfs.py k10s.cpio.zst --init ./k10s --conf k10s.conf --file admin.key:/etc/admin.key:0600
+   ```
+
+3. Boot it and deploy:
+
+   ```bash
+   qemu-system-x86_64 -accel kvm -m 512M -nodefaults -display none -serial stdio \
+     -kernel target/os/kernel-x86_64-vm/arch/x86/boot/bzImage -initrd k10s.cpio.zst \
+     -append "console=ttyS0 panic=5" -device virtio-rng-pci \
+     -netdev user,id=n0,hostfwd=tcp:127.0.0.1:8080-:80 -device virtio-net-pci,netdev=n0
+   k10s apply examples/app.k10s --node 127.0.0.1:8080 --admin-token-file admin.key
+   curl http://127.0.0.1:8080/hello/
+   ```
+
+</Steps>
+
+Settings go on the kernel command line as `k10s.KEY=VALUE` (`k10s.ip=10.0.0.5/24,10.0.0.1`, `k10s.watchdog=1`), or
+as `KEY=VALUE` lines in `k10s.conf`; keys init does not use become `k10s node` flags (`k10s.join=10.0.0.2`). A
+distribution kernel works too, with its modules in the initramfs: `os/debian-kernel.sh` and `os/test.sh` show how
+for Debian 13's.
+
+<Aside type="caution" title="PID 1 mode limits">
+	An image is a kernel and an initramfs for now: disk images with BIOS and UEFI boot, signed A/B updates, arm64 and
+	the Raspberry Pi come next. x86-64 only; tested under QEMU, not yet on physical machines.
 </Aside>

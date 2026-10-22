@@ -99,3 +99,8 @@ Every release publishes these files. `V` is the version (`0.1.0`, or `0.1.1-dev.
 	Nothing else is needed on a node: no container runtime, no CNI plugin, no etcd. The same binary is the CLI you
 	use from your laptop.
 </Aside>
+
+## As the operating system
+
+A node needs no Linux distribution either: the static `k10s` can be the only program (PID 1) of a Linux image, a
+kernel plus an initramfs, or the runtime boots as its own kernel. See [Bare metal](/k10s/guides/bare-metal/).

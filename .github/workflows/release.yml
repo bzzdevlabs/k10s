@@ -189,6 +189,37 @@ jobs:
       - name: scripts/ci-test.sh metal-selftest
         run: scripts/ci-test.sh metal-selftest
 
+  os:
+    name: PID 1 mode under QEMU/KVM (os/test.sh)
+    needs: version
+    if: needs.version.outputs.released == 'false'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      K10S_BUILD_VERSION: ${{ needs.version.outputs.version }}
+      K10S_BUILD_COMMIT: ${{ needs.version.outputs.build }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/toolchains
+        with:
+          qemu: "true"
+      - name: Kernel build and image tools
+        run: sudo apt-get install -y -q --no-install-recommends flex bison bc libelf-dev dosfstools mtools fdisk zstd
+      # The pinned kernel.org tarball, the Debian kernel package and the k10s kernel built from them.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/os/linux-*.tar.xz
+            target/os/linux-image-*.deb
+            target/os/kernel-x86_64-vm/arch/x86/boot/bzImage
+            target/os/kernel-x86_64-vm/.k10s-stamp
+          key: os-${{ hashFiles('os/kbuild.sh', 'os/debian-kernel.sh', 'os/kconfig/*') }}
+      - name: scripts/ci-test.sh os
+        run: scripts/ci-test.sh os
+
   metal-e2e:
     name: Bare-metal kernel end-to-end (metal/test.sh, non-blocking)
     needs: version
@@ -214,7 +245,7 @@ jobs:
 
   publish:
     name: Publish ${{ needs.version.outputs.tag }}
-    needs: [version, build, dist-test, test, metal]
+    needs: [version, build, dist-test, test, metal, os]
     if: needs.version.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:

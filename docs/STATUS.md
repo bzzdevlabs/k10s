@@ -25,6 +25,12 @@ release, pages and vscode workflows green; glibc, musl, metal, bench, examples a
   in ≈ 80 ms, output pinned by a test), rejoin through tombstone addresses and `DATA/peers`, KV store with ordered
   flushes and rewrite-from-memory on I/O errors; each peer link gets 1 MiB per mesh-loop iteration (bytes read plus
   replies queued), so a peer flooding requests cannot stall gossip.
+- Tier 1 PID 1 mode (U0, docs/OS.md): `k10s` as `/init` of a Linux image: modalias cold/hotplug and modprobe helper,
+  `K10S-BOOT` config and `K10S-DATA` data partitions, RFC 2131 DHCP (renew, rebind, NAK), SNTP, hostname, health-gated
+  watchdog, power button; the node runs as a sandboxed child (`--user 65532:65532`), restarted with backoff. k10s
+  kernel 6.18.57 `vm` profile (`os/kbuild.sh`, seccomp + Landlock) and the pinned Debian 13 kernel; `os/test.sh`
+  (CI suite `os`, release gate) boots both under QEMU: apply, serve, power off, state kept across reboots; DHCP
+  renew test (and the cluster node's restart on a new address). Non-key seeds use `GRND_INSECURE`.
 - Releases: SemVer; tag `vX.Y.Z` on main → stable release, every push to main → `vX.Y.Z-dev.N` pre-release.
 - Performance vs 08f2921 (`bench/k10s/ab.py --same`, 4 interleaved rounds, host load ≈ 7 from the benchmark itself;
   medians): single node within ±2.5 %; local ingress −4 %; forwarded requests −5 % at c=1 (CPU per request +7 %) and
@@ -41,7 +47,9 @@ seek privileges on this machine.
     gossip, fetch and accept; expected 7 → 3 wake-ups per forwarded request (≈ −40 % CPU at 1 conn).
 12. **Tier 1 universal image** (docs/TASK-universal-os.md, plan in docs/research/universal-os.md §9, decisions in
     docs/REPORT.md §9; prototypes on branch `research/universal-os`): milestones U0 → U1 → U2 → U3 → U4 (= Tier 2 M6)
-    → U5 → U6, one session each.
+    → U5 → U6, one session each. U0 done (PID 1 mode); next U1 (x86-64 images: `metal` kernel profile, signed modules,
+    image builder with the §8.4 ESP layout, firmware bundle, mini-PC bring-up). The multi-arch `coro.rs`/JIT-gating
+    commit of the prototype branch belongs to U3.
 13. **Tier 2 native hardware** (docs/TASK-native-hardware.md, plan in docs/research/native-hardware.md §9, decisions
     in docs/REPORT.md §9; prototypes on branch `research/native-hardware`): milestones M1 → M2 → M3 → M4 → M5 → M6 →
     M7 (x86 first), one session each.
@@ -61,6 +69,7 @@ seek privileges on this machine.
 | x86-64 JIT (single pass, SFI masking, safepoints, speculation hardening) | `crates/k10-jit` | differential soak, red-team, objdump |
 | Node runtime, sandbox, CLI | `crates/k10-node`, `crates/k10s` | unit, cluster, chaos, soak, abuse, auth |
 | Bare-metal node (PVH, virtio-net, smoltcp, JIT, SMP, cluster member) | `metal/` | `test.sh`, `cluster-test.sh` |
+| PID 1 mode (Tier 1), k10s kernel config and build, initramfs builder | `crates/k10s/src/pid1`, `os/` | unit + `os/test.sh` (QEMU) |
 | Baselines (Kubernetes, bare processes), loadgen, k10s harness, A/B driver | `bench/` | — |
 | Editor extension, documentation site | `editors/vscode`, `website/` | — |
 | CI and releases | `.github/`, `scripts/` | — |
@@ -80,4 +89,7 @@ seek privileges on this machine.
   unsent-byte cap or per-iteration budget (a key holder that stops reading grows the write buffer): port the hosted
   ones (`LINK_BUDGET`, `LINK_SOFT_CAP`, `LINK_HARD_CAP` in `crates/k10-node/src/cluster/mesh.rs`).
 - The hosted node builds for Linux x86-64 only (seccomp filter, `coro.rs`); Tier 1 needs portable versions
-  (docs/TASK-universal-os.md).
+  (docs/TASK-universal-os.md, U3).
+- PID 1 mode is tested under QEMU only. Needs real hardware: drivers outside QEMU's virtio set (NICs, AHCI/NVMe, USB),
+  firmware files, asynchronous USB storage (`bootwait`), hardware watchdogs and RTCs, real DHCP servers and NTP pools
+  (U1 mini-PC bring-up).

@@ -17,7 +17,8 @@ cargo test
 K10S_BACKEND=interp cargo test   # the same suites on the reference interpreter
 ```
 
-CI runs `scripts/ci-test.sh unit musl metal-selftest metal dist` on every pull request (`metal` non-blocking), and
+CI runs `scripts/ci-test.sh unit musl metal-selftest metal os dist` on every pull request (`metal` non-blocking;
+`os` boots PID 1 mode under QEMU on the Debian and k10s kernels), and
 the non-blocking chaos and soak `campaign` on pull requests and `main`.
 
 ## Rules of thumb

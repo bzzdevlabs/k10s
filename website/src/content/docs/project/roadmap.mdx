@@ -38,7 +38,8 @@ import { Aside } from '@astrojs/starlight/components';
 1. **Cluster security:** per-node identity and signed bundles, on top of today's authenticated and encrypted gossip
    and peer links.
 2. **Replicated state:** a replicated key-value store per service (Raft per shard group) and leases for singletons.
-3. **Images:** a PID-1 mode and signed A/B OS updates spread over gossip.
+3. **Images:** bootable x86-64 images (BIOS and UEFI) around the PID 1 mode, then signed A/B OS updates spread over
+   gossip.
 4. **arm64:** a JIT backend shared by hosted and bare-metal nodes.
 5. **Native bare metal:** UEFI, ACPI, modern virtio, NVMe and a durable key-value log; then cloud NICs.
 6. **Performance:** register allocation in the JIT, 32-bit TIR operations, cheaper cross-node forwarding.

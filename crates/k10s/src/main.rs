@@ -79,8 +79,20 @@ The default backend is $K10S_BACKEND (jit|interp) if set, else jit.";
 /// Build version, e.g. `0.1.1-dev.45+1a2b3c4` (scripts/version.sh via build.rs).
 const VERSION: &str = env!("K10S_VERSION_FULL");
 
+/// `k10s node` flags that take no value.
+const NODE_BOOLEANS: &[&str] = &["log-stderr", "pin", "insecure-unauthenticated-cluster"];
+
+mod pid1;
+
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let argv: Vec<String> = std::env::args().collect();
+    if pid1::is_init(argv.first().map_or("", String::as_str)) {
+        pid1::main();
+    }
+    if let Some(module) = pid1::modprobe_request(&argv) {
+        return pid1::modprobe(module);
+    }
+    let args = &argv[1.min(argv.len())..];
     let Some(cmd) = args.first() else {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
@@ -304,7 +316,7 @@ fn cmd_keygen(args: &[String]) -> Result<(), String> {
 }
 
 fn cmd_node(args: &[String]) -> Result<(), String> {
-    let a = Args::parse(args, &["log-stderr", "pin", "insecure-unauthenticated-cluster"])?;
+    let a = Args::parse(args, NODE_BOOLEANS)?;
     a.check_known(&[
         "http", "data", "shards", "backend", "name", "mem", "kv-max", "conn-buffer-max", "snapshots", "idle-timeout", "idle-spin-us", "log-stderr",
         "pin", "rpc", "gossip", "join", "advertise", "probe-ms", "suspicion-mult", "leave-grace-ms",

@@ -89,13 +89,20 @@ pub fn wall_ms() -> u64 {
     ts.tv_sec as u64 * 1000 + ts.tv_nsec as u64 / 1_000_000
 }
 
-/// 64 random bits from the kernel (used to seed per-shard generators).
+/// 64 random bits for non-key seeds (shard generators, node ids, shuffles, DHCP and NTP nonces): never blocks, even
+/// before the kernel's generator is seeded at early boot (`GRND_INSECURE`). Keys and nonces use [`fill_random`].
 pub fn getrandom_u64() -> u64 {
+    const GRND_INSECURE: libc::c_uint = 4;
     let mut v = 0u64;
+    let p = &mut v as *mut u64 as *mut libc::c_void;
     // SAFETY: writes at most 8 bytes into `v`.
-    let r = unsafe { libc::getrandom(&mut v as *mut u64 as *mut libc::c_void, 8, 0) };
+    let mut r = unsafe { libc::getrandom(p, 8, GRND_INSECURE) };
+    if r < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL) {
+        // Linux < 5.6 has no GRND_INSECURE.
+        // SAFETY: as above.
+        r = unsafe { libc::getrandom(p, 8, libc::GRND_NONBLOCK) };
+    }
     if r != 8 {
-        // Fall back to time-based entropy (getrandom never fails for 8 bytes on Linux ≥ 3.17 once seeded).
         v = mono_ns() ^ wall_ms().rotate_left(32) ^ (std::process::id() as u64).rotate_left(17);
     }
     v

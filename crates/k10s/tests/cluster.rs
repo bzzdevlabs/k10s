@@ -1038,3 +1038,16 @@ fn measure_idle() {
     drop(nodes);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Wildcard cluster binds without `--advertise`: the advertised address is probed before the sandbox, which forbids
+/// creating sockets afterwards (the probe used to kill the node with SIGSYS).
+#[test]
+fn wildcard_binds_advertise_a_probed_address() {
+    let dir = tmpdir("wildcard");
+    let args: Vec<String> = ["--http", "127.0.0.1:0", "--gossip", "0.0.0.0:0", "--rpc", "0.0.0.0:0"].map(String::from).to_vec();
+    let n = support::spawn("wild", &dir.join("data"), &args);
+    assert!(!n.gossip.is_empty() && !n.gossip.starts_with("0.0.0.0:"), "advertised gossip address {}\n{}", n.gossip, n.log());
+    assert!(n.log().contains("seccomp=kill") || std::env::var("K10S_SANDBOX").is_ok_and(|m| m != "on"), "{}", n.log());
+    drop(n);
+    let _ = std::fs::remove_dir_all(&dir);
+}

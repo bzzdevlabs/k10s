@@ -663,18 +663,20 @@ pub struct ClusterBound {
     inbox: Arc<MeshInbox>,
     udp: UdpSocket,
     listener: sys::Fd,
+    /// The advertised IP when nothing more specific is known, probed here: the sandbox forbids new sockets.
+    fallback_ip: IpAddr,
 }
 
 impl ClusterBound {
     /// After the sandbox, before the node serves (so the cluster status is attached as soon as the ingress answers):
     /// the store, the node id and the persisted incarnation.
     pub fn open(self, data: Option<&Path>) -> io::Result<ClusterSetup> {
-        let ClusterBound { cfg, inbox, udp, listener } = self;
+        let ClusterBound { cfg, inbox, udp, listener, fallback_ip } = self;
         let id = store::node_id(data)?;
         let store = Store::open(data)?;
         // A restarted node keeps its id: start above any incarnation it used before (refutes stale Dead records).
         let incarnation = store.next_incarnation(sys::wall_ms())?;
-        Ok(ClusterSetup { cfg, inbox, udp, listener, store, id, incarnation })
+        Ok(ClusterSetup { cfg, inbox, udp, listener, fallback_ip, store, id, incarnation })
     }
 }
 
@@ -684,6 +686,7 @@ pub struct ClusterSetup {
     inbox: Arc<MeshInbox>,
     udp: UdpSocket,
     listener: sys::Fd,
+    fallback_ip: IpAddr,
     store: Store,
     id: NodeId,
     incarnation: u64,
@@ -705,7 +708,8 @@ impl ClusterSetup {
         let udp = UdpSocket::bind(cfg.gossip_bind).map_err(|e| io::Error::new(e.kind(), format!("gossip {}: {e}", cfg.gossip_bind)))?;
         let listener =
             sys::tcp_listen(&cfg.rpc_bind, 1024).map_err(|e| io::Error::new(e.kind(), format!("rpc {}: {e}", cfg.rpc_bind)))?;
-        Ok(ClusterBound { cfg, inbox: Arc::new(MeshInbox::new()?), udp, listener })
+        let fallback_ip = if cfg.advertise.is_none() && cfg.gossip_bind.ip().is_unspecified() { detect_ip() } else { cfg.gossip_bind.ip() };
+        Ok(ClusterBound { cfg, inbox: Arc::new(MeshInbox::new()?), udp, listener, fallback_ip })
     }
 
     pub fn id(&self) -> NodeId {
@@ -719,7 +723,7 @@ impl ClusterSetup {
 
     /// Starts the applier and the mesh thread (joins the seeds). The node must run with this setup's router.
     pub fn start(self, node: Arc<NodeShared>) -> io::Result<Cluster> {
-        let ClusterSetup { cfg, inbox, udp, listener, store, id, incarnation } = self;
+        let ClusterSetup { cfg, inbox, udp, listener, fallback_ip, store, id, incarnation } = self;
         let gossip_bound = udp.local_addr()?;
         let rpc_bound = sys::local_addr(listener.raw())?;
         let http_bound = *node.http_addr.get().expect("node started");
@@ -728,7 +732,7 @@ impl ClusterSetup {
                 Some(ip) => ip,
                 None if !bound.ip().is_unspecified() => bound.ip(),
                 None if !gossip_bound.ip().is_unspecified() => gossip_bound.ip(),
-                None => detect_ip(),
+                None => fallback_ip,
             };
             SocketAddr::new(ip, bound.port())
         };

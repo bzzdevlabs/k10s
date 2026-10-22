@@ -6,6 +6,8 @@
 #   metal-selftest  kernel self tests (k10.selftest) under QEMU/KVM on 1 and 4 CPUs
 #   metal           metal/test.sh end-to-end (TEST_PORT, default 18090)
 #   dist            the k10s integration tests against the static k10s of dist/ (K10S_BIN), both backends
+#   os              PID 1 mode under QEMU (os/test.sh): boot, apply, serve, power off on the Debian and k10s
+#                   kernels; DHCP renew, rebind and address change
 # env: CARGO_TEST_ARGS (extra cargo test args), K10S_VERSION_FULL (metal-selftest checks the banner)
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -84,6 +86,7 @@ for suite in "$@"; do
         [[ -x bench/bin/loadgen ]] || run env NO_DOCKER=1 bench/workloads/build.sh
         run env -u CARGO_TARGET_DIR metal/test.sh
         ;;
+    os) run os/test.sh ;;
     *)
         echo "ci-test.sh: unknown suite '$suite'" >&2
         exit 2
