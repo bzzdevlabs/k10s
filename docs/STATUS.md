@@ -5,8 +5,9 @@ PROJECT STATE: HARDENING
 Last updated: 2026-10-22. This file is the single place to learn where the project stands and what comes next.
 
 ## State of `main`
-`main` is pushed; every push publishes a dev pre-release (v0.1.0-dev.127 = 23bd4fb, the step 8 integration: ci,
-release, pages and vscode workflows green; glibc, musl, metal, bench, examples and source archives and `SHA256SUMS`).
+`main` is pushed; every push publishes a dev pre-release (v0.1.0-dev.132 = 5cd99cc, step 12 U0: ci, release, pages
+workflows green, the `os` QEMU suite gating the release; glibc (≥ 2.34), musl, metal, bench, examples and source
+archives and `SHA256SUMS`).
 `main` contains:
 - Isolation: SFI-masked JIT and interpreter, validator, red-team and differential suites, objdump encoder fuzzing and
   SFI verifier tests.
