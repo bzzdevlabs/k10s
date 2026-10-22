@@ -72,7 +72,9 @@ build_k10s() {
     check_version "$STAGE/$name/k10s" --version "k10s $K10S_VERSION_FULL"
     if [[ $triple == *-gnu ]]; then
         local glibc
-        glibc=$(objdump -T "$STAGE/$name/k10s" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)
+        # The version needs the loader enforces: WEAK ones (std's optional newer symbols, e.g. pidfd_spawnp) are not.
+        glibc=$(readelf -V "$STAGE/$name/k10s" | grep 'Name: GLIBC_' | grep -v 'Flags: WEAK' | grep -o 'GLIBC_[0-9.]*' |
+            sed 's/GLIBC_//' | sort -uV | tail -1)
         echo "   needs glibc >= $glibc"
         if [[ $(printf '%s\n' "$glibc" "$GLIBC_MAX" | sort -V | tail -1) != "$GLIBC_MAX" ]]; then
             echo "dist.sh: the gnu k10s needs glibc $glibc > GLIBC_MAX=$GLIBC_MAX (README.md promises $GLIBC_MAX)" >&2
