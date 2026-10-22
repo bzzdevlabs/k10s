@@ -417,13 +417,44 @@ enum Halt {
     Reboot,
 }
 
+/// The node, by `posix_spawn` of our own binary: std's spawn would link glibc symbols newer than the gnu build's floor
+/// (2.34). The child starts with an empty signal mask and default dispositions; it reads its secrets, binds, then
+/// sandboxes itself.
 fn spawn_node(cfg: &Config) -> io::Result<libc::pid_t> {
-    use std::os::unix::process::CommandExt;
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStringExt;
     let args = cfg.node_args(DATA, crate::NODE_BOOLEANS);
     say!("node: k10s {}", args.join(" "));
-    // The child starts with an empty signal mask (std resets it); it reads its secrets, binds, then sandboxes itself.
-    let child = std::process::Command::new("/proc/self/exe").arg0("k10s").args(&args).stdin(std::process::Stdio::null()).spawn()?;
-    Ok(child.id() as libc::pid_t)
+    let argv: Vec<CString> =
+        std::iter::once("k10s").chain(args.iter().map(String::as_str)).map(CString::new).collect::<Result<_, _>>().map_err(io::Error::other)?;
+    let env: Vec<CString> = std::env::vars_os()
+        .map(|(k, v)| CString::new([k.into_vec(), b"=".to_vec(), v.into_vec()].concat()))
+        .collect::<Result<_, _>>()
+        .map_err(io::Error::other)?;
+    let ptrs = |v: &[CString]| v.iter().map(|c| c.as_ptr() as *mut libc::c_char).chain([std::ptr::null_mut()]).collect::<Vec<_>>();
+    let (argv_p, env_p) = (ptrs(&argv), ptrs(&env));
+    let mut pid = 0;
+    // SAFETY: initialized attributes and file actions, NULL-terminated argv/envp of live C strings.
+    let r = unsafe {
+        let mut attr: libc::posix_spawnattr_t = std::mem::zeroed();
+        let mut fa: libc::posix_spawn_file_actions_t = std::mem::zeroed();
+        libc::posix_spawnattr_init(&mut attr);
+        libc::posix_spawn_file_actions_init(&mut fa);
+        let mut empty: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut empty);
+        libc::posix_spawnattr_setsigmask(&mut attr, &empty);
+        libc::posix_spawnattr_setsigdefault(&mut attr, &signal_set());
+        libc::posix_spawnattr_setflags(&mut attr, (libc::POSIX_SPAWN_SETSIGMASK | libc::POSIX_SPAWN_SETSIGDEF) as libc::c_short);
+        libc::posix_spawn_file_actions_addopen(&mut fa, 0, c"/dev/null".as_ptr(), libc::O_RDONLY, 0);
+        let r = libc::posix_spawn(&mut pid, c"/proc/self/exe".as_ptr(), &fa, &attr, argv_p.as_ptr(), env_p.as_ptr());
+        libc::posix_spawn_file_actions_destroy(&mut fa);
+        libc::posix_spawnattr_destroy(&mut attr);
+        r
+    };
+    if r != 0 {
+        return Err(io::Error::from_raw_os_error(r));
+    }
+    Ok(pid)
 }
 
 fn sigwait_for(set: &libc::sigset_t, timeout: Duration) -> Option<libc::c_int> {
