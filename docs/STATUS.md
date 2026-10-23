@@ -5,9 +5,9 @@ PROJECT STATE: HARDENING
 Last updated: 2026-10-23. This file is the single place to learn where the project stands and what comes next.
 
 ## State of `main`
-`main` is pushed; every push publishes a dev pre-release (v0.1.0-dev.132 = 5cd99cc, step 12 U0: ci, release, pages
-workflows green, the `os` QEMU suite gating the release; glibc (≥ 2.34), musl, metal, bench, examples and source
-archives and `SHA256SUMS`).
+`main` is pushed; every push publishes a dev pre-release (v0.1.0-dev.134 = 83362ec, step 12 U1: ci, release, pages
+workflows green, the `os` QEMU suite gating the release (boot to first HTTP 200 in CI: median 551 ms); glibc (≥ 2.34),
+musl, metal, bench, examples and source archives, the `vm` and `metal` disk images and their UKIs, `SHA256SUMS`).
 `main` contains:
 - Isolation: SFI-masked JIT and interpreter, validator, red-team and differential suites, objdump encoder fuzzing and
   SFI verifier tests.
