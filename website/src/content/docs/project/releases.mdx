@@ -22,10 +22,10 @@ and bare metal), the kernel's boot banner, `mkbundle --version` and `-version` o
 
 ## Artifacts
 
-Every release publishes the [archives listed on the installation page](/k10s/start/installation/#release-archives)
-and `SHA256SUMS`. The benchmark workloads are also container images, `ghcr.io/bzzdevlabs/k10s-bench-<workload>:V`
+Every release publishes the [archives and disk images listed on the installation
+page](/k10s/start/installation/#release-archives) and `SHA256SUMS`. The benchmark workloads are also container images, `ghcr.io/bzzdevlabs/k10s-bench-<workload>:V`
 (`echo`, `compute`, `chain`, `counter`), with the moving tags `latest` (last stable release) and `dev` (last `main`
-build). `scripts/dist.sh` builds the same archives locally into `dist/`.
+build). `scripts/dist.sh` builds the same archives locally into `dist/`, `os/images.sh` the disk images.
 
 ## Cutting a release
 

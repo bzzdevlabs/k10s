@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashSet};
 
 /// Keys consumed by init (docs/OS.md); all others are node flags.
 pub const INIT_KEYS: &[&str] =
-    &["net", "ip", "dns", "iface", "netwait", "ntp", "modules", "data", "bootwait", "watchdog", "prune_modules", "debug"];
+    &["net", "ip", "dns", "iface", "netwait", "ntp", "modules", "data", "bootwait", "grow", "watchdog", "prune_modules", "debug"];
 
 /// The node's identity when `user` is not configured (no account database is needed for numeric ids).
 pub const NODE_USER: &str = "65532:65532";

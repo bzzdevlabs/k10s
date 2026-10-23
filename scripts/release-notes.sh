@@ -53,6 +53,9 @@ cat <<EOF
 | \`k10s-$v-x86_64-unknown-linux-gnu.tar.gz\` | \`k10s\` linked against glibc (>= 2.34) |
 | \`k10s-examples-$v.tar.gz\` | example services: Ten sources, compiled \`.k10\` modules, \`app.k10s\` |
 | \`k10s-metal-$v-x86_64.tar.gz\` | bare-metal kernel (\`k10-metal.elf\`, \`k10-metal-embedded.elf\`), \`bundle.k10b\`, \`mkbundle\` |
+| \`k10s-os-$v-x86_64-vm.img.xz\` | disk image, BIOS + UEFI: \`k10s\` as PID 1 of a Linux kernel, for VMs and clouds |
+| \`k10s-os-$v-x86_64-metal.img.xz\` | the same for PCs and servers: signed driver modules, NIC firmware (own licences) |
+| \`k10s-os-$v-x86_64-{vm,metal}.efi\` | the UKIs of these images (PXE, other UEFI loaders) |
 | \`k10s-bench-$v-linux-amd64.tar.gz\` | benchmark workloads and \`loadgen\` (static Go) |
 | \`k10s-$v-src.tar.gz\` | sources of this commit, version-stamped |
 

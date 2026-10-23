@@ -4,9 +4,9 @@ The static `k10s` binary is the only userspace program of a Linux image: the ker
 shell, udev, systemd, DHCP daemon or SSH. This is Tier 1 of the platform plan (docs/REPORT.md §9,
 docs/research/universal-os.md §8–9); Tier 2 is the native kernel in `metal/`.
 
-What exists today (milestone U0): PID 1 mode in `crates/k10s/src/pid1/`, the k10s kernel configuration and build
-(`os/`), and QEMU tests on the k10s kernel and the Debian kernel. Bootable disk images (BIOS and UEFI), signed
-updates, arm64 and the Raspberry Pi come next (U1–U3); until then an image is a kernel plus an initramfs.
+What exists today (milestones U0 and U1): PID 1 mode in `crates/k10s/src/pid1/`, the k10s kernels (`vm` and `metal`
+profiles, `os/`), x86-64 disk images that boot on BIOS and UEFI, and QEMU tests of all of them. Signed A/B updates,
+arm64 and the Raspberry Pi come next (U2, U3).
 
 ## Boot sequence
 
@@ -24,14 +24,19 @@ of a container, `docker run … k10s node`, it keeps its normal command line).
 3. **Configuration:** the GPT partition named `K10S-BOOT` (FAT) is mounted read-only on `/boot`, root-only
    (files 0600), and its `k10s.conf` merged (keys below).
 4. **Network:** loopback and the first Ethernet interface (`iface` to choose). A static `ip`, else an address the
-   kernel set (`ip=`), else DHCPv4: the client follows RFC 2131 (renews at T1 by unicast to its server, rebinds at T2
+   kernel set (`ip=`), else DHCPv4 once the link is up (carrier, up to `netwait`): the client follows RFC 2131 (renews at T1 by unicast to its server, rebinds at T2
    by broadcast, starts over on a NAK or at the end of the lease), writes `/etc/resolv.conf` from the lease, and keeps
    retrying in the background. Init waits up to 30 s for the first lease, since a cluster node advertises the
    interface's address; when the address changes, a node that advertises it is restarted. IPv6 addresses come from
    the kernel's SLAAC.
 5. **Hostname:** `name`, else `k10s-` and the last three bytes of the MAC (the node's default name).
 6. **Data:** the partition named `K10S-DATA` (or `data=/dev/X[:FSTYPE]`), ext4 by default, on `/data`, handed to the
-   node's user when fresh; without one the node's state lives in RAM.
+   node's user when fresh; without one the node's state lives in RAM. When `K10S-DATA` is the last partition of a GPT
+   disk with free space behind it (an image written to a larger disk), init grows it to the end of the disk first:
+   backup GPT moved to the disk's end, partition extended to the last 1 MiB boundary (backup table written and synced
+   before the primary), `BLKPG_RESIZE_PARTITION`, then the mounted ext4 is grown online (`EXT4_IOC_RESIZE_FS`). A
+   filesystem smaller than its partition (power lost between the two steps) is grown on the next boot. Other
+   partitions are never touched; `grow=0` keeps the size.
 7. **Time:** an SNTP client (RFC 4330) sets the clock in the background from `ntp`, else the lease's NTP servers,
    else `pool.ntp.org`; offsets of 128 ms or more step the clock, smaller ones slew it, and it polls every 17 minutes.
    A reply must echo the random transmit timestamp of its request (SNTP itself is unauthenticated).
@@ -61,11 +66,12 @@ prefix). Init consumes these keys:
 | `ip` | static address `A.B.C.D/P[,GATEWAY]` | DHCP |
 | `dns` | name servers `A.B.C.D,…` (overrides the lease's) | the lease's |
 | `iface` | interface to configure | first Ethernet interface by name |
-| `netwait` | seconds to wait for an Ethernet interface | 10 |
+| `netwait` | seconds to wait for an Ethernet interface, then for its link | 10 |
 | `ntp` | `HOST[:PORT],…`, or `none` | the lease's, else `pool.ntp.org` |
 | `modules` | `none` to skip module loading | load by modalias |
 | `data` | `/dev/X[:FSTYPE]`, or `none` | partition `K10S-DATA`, ext4 |
 | `bootwait` | milliseconds to wait for `K10S-BOOT` to appear | 0 |
+| `grow` | `0` to keep the size of `K10S-DATA` | grow to the end of the disk |
 | `watchdog` | `1` to arm `/dev/watchdog` | off |
 | `prune_modules` | `1` to free unused module files from the RAM initramfs after boot | off |
 | `debug` | `1` to log each module match | off |
@@ -82,24 +88,94 @@ Keys, nonces and node secrets use blocking `getrandom`; non-key seeds (node ids,
 transaction ids, SNTP nonces) use `GRND_INSECURE`, which never blocks at early boot. The k10s kernel builds the
 hardware RNG drivers in (`HW_RANDOM`, `HW_RANDOM_VIRTIO`), so the kernel's generator is seeded early.
 
+## Disk images
+
+`os/images.sh` builds the two x86-64 images of a release; both boot on BIOS and on UEFI (Secure Boot off) from any
+disk, and a release publishes them with their UKIs:
+
+| Release file | For | Kernel | Compressed size |
+|---|---|---|---|
+| `k10s-os-V-x86_64-vm.img.xz` | QEMU/KVM guests and clouds | `vm` profile, every driver built in; console on serial | 4.3 MB |
+| `k10s-os-V-x86_64-metal.img.xz` | PCs, mini-PCs, servers | `metal` profile, signed driver modules, NIC firmware; console on the screen | 6.7 MB |
+| `k10s-os-V-x86_64-{vm,metal}.efi` | PXE or another UEFI loader | the slot-A UKI of the image | 4.2 / 6.6 MB |
+
+Write an image to the whole disk (`xz -dc IMG.xz | dd of=/dev/sdX bs=4M conv=fsync`, or any image writer that reads
+`.xz`), copy `k10s.conf` and key files to the `K10S-BOOT` partition (FAT, readable on any PC), and boot. The first boot
+grows `K10S-DATA` to the end of the disk.
+
+Layout (GPT, the shared layout of docs/research/universal-os.md §8.4):
+
+```
+MBR  GRUB boot.img in the first 440 bytes (BIOS), protective MBR
+p1   bios-boot   1 MiB    GRUB core.img (BIOS)
+p2   K10S-BOOT   256 MiB  EFI system partition, FAT32:
+       /EFI/BOOT/BOOTX64.EFI   systemd-boot (UEFI)
+       /EFI/Linux/k10s-a.efi   slot A: UKI = systemd-stub + kernel + initramfs + command line
+       /loader/loader.conf     no menu, command-line editor off
+       /boot/grub/grub.cfg     BIOS: GRUB boots /k10s/a/vmlinuz and /k10s/a/initrd, the payload of the UKI
+       /k10s/tier              auto (for the Tier 2 loader)
+       /k10s.conf              node configuration (a commented template)
+p3   K10S-DATA   256 MiB  ext4, grown to the end of the disk on first boot
+```
+
+UEFI firmware starts systemd-boot, which starts the UKI; BIOS starts GRUB from the MBR, which reads `grub.cfg` from
+the ESP of the boot disk. The kernel command line is fixed in both (`console=ttyS0,115200 quiet panic=5` for `vm`;
+`metal` adds `console=tty0` last, so init's lines appear on the screen); everything else is configured in
+`k10s.conf`. Images are reproducible: fixed GUIDs, volume ids, ext4 hash seed, and every timestamp from
+`SOURCE_DATE_EPOCH` (the commit time). On the ESP, `BOOTX64.EFI` becomes the Tier 2 loader (`k10boot`, which reads
+`/k10s/tier`) and slot B appears with milestones M1 and U2.
+
+### Kernels
+
+Linux 6.18.57 (kernel.org tarball, SHA-256 pinned) from `tinyconfig` plus `os/kconfig/common.config`, a profile and
+`x86_64.config`; kernel lockdown in integrity mode (no unsigned modules, `/dev/mem`, kexec, MSR writes or ACPI table
+overrides), seccomp, Landlock, the hardware RNG drivers.
+
+- **`vm`** (3.1 MB): QEMU/KVM guests; virtio (PCI, net, block, RNG), e1000/e1000e, the i6300esb watchdog, the CMOS
+  RTC, the ACPI power button, no modules.
+- **`metal`** (3.8 MB): real machines. Built in: ACPI (power button, processor idle, thermal, frequency scaling), PCI
+  and MSI, IOMMU (Intel VT-d and AMD-Vi, on), AHCI and legacy Intel SATA, NVMe, USB host (xHCI, EHCI) and USB
+  storage, eMMC/SD, virtio, serial, VGA text and EFI framebuffer consoles, PC keyboard. Modules (63, signed): Ethernet
+  (Intel e1000, e1000e, igb, igc, ixgbe, i40e, ice; Realtek r8169 family, including RTL8125; Broadcom tg3, bnx2;
+  Aquantia; Marvell sky2; Atheros alx, atl1c; virtio-net), USB Ethernet (Realtek r8152, ASIX, CDC ECM/NCM, SMSC,
+  Microchip LAN78xx), watchdogs (Intel TCO through the LPC bridge or the SMBus controller, AMD SP5100/FCH, ACPI WDAT,
+  i6300esb), OHCI/UHCI.
+
+Modules are signed (RSA-4096, SHA-512) with a key that `os/kbuild.sh` creates for the build and deletes after
+`modules_install`: no other module can ever be signed for that kernel, and the kernel refuses unsigned or foreign
+modules (`MODULE_SIG_FORCE`, lockdown). They are zstd-compressed and decompressed by the kernel. `K10S_MODULE_KEY=PEM`
+signs with a key you keep instead, which makes the kernel build reproducible.
+
+### Firmware
+
+`os/firmware.sh` builds the firmware archive of the `metal` image: the 43 files that its modules declare
+(`modinfo -F firmware`: Realtek `rtl_nic/`, Broadcom `tigon/` and `bnx2/`, Intel `ice` DDP) from linux-firmware
+`20261019`, each checked against its SHA-256 in `os/firmware.list`, with their licence files
+(`/lib/firmware/LICENSES/`). It is a separate cpio appended to the initramfs; the files keep their own redistributable
+licences, not k10s's Apache-2.0. Intel e1000e/igb/igc/ixgbe/i40e need no firmware.
+
 ## Building
 
 | Script | Does |
 |---|---|
-| `os/kbuild.sh [OUT]` | the k10s kernel, `vm` profile: Linux 6.18.57 (kernel.org tarball, SHA-256 pinned) from `tinyconfig` plus `os/kconfig/{common,x86-vm,x86_64}.config`, no modules, rootless; fails if an option does not survive `olddefconfig`; reproducible build metadata |
+| `os/images.sh [OUT]` | the release images and UKIs (above), `SHA256SUMS.os`; fails when a compressed image exceeds its budget (`vm` 5 MB, `metal` 40 MB). `K10S_BIN` picks the static k10s |
+| `os/kbuild.sh [vm\|metal] [OUT]` | a k10s kernel, rootless; fails if a fragment option does not survive `olddefconfig`; reproducible build metadata; `metal` also installs the signed module tree with its `depmod` output |
+| `os/mkimage.py OUT.img --kernel K --initrd I… --cmdline C --boot DIR [--conf F] [--uki OUT.efi]` | a disk image: GPT, GRUB patched into the MBR and `bios-boot` (no `grub-install`), the UKI built with `objcopy`, FAT with mtools, ext4 with `mkfs.ext4`; no root, no loop devices |
+| `os/bootfiles.sh` | the pinned Debian 12 GRUB (`i386-pc`, `grub-mkimage`) and systemd-boot packages (systemd-boot, systemd-stub), SHA-256 checked |
+| `os/firmware.sh` | the firmware archive (above) |
 | `os/debian-kernel.sh` | the pinned Debian 13 kernel (6.12, SHA-256 checked) with its module tree and `depmod` output |
-| `os/mkinitramfs.py OUT --init K10S [--kmods DIR --mod GLOB…] [--conf FILE]` | a reproducible newc initramfs (gzip, xz or zstd), module subsets with their dependencies, filtered `modules.alias` |
+| `os/mkinitramfs.py OUT [--init K10S] [--kmods DIR --mod GLOB…] [--firmware DIR --fw GLOB…] [--conf FILE]` | a reproducible newc initramfs (gzip, xz or zstd), module subsets with their dependencies, filtered `modules.alias`; without `--init`, an archive to append to another |
 
-The kernel build needs make, gcc, flex, bison, bc and the libelf headers. The `vm` profile covers QEMU/KVM guests:
-virtio (PCI, net, block, RNG), the i6300esb watchdog, the CMOS RTC, ACPI with the tiny power button, seccomp and
-Landlock. `metal` profiles for real machines come with U1.
+The kernel builds need make, gcc, flex, bison, bc, openssl, depmod and the libelf and libssl headers; the images
+need objcopy, sfdisk, mkfs.fat, mtools, mkfs.ext4, dpkg-deb, zstd and xz.
 
 ## Testing
 
-`os/test.sh` (CI suite `os`, a release gate) builds the static k10s, both kernels and their initramfs images, and
-runs `os/test.py` under QEMU (KVM when available), with no root:
+`os/test.sh` (CI suite `os`, a release gate) builds the static k10s, the kernels, the Debian kernel, the initramfs
+images and the release images, then runs `os/test.py` under QEMU (KVM when available), with no root. The release runs
+it on the k10s binary of the release's musl archive and publishes the images it tested.
 
-- **boot** on the Debian and the k10s kernel: a GPT disk with `K10S-BOOT` (`k10s.conf`, the admin key) and
+- **boot-debian, boot-k10s**: kernel and initramfs on a GPT disk with `K10S-BOOT` (`k10s.conf`, the admin key) and
   `K10S-DATA` (ext4); the guest RTC starts in 2001, so the signed `k10s apply` only succeeds after SNTP (a host-side
   server) set the clock. Checks the drivers, config, DHCP lease (QEMU user networking), data partition, watchdog,
   the node's sandbox line, readiness, serving, and a power-button shutdown with the node drained; a second boot
@@ -107,16 +183,36 @@ runs `os/test.py` under QEMU (KVM when available), with no root:
 - **dhcp** on the k10s kernel: a scripted DHCP server on a QEMU socket netdev hands out 6 s leases; the client must
   renew by unicast, rebind by broadcast when renewals go unanswered, and take a new address after a NAK; the node,
   in cluster mode without `advertise`, is restarted to advertise it.
+- **image-bios, image-uefi**: the `vm` image on SeaBIOS and on OVMF, written to a 4 GiB disk, configured the way an
+  operator does it (`k10s.conf` and the admin key copied to `K10S-BOOT` with mtools). The first boot grows
+  `K10S-DATA` and its ext4 to the end of the disk (checked on the host afterwards: both GPT headers and the entry
+  array valid, the backup in the last sector, ext4 filling the partition), applies and serves as above; the second
+  boot keeps the state and grows nothing.
+- **image-metal**: the same on the `metal` image (with the console on serial for the test) on OVMF `q35`, booting
+  from NVMe; its only NIC (e1000e) and watchdog (Intel TCO behind `lpc_ich`) are signed modules.
+- **unsigned**: the `metal` kernel with an initramfs whose e1000e lost its signature refuses it ("Key was rejected by
+  service") and comes up without network.
+- **boottime**: QEMU start → first HTTP 200 from the node, `vm` image on SeaBIOS (GRUB, KVM, 512 MiB, fresh disk
+  each time), median of 5 below 1 s (measured 0.50–0.54 s).
+- **repro**: the same image built twice is bit-identical, UKI included.
 
 Unit tests cover the configuration precedence, module tree parsing and modalias matching, the DHCP state machine
-against a fake server, and SNTP sample checks.
+against a fake server, SNTP sample checks and the GPT rewrite that grows `K10S-DATA` (512-byte and 4 KiB sectors,
+checksums, partitions that are not last, corrupt tables).
 
-Real hardware is needed for: drivers outside QEMU's virtio set (NICs, AHCI/NVMe, USB), firmware files, slow or
-asynchronous USB storage (`bootwait`), hardware watchdog and RTC chips, and real DHCP servers and NTP pools.
+Real hardware is needed for: a real machine serving after a cold boot from the `metal` image (the U1 exit criterion
+for a Realtek or Intel mini-PC), NIC drivers and firmware outside QEMU's models (r8169/RTL8125, igc, tg3, USB
+Ethernet), AHCI and eMMC boot disks, the screen console, firmware quirks of real BIOS and UEFI implementations
+(boot drive numbers, removable-media boot paths), slow USB storage (`bootwait`), the AMD and newer Intel (SMBus)
+watchdogs, RTC chips, real DHCP servers, switches (link and STP delays) and NTP pools.
 
 ## Limits
 
-- An image is a kernel plus an initramfs; no disk image builder, bootloader setup or A/B updates yet (U1, U2).
+- One boot slot: signed A/B updates come with U2; until then a new release is written over the image (`K10S-BOOT` and
+  `K10S-DATA` survive only if you keep them).
+- Secure Boot must be off (U6 documents signing the image with an own key).
+- The image uses 512-byte logical sectors; disks with 4 KiB logical sectors (rare outside servers) need a rebuilt
+  image.
 - x86-64 only; the hosted node builds for Linux x86-64 only (U3 ports it).
 - No DHCP address conflict detection (ARP probe), no DHCPv6; one configured interface.
 - `join` host names are resolved once, when the node starts (name servers from the lease or `dns`).

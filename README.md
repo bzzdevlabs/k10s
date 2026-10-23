@@ -16,7 +16,7 @@ kube-proxy, sidecars, probes, and a control plane to manage it all. k10s isolate
 - **No control plane**: desired state spreads by gossip, membership is SWIM, and placement is a pure function every
   node computes on its own. Self-healing falls out of membership changes.
 - The same runtime also boots **as its own kernel** (`metal/`), with no Linux underneath, or as the only program
-  (PID 1) of a minimal Linux image (`os/`, [docs/OS.md](docs/OS.md)).
+  (PID 1) of a minimal Linux image: disk images for VMs and PCs, BIOS and UEFI (`os/`, [docs/OS.md](docs/OS.md)).
 
 Design rationale: [docs/DESIGN.md](docs/DESIGN.md) · evidence from the literature: [docs/research.md](docs/research.md)
 
@@ -94,6 +94,9 @@ is the release's version (e.g. `0.1.0`, or `0.1.1-dev.45`).
 | `k10s-V-x86_64-unknown-linux-gnu.tar.gz` | the same, linked against glibc ≥ 2.34 (Debian 12, Ubuntu 22.04, RHEL 9 and later) |
 | `k10s-examples-V.tar.gz` | [examples/](examples/): Ten sources, the compiled `.k10` modules, `app.k10s` (`k10s apply app.k10s`) |
 | `k10s-metal-V-x86_64.tar.gz` | the bare-metal kernel ([metal/](metal/)): `k10-metal.elf`, `k10-metal-embedded.elf` (test bundle baked in), `bundle.k10b` (19 test services), `mkbundle` (static; pass `--ten-dir examples` or `--no-ten`), `examples/*.ten`, metal README |
+| `k10s-os-V-x86_64-vm.img.xz` | disk image (GPT, BIOS and UEFI) with `k10s` as PID 1 of the `vm` k10s kernel, for VMs and clouds ([docs/OS.md](docs/OS.md)); write it to a disk with `xz -dc … \| dd` |
+| `k10s-os-V-x86_64-metal.img.xz` | the same for PCs and servers: `metal` kernel, signed driver modules, NIC firmware (linux-firmware files under their own licences, in `/lib/firmware/LICENSES/`) |
+| `k10s-os-V-x86_64-{vm,metal}.efi` | the UKIs of the images (kernel, initramfs and command line in one EFI file) for PXE or another UEFI loader |
 | `k10s-bench-V-linux-amd64.tar.gz` | [bench/](bench/) tools, static Go: workloads `echo` `compute` `chain` `counter` `compute-purego`, and `loadgen` |
 | `k10s-V-src.tar.gz` | the sources of the commit, stamped with its version (`.k10s-version`) for builds without git |
 | `SHA256SUMS` | `sha256sum -c SHA256SUMS --ignore-missing`; build provenance: `gh attestation verify FILE --repo bzzdevlabs/k10s` |
@@ -139,7 +142,7 @@ Then set the next version (`scripts/set-version.sh X.Y.(Z+1)`, or a minor or maj
 | [crates/k10-mesh](crates/k10-mesh) | gossip membership, manifests, bundles, placement, wire protocol |
 | [crates/k10-node](crates/k10-node), [crates/k10s](crates/k10s) | node runtime and the `k10s` binary (also PID 1 of a Linux image) |
 | [metal/](metal/) | the node as a bare-metal kernel (PVH, virtio-net, SMP, JIT, cluster member) |
-| [os/](os/) | the k10s Linux kernel configuration and build, the initramfs builder, PID 1 tests under QEMU ([docs/OS.md](docs/OS.md)) |
+| [os/](os/) | the k10s Linux kernels (`vm`, `metal`), initramfs, firmware and disk image builders, PID 1 and image tests under QEMU ([docs/OS.md](docs/OS.md)) |
 | [examples/](examples/) | Ten services: hello, echo, compute (SHA-256), chain, counter, todo, nbody, sort |
 | [bench/](bench/) | Kubernetes / bare-process / k10s benchmark harness and results |
 | [editors/vscode](editors/vscode) | VS Code extension for Ten sources and `.k10s` manifests |

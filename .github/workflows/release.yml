@@ -190,8 +190,8 @@ jobs:
         run: scripts/ci-test.sh metal-selftest
 
   os:
-    name: PID 1 mode under QEMU/KVM (os/test.sh)
-    needs: version
+    name: PID 1 mode and disk images under QEMU/KVM (os/test.sh)
+    needs: [version, build]
     if: needs.version.outputs.released == 'false'
     runs-on: ubuntu-24.04
     permissions:
@@ -207,18 +207,37 @@ jobs:
         with:
           qemu: "true"
       - name: Kernel build and image tools
-        run: sudo apt-get install -y -q --no-install-recommends flex bison bc libelf-dev dosfstools mtools fdisk zstd
-      # The pinned kernel.org tarball, the Debian kernel package and the k10s kernel built from them.
+        run: >-
+          sudo apt-get install -y -q --no-install-recommends flex bison bc libelf-dev libssl-dev dosfstools mtools fdisk
+          zstd xz-utils ovmf libdevmapper1.02.1
+      # The pinned downloads (kernel.org tarball, Debian packages, firmware) and the k10s kernels built from them.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             target/os/linux-*.tar.xz
-            target/os/linux-image-*.deb
-            target/os/kernel-x86_64-vm/arch/x86/boot/bzImage
-            target/os/kernel-x86_64-vm/.k10s-stamp
-          key: os-${{ hashFiles('os/kbuild.sh', 'os/debian-kernel.sh', 'os/kconfig/*') }}
+            target/os/*.deb
+            target/os/firmware-*
+            target/os/kernel-x86_64-*/arch/x86/boot/bzImage
+            target/os/kernel-x86_64-*/modroot
+            target/os/kernel-x86_64-*/.k10s-stamp
+          key: os-${{ hashFiles('os/kbuild.sh', 'os/debian-kernel.sh', 'os/bootfiles.sh', 'os/firmware.sh', 'os/firmware.list', 'os/kconfig/*') }}
+      # The images ship and the tests use the k10s of the release's musl archive.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+      - name: The release's k10s
+        run: |
+          tar -xzf dist/k10s-*-x86_64-unknown-linux-musl.tar.gz -C "$RUNNER_TEMP"
+          echo "K10S_BIN=$(echo "$RUNNER_TEMP"/k10s-*-x86_64-unknown-linux-musl/k10s)" >> "$GITHUB_ENV"
       - name: scripts/ci-test.sh os
         run: scripts/ci-test.sh os
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: os-images
+          path: target/os/images/
+          if-no-files-found: error
+          retention-days: 14
 
   metal-e2e:
     name: Bare-metal kernel end-to-end (metal/test.sh, non-blocking)
@@ -267,9 +286,15 @@ jobs:
         with:
           name: dist
           path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: os-images
+          path: dist
       - name: Verify the artifacts
         working-directory: dist
-        run: sha256sum -c SHA256SUMS
+        run: |
+          cat SHA256SUMS.os >>SHA256SUMS && rm SHA256SUMS.os
+          sha256sum -c SHA256SUMS
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-checksums: dist/SHA256SUMS
@@ -297,7 +322,8 @@ jobs:
             if [[ $top == "$TAG" ]]; then latest=true; fi
             args+=(--verify-tag)
           fi
-          gh release create "$TAG" "${args[@]}" --latest="$latest" dist/*.tar.gz dist/SHA256SUMS
+          gh release create "$TAG" "${args[@]}" --latest="$latest" dist/*.tar.gz dist/*.img.xz dist/*.efi \
+            dist/SHA256SUMS
       - name: Prune old development pre-releases
         if: needs.version.outputs.channel == 'dev'
         run: scripts/prune-dev.sh "$KEEP_DEV_RELEASES" releases

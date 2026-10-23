@@ -10,6 +10,7 @@
 
 mod config;
 mod dhcp;
+mod grow;
 mod modules;
 mod net;
 mod sntp;
@@ -223,6 +224,9 @@ fn network(cfg: &Config, lease: &Arc<dhcp::Shared>) -> Option<String> {
     } else if net::has_address(&ifc) {
         say!("net: {ifc} configured by the kernel (ip=)");
     } else {
+        if !net::wait_carrier(&ifc, wait) {
+            say!("net: {ifc}: no link after {} s", wait.as_secs());
+        }
         match dhcp::spawn(&ifc, lease.clone(), dns.is_empty()) {
             Ok(()) => {
                 if lease.wait_lease(Duration::from_secs(30)).is_none() {
@@ -269,12 +273,12 @@ fn find_partition(label: &str, wait: Duration) -> Option<String> {
 }
 
 /// The data partition (`data=/dev/X[:FSTYPE]`, else GPT name K10S-DATA, ext4) on /data; without one the node's
-/// state lives in RAM.
+/// state lives in RAM. K10S-DATA grows to the end of its disk unless `grow=0`.
 fn mount_data(cfg: &Config) {
-    let spec = match cfg.get("data") {
-        Some("none") => None,
-        Some(s) => Some(s.to_string()),
-        None => find_partition("K10S-DATA", Duration::ZERO),
+    let (spec, grow) = match cfg.get("data") {
+        Some("none") => (None, false),
+        Some(s) => (Some(s.to_string()), false),
+        None => (find_partition("K10S-DATA", Duration::ZERO), cfg.get("grow").is_none() || cfg.flag("grow")),
     };
     let _ = fs::create_dir_all(DATA);
     let Some(spec) = spec else {
@@ -287,9 +291,23 @@ fn mount_data(cfg: &Config) {
     while !Path::new(dev).exists() && t.elapsed() < Duration::from_secs(10) {
         std::thread::sleep(Duration::from_millis(10));
     }
+    if grow {
+        match grow::partition(dev) {
+            Ok(Some(b)) => say!("data: {dev} grown to {} MiB (end of disk)", b >> 20),
+            Ok(None) => {}
+            Err(e) => say!("data: growing {dev}: {e}"),
+        }
+    }
     match mount(dev, DATA, fstype, libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_NOATIME, "") {
         Ok(()) => say!("data: {dev} ({fstype}) on {DATA}"),
-        Err(e) => say!("data: mounting {dev} ({fstype}): {e}; state is volatile"),
+        Err(e) => return say!("data: mounting {dev} ({fstype}): {e}; state is volatile"),
+    }
+    if grow && fstype == "ext4" {
+        match grow::ext4(dev, DATA) {
+            Ok(Some(b)) => say!("data: ext4 grown to {} MiB", b >> 20),
+            Ok(None) => {}
+            Err(e) => say!("data: growing the filesystem on {dev}: {e}"),
+        }
     }
 }
 

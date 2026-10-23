@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""QEMU tests of PID 1 mode (docs/OS.md) without root: user networking, a host-side SNTP server and, for the DHCP
-test, a host-side DHCP server on a QEMU socket netdev. os/test.sh builds the inputs and runs both.
+"""QEMU tests of PID 1 mode and of the disk images (docs/OS.md) without root: user networking, a host-side SNTP server
+and, for the DHCP test, a host-side DHCP server on a QEMU socket netdev. os/test.sh builds the inputs and runs them.
 
   test.py boot --kernel K --initrd I --k10s HOST_K10S --examples DIR [--work DIR]
       A GPT disk with K10S-BOOT (k10s.conf, admin key) and K10S-DATA (ext4). Boot → apply → serve → power button,
@@ -9,6 +9,14 @@ test, a host-side DHCP server on a QEMU socket netdev. os/test.sh builds the inp
   test.py dhcp --kernel K --initrd I [--work DIR]
       6 s leases from a scripted server: renew (unicast, ciaddr), rebind (broadcast), NAK → a new address, which
       restarts the cluster node so that it advertises the new address.
+  test.py image --image IMG --k10s HOST_K10S --examples DIR (--bios | --uefi) [--metal] [--work DIR]
+      A disk image (os/mkimage.py) on a 4 GiB disk, configured like an operator would: k10s.conf and the admin key
+      copied to K10S-BOOT. Boot 1 grows K10S-DATA and its ext4 to the end of the disk, applies and serves; boot 2 keeps
+      the state and grows nothing. --metal: q35, NVMe, e1000e and the Intel TCO watchdog (signed modules).
+  test.py unsigned --kernel K --kmods DIR --k10s K10S --work DIR
+      The metal kernel refuses e1000e once its signature is stripped (no network).
+  test.py boottime --image IMG [--runs N]
+      QEMU start → first HTTP 200 from the node, BIOS boot of the image (KVM); fails when the median reaches 1 s.
 """
 import argparse
 import json
@@ -16,6 +24,7 @@ import os
 import re
 import shutil
 import socket
+import statistics
 import struct
 import subprocess
 import sys
@@ -23,6 +32,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+import zlib
 
 PATH = os.environ.get("PATH", "") + ":/sbin:/usr/sbin"
 
@@ -48,20 +58,36 @@ def fail(msg, log=None):
     sys.exit(f"test.py: FAIL: {msg}")
 
 
+KVM = os.access("/dev/kvm", os.R_OK | os.W_OK)
+OVMF = [("/usr/share/OVMF/OVMF_CODE_4M.fd", "/usr/share/OVMF/OVMF_VARS_4M.fd"),
+        ("/usr/share/OVMF/OVMF_CODE.fd", "/usr/share/OVMF/OVMF_VARS.fd"),
+        ("/usr/share/edk2/ovmf/OVMF_CODE.fd", "/usr/share/edk2/ovmf/OVMF_VARS.fd")]
+
+
+def uefi_firmware(work):
+    """pflash arguments for OVMF (Secure Boot off) with a private copy of its variable store."""
+    for code, vars_ in OVMF:
+        if os.path.exists(code) and os.path.exists(vars_):
+            mine = os.path.join(work, "OVMF_VARS.fd")
+            shutil.copyfile(vars_, mine)
+            return ["-drive", f"if=pflash,format=raw,readonly=on,file={code}", "-drive", f"if=pflash,format=raw,file={mine}"]
+    sys.exit("test.py: OVMF not found (package ovmf)")
+
+
 class Guest:
-    """One QEMU run: serial console to a file, QMP for the power button."""
+    """One QEMU run: serial console to a file, QMP for the power button. Boots `kernel` + `initrd`, else the disk in
+    `extra`."""
 
     def __init__(self, work, name, kernel, initrd, append, extra):
         self.log = os.path.join(work, f"{name}.log")
         self.qmp = os.path.join(work, f"{name}.qmp")
         open(self.log, "w").close()
-        kvm = os.access("/dev/kvm", os.R_OK | os.W_OK)
+        boot = ["-kernel", kernel, "-initrd", initrd, "-append", "console=ttyS0 panic=-1 " + append] if kernel else []
         cmd = [tool("qemu-system-x86_64"), "-nodefaults", "-no-user-config", "-display", "none", "-no-reboot",
-               "-m", "512M", "-smp", "2", "-accel", "kvm" if kvm else "tcg", "-cpu", "host" if kvm else "max",
-               "-kernel", kernel, "-initrd", initrd, "-append", "console=ttyS0 panic=-1 " + append,
-               "-serial", f"file:{self.log}", "-qmp", f"unix:{self.qmp},server=on,wait=off",
+               "-m", "512M", "-smp", "2", "-accel", "kvm" if KVM else "tcg", "-cpu", "host" if KVM else "max",
+               *boot, "-serial", f"file:{self.log}", "-qmp", f"unix:{self.qmp},server=on,wait=off",
                "-device", "virtio-rng-pci"] + extra
-        self.timeout = 90 if kvm else 300
+        self.timeout = 90 if KVM else 300
         self.proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
 
     def wait_for(self, pattern, what=None):
@@ -297,18 +323,181 @@ def dhcp_test(a, work):
     print("test.py: dhcp: ok", file=sys.stderr)
 
 
+def data_partition_check(disk):
+    """After the first boot: both GPT headers valid, the backup in the last sector, K10S-DATA ending at the last
+    1 MiB boundary before it, and ext4 filling K10S-DATA. Returns an error or None."""
+    total = os.path.getsize(disk) // 512
+    with open(disk, "rb") as f:
+        def read(lba, n=512):
+            f.seek(lba * 512)
+            return f.read(n)
+
+        for lba, other in ((1, total - 1), (total - 1, 1)):
+            h = read(lba, 92)
+            if h[:8] != b"EFI PART" or struct.unpack_from("<QQ", h, 24) != (lba, other):
+                return f"no GPT header at LBA {lba}"
+            if zlib.crc32(h[:16] + bytes(4) + h[20:]) != struct.unpack_from("<I", h, 16)[0]:
+                return f"GPT header checksum at LBA {lba}"
+            ents_lba, n, esz, crc = struct.unpack_from("<QIII", h, 72)
+            ents = read(ents_lba, n * esz)
+            if zlib.crc32(ents) != crc:
+                return f"GPT entries checksum (header at LBA {lba})"
+        for i in range(n):
+            e = ents[i * esz:(i + 1) * esz]
+            if e[56:74].decode("utf-16-le") == "K10S-DATA":
+                start, end = struct.unpack_from("<QQ", e, 32)
+                break
+        else:
+            return "no K10S-DATA partition"
+        if end != (total - 33) // 2048 * 2048 - 1:
+            return f"K10S-DATA ends at LBA {end} of {total}"
+        sb = read(start + 2, 1024)
+        hi = struct.unpack_from("<I", sb, 0x150)[0] if struct.unpack_from("<I", sb, 0x60)[0] & 0x80 else 0
+        blocks = hi << 32 | struct.unpack_from("<I", sb, 4)[0]
+        if blocks * (1024 << struct.unpack_from("<I", sb, 0x18)[0]) != (end - start + 1) * 512:
+            return f"ext4 has {blocks} blocks"
+    return None
+
+
+def image_test(a, work):
+    disk = os.path.join(work, "disk.img")
+    subprocess.run(["cp", "--sparse=always", a.image, disk], check=True)
+    with open(disk, "r+b") as f:
+        f.truncate(4 << 30)
+    key = os.path.join(work, "admin.key")
+    subprocess.run([a.k10s, "keygen", "-o", key], check=True)
+    ntp = free_port(socket.SOCK_DGRAM)
+    sntp_server(ntp)
+    conf = os.path.join(work, "k10s.conf")
+    with open(conf, "w") as f:
+        f.write(f"# image test node\nadmin-token-file=/boot/admin.key\nwatchdog=1\nntp=10.0.2.2:{ntp}\n")
+    subprocess.run([tool("mcopy"), "-o", "-i", f"{disk}@@{2 << 20}", conf, key, "::/"], check=True,
+                   env=dict(os.environ, MTOOLS_SKIP_CHECK="1"))
+    if a.metal:
+        dev, nic = "nvme0n1p", "e1000e"
+        hw = ["-M", "q35", "-drive", f"file={disk},if=none,id=d0,format=raw", "-device", "nvme,drive=d0,serial=k10s"]
+    else:
+        dev, nic = "vda", "virtio-net-pci"
+        hw = ["-drive", f"file={disk},if=virtio,format=raw", "-device", "i6300esb"]
+    fw = uefi_firmware(work) if a.uefi else []
+    for run in (1, 2):
+        port = free_port()
+        g = Guest(work, f"image{run}", None, None, None,
+                  fw + hw + ["-rtc", "base=2001-01-01T00:00:00", "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:80",
+                             "-device", f"{nic},netdev=n0"])
+        g.wait_for(r"k10s-init\[ *[\d.]+\]: k10s \S+ as PID 1", "init banner")
+        if a.metal:
+            # The only NIC (e1000e) and watchdog (iTCO_wdt behind lpc_ich) are modules: the lease and "armed" below.
+            g.wait_for(r"modules: [3-9] loaded by modalias", "signed modules")
+        g.wait_for(rf"config: /dev/{dev}2 \(K10S-BOOT\): k10s.conf merged", "k10s.conf from K10S-BOOT")
+        g.wait_for(r"net: eth0 DHCP 10\.0\.2\.15/24 gateway 10\.0\.2\.2", "DHCP lease")
+        if run == 1:
+            g.wait_for(rf"data: /dev/{dev}3 grown to 3837 MiB \(end of disk\)", "K10S-DATA grown")
+        g.wait_for(rf"data: /dev/{dev}3 \(ext4\) on /data", "data partition")
+        if run == 1:
+            g.wait_for(r"data: ext4 grown to 3837 MiB", "ext4 grown")
+        g.wait_for(r"watchdog: armed", "watchdog")
+        g.wait_for(r"sandbox mode=on user=65532\(65532:65532\) caps=none landlock=abi\d+ seccomp=kill", "node sandbox")
+        g.wait_for(r"ready: the node answers", "node ready")
+        g.wait_for(r"time: stepped by \+\d{9}\.\d+ s from 10\.0\.2\.2", "SNTP step from 2001")
+        if run == 1:
+            subprocess.run([a.k10s, "apply", os.path.join(a.examples, "app.k10s"), "--node", f"127.0.0.1:{port}",
+                            "--admin-token-file", key], check=True)
+        if http(port, "/hello/") != (200, "hello"):
+            fail("GET /hello/", g.log)
+        want = [f"{n}\n" for n in ((1, 2) if run == 1 else (3,))]
+        got = [http(port, "/counter/")[1] for _ in want]
+        if got != want:
+            fail(f"counter: got {got}, want {want}", g.log)
+        g.power_button()
+        g.wait_for(r"shutdown: node stopped \(exit status 0\)", "node drained")
+        g.wait_for(r"powering off", "power off")
+        g.wait_exit()
+        if run == 1 and (err := data_partition_check(disk)):
+            fail(err, g.log)
+        if run == 2 and "grown" in open(g.log, errors="replace").read():
+            fail("the second boot grew the data partition again", g.log)
+        print(f"test.py: image {run}: ok", file=sys.stderr)
+
+
+def unsigned_test(a, work):
+    kmods = os.path.join(work, os.path.basename(a.kmods.rstrip("/")))
+    shutil.copytree(a.kmods, kmods, symlinks=True)
+    ko = next(os.path.join(r, f) for r, _, fs in os.walk(kmods) for f in fs if f == "e1000e.ko.zst")
+    raw = subprocess.run([tool("zstd"), "-dqc", ko], stdout=subprocess.PIPE, check=True).stdout
+    marker = b"~Module signature appended~\n"
+    if not raw.endswith(marker):
+        fail(f"{ko} is not signed")
+    siglen = struct.unpack(">I", raw[-len(marker) - 4:-len(marker)])[0]
+    raw = raw[:-(len(marker) + 12 + siglen)]
+    subprocess.run([tool("zstd"), "-19qfo", ko], input=raw, check=True)
+    initrd = os.path.join(work, "unsigned.cpio.zst")
+    subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "mkinitramfs.py"), initrd,
+                    "--init", a.k10s, "--kmods", kmods, "--mod", "*"], check=True)
+    g = Guest(work, "unsigned", a.kernel, initrd, "k10s.netwait=2",
+              ["-M", "q35", "-netdev", "user,id=n0", "-device", "e1000e,netdev=n0"])
+    g.wait_for(r"e1000e\.ko\.zst: Key was rejected by service", "unsigned e1000e refused")
+    g.wait_for(r"ready: the node answers", "node ready")
+    if "DHCP" in open(g.log, errors="replace").read():
+        fail("network configured without e1000e", g.log)
+    g.power_button()
+    g.wait_for(r"powering off", "power off")
+    g.wait_exit()
+    print("test.py: unsigned: ok", file=sys.stderr)
+
+
+def boottime_test(a, work):
+    if not KVM:
+        print("test.py: boottime: skipped (needs KVM)", file=sys.stderr)
+        return
+    times = []
+    for i in range(a.runs):
+        port = free_port()
+        cmd = [tool("qemu-system-x86_64"), "-nodefaults", "-no-user-config", "-display", "none", "-m", "512M", "-smp", "2",
+               "-accel", "kvm", "-cpu", "host", "-snapshot", "-drive", f"file={a.image},if=virtio,format=raw",
+               "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:80", "-device", "virtio-net-pci,netdev=n0",
+               "-device", "virtio-rng-pci", "-serial", f"file:{os.path.join(work, f'boottime{i}.log')}"]
+        t0 = time.monotonic()
+        p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
+        while True:
+            try:
+                if urllib.request.urlopen(f"http://127.0.0.1:{port}/_k10s/health", timeout=0.1).status == 200:
+                    break
+            except OSError:
+                pass
+            if time.monotonic() - t0 > 30 or p.poll() is not None:
+                p.kill()
+                fail("no HTTP 200 within 30 s", os.path.join(work, f"boottime{i}.log"))
+            time.sleep(0.005)
+        times.append(time.monotonic() - t0)
+        p.kill()
+        p.wait()
+    med = statistics.median(times)
+    print(f"test.py: boottime: {' '.join(f'{t * 1e3:.0f}' for t in times)} ms, median {med * 1e3:.0f} ms", file=sys.stderr)
+    if med >= 1.0:
+        fail(f"boot to first HTTP 200 takes {med * 1e3:.0f} ms (limit 1000 ms)")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("test", choices=["boot", "dhcp"])
-    ap.add_argument("--kernel", required=True)
-    ap.add_argument("--initrd", required=True)
+    tests = {"boot": boot_test, "dhcp": dhcp_test, "image": image_test, "unsigned": unsigned_test, "boottime": boottime_test}
+    ap.add_argument("test", choices=tests)
+    ap.add_argument("--kernel")
+    ap.add_argument("--initrd")
+    ap.add_argument("--image")
+    ap.add_argument("--kmods")
+    fw = ap.add_mutually_exclusive_group()
+    fw.add_argument("--bios", action="store_true")
+    fw.add_argument("--uefi", action="store_true")
+    ap.add_argument("--metal", action="store_true")
+    ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--k10s")
     ap.add_argument("--examples")
     ap.add_argument("--work")
     a = ap.parse_args()
     work = a.work or tempfile.mkdtemp(prefix="k10s-os-test.")
     os.makedirs(work, exist_ok=True)
-    (boot_test if a.test == "boot" else dhcp_test)(a, work)
+    tests[a.test](a, work)
 
 
 if __name__ == "__main__":

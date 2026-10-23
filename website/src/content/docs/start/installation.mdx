@@ -80,6 +80,9 @@ Every release publishes these files. `V` is the version (`0.1.0`, or `0.1.1-dev.
 | `k10s-V-x86_64-unknown-linux-gnu.tar.gz` | the same, linked against glibc |
 | `k10s-examples-V.tar.gz` | Ten sources, compiled `.k10` modules and `app.k10s` |
 | `k10s-metal-V-x86_64.tar.gz` | the [bare-metal kernel](/k10s/guides/bare-metal/) and its bundle tool |
+| `k10s-os-V-x86_64-vm.img.xz` | a [disk image](/k10s/guides/bare-metal/#on-a-linux-kernel-pid-1-mode) with `k10s` as the only program of a Linux kernel, for VMs and clouds (BIOS and UEFI) |
+| `k10s-os-V-x86_64-metal.img.xz` | the same for PCs and servers: signed driver modules, NIC firmware |
+| `k10s-os-V-x86_64-{vm,metal}.efi` | the boot files (UKIs) of these images, for PXE or another UEFI loader |
 | `k10s-bench-V-linux-amd64.tar.gz` | benchmark workloads and the load generator |
 | `k10s-V-src.tar.gz` | the sources, stamped with their version |
 | `SHA256SUMS` | checksums of all of the above |
@@ -102,5 +105,6 @@ Every release publishes these files. `V` is the version (`0.1.0`, or `0.1.1-dev.
 
 ## As the operating system
 
-A node needs no Linux distribution either: the static `k10s` can be the only program (PID 1) of a Linux image, a
-kernel plus an initramfs, or the runtime boots as its own kernel. See [Bare metal](/k10s/guides/bare-metal/).
+A node needs no Linux distribution either: write a release's disk image to a machine and `k10s` is the only program
+(PID 1) on top of a Linux kernel used as a driver layer, or the runtime boots as its own kernel. See
+[Bare metal](/k10s/guides/bare-metal/).

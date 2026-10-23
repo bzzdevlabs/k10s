@@ -84,6 +84,18 @@ pub fn pick_iface(want: Option<&str>, wait: Duration) -> Option<String> {
     }
 }
 
+/// Waits up to `wait` for the link (carrier) of `ifc`: a DHCP request sent before it is lost and costs a retransmit.
+pub fn wait_carrier(ifc: &str, wait: Duration) -> bool {
+    let t = Instant::now();
+    while fs::read_to_string(format!("/sys/class/net/{ifc}/carrier")).map_or(true, |c| c.trim() != "1") {
+        if t.elapsed() >= wait {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    true
+}
+
 /// The interface already has an IPv4 address (the kernel's `ip=` parameter).
 pub fn has_address(ifc: &str) -> bool {
     let mut r = ifreq(ifc);

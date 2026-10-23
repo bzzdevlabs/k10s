@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Rootless initramfs builder for k10s as PID 1 of a Linux image (newc cpio, optionally compressed; docs/OS.md).
 
-  mkinitramfs.py OUT.cpio[.gz|.xz|.zst] --init K10S_BINARY
+  mkinitramfs.py OUT.cpio[.gz|.xz|.zst] [--init K10S_BINARY]  # without --init: an archive to append to another
       [--kmods /lib/modules/VER] [--mod PATTERN ...]     # module globs relative to kernel/ (deps added automatically)
       [--firmware DIR] [--fw GLOB ...]                    # firmware files relative to DIR, shipped as /lib/firmware/...
       [--conf FILE]                                       # becomes /etc/k10s.conf
@@ -55,7 +55,7 @@ class Cpio:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
-    ap.add_argument("--init", required=True)
+    ap.add_argument("--init")
     ap.add_argument("--kmods")
     ap.add_argument("--mod", action="append", default=[])
     ap.add_argument("--firmware")
@@ -65,10 +65,11 @@ def main():
     a = ap.parse_args()
 
     c = Cpio()
-    for d in ["dev", "proc", "sys", "data", "etc", "run"]:
-        c.mkdirs(d)
-    c.entry("dev/console", 0o020600, rmaj=5, rmin=1)
-    c.file("init", open(a.init, "rb").read(), 0o100755)
+    if a.init:
+        for d in ["dev", "proc", "sys", "data", "etc", "run"]:
+            c.mkdirs(d)
+        c.entry("dev/console", 0o020600, rmaj=5, rmin=1)
+        c.file("init", open(a.init, "rb").read(), 0o100755)
     if a.conf:
         c.file("etc/k10s.conf", open(a.conf, "rb").read())
     for spec in a.file:
@@ -136,7 +137,7 @@ def main():
     with open(a.out, "wb") as f:
         f.write(blob)
     print(
-        f"mkinitramfs: {a.out}: {len(blob)} bytes ({raw} uncompressed; init {os.path.getsize(a.init)}, "
+        f"mkinitramfs: {a.out}: {len(blob)} bytes ({raw} uncompressed; init {os.path.getsize(a.init) if a.init else 0}, "
         f"{nmods} modules {mod_bytes}, firmware {fw_bytes})",
         file=sys.stderr,
     )

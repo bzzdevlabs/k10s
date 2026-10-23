@@ -58,7 +58,7 @@ jobs:
         run: scripts/ci-test.sh metal-selftest
 
   os:
-    name: PID 1 mode under QEMU/KVM (os/test.sh)
+    name: PID 1 mode and disk images under QEMU/KVM (os/test.sh)
     if: github.event_name != 'push'
     runs-on: ubuntu-24.04
     steps:
@@ -70,16 +70,20 @@ jobs:
         with:
           qemu: "true"
       - name: Kernel build and image tools
-        run: sudo apt-get install -y -q --no-install-recommends flex bison bc libelf-dev dosfstools mtools fdisk zstd
-      # The pinned kernel.org tarball, the Debian kernel package and the k10s kernel built from them.
+        run: >-
+          sudo apt-get install -y -q --no-install-recommends flex bison bc libelf-dev libssl-dev dosfstools mtools fdisk
+          zstd xz-utils ovmf libdevmapper1.02.1
+      # The pinned downloads (kernel.org tarball, Debian packages, firmware) and the k10s kernels built from them.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             target/os/linux-*.tar.xz
-            target/os/linux-image-*.deb
-            target/os/kernel-x86_64-vm/arch/x86/boot/bzImage
-            target/os/kernel-x86_64-vm/.k10s-stamp
-          key: os-${{ hashFiles('os/kbuild.sh', 'os/debian-kernel.sh', 'os/kconfig/*') }}
+            target/os/*.deb
+            target/os/firmware-*
+            target/os/kernel-x86_64-*/arch/x86/boot/bzImage
+            target/os/kernel-x86_64-*/modroot
+            target/os/kernel-x86_64-*/.k10s-stamp
+          key: os-${{ hashFiles('os/kbuild.sh', 'os/debian-kernel.sh', 'os/bootfiles.sh', 'os/firmware.sh', 'os/firmware.list', 'os/kconfig/*') }}
       - name: scripts/ci-test.sh os
         run: scripts/ci-test.sh os
 

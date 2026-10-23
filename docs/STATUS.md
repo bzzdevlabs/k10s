@@ -2,7 +2,7 @@
 
 PROJECT STATE: HARDENING
 
-Last updated: 2026-10-22. This file is the single place to learn where the project stands and what comes next.
+Last updated: 2026-10-23. This file is the single place to learn where the project stands and what comes next.
 
 ## State of `main`
 `main` is pushed; every push publishes a dev pre-release (v0.1.0-dev.132 = 5cd99cc, step 12 U0: ci, release, pages
@@ -32,6 +32,14 @@ archives and `SHA256SUMS`).
   kernel 6.18.57 `vm` profile (`os/kbuild.sh`, seccomp + Landlock) and the pinned Debian 13 kernel; `os/test.sh`
   (CI suite `os`, release gate) boots both under QEMU: apply, serve, power off, state kept across reboots; DHCP
   renew test (and the cluster node's restart on a new address). Non-key seeds use `GRND_INSECURE`.
+- Tier 1 x86-64 images (U1, docs/OS.md): `os/images.sh` builds `k10s-os-V-x86_64-{vm,metal}.img.xz` (GPT, BIOS via
+  GRUB patched into the MBR, UEFI via systemd-boot and a UKI; the §8.4 ESP layout with slot A, `/k10s/tier`; ext4
+  `K10S-DATA` grown to the disk on first boot by PID 1) and their UKIs, reproducibly; `vm` 4.3 MB, `metal` 6.7 MB.
+  `metal` kernel profile: platform, storage, USB and consoles built in, 63 signed modules (per-build key deleted after
+  `modules_install`, `MODULE_SIG_FORCE`, lockdown=integrity on both profiles), linux-firmware 20261019 subset with
+  licences. PID 1 waits for carrier before DHCP. `os/test.sh` adds image tests on SeaBIOS, OVMF and q35/NVMe/e1000e,
+  an unsigned-module refusal, boot time (QEMU start → first HTTP 200, median 0.51 s) and reproducibility; the release
+  tests and publishes the images built from its musl `k10s`.
 - Releases: SemVer; tag `vX.Y.Z` on main → stable release, every push to main → `vX.Y.Z-dev.N` pre-release.
 - Performance vs 08f2921 (`bench/k10s/ab.py --same`, 4 interleaved rounds, host load ≈ 7 from the benchmark itself;
   medians): single node within ±2.5 %; local ingress −4 %; forwarded requests −5 % at c=1 (CPU per request +7 %) and
@@ -48,9 +56,10 @@ seek privileges on this machine.
     gossip, fetch and accept; expected 7 → 3 wake-ups per forwarded request (≈ −40 % CPU at 1 conn).
 12. **Tier 1 universal image** (docs/TASK-universal-os.md, plan in docs/research/universal-os.md §9, decisions in
     docs/REPORT.md §9; prototypes on branch `research/universal-os`): milestones U0 → U1 → U2 → U3 → U4 (= Tier 2 M6)
-    → U5 → U6, one session each. U0 done (PID 1 mode); next U1 (x86-64 images: `metal` kernel profile, signed modules,
-    image builder with the §8.4 ESP layout, firmware bundle, mini-PC bring-up). The multi-arch `coro.rs`/JIT-gating
-    commit of the prototype branch belongs to U3.
+    → U5 → U6, one session each. U0 (PID 1 mode) and U1 (x86-64 images) done; U1's last exit criterion, a real
+    Realtek or Intel mini-PC serving after a cold boot from the `metal` image, needs the hardware (user). Next U2
+    (signed image blobs over gossip, A/B slot B, boot counting, GRUB fallback on BIOS). The multi-arch
+    `coro.rs`/JIT-gating commit of the prototype branch belongs to U3.
 13. **Tier 2 native hardware** (docs/TASK-native-hardware.md, plan in docs/research/native-hardware.md §9, decisions
     in docs/REPORT.md §9; prototypes on branch `research/native-hardware`): milestones M1 → M2 → M3 → M4 → M5 → M6 →
     M7 (x86 first), one session each.
@@ -70,7 +79,7 @@ seek privileges on this machine.
 | x86-64 JIT (single pass, SFI masking, safepoints, speculation hardening) | `crates/k10-jit` | differential soak, red-team, objdump |
 | Node runtime, sandbox, CLI | `crates/k10-node`, `crates/k10s` | unit, cluster, chaos, soak, abuse, auth |
 | Bare-metal node (PVH, virtio-net, smoltcp, JIT, SMP, cluster member) | `metal/` | `test.sh`, `cluster-test.sh` |
-| PID 1 mode (Tier 1), k10s kernel config and build, initramfs builder | `crates/k10s/src/pid1`, `os/` | unit + `os/test.sh` (QEMU) |
+| PID 1 mode (Tier 1), k10s kernels (`vm`, `metal`), initramfs, firmware and disk image builders | `crates/k10s/src/pid1`, `os/` | unit + `os/test.sh` (QEMU) |
 | Baselines (Kubernetes, bare processes), loadgen, k10s harness, A/B driver | `bench/` | — |
 | Editor extension, documentation site | `editors/vscode`, `website/` | — |
 | CI and releases | `.github/`, `scripts/` | — |
@@ -81,6 +90,9 @@ seek privileges on this machine.
   step 8 on).
 - Use separate cargo target dirs per concurrent agent (`target/node`, `target/chaos`, …) to avoid lock contention.
 - Never touch Docker containers/images not created by k10s scripts (the machine has the user's own).
+- This machine has no flex, bison or libelf headers: kernel builds run with `. target/os/hosttools/env.sh`, a sysroot
+  of Debian 12 packages (`apt-get download flex bison m4 libelf-dev zlib1g-dev libzstd-dev`, `dpkg-deb -x`, a
+  `pkg-config` shim for libelf; not in git, recreate it if `target/` was cleaned).
 
 ## Open items
 - Untested here (needs root): `k10s node --user U --data NEW_DIR` without `--admin-token-file` creates the data
@@ -91,6 +103,9 @@ seek privileges on this machine.
   ones (`LINK_BUDGET`, `LINK_SOFT_CAP`, `LINK_HARD_CAP` in `crates/k10-node/src/cluster/mesh.rs`).
 - The hosted node builds for Linux x86-64 only (seccomp filter, `coro.rs`); Tier 1 needs portable versions
   (docs/TASK-universal-os.md, U3).
-- PID 1 mode is tested under QEMU only. Needs real hardware: drivers outside QEMU's virtio set (NICs, AHCI/NVMe, USB),
-  firmware files, asynchronous USB storage (`bootwait`), hardware watchdogs and RTCs, real DHCP servers and NTP pools
-  (U1 mini-PC bring-up).
+- PID 1 mode and the images are tested under QEMU only (SeaBIOS, OVMF, NVMe, e1000e, Intel TCO). Needs real
+  hardware: the U1 mini-PC cold boot (Realtek RTL8111/8125 with `rtl_nic` firmware, or Intel igc/e1000e), NICs and
+  USB Ethernet outside QEMU's models, AHCI/eMMC boot disks, the screen console, BIOS/UEFI firmware quirks, slow USB
+  storage (`bootwait`), AMD and SMBus-attached Intel watchdogs, RTC chips, real DHCP servers, switches and NTP pools.
+- Linux 6.18's ACPI button driver no longer binds fixed-feature power buttons; both profiles use the tiny power
+  button driver (signal to init). The evdev path of PID 1 stays for distribution kernels.

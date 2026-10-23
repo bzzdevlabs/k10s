@@ -21,6 +21,9 @@ import { Aside } from '@astrojs/starlight/components';
   invariant violations, 0 wrong bodies.
 - **Abuse:** output bombs, log spam, infinite loops, crash loops, KV bombs, slowloris, hostile bundles, call
   cycles, fd exhaustion, peers that never read: a well-behaved neighbour kept 0 errors.
+- **OS images:** PID 1 mode and both x86-64 disk images under QEMU on SeaBIOS and OVMF: DHCP renew, rebind and NAK,
+  growth of the data partition to the disk, signed driver modules (an unsigned one is refused), state across
+  reboots, reproducible builds; QEMU start to first HTTP 200 in about 0.5 s.
 
 ## Limits
 
@@ -31,15 +34,14 @@ import { Aside } from '@astrojs/starlight/components';
 | storage | key-value store durable but node-local; no replication, no consensus for singletons |
 | compute | 1.1–1.6× slower than portable Go on CPU-bound code |
 | ecosystem | Ten or TIR only; no Wasm or LLVM front end |
-| platforms | JIT on x86-64; other architectures on the interpreter; bare metal on VM guests only |
+| platforms | JIT on x86-64; other architectures on the interpreter; native kernel on VM guests only; disk images x86-64 only, tested under QEMU, not yet on a physical machine |
 
 ## Roadmap
 
 1. **Cluster security:** per-node identity and signed bundles, on top of today's authenticated and encrypted gossip
    and peer links.
 2. **Replicated state:** a replicated key-value store per service (Raft per shard group) and leases for singletons.
-3. **Images:** bootable x86-64 images (BIOS and UEFI) around the PID 1 mode, then signed A/B OS updates spread over
-   gossip.
+3. **OS updates:** signed A/B updates of the x86-64 disk images, spread over gossip.
 4. **arm64:** a JIT backend shared by hosted and bare-metal nodes.
 5. **Native bare metal:** UEFI, ACPI, modern virtio, NVMe and a durable key-value log; then cloud NICs.
 6. **Performance:** register allocation in the JIT, 32-bit TIR operations, cheaper cross-node forwarding.
