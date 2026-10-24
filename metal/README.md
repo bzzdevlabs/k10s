@@ -292,8 +292,10 @@ block the host wrote, writes, flushes and reads back 8 blocks, keeps four reques
 request past the end is refused; test.sh then checks the written blocks in the host's image file.
 
 **TCP/IP and HTTP.** The interface address comes from DHCPv4 (smoltcp's client: renewal by unicast at T1,
-rebinding by broadcast at T2, a NAK or the end of the lease starts over; boot waits up to 30 s for the first lease,
-since a cluster node advertises its address; a lost lease removes the address) or from `k10.ip=` (static). Ingress is
+rebinding by broadcast at T2, a NAK or the end of the lease starts over; a lost lease removes the address) or from
+`k10.ip=` (static). The DISCOVER goes out as soon as the NIC is up; a single node applies its bundle meanwhile and
+waits up to 30 s for the lease before its ready line, a cluster member waits for it before it starts (it sends from
+that address, and advertises it unless told otherwise). Ingress is
 processed one packet at a time (`poll_ingress_single`), and the listening sockets are topped up after every
 packet. A SYN burst therefore never meets an empty backlog, without keeping a large pool of idle sockets.
 HTTP/1.1 supports keep-alive, pipelining (one request in flight per connection), Content-Length bodies and

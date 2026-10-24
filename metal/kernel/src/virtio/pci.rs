@@ -131,16 +131,23 @@ pub struct Modern {
 impl Modern {
     fn new(d: &Device) -> Option<Modern> {
         let (mut common, mut notify, mut device, mut mult) = (0, 0, 0, 0);
-        // Each BAR is sized and mapped once (config accesses are VM exits).
-        let mut bars: [Option<Option<u64>>; 6] = [None; 6];
-        for cap in d.capabilities(CAP_VENDOR) {
-            let kind = d.read8(cap + 3);
-            let bar = d.read8(cap + 4);
-            let off = d.read32(cap + 8) as u64;
-            if bar > 5 || !matches!(kind, CFG_COMMON | CFG_NOTIFY | CFG_DEVICE) {
+        // Each capability names a BAR, an offset and a length: only that range is mapped (sizing the BAR would cost
+        // several configuration accesses, VM exits under a hypervisor).
+        let mut bars: [Option<(bool, u64)>; 6] = [None; 6];
+        for (cap, head) in d.capabilities(CAP_VENDOR) {
+            let kind = (head >> 24) as u8;
+            if !matches!(kind, CFG_COMMON | CFG_NOTIFY | CFG_DEVICE) {
                 continue;
             }
-            let Some(base) = *bars[bar as usize].get_or_insert_with(|| d.map_bar(bar)) else { continue };
+            let bar = d.read32(cap + 4) as u8;
+            if bar > 5 {
+                continue;
+            }
+            let (off, len) = (d.read32(cap + 8) as u64, d.read32(cap + 12) as u64);
+            let (io, base) = *bars[bar as usize].get_or_insert_with(|| d.bar(bar));
+            if io || base == 0 || !crate::arch::paging::map_mmio(base + off, len.max(1)) {
+                continue;
+            }
             match kind {
                 CFG_COMMON if common == 0 => common = base + off,
                 CFG_NOTIFY if notify == 0 => {

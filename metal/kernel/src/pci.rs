@@ -1,6 +1,6 @@
 //! PCI: configuration space through ECAM (the ACPI MCFG windows: every segment, the 4 KiB extended space) or else
 //! the legacy port mechanism (0xCF8 address / 0xCFC data: segment 0, 256 bytes), one bus enumeration at boot,
-//! BARs (I/O, 32- and 64-bit memory, mapped uncached when a driver claims them), MSI-X, and the bridges above a
+//! BARs (I/O, 32- and 64-bit memory; drivers map the ranges they use uncached), MSI-X, and the bridges above a
 //! device (enabled with it, so its DMA and MMIO are forwarded).
 //!
 //! Enumeration follows PCI-PCI bridges from each segment's first bus (every device firmware set up is reachable
@@ -218,16 +218,6 @@ impl Device {
         if mlo == 0 { 0 } else { size }
     }
 
-    /// The base of memory BAR `i`, mapped uncached over its whole size (`None`: an I/O, unassigned or unmappable BAR).
-    pub fn map_bar(&self, i: u8) -> Option<u64> {
-        let (io, base) = self.bar(i);
-        if io || base == 0 {
-            return None;
-        }
-        let size = self.bar_size(i).max(4096);
-        crate::arch::paging::map_mmio(base, size).then_some(base)
-    }
-
     /// Gives every unprogrammed BAR an address (minimal firmware such as qboot leaves them at 0): I/O BARs from
     /// 0xC000 up, memory BARs (64-bit ones too, with a zero high half) from 0xE000_0000 up (inside the uncached
     /// PCI hole below 4 GiB), each aligned to its size. BARs firmware already placed are left alone.
@@ -258,34 +248,33 @@ impl Device {
         }
     }
 
-    /// Offsets of the capabilities with id `cap`.
-    pub fn capabilities(&self, cap: u8) -> impl Iterator<Item = u16> + '_ {
+    /// The capabilities with id `cap`: (offset, the capability's first dword). One configuration read per
+    /// capability (each is a VM exit or two under a hypervisor).
+    pub fn capabilities(&self, cap: u8) -> impl Iterator<Item = (u16, u32)> + '_ {
         let mut p = if self.read16(0x06) & (1 << 4) != 0 { (self.read8(0x34) & !3) as u16 } else { 0 };
         let mut guard = 48;
         core::iter::from_fn(move || {
             while p != 0 && guard > 0 {
                 guard -= 1;
                 let here = p;
-                p = (self.read8(here + 1) & !3) as u16;
-                if self.read8(here) == cap {
-                    return Some(here);
+                let head = self.read32(here);
+                p = ((head >> 8) & 0xFC) as u16;
+                if head as u8 == cap {
+                    return Some((here, head));
                 }
             }
             None
         })
     }
 
-    pub fn find_capability(&self, cap: u8) -> Option<u16> {
-        self.capabilities(cap).next()
-    }
-
-    /// The MSI-X table (its BAR mapped), or `None` without MSI-X.
+    /// The MSI-X table (mapped uncached), or `None` without MSI-X.
     pub fn msix(&self) -> Option<MsiX> {
-        let cap = self.find_capability(CAP_MSIX)?;
-        let size = (self.read16(cap + 2) & 0x7FF) + 1;
+        let (cap, head) = self.capabilities(CAP_MSIX).next()?;
+        let size = ((head >> 16) as u16 & 0x7FF) + 1;
         let t = self.read32(cap + 4);
-        let base = self.map_bar((t & 7) as u8)?;
-        Some(MsiX { table: base + (t & !7) as u64, size, cap })
+        let (io, base) = self.bar((t & 7) as u8);
+        let table = base + (t & !7) as u64;
+        (!io && base != 0 && crate::arch::paging::map_mmio(table, size as u64 * 16)).then_some(MsiX { table, size, cap })
     }
 
     /// Turns MSI-X on (and the function mask off): entries left masked stay silent.

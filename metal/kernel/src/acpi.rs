@@ -278,20 +278,23 @@ fn table(addr: u64, bad: &mut usize) -> Option<&'static [u8]> {
     Some(t)
 }
 
+/// Whether `b` (36 bytes or more) starts with a valid RSDP.
+fn rsdp_ok(b: &[u8]) -> bool {
+    &b[..8] == b"RSD PTR " && checksum_ok(&b[..20]) && (b[15] < 2 || checksum_ok(&b[..(u32_at(b, 20) as usize).clamp(20, 36)]))
+}
+
+/// The first 16-byte-aligned address in `[start, end)` where `ok` accepts the bytes (the area mapped once).
+fn scan(start: u64, end: u64, len: usize, ok: impl Fn(&[u8]) -> bool) -> Option<u64> {
+    let area = phys(start, (end - start) as usize + len)?;
+    (0..(end - start) as usize).step_by(16).find(|&o| ok(&area[o..o + len])).map(|o| start + o as u64)
+}
+
 fn find_rsdp(hint: u64) -> Option<u64> {
-    let valid = |a: u64| -> bool {
-        let Some(b) = phys(a, 20) else { return false };
-        if &b[..8] != b"RSD PTR " || !checksum_ok(b) {
-            return false;
-        }
-        b[15] < 2 || phys(a, 36).is_some_and(|x| checksum_ok(&x[..(u32_at(x, 20) as usize).clamp(20, 36)]))
-    };
-    if hint != 0 && valid(hint) {
+    if hint != 0 && phys(hint, 36).is_some_and(rsdp_ok) {
         return Some(hint);
     }
-    // The EBDA's first KiB, then the BIOS area, on 16-byte boundaries.
-    let scan = |s: u64, e: u64| (s..e).step_by(16).find(|&a| valid(a));
-    ebda().and_then(|a| scan(a, a + 1024)).or_else(|| scan(0xE_0000, 0x10_0000))
+    // The EBDA's first KiB, then the BIOS area.
+    ebda().and_then(|a| scan(a, a + 1024, 36, rsdp_ok)).or_else(|| scan(0xE_0000, 0x10_0000 - 36, 36, rsdp_ok))
 }
 
 /// Reads the tables (once, after paging is up). Returns whether ACPI or an MP table was found.
@@ -524,12 +527,11 @@ fn find_virtio_mmio(aml: &[u8], out: &mut Vec<crate::dev::mmio::MmioSlot>) {
 
 /// Intel MultiProcessor Specification 1.4 table: processors and I/O APICs.
 fn mptable(t: &mut Tables) -> bool {
-    let valid = |a: u64| phys(a, 16).is_some_and(|b| &b[..4] == b"_MP_" && checksum_ok(b));
-    let scan = |s: u64, e: u64| (s..e).step_by(16).find(|&a| valid(a));
+    let valid = |b: &[u8]| &b[..4] == b"_MP_" && checksum_ok(&b[..16]);
     let fp = ebda()
-        .and_then(|a| scan(a, a + 1024))
-        .or_else(|| scan(0x9_FC00, 0xA_0000))
-        .or_else(|| scan(0xF_0000, 0x10_0000));
+        .and_then(|a| scan(a, a + 1024, 16, valid))
+        .or_else(|| scan(0x9_FC00, 0xA_0000, 16, valid))
+        .or_else(|| scan(0xF_0000, 0x10_0000 - 16, 16, valid));
     let Some(fp) = fp else { return false };
     let Some(cfg) = phys(fp, 16).map(|b| u32_at(b, 4) as u64) else { return false };
     let Some(h) = phys(cfg, 44) else { return false };

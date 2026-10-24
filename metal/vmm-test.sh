@@ -102,6 +102,7 @@ expect() { # NAME URL STATUS REGEX [curl args]
     body=$(curl -sS -m 10 -o - -w '\n%{http_code}' "$@" "$url" 2>&1)
     code=${body##*$'\n'}
     body=${body%$'\n'*}
+    body=${body%$'\n'}
     if [[ "$code" == "$st" && "$body" =~ $re ]]; then ok "$name ($code)"; else ko "$name: got $code '${body:0:120}', want $st /$re/"; fi
 }
 

@@ -1,8 +1,8 @@
 //! TCP/IP (smoltcp over a [`NetDevice`]) and the HTTP/1.1 ingress connections on port 80.
 //!
 //! * IPv4 only: DHCPv4 by default (smoltcp's client: renews at T1, rebinds at T2, starts over on a NAK or when
-//!   the lease ends), or a static `k10.ip=A.B.C.D/P[,GATEWAY]`. Boot waits up to 30 s for the first lease, since a
-//!   cluster node advertises its address.
+//!   the lease ends), or a static `k10.ip=A.B.C.D/P[,GATEWAY]`. Boot waits up to 30 s for the first lease (main.rs),
+//!   since a cluster node sends from, and advertises, its address.
 //! * smoltcp needs one socket in LISTEN state per connection it can accept. Instead of a large idle pool, the
 //!   kernel processes ingress one packet at a time (`poll_ingress_single`) and tops the listening sockets back
 //!   up after every packet, so a burst of SYNs never meets an empty backlog.

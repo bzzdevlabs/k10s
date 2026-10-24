@@ -396,7 +396,7 @@ for p in $PLATFORMS; do
     selftest "$p" "$p"
     if NO_REBOOT=0 BOOT_PLATFORM=$p boot "$MEM" out/bundle.k10b "$OUT/serial-platform-$p.log" "k10.verbose"; then
         ok "boot $p: $(grep -a 'k10-metal ready' "$OUT/serial-platform-$p.log" | head -1)"
-        grep -a "^net: \|^acpi: " "$OUT/serial-platform-$p.log" | head -3 | sed 's/^/    /'
+        grep -a "^net: \|^acpi: \|^boot phases" "$OUT/serial-platform-$p.log" | head -4 | sed 's/^/    /'
         power_cycle "$p" "$OUT/serial-platform-$p.log"
     else
         ko "boot $p (no ready line)"

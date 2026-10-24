@@ -52,7 +52,8 @@ pub fn init(chips: &[crate::acpi::IoApic]) {
         let gsi_base = if c.gsi_base == crate::acpi::GSI_AFTER_PREVIOUS { next } else { c.gsi_base };
         next = gsi_base + pins;
         let chip = Chip { base: c.addr, gsi_base, pins };
-        for p in 0..pins {
+        // Only pins left unmasked are written (each access is an exit under a hypervisor).
+        for p in (0..pins).filter(|&p| read(chip.base, 0x10 + 2 * p) as u64 & MASKED == 0) {
             set_entry(&chip, p, MASKED);
         }
         v.push(chip);

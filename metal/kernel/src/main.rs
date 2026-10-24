@@ -114,11 +114,13 @@ extern "C" fn kmain() -> ! {
     VERBOSE.store(verbose, Ordering::Relaxed);
     acpi::early();
     let kernel = boot::kernel_image();
+    let t_parse = arch::rdtsc();
     let memmap = mem::memmap::MemoryMap::from_entries(bi.memmap().iter().map(|r| (r.addr, r.size, r.kind)));
     frames::init(&memmap, bi.modules(), kernel);
     arch::paging::init(&memmap);
     efi::init(&bi);
     TOTAL_RAM.store(frames::total_ram(&memmap), Ordering::Relaxed);
+    let t_paging = arch::rdtsc();
     let have_acpi = acpi::init(bi.rsdp);
     frames::add_low_memory(&memmap, acpi::ebda_range());
     let fs = frames::stats();
@@ -261,8 +263,15 @@ extern "C" fn kmain() -> ! {
     let (nic_name, irq, pairs) = (nic.name(), nic.has_interrupts(), nic.queue_pairs());
     let seed = arch::rdrand().unwrap_or(arch::rdtsc());
     let mut net = net::Net::new(nic, limits, seed, ip);
+    // DHCP: the DISCOVER goes out now; the lease arrives while the bundle is applied. A cluster member waits for it
+    // before it starts (it sends from, and may advertise, that address); a single node before the ready line.
+    let cluster_cfg = cluster::config(&bi);
     if ip == net::IpConfig::Dhcp {
-        wait_for_address(&mut net, 30_000_000_000);
+        net.poll_ingress();
+        net.poll_egress();
+        if cluster_cfg.is_some() {
+            wait_for_address(&mut net, 30_000_000_000);
+        }
     }
     let t_net = arch::rdtsc();
     if verbose { kprintln!(
@@ -279,7 +288,6 @@ extern "C" fn kmain() -> ! {
     // Cluster mode (k10.join= / k10.gossip= / k10.cluster): gossip + peer links; the desired state comes from the
     // cluster (a boot bundle is applied like an operator apply: installed, then announced).
     // A member that advertises the interface's address needs one: it waits for the lease as long as it takes.
-    let cluster_cfg = cluster::config(&bi);
     let follows_address = cluster_cfg.as_ref().is_some_and(cluster::advertises_interface);
     while follows_address && net.ipv4().is_none() {
         kprintln!("net: the cluster member advertises the interface's address and has none yet; waiting for DHCP");
@@ -322,13 +330,18 @@ extern "C" fn kmain() -> ! {
         }
     }
 
+    if ip == net::IpConfig::Dhcp && net.ipv4().is_none() {
+        wait_for_address(&mut net, 30_000_000_000);
+    }
     let t_apply = arch::rdtsc();
     let boot_ns = time::now_ns();
     BOOT_NS.store(boot_ns, Ordering::Relaxed);
     let us = |a: u64, b: u64| time::tsc_to_ns(b - a) / 1000;
     if verbose { kprintln!(
-        "boot phases (us): cpu+memory+acpi {} clock {} apic {} console+cpus {} pci+devices {} tcp/ip+address {} console {} apply {}",
-        us(tsc0, t_mem),
+        "boot phases (us): cpu+boot info {} memory {} acpi {} clock {} apic {} console+cpus {} pci+devices {} tcp/ip {} console {} apply+address {}",
+        us(tsc0, t_parse),
+        us(t_parse, t_paging),
+        us(t_paging, t_mem),
         us(t_mem, t_clock),
         us(t_clock, t_apic),
         us(t_apic, t_banner),
