@@ -687,29 +687,31 @@ fn decoder_reads_like_objdump() {
     let seed: u64 = std::env::var("K10_FUZZ_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(0xDEC);
     let mut rng = Rng(k10_ir::gen::Rng::new(seed));
     let n = 4 * iters();
-    let mut words = Vec::with_capacity(n as usize);
-    while (words.len() as u64) < n {
-        if rng.bool() {
-            words.push(rng.next() as u32);
+    // Only the accepted words go to objdump, the only ones compared: binutils 2.42 aborts on some unallocated
+    // encodings (PR31595, e.g. LRCPC3 SIMD&FP with size:opc > 4), which the decoder rejects.
+    let mut words = Vec::new();
+    for _ in 0..n {
+        let w = if rng.bool() {
+            rng.next() as u32
         } else {
             let mut b = Asm::new();
             let bl = b.new_label();
             b.bind(bl);
             let _ = gen(&mut b, &mut rng, &[bl]);
             let code = b.finish().unwrap();
-            let w = u32::from_le_bytes(code[0..4].try_into().unwrap());
-            words.push(w ^ (1 << rng.below(32)));
+            u32::from_le_bytes(code[0..4].try_into().unwrap()) ^ (1 << rng.below(32))
+        };
+        if let Some(i) = decode(w) {
+            words.push((w, i));
         }
     }
-    let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let code: Vec<u8> = words.iter().flat_map(|(w, _)| w.to_le_bytes()).collect();
     let dis = xdis::disassemble_a64(&objdump, &[&code]).pop().unwrap();
-    let mut accepted = 0;
-    for (at, w, text) in &dis {
-        if let Some(i) = decode(*w) {
-            assert_eq!(&i.text(*at), text, "{at:#x}: {w:#010x} decoded as {i:?}");
-            accepted += 1;
-        }
+    assert_eq!(dis.len(), words.len(), "objdump did not decode every word");
+    for ((at, w, text), (want, i)) in dis.iter().zip(&words) {
+        assert_eq!(w, want);
+        assert_eq!(&i.text(*at), text, "{at:#x}: {w:#010x} decoded as {i:?}");
     }
-    eprintln!("a64 decoder: {accepted} of {} random or mutated words accepted, all read as objdump does", dis.len());
-    assert!(accepted > 0);
+    eprintln!("a64 decoder: {} of {n} random or mutated words accepted, all read as objdump does", words.len());
+    assert!(!words.is_empty());
 }
