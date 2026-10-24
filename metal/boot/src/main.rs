@@ -119,6 +119,7 @@ fn run() -> Status {
         log!("native kernel not booted: {why}");
         log!("booting Tier 1 instead");
     }
+    drop(esp);
     chainload(device)
 }
 

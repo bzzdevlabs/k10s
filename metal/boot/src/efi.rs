@@ -468,6 +468,15 @@ pub fn exit_boot_services(key: usize) -> Result<(), Status> {
 /// The root directory of a volume.
 pub struct Volume(*mut File);
 
+impl Drop for Volume {
+    /// Closes the root directory: the firmware's FAT driver should have nothing of ours open when the next loader
+    /// (systemd-boot, which writes the partition) starts. Never runs after ExitBootServices (the jump never returns).
+    fn drop(&mut self) {
+        // SAFETY: the directory this volume opened, boot services up.
+        unsafe { ((*self.0).close)(self.0) };
+    }
+}
+
 /// A file's contents and its modification time (`EFI_TIME`).
 pub struct FileData {
     pub data: Vec<u8>,

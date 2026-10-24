@@ -254,7 +254,12 @@ seek privileges on this machine.
   kept)` checks fail, before and after 13b alike: emulated, the service's CPU time exceeds the 20 µs local-dispatch
   threshold, so the second request runs on another CPU's instance pool. KVM runs (CI) pass.
 - The x86-64 `update` test timed out once waiting for the commit (release run of 2d12614, before U3); it passed on
-  the next run. Watch for a recurrence. Same for `graceful_leave_and_join_under_load` (musl suite, "placement includes
+  the next run. It recurred in update-uefi (release run 40141304655, 08686b6): at the first slot write on a fresh disk
+  after a UEFI boot, Linux reported "FAT-fs (vda2): error, fat_get_cluster: invalid cluster chain (i_pos 0)" on
+  K10S-BOOT, while update-bios passed on copies of the same image. Before Linux the only FAT writes on that path are
+  systemd-boot 262's (`loader/random-seed`, `loader/boot-secret-mixin`, through the firmware's FAT driver); not
+  reproduced locally (the disks are fsck-clean after boots and updates). Watch for a recurrence and keep the step's
+  disk (`fsck.fat -n`). Same for `graceful_leave_and_join_under_load` (musl suite, "placement includes
   the newcomer" not within 10 s; release run of 08a3fb7, first failure in the release history).
 - Linux 6.18's ACPI button driver no longer binds fixed-feature power buttons; both profiles use the tiny power
   button driver (signal to init). The evdev path of PID 1 stays for distribution kernels.
