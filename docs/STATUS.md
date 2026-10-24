@@ -5,10 +5,11 @@ PROJECT STATE: HARDENING
 Last updated: 2026-10-24. This file is the single place to learn where the project stands and what comes next.
 
 ## State of `main`
-`main` is pushed; every push publishes a dev pre-release (v0.1.0-dev.136 = 7ecd4ba, step 12 U2: ci, release, pages
-workflows green, the `os` QEMU suite gating the release, now with the update and 20-node rollout tests; glibc
-(≥ 2.34), musl, metal, bench, examples and source archives, the `vm` and `metal` disk images and their UKIs signed by
-the release key (verified against the key built into k10s), `SHA256SUMS`).
+`main` is pushed; every push publishes a dev pre-release (v0.1.0-dev.139 = 18cceb5, step 12 U3: ci, release, pages
+workflows green, the `os`, `os-arm64` QEMU suites and the arm64-runner `arm64` suite gating the release; glibc
+(≥ 2.34), musl (x86-64 and aarch64), metal, bench, examples and source archives, the x86-64 `vm`/`metal`, `aarch64-vm`
+and `aarch64-pi` disk images with their UKIs signed by the release key (verified against the key built into k10s),
+`SHA256SUMS`; dev.139 lacks the Pi's `.fat` update file, which the publish step now uploads).
 `main` contains:
 - Isolation: SFI-masked JIT and interpreter, validator, red-team and differential suites, objdump encoder fuzzing and
   SFI verifier tests.
@@ -139,5 +140,7 @@ seek privileges on this machine.
   power cuts during an update on real disks, GRUB `save_env` and systemd-boot boot counting on real firmware (Realtek RTL8111/8125 with `rtl_nic` firmware, or Intel igc/e1000e), NICs and
   USB Ethernet outside QEMU's models, AHCI/eMMC boot disks, the screen console, BIOS/UEFI firmware quirks, slow USB
   storage (`bootwait`), AMD and SMBus-attached Intel watchdogs, RTC chips, real DHCP servers, switches and NTP pools.
+- The x86-64 `update` test timed out once waiting for the commit (release run of 2d12614, before U3); it passed on
+  the next run. Watch for a recurrence.
 - Linux 6.18's ACPI button driver no longer binds fixed-feature power buttons; both profiles use the tiny power
   button driver (signal to init). The evdev path of PID 1 stays for distribution kernels.
