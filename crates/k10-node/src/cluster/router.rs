@@ -25,6 +25,8 @@ pub(crate) enum MeshMsg {
     SetDesired { version: u64, hash: [u8; 32] },
     /// Fallback order per service (HRW ranking over live members), computed with each placement.
     Ranking(Arc<HashMap<String, Vec<NodeId>>>),
+    /// This node's OS report changed (Tier 1, from init).
+    SetOs(Option<k10_mesh::OsInfo>),
     /// Graceful leave (gossip `Left`); links keep serving until `Stop`.
     Leave,
     Stop,

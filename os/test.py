@@ -17,8 +17,17 @@ and, for the DHCP test, a host-side DHCP server on a QEMU socket netdev. os/test
       The metal kernel refuses e1000e once its signature is stripped (no network).
   test.py boottime --image IMG [--runs N]
       QEMU start → first HTTP 200 from the node, BIOS boot of the image (KVM); fails when the median reaches 1 s.
+  test.py update --image IMG --uki EFI --image-key KEY --boot DIR --k10s K10S --examples DIR (--bios | --uefi)
+      A/B update of a single-node cluster to a re-signed image, with the power cut at every step (verified, slot
+      written, armed, trial boot, commit request, committed): each boot serves on a good image and the KV state
+      survives. Then an image that panics (the loaders fall back after 3 boots) and one that never commits (init
+      falls back after os_trial); both are recorded as failed.
+  test.py rollout --image IMG --uki EFI --image-key KEY --boot DIR --k10s K10S --examples DIR [--nodes 20]
+      A cluster of BIOS VMs: an image that panics stops after the first wave (one node), then a good image rolls
+      through every node in waves of 1, 2, 4, … with each wave committed before the next starts.
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -78,31 +87,66 @@ class Guest:
     """One QEMU run: serial console to a file, QMP for the power button. Boots `kernel` + `initrd`, else the disk in
     `extra`."""
 
-    def __init__(self, work, name, kernel, initrd, append, extra):
+    def __init__(self, work, name, kernel, initrd, append, extra, reboot=False, mem="512M", smp=2, cut=None):
+        """`cut`: a pattern on the console at which QEMU is killed at once (a power cut)."""
         self.log = os.path.join(work, f"{name}.log")
         self.qmp = os.path.join(work, f"{name}.qmp")
         open(self.log, "w").close()
         boot = ["-kernel", kernel, "-initrd", initrd, "-append", "console=ttyS0 panic=-1 " + append] if kernel else []
-        cmd = [tool("qemu-system-x86_64"), "-nodefaults", "-no-user-config", "-display", "none", "-no-reboot",
-               "-m", "512M", "-smp", "2", "-accel", "kvm" if KVM else "tcg", "-cpu", "host" if KVM else "max",
+        # The firmware's debug port (SeaBIOS): what happened before the kernel, should a disk boot fail silently.
+        self.fwlog = os.path.join(work, f"{name}.fw.log")
+        if not kernel:
+            boot = ["-chardev", f"file,id=fw,path={self.fwlog}", "-device", "isa-debugcon,iobase=0x402,chardev=fw"]
+        cmd = [tool("qemu-system-x86_64"), "-nodefaults", "-no-user-config", "-display", "none",
+               *([] if reboot else ["-no-reboot"]),
+               "-m", mem, "-smp", str(smp), "-accel", "kvm" if KVM else "tcg", "-cpu", "host" if KVM else "max",
                *boot, "-serial", f"file:{self.log}", "-qmp", f"unix:{self.qmp},server=on,wait=off",
                "-device", "virtio-rng-pci"] + extra
         self.timeout = 90 if KVM else 300
+        self.cmd = cmd
         self.proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
+        self.cut = threading.Event()
+        if cut:
+            threading.Thread(target=self.cutter, args=(re.compile(cut.encode()),), daemon=True).start()
 
-    def wait_for(self, pattern, what=None):
-        """Waits for console output matching `pattern`; returns the match."""
+    def cutter(self, rx):
+        """Kills QEMU within about a millisecond of `rx` appearing on the console (QEMU writes it synchronously)."""
+        seen = b""
+        with open(self.log, "rb") as log:
+            while self.proc.poll() is None:
+                chunk = log.read()
+                if not chunk:
+                    time.sleep(0.0005)
+                    continue
+                seen = seen[-4096:] + chunk
+                if rx.search(seen):
+                    self.proc.kill()
+                    self.cut.set()
+                    return
+
+    def text(self):
+        return open(self.log, errors="replace").read()
+
+    def wait_for(self, pattern, what=None, since=0, timeout=None):
+        """Waits for console output matching `pattern` (after offset `since`); returns the match."""
         rx = re.compile(pattern)
-        end = time.time() + self.timeout
+        end = time.time() + (timeout or self.timeout)
         while time.time() < end:
-            text = open(self.log, errors="replace").read()
-            m = rx.search(text)
+            text = self.text()
+            m = rx.search(text, since)
             if m:
                 return m
             if self.proc.poll() is not None:
                 fail(f"QEMU exited ({self.proc.returncode}) before: {what or pattern}", self.log)
             time.sleep(0.05)
         self.proc.kill()
+        if not self.text() and os.path.exists(self.fwlog):
+            sys.stderr.write(open(self.fwlog, errors="replace").read()[-1500:])
+            disk = next((d.split("=", 1)[1].split(",")[0] for d in self.cmd if d.startswith("file=")), None)
+            if disk:
+                env = dict(os.environ, MTOOLS_SKIP_CHECK="1")
+                for c in (["mdir", "-/", "-i", f"{disk}@@{2 << 20}", "::/"], ["mtype", "-i", f"{disk}@@{2 << 20}", "::/boot/grub/grubenv"]):
+                    sys.stderr.write(subprocess.run([tool(c[0]), *c[1:]], capture_output=True, text=True, env=env).stdout[:3000])
         fail(f"timeout waiting for: {what or pattern}", self.log)
 
     def power_button(self):
@@ -116,6 +160,11 @@ class Guest:
             while "return" not in json.loads(f.readline()):
                 pass
         s.close()
+
+    def kill(self):
+        """Power cut."""
+        self.proc.kill()
+        self.proc.wait()
 
     def wait_exit(self):
         try:
@@ -478,9 +527,323 @@ def boottime_test(a, work):
         fail(f"boot to first HTTP 200 takes {med * 1e3:.0f} ms (limit 1000 ms)")
 
 
+def unsigned_payload(blob):
+    """The UKI of a signed OS image (crates/k10-mesh/src/osimage.rs: the trailer ends in its length and K10S-END)."""
+    if blob[-8:] != b"K10S-END":
+        fail("not a signed OS image")
+    return blob[:len(blob) - 12 - struct.unpack("<I", blob[-12:-8])[0]]
+
+
+def pe_sections(pe):
+    lfanew = struct.unpack_from("<I", pe, 0x3C)[0]
+    nsec, optsz = struct.unpack_from("<HH", pe, lfanew + 6)[0], struct.unpack_from("<H", pe, lfanew + 20)[0]
+    out = {}
+    for i in range(nsec):
+        h = lfanew + 24 + optsz + 40 * i
+        name = pe[h:h + 8].rstrip(b"\0").decode()
+        vsize, raw, ptr = struct.unpack_from("<I", pe, h + 8)[0], struct.unpack_from("<I", pe, h + 16)[0], struct.unpack_from("<I", pe, h + 20)[0]
+        out[name] = pe[ptr:ptr + min(vsize, raw)]
+    return out
+
+
+class Images:
+    """OS images for the update tests, from the image's own slot-A UKI: a re-signed copy (another version, so another
+    hash), one whose kernel finds no init (it panics: `panic=5` reboots), and one whose node never asks to commit."""
+
+    def __init__(self, a, work):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import mkimage
+        self.k10s, self.key = a.k10s, a.image_key
+        self.pub = subprocess.run([a.k10s, "image", "pubkey", a.image_key], check=True, capture_output=True, text=True).stdout.strip()
+        blob = open(a.uki, "rb").read()
+        self.a = a.uki
+        self.ids = {"a": hashlib.sha256(blob).hexdigest()}
+        payload = unsigned_payload(blob)
+        secs = pe_sections(payload)
+        cmdline = secs[".cmdline"].rstrip(b"\0").decode().strip()
+        stub = os.path.join(a.boot, "usr/lib/systemd/boot/efi/linuxx64.efi.stub")
+        self.files = {}
+        for name, extra in (("b", None), ("bad", " rdinit=/missing"), ("slow", " k10s.os-commit-grace=100000")):
+            uki = os.path.join(work, f"{name}.unsigned.efi")
+            if extra is None:
+                open(uki, "wb").write(payload)
+            else:
+                parts = []
+                for sec, data in ((".osrel", secs[".osrel"]), (".cmdline", (cmdline + extra).encode()),
+                                  (".initrd", secs[".initrd"]), (".linux", secs[".linux"])):
+                    parts.append((sec, os.path.join(work, f"{name}{sec}")))
+                    open(parts[-1][1], "wb").write(data)
+                mkimage.uki(stub, parts, uki)
+            out = os.path.join(work, f"{name}.efi")
+            subprocess.run([a.k10s, "image", "sign", "--key", a.image_key, "--arch", "x86_64", "--profile", "vm",
+                            "--version", f"test-{name}", uki, out], check=True, stderr=subprocess.DEVNULL)
+            self.files[name] = out
+            self.ids[name] = hashlib.sha256(open(out, "rb").read()).hexdigest()
+
+    def manifest(self, work, a, image, name):
+        p = os.path.join(work, f"{name}.k10s")
+        ex = os.path.abspath(a.examples)
+        with open(p, "w") as f:
+            f.write(f'service hello {{ code = "{ex}/hello.ten" memory = 64KiB replicas = 3 }}\n'
+                    f'service counter {{ code = "{ex}/counter.ten" memory = 64KiB }}\n'
+                    f'os {{ images = ["{os.path.abspath(self.files[image])}"] wave = 1 }}\n')
+        return p
+
+
+def configure(disk, work, k10s, conf_lines, name="node"):
+    """k10s.conf, the admin key and the cluster key on K10S-BOOT of a disk image, like an operator does."""
+    d = os.path.join(work, name)
+    os.makedirs(d, exist_ok=True)
+    conf = os.path.join(d, "k10s.conf")
+    open(conf, "w").write("".join(f"{l}\n" for l in conf_lines))
+    subprocess.run([tool("mcopy"), "-o", "-i", f"{disk}@@{2 << 20}", conf, os.path.join(work, "admin.key"),
+                    os.path.join(work, "cluster.key"), "::/"], check=True, env=dict(os.environ, MTOOLS_SKIP_CHECK="1"))
+
+
+def keys(work, k10s):
+    for k in ("admin.key", "cluster.key"):
+        if not os.path.exists(os.path.join(work, k)):
+            subprocess.run([k10s, "keygen", "-o", os.path.join(work, k)], check=True)
+    return os.path.join(work, "admin.key")
+
+
+def apply(a, key, port, manifest):
+    subprocess.run([a.k10s, "apply", manifest, "--node", f"127.0.0.1:{port}", "--admin-token-file", key], check=True,
+                   stdout=subprocess.DEVNULL)
+
+
+BOOTED = r"update: (?:Uefi|Bios) boot of slot ([ab]) \(x86_64-vm, ([0-9a-f]{8})(, trial)?\)"
+
+
+def update_test(a, work):
+    im = Images(a, work)
+    key = keys(work, a.k10s)
+    disk = os.path.join(work, "disk.img")
+    fw_args = uefi_firmware(work) if a.uefi else []
+    runs = [0]
+
+    def fresh_disk():
+        subprocess.run(["cp", "--sparse=always", a.image, disk], check=True)
+        with open(disk, "r+b") as f:
+            f.truncate(2 << 30)
+        configure(disk, work, a.k10s, ["admin-token-file=/boot/admin.key", "cluster-key-file=/boot/cluster.key",
+                                       "gossip=0.0.0.0:7946", "ntp=none", "watchdog=1", f"os_key={im.pub}", "os_trial=40",
+                                       "os-commit-grace=3"])
+
+    def power_on(cut=None):
+        runs[0] += 1
+        port = free_port()
+        g = Guest(work, f"update{runs[0]}", None, None, None,
+                  fw_args + ["-drive", f"file={disk},if=virtio,format=raw", "-device", "i6300esb",
+                             "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:80", "-device", "virtio-net-pci,netdev=n0"],
+                  reboot=True, cut=cut)
+        g.port = port
+        return g
+
+    def serving(g, since=0, path="/hello/"):
+        """The boot after `since` comes up on a good image (A or B, as committed or trial) and serves."""
+        m = g.wait_for(BOOTED, "booted slot", since)
+        if m.group(2) not in (im.ids["a"][:8], im.ids["b"][:8]):
+            fail(f"booted an unknown image {m.group(2)}", g.log)
+        g.wait_for(r"ready: the node answers", "node ready", m.end())
+        if http(g.port, path)[0] != 200:
+            fail(f"GET {path}", g.log)
+        return m
+
+    def committed_b(g, since=0):
+        """Boots (QEMU reboots in place) until slot B is committed; returns the offset after the commit."""
+        c = g.wait_for(r"update: committed slot b", "commit", since, 180)
+        return c.end()
+
+    # A power cut at every step of an update, each on a fresh disk: the QEMU process is killed the moment init or the
+    # node logs the step. Every next boot serves on a good image, the update completes, and the KV state survives.
+    steps = ((r"update: verified ", "image verified"), (r"update: slot b written", "slot written"),
+             (r"update: slot b armed", "trial armed"), (r"update: trial boot of slot b", "trial booted"),
+             (r"os: trial image \w+ serves; asking init to commit it", "commit requested"),
+             (r"update: committed slot b", "committed"))
+    for pat, what in steps:
+        fresh_disk()
+        g = power_on(cut=pat)
+        m = serving(g, path="/_k10s/health")
+        if (m.group(1), m.group(2), m.group(3)) != ("a", im.ids["a"][:8], None):
+            fail(f"first boot: {m.group(0)}", g.log)
+        apply(a, key, g.port, im.manifest(work, a, "b", "to-b"))
+        if http(g.port, "/counter/")[1] != "1\n":
+            fail("counter before the update", g.log)
+        if not g.cut.wait(180):
+            fail(f"no power cut at: {what}", g.log)
+        g.proc.wait()
+        g = power_on()
+        m = serving(g)
+        state = f"slot {m.group(1)}{' trial' if m.group(3) else ''}"
+        if not (m.group(1) == "b" and m.group(3) is None):
+            committed_b(g, m.start())
+            if http(g.port, "/hello/")[0] != 200:
+                fail("GET /hello/ after the commit", g.log)
+        if http(g.port, "/counter/")[1] != "2\n":
+            fail(f"the KV state did not survive a power cut at: {what}", g.log)
+        g.kill()
+        print(f"test.py: update: power cut at {what}: next boot {state}, then slot b committed: ok", file=sys.stderr)
+
+    # An image that panics: 3 trial boots, then the loader falls back to B; init records it as failed. Then an image
+    # that boots but never asks to commit: init gives up after os_trial and falls back.
+    fresh_disk()
+    g = power_on()
+    serving(g, path="/_k10s/health")
+    apply(a, key, g.port, im.manifest(work, a, "b", "to-b"))
+    committed_b(g)
+    if http(g.port, "/hello/")[0] != 200:
+        fail("GET /hello/ after the update", g.log)
+    mark = len(g.text())
+    apply(a, key, g.port, im.manifest(work, a, "bad", "to-bad"))
+    g.wait_for(r"update: slot a armed", "bad image armed", mark)
+    g.wait_for(rf"update: slot a \({im.ids['bad'][:8]}\) did not come up in 3 boots; back on slot b", "fallback", mark, 300)
+    m = serving(g, mark)
+    if m.group(1) != "b":
+        fail(f"after the bad image: {m.group(0)}", g.log)
+    g.wait_for(rf"os: rollout of {im.ids['bad'][:8]} stopped: node \w+ failed to commit it", "rollout halted", mark)
+    print("test.py: update: an image that panics falls back after 3 boots: ok", file=sys.stderr)
+    mark = len(g.text())
+    apply(a, key, g.port, im.manifest(work, a, "slow", "to-slow"))
+    m = g.wait_for(BOOTED, "trial of the slow image", g.wait_for(r"update: slot a armed", "slow image armed", mark).end(), 120)
+    if m.group(3) is None or m.group(2) != im.ids["slow"][:8]:
+        fail(f"slow image: {m.group(0)}", g.log)
+    g.wait_for(r"update: the trial boot did not commit within 40 s; falling back", "trial timeout", m.end(), 120)
+    m = serving(g, m.end())
+    if (m.group(1), m.group(3)) != ("b", None):
+        fail(f"after the slow image: {m.group(0)}", g.log)
+    print("test.py: update: an image that never commits is abandoned after os_trial: ok", file=sys.stderr)
+    g.power_button()
+    g.wait_for(r"powering off", "power off")
+    g.wait_exit()
+    print(f"test.py: update ({'uefi' if a.uefi else 'bios'}): ok", file=sys.stderr)
+
+
+def rollout_test(a, work):
+    if not KVM:
+        print("test.py: rollout: skipped (needs KVM)", file=sys.stderr)
+        return
+    im = Images(a, work)
+    key = keys(work, a.k10s)
+    n = a.nodes
+    # Distinct ports: every socket stays bound until all are picked.
+    held = []
+    for kind in [socket.SOCK_DGRAM, socket.SOCK_STREAM, socket.SOCK_STREAM] * n:
+        s = socket.socket(socket.AF_INET, kind)
+        s.bind(("127.0.0.1", 0))
+        held.append(s)
+    nums = [s.getsockname()[1] for s in held]
+    for s in held:
+        s.close()
+    ports = [tuple(nums[3 * i:3 * i + 3]) for i in range(n)]
+    guests = []
+    for i, (gp, rp, hp) in enumerate(ports):
+        disk = os.path.join(work, f"disk{i}.img")
+        subprocess.run(["cp", "--sparse=always", a.image, disk], check=True)
+        # Peers reach each other through the host: QEMU forwards each node's ports from 127.0.0.1, which guests
+        # see as 10.0.2.2.
+        configure(disk, work, a.k10s, ["admin-token-file=/boot/admin.key", "cluster-key-file=/boot/cluster.key",
+                                       f"gossip=0.0.0.0:{gp}", f"rpc=0.0.0.0:{rp}", "advertise=10.0.2.2",
+                                       f"join=10.0.2.2:{ports[0][0]}", "ntp=none", f"os_key={im.pub}", "os_trial=120",
+                                       "os-commit-grace=3", f"name=n{i}"], f"n{i}")
+        fwd = f"hostfwd=udp:127.0.0.1:{gp}-:{gp},hostfwd=tcp:127.0.0.1:{rp}-:{rp},hostfwd=tcp:127.0.0.1:{hp}-:80"
+        g = Guest(work, f"n{i}", None, None, None,
+                  ["-drive", f"file={disk},if=virtio,format=raw", "-netdev", f"user,id=n0,{fwd}",
+                   "-device", "virtio-net-pci,netdev=n0"], reboot=True, mem="192M", smp=1)
+        g.timeout = 600
+        g.port = hp
+        guests.append(g)
+    for g in guests:
+        g.wait_for(r"ready: the node answers", "node ready")
+    status = lambda g: subprocess.run([a.k10s, "status", "--node", f"127.0.0.1:{g.port}", "--admin-token-file", key],
+                                      capture_output=True, text=True).stdout
+    # Every node sees every member and its OS report.
+    end = time.time() + 180
+    while not all(f"members: {n} live" in (st := status(g)) and st.count("    os x86_64-vm ") == n for g in guests):
+        if time.time() > end:
+            fail(f"the membership did not converge: {status(guests[0])}", guests[0].log)
+        time.sleep(1)
+    print(f"test.py: rollout: {n} nodes up, each sees {n} OS reports", file=sys.stderr)
+
+    def watch(pattern, since, until, wait_all=True, limit=600):
+        """Host time of the first match per guest, polled until `until()` or the limit."""
+        seen, end = {}, time.time() + limit
+        while time.time() < end:
+            for i, g in enumerate(guests):
+                if i not in seen and re.search(pattern, g.text()[since[i]:]):
+                    seen[i] = time.time()
+            if until(seen):
+                return seen
+            time.sleep(0.2)
+        fail(f"timeout watching {pattern}: {sorted(seen)}", guests[0].log)
+
+    # A bad image: the first wave (one node) takes it, falls back, and the rollout stops there.
+    marks = [len(g.text()) for g in guests]
+    apply(a, key, guests[0].port, im.manifest(work, a, "bad", "to-bad"))
+    back = watch(rf"did not come up in 3 boots", marks, lambda s: len(s) >= 1)
+    canary = next(iter(back))
+    stopped = watch(rf"os: rollout of {im.ids['bad'][:8]} stopped", marks, lambda s: len(s) == n, limit=120)
+    armed = [i for i, g in enumerate(guests) if re.search(r"update: slot \w armed", g.text()[marks[i]:])]
+    if armed != [canary]:
+        for i in armed:
+            sys.stderr.write("".join(f"n{i}: {l}\n" for l in guests[i].text()[marks[i]:].splitlines() if "os:" in l or "update:" in l))
+        fail(f"the bad image was installed on nodes {armed}, want only the first wave [{canary}]")
+    print(f"test.py: rollout: bad image stopped after the first wave (node {canary}); {len(stopped)} nodes halted", file=sys.stderr)
+    # A good image rolls through every node, a wave at a time.
+    marks = [len(g.text()) for g in guests]
+    apply(a, key, guests[0].port, im.manifest(work, a, "b", "to-b"))
+    events = {}
+    end = time.time() + 900
+    while len([1 for e in events.values() if "committed" in e]) < n:
+        if time.time() > end:
+            fail(f"rollout incomplete: {events}", guests[0].log)
+        for i, g in enumerate(guests):
+            t = g.text()[marks[i]:]
+            for ev, pat in (("armed", r"update: slot \w armed"), ("committed", r"update: committed slot")):
+                if ev not in events.setdefault(i, {}) and re.search(pat, t):
+                    events[i][ev] = time.time()
+        time.sleep(0.2)
+    # Each node logs its wave when it starts; the waves must have the expected sizes, and a node may start only after
+    # every node of the earlier waves committed (host times, polled every 0.2 s: 0.5 s of slack).
+    wave = {}
+    for i, g in enumerate(guests):
+        m = re.search(rf"os: installing {im.ids['b'][:8]} \(wave (\d+)\)", g.text()[marks[i]:])
+        if not m:
+            fail(f"node {i} logged no wave", g.log)
+        wave[i] = int(m.group(1))
+    waves = [sum(1 for w in wave.values() if w == k) for k in range(max(wave.values()) + 1)]
+    want, size, left = [], 1, n
+    while left > 0:
+        want.append(min(size, left))
+        left -= size
+        size *= 2
+    for i in events:
+        earlier = [events[j]["committed"] for j in events if wave[j] < wave[i]]
+        if earlier and events[i]["armed"] < max(earlier) - 0.5:
+            fail(f"node {i} (wave {wave[i]}) started {max(earlier) - events[i]['armed']:.1f} s before the earlier waves committed")
+    if waves != want:
+        fail(f"waves {waves}, want {want}")
+    # Every node serves once the links to the last wave's nodes are back.
+    end = time.time() + 60
+    for g in guests:
+        while True:
+            try:
+                if http(g.port, "/hello/") == (200, "hello"):
+                    break
+            except OSError:
+                pass
+            if time.time() > end:
+                fail("GET /hello/ after the rollout", g.log)
+            time.sleep(0.5)
+    for g in guests:
+        g.kill()
+    print(f"test.py: rollout: good image on all {n} nodes in waves {waves}", file=sys.stderr)
+
+
 def main():
     ap = argparse.ArgumentParser()
-    tests = {"boot": boot_test, "dhcp": dhcp_test, "image": image_test, "unsigned": unsigned_test, "boottime": boottime_test}
+    tests = {"boot": boot_test, "dhcp": dhcp_test, "image": image_test, "unsigned": unsigned_test, "boottime": boottime_test,
+             "update": update_test, "rollout": rollout_test}
     ap.add_argument("test", choices=tests)
     ap.add_argument("--kernel")
     ap.add_argument("--initrd")
@@ -491,6 +854,10 @@ def main():
     fw.add_argument("--uefi", action="store_true")
     ap.add_argument("--metal", action="store_true")
     ap.add_argument("--runs", type=int, default=5)
+    ap.add_argument("--uki")
+    ap.add_argument("--image-key")
+    ap.add_argument("--boot")
+    ap.add_argument("--nodes", type=int, default=20)
     ap.add_argument("--k10s")
     ap.add_argument("--examples")
     ap.add_argument("--work")

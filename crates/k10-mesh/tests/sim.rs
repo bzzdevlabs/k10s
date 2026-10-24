@@ -296,7 +296,7 @@ fn mixed_placement_versions_use_the_lowest_until_all_upgrade() {
         calls: Calls::none(),
     };
     // 5 nodes × room for 10 instances of 4 KiB + tail (20 under version 1, which charges 4 KiB): 60 services.
-    let m = Manifest { version: 1, services: (0..60).map(svc).collect() };
+    let m = Manifest { version: 1, services: (0..60).map(svc).collect(), ..Default::default() };
     let cap = 10 * instance_bytes(&svc(0));
     let views = |s: &Sim| -> Vec<_> {
         s.up_nodes()

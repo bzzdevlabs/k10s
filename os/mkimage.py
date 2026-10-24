@@ -3,18 +3,22 @@
 boots on BIOS and on UEFI.
 
   mkimage.py OUT.img --kernel BZIMAGE --initrd CPIO [--initrd CPIO ...] --cmdline "..." --boot DIR
-      [--conf FILE] [--uki OUT.efi] [--version V] [--esp-mib 256] [--data-mib 256]
+      [--conf FILE] [--uki OUT.efi] [--version V] [--sign KEY --k10s K10S --profile P] [--esp-mib 256]
+      [--data-mib 256]
 
---boot is the output of os/bootfiles.sh; initramfs archives are concatenated in order. Layout (the shared ESP of
-docs/research/universal-os.md §8.4):
+--boot is the output of os/bootfiles.sh; initramfs archives are concatenated in order. --sign signs the UKI with
+`K10S image sign` (an OS image for updates, docs/OS.md); unsigned images boot but cannot update. Layout (the shared
+ESP of docs/research/universal-os.md §8.4, with the A/B slots of crates/k10s/src/pid1/update.rs):
 
   MBR  GRUB boot.img (first 440 bytes) in front of the protective MBR
   p1   BIOS boot, 1 MiB: GRUB core.img
   p2   K10S-BOOT, the EFI system partition (FAT32):
          /EFI/BOOT/BOOTX64.EFI   systemd-boot
-         /EFI/Linux/k10s-a.efi   slot A, a UKI: systemd-stub + kernel + initramfs + command line
-         /loader/loader.conf     no menu, no command-line editor
-         /boot/grub/grub.cfg     BIOS: GRUB boots /k10s/a/vmlinuz and /k10s/a/initrd, the UKI's payload
+         /EFI/Linux/k10s-a.efi   slot A, a UKI: systemd-stub + kernel + initramfs + command line (+ signature)
+         /loader/loader.conf     no menu, no command-line editor, default k10s-a.efi
+         /boot/grub/grub.cfg     BIOS: boots slot k10s_slot of grubenv, or a trial slot (k10s_try) counted down
+         /boot/grub/grubenv      k10s_slot=a
+         /k10s/a/                vmlinuz, initrd and boot.cfg (GRUB's linux/initrd lines): the UKI's payload
          /k10s/tier              auto (read by the Tier 2 loader)
          /k10s.conf              node configuration
   p3   K10S-DATA (ext4); init grows it to the end of the disk on first boot
@@ -43,7 +47,19 @@ PARTS = [  # name, type GUID, unique GUID
 ESP_VOLID = "6B10C5A0"
 DATA_UUID = "6b10c5a0-0000-4000-8000-0000000000da"
 DATA_SEED = "6b10c5a0-0000-4000-8000-0000000000db"
-LOADER_CONF = "timeout 0\ndefault k10s-*\neditor no\nauto-entries no\nauto-firmware no\nconsole-mode keep\n"
+LOADER_CONF = "timeout 0\ndefault k10s-a.efi\neditor no\nauto-entries no\nauto-firmware no\nconsole-mode keep\n"
+# BIOS: slot k10s_slot, unless a trial (k10s_try=X3) is armed: counted down, slot X booted until X0 (GRUB has no
+# arithmetic, hence the chain); init commits or clears it (crates/k10s/src/pid1/update.rs models the same).
+# GRUB's own messages (errors only: no menu) go to the screen and the first serial port.
+GRUB_CFG = "serial --unit=0 --speed=115200\nterminal_output --append serial\nset timeout=0\nload_env\nset slot=\"${k10s_slot}\"\n" + "".join(
+    f'{"if" if (s, n) == ("a", 3) else "elif"} [ "${{k10s_try}}" = {s}{n} ]; then set k10s_try={s}{n - 1}; set slot={s}; save_env k10s_try\n'
+    for s in "ab" for n in (3, 2, 1)) + "fi\nif [ \"${slot}\" != b ]; then set slot=a; fi\nsource /k10s/${slot}/boot.cfg\nboot\n"
+
+
+def grubenv(**kv):
+    """A GRUB environment block (1024 bytes, `#` padded)."""
+    text = "# GRUB Environment Block\n" + "".join(f"{k}={v}\n" for k, v in kv.items())
+    return (text + "#" * (1024 - len(text))).encode()
 CONF = """# k10s node configuration: KEY=VALUE lines with the keys of `k10s node` and of init (docs/OS.md).
 # k10s.KEY=VALUE on the kernel command line wins over this file.
 # admin-token-file=/boot/admin.key
@@ -144,7 +160,7 @@ def grub_bios(boot, disk, tmp):
     mods = os.path.join(boot, "usr/lib/grub/i386-pc")
     core = os.path.join(tmp, "core.img")
     run(os.path.join(boot, "usr/bin/grub-mkimage"), "-d", mods, "-O", "i386-pc", "-o", core, "-p", "(,gpt2)/boot/grub",
-        "biosdisk", "part_gpt", "fat", "normal", "linux", "configfile")
+        "biosdisk", "part_gpt", "fat", "normal", "linux", "configfile", "loadenv", "test", "serial", "terminal")
     img = bytearray(open(core, "rb").read())
     if len(img) > MIB:
         sys.exit("mkimage: core.img does not fit the BIOS boot partition")
@@ -169,6 +185,9 @@ def main():
     ap.add_argument("--conf")
     ap.add_argument("--uki")
     ap.add_argument("--version", default="dev")
+    ap.add_argument("--sign")
+    ap.add_argument("--k10s")
+    ap.add_argument("--profile")
     ap.add_argument("--esp-mib", type=int, default=256)
     ap.add_argument("--data-mib", type=int, default=256)
     a = ap.parse_args()
@@ -187,6 +206,13 @@ def main():
         efi = os.path.join(tmp, "k10s-a.efi")
         uki(os.path.join(a.boot, "usr/lib/systemd/boot/efi/linuxx64.efi.stub"),
             [(".osrel", osrel), (".cmdline", put("cmdline", a.cmdline)), (".initrd", initrd), (".linux", a.kernel)], efi)
+        if a.sign:
+            if not (a.k10s and a.profile):
+                sys.exit("mkimage: --sign needs --k10s and --profile")
+            unsigned = efi + ".unsigned"
+            os.rename(efi, unsigned)
+            run(a.k10s, "image", "sign", "--key", a.sign, "--arch", "x86_64", "--profile", a.profile, "--version", a.version,
+                unsigned, efi)
         if a.uki:
             shutil.copyfile(efi, a.uki)
 
@@ -197,9 +223,11 @@ def main():
             (os.path.join(a.boot, "usr/lib/systemd/boot/efi/systemd-bootx64.efi"), "EFI/BOOT/BOOTX64.EFI"),
             (efi, "EFI/Linux/k10s-a.efi"),
             (put("loader.conf", LOADER_CONF), "loader/loader.conf"),
-            (put("grub.cfg", f"set timeout=0\nlinux /k10s/a/vmlinuz {a.cmdline}\ninitrd /k10s/a/initrd\nboot\n"), "boot/grub/grub.cfg"),
+            (put("grub.cfg", GRUB_CFG), "boot/grub/grub.cfg"),
+            (put("grubenv", grubenv(k10s_slot="a")), "boot/grub/grubenv"),
             (a.kernel, "k10s/a/vmlinuz"),
             (initrd, "k10s/a/initrd"),
+            (put("boot.cfg", f"linux /k10s/a/vmlinuz {a.cmdline} k10s.slot=a\ninitrd /k10s/a/initrd\n"), "k10s/a/boot.cfg"),
             (put("tier", "auto\n"), "k10s/tier"),
             (a.conf or put("k10s.conf", CONF), "k10s.conf"),
         ]

@@ -1,0 +1,3 @@
+# Public keys whose OS images every k10s node installs (docs/OS.md, "Updates"): the k10s release key.
+# The release workflow signs the disk images and update images with its private half (secret K10S_IMAGE_KEY).
+c5c74931bd7b6ef97e29ee880adaa4c2a1a6d2217a5fc4f9a6aaa8338ad762c2

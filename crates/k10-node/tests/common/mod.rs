@@ -93,7 +93,7 @@ pub fn bundle(svcs: Vec<Svc>) -> Bundle {
         }
         specs.push(s.spec);
     }
-    Bundle::new(Manifest { version: 0, services: specs }, blobs)
+    Bundle::new(Manifest { version: 0, services: specs, ..Default::default() }, blobs)
 }
 
 pub fn client(node: &Node) -> Client {

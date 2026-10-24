@@ -399,7 +399,10 @@ younger than 60 s and those of the manifest being fetched, which are pinned).
 
 **Placement.** Members advertise their placement version; `place` uses the lowest live one (version 2 charges
 `2^memory + 4 KiB` per replica, version 1 `2^memory`), so mixed-version clusters agree during a rolling upgrade
-(the version rides in the top byte of `cores`: older nodes show newer members with an inflated core count).
+(the version rides in the top byte of `cores`: older nodes show newer members with an inflated core count). The
+same byte says whether a member decodes extension records; Tier 1 nodes report their OS image in one, sent only to
+members that decode them (crates/k10-mesh/README.md, docs/OS.md "Updates"), and the cluster status shows it per
+member (`os`) with the node's update step (`os_step`).
 On every desired-state change and on every change of the live member set (ids + capacity + placement version; Alive and
 Suspect count, like in `place`), batched in a 50 ms window (`ClusterConfig::debounce`; bounds the delay, not
 extended by later events), the applier computes `place(manifest, live members)` and calls

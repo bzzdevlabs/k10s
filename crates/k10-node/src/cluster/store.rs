@@ -39,15 +39,9 @@ impl Stored {
         (self.manifest.version, self.hash)
     }
 
-    /// Code hashes referenced by the manifest (deduplicated, in service order).
+    /// Blobs referenced by the manifest: code (deduplicated, in service order), then OS images.
     pub fn code_hashes(&self) -> Vec<[u8; 32]> {
-        let mut v: Vec<[u8; 32]> = Vec::new();
-        for s in &self.manifest.services {
-            if !v.contains(&s.code_hash) {
-                v.push(s.code_hash);
-            }
-        }
-        v
+        self.manifest.blob_hashes()
     }
 }
 
@@ -135,6 +129,11 @@ impl Store {
         self.pinned.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
+    /// The blob is in `DATA/blobs` (persisted with the desired state that references it).
+    pub fn blob_on_disk(&self, h: &[u8; 32]) -> bool {
+        self.dir.as_ref().is_some_and(|d| d.join("blobs").join(to_hex(h)).is_file())
+    }
+
     pub fn blob_count(&self) -> usize {
         self.blobs.read().unwrap_or_else(|e| e.into_inner()).len()
     }
@@ -153,11 +152,14 @@ impl Store {
         true
     }
 
-    /// The bundle for `s` (blobs copied out of the store); `None` if a blob is missing.
+    /// The bundle the runtime applies for `s`: its code blobs copied out of the store (OS images stay out); `None`
+    /// if one is missing.
     pub fn bundle(&self, s: &Stored) -> Option<Bundle> {
-        let mut blobs = Vec::new();
-        for h in s.code_hashes() {
-            blobs.push((h, self.blob(&h)?.as_ref().clone()));
+        let mut blobs: Vec<([u8; 32], Vec<u8>)> = Vec::new();
+        for sv in &s.manifest.services {
+            if !blobs.iter().any(|(h, _)| *h == sv.code_hash) {
+                blobs.push((sv.code_hash, self.blob(&sv.code_hash)?.as_ref().clone()));
+            }
         }
         Some(Bundle { manifest: s.manifest.clone(), blobs })
     }
@@ -316,7 +318,7 @@ mod tests {
         assert!(st.current().is_none());
         st.insert_blob(sha256(&a), a.clone());
         st.insert_blob(sha256(&b), b.clone());
-        let s1 = Arc::new(Stored::new(Manifest { version: 3, services: vec![spec("a", &a), spec("b", &b)] }));
+        let s1 = Arc::new(Stored::new(Manifest { version: 3, services: vec![spec("a", &a), spec("b", &b)], ..Default::default() }));
         st.persist(&s1, true).unwrap();
         assert!(st.set_current_if_newer(s1.clone()));
         assert!(!st.set_current_if_newer(s1.clone()), "same key is not newer");
@@ -330,7 +332,7 @@ mod tests {
         assert!(!st3.has_blob(&sha256(&a)));
         assert!(st3.current().is_none());
         // gc keeps what the current manifest references, and young blobs
-        let s2 = Arc::new(Stored::new(Manifest { version: 4, services: vec![spec("b", &b)] }));
+        let s2 = Arc::new(Stored::new(Manifest { version: 4, services: vec![spec("b", &b)], ..Default::default() }));
         assert!(st.set_current_if_newer(s2));
         st.gc(std::time::Duration::from_secs(60));
         assert!(st.has_blob(&sha256(&a)), "young blobs are kept");

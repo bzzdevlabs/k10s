@@ -433,7 +433,8 @@ mod tests {
     fn all_msgs() -> Vec<Msg<'static>> {
         let a: Addr = "192.168.1.10:7000".parse().unwrap();
         vec![
-            Msg::Hello { member: Member::new(NodeId(42), a, a, a, Capacity { mem_bytes: 1 << 33, cores: 16 }) },
+            // `Hello` carries the record in the form every node decodes, without extensions.
+            Msg::Hello { member: Member { os_known: false, ..Member::new(NodeId(42), a, a, a, Capacity { mem_bytes: 1 << 33, cores: 16 }) } },
             Msg::GetManifest { version: 9 },
             Msg::Manifest { bytes: b"K10M..." },
             Msg::Manifest { bytes: b"" },

@@ -159,6 +159,11 @@ impl UdpDriver {
         self.flush(out)
     }
 
+    /// Publishes this node's OS report (sent with the next gossip rounds).
+    pub fn set_local_os(&mut self, os: Option<crate::member::OsInfo>) {
+        self.gossip.set_local_os(os);
+    }
+
     /// Next pending membership / desired-state event.
     pub fn poll_event(&mut self) -> Option<Event> {
         self.events.pop_front()

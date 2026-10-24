@@ -10,13 +10,16 @@
 #   unsigned                the metal kernel refuses a module whose signature is stripped
 #   boottime                the vm image on BIOS: QEMU start → first HTTP 200, median of 5 below 1 s
 #   repro                   the vm image built twice is bit-identical
+#   update-bios, update-uefi  A/B update with a power cut at every step, an image that panics, one that never
+#                           commits (single node; the update images are signed with a test key pinned by os_key)
+#   rollout                 20 BIOS VMs: a bad image stops after the first wave, a good one rolls out in waves
 # usage: os/test.sh [TEST...]   (default: all). K10S_BIN: the static musl k10s to test (default: built here).
 # Needs the musl target, qemu-system-x86_64 (KVM when /dev/kvm is usable), OVMF, python3, zstd, xz, mkfs.fat, mtools,
 # mkfs.ext4, sfdisk, objcopy, dpkg-deb, depmod and the kernel build tools of os/kbuild.sh.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 tests=("$@")
-[[ ${#tests[@]} -gt 0 ]] || tests=(boot-debian boot-k10s dhcp image-bios image-uefi image-metal unsigned boottime repro)
+[[ ${#tests[@]} -gt 0 ]] || tests=(boot-debian boot-k10s dhcp image-bios image-uefi image-metal unsigned boottime repro update-bios update-uefi rollout)
 out=${K10S_OS_CACHE:-target/os}
 mkdir -p "$out"
 export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct)}
@@ -41,10 +44,16 @@ if has boot-debian; then
         --mod 'fs/nls/nls_cp437.ko*' --mod 'fs/nls/nls_iso8859-1.ko*' --mod 'drivers/acpi/button.ko*' \
         --mod 'drivers/input/evdev.ko*' --mod 'drivers/watchdog/i6300esb.ko*'
 fi
-if has image-bios image-uefi image-metal unsigned boottime; then
+if has image-bios image-uefi image-metal unsigned boottime update-bios update-uefi rollout; then
     K10S_BIN=$k10s os/images.sh "$out/images"
     metal=$(os/kbuild.sh metal)
     kmods=$(echo "$metal"/modroot/lib/modules/*)
+fi
+if has update-bios update-uefi rollout; then
+    image_key=$out/image-test.key
+    [[ -f $image_key ]] || "$k10s" keygen -o "$image_key"
+    upd=(--image "$out/k10s-os-x86_64-vm.img" --uki "$(echo "$out"/images/k10s-os-*-x86_64-vm.efi)" --image-key "$image_key"
+        --boot "$(os/bootfiles.sh)" --k10s "$k10s" --examples examples)
 fi
 if has image-metal; then
     python3 os/mkimage.py "$out/metal-serial.img" --kernel "$metal/arch/x86/boot/bzImage" --initrd "$out/initrd-metal.cpio.zst" \
@@ -64,6 +73,9 @@ for t in "${tests[@]}"; do
     image-metal) python3 os/test.py image --uefi --metal --image "$out/metal-serial.img" --k10s "$k10s" --examples examples --work "$work" ;;
     unsigned) python3 os/test.py unsigned --kernel "$metal/arch/x86/boot/bzImage" --kmods "$kmods" --k10s "$k10s" --work "$work" ;;
     boottime) python3 os/test.py boottime --image "$out/k10s-os-x86_64-vm.img" --work "$work" ;;
+    update-bios) python3 os/test.py update --bios "${upd[@]}" --work "$work" ;;
+    update-uefi) python3 os/test.py update --uefi "${upd[@]}" --work "$work" ;;
+    rollout) python3 os/test.py rollout "${upd[@]}" --work "$work" ;;
     repro)
         boot=$(os/bootfiles.sh)
         for i in 1 2; do

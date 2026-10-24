@@ -38,6 +38,21 @@ service session {
 Service names use `[a-z0-9-]`, 1 to 63 characters. They are also the first path segment at the ingress
 (`/hello/…`) and the name of the service's key-value namespace.
 
+## OS images
+
+A cluster of machines running a k10s disk image also updates the image itself from the manifest. An `os` block
+names a signed image per platform and the size of the first update wave:
+
+```
+os {
+    images = ["k10s-os-0.1.1-x86_64-metal.efi"]  # signed images (.efi of a release), one per platform
+    wave = 1                                    # nodes in the first wave (default 1); each next wave doubles
+}
+```
+
+The files travel with the bundle and between nodes like code. See
+[Updating the image](/k10s/guides/bare-metal/#updating-the-image).
+
 ## Applying
 
 <Terminal

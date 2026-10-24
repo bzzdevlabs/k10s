@@ -200,13 +200,41 @@ qemu-system-x86_64 -accel kvm -m 512M -nodefaults -display none -serial stdio \
 ```
 
 `k10s.conf` holds `KEY=VALUE` lines: init's keys (`ip=10.0.0.5/24,10.0.0.1`, `watchdog=1`, `grow=0`) and every
-`k10s node` flag (`join=10.0.0.2`, `cluster-key-file=/boot/cluster.key`). The kernel command line of the images is
+`k10s node` flag (`join=10.0.0.2`, `cluster-key-file=/boot/cluster.key`).
+
+### Updating the image
+
+The cluster updates its own machines. Name the new release's images in the desired state, one per platform, and
+apply it to any node:
+
+```
+os {
+    images = ["k10s-os-0.1.1-x86_64-metal.efi", "k10s-os-0.1.1-x86_64-vm.efi"]
+    wave = 1    # nodes in the first wave; each next wave is twice as large
+}
+```
+
+```bash
+gh release download --repo bzzdevlabs/k10s v0.1.1 --pattern 'k10s-os-*-x86_64-*.efi'
+k10s apply app.k10s --node 192.168.1.50:80 --admin-token-file admin.key
+k10s status --node 192.168.1.50:80 --admin-token-file admin.key    # each member's image, the update step
+```
+
+The `.efi` files are signed with the k10s release key, which every image trusts. Nodes fetch them from each other
+and update in waves (1 node, then 2, 4, …): a node writes the new image to its second boot slot, reboots into it
+for a trial, and keeps it once it is back in the cluster and serves (`os-commit-grace`, 30 s). A trial that crashes
+or hangs falls back to the previous slot after 3 boots, one that does not commit within `os_trial` (600 s) is
+abandoned; the image is then recorded as failed and the rollout stops until you apply another one. A power cut at
+any point boots a complete image. Images you build yourself install when you sign them (`k10s keygen -o key`,
+`k10s image sign --key key --arch x86_64 --profile metal --version V in.efi out.efi`) and pin the key on every
+machine (`os_key=` and the output of `k10s image pubkey key` in `k10s.conf`). Updates need cluster mode
+(`cluster-key-file=/boot/cluster.key`, and `join=` on all but the first machine);
+[docs/OS.md](https://github.com/bzzdevlabs/k10s/blob/main/docs/OS.md#updates) has the details. The kernel command line of the images is
 fixed; `os/images.sh` and `os/mkimage.py` build images with your own command line, kernel or k10s binary, and
 `os/kbuild.sh`, `os/mkinitramfs.py` a kernel plus initramfs for `-kernel` boots. A distribution kernel works too,
 with its modules in the initramfs: `os/debian-kernel.sh` and `os/test.sh` show how for Debian 13's.
 
 <Aside type="caution" title="PID 1 mode limits">
-	One boot slot: signed A/B updates over the cluster come next, then arm64 and the Raspberry Pi. Secure Boot must be
-	off. x86-64 only. Tested under QEMU (SeaBIOS, OVMF, NVMe, e1000e, Intel TCO watchdog), not yet on a physical
-	machine.
+	arm64 and the Raspberry Pi come next. Secure Boot must be off. x86-64 only. Tested under QEMU (SeaBIOS, OVMF, NVMe,
+	e1000e, Intel TCO watchdog, power cuts during updates, a 20-node rollout), not yet on a physical machine.
 </Aside>

@@ -505,7 +505,7 @@ fn main() {
         s.calls = Calls::from_list(&present).expect("valid callees");
     }
     services.sort_by(|a, b| a.name.cmp(&b.name));
-    let manifest = Manifest { version, services };
+    let manifest = Manifest { version, services, ..Default::default() };
     manifest.validate().unwrap_or_else(|e| panic!("manifest: {e}"));
     let n = manifest.services.len();
     let bundle = Bundle::new(manifest, blobs);

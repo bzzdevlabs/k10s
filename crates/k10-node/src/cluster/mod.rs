@@ -15,6 +15,7 @@
 //! `Node::shutdown` (drains in-flight requests), then [`Cluster::stop`].
 
 pub mod mesh;
+pub mod os;
 pub mod router;
 pub mod store;
 
@@ -65,6 +66,8 @@ pub struct ClusterConfig {
     pub insecure: bool,
     /// Gossip datagrams stamped further than this from the local clock are dropped (at least 1 s).
     pub gossip_max_skew: Duration,
+    /// OS report of a Tier 1 node, in its gossip record from the start (see [`os`]).
+    pub os: Option<k10_mesh::OsInfo>,
 }
 
 impl Default for ClusterConfig {
@@ -81,6 +84,7 @@ impl Default for ClusterConfig {
             keys: None,
             insecure: false,
             gossip_max_skew: Duration::from_millis(k10_mesh::secure::DEFAULT_MAX_SKEW_MS),
+            os: None,
         }
     }
 }
@@ -172,6 +176,10 @@ pub struct ClusterShared {
     queue_cv: Condvar,
     leaving: AtomicBool,
     serving: AtomicBool,
+    /// The node was configured to join, or remembered peers at start (set by the mesh thread).
+    expects_peers: AtomicBool,
+    /// The OS rollout step of this node, for the status (see [`os`]).
+    pub os_step: Mutex<String>,
 }
 
 impl ClusterShared {
@@ -182,6 +190,10 @@ impl ClusterShared {
 
     pub fn leaving(&self) -> bool {
         self.leaving.load(Acquire)
+    }
+
+    pub fn expects_peers(&self) -> bool {
+        self.expects_peers.load(Acquire)
     }
 
     /// Hands a newly fetched desired state to the applier.
@@ -348,6 +360,20 @@ impl ClusterShared {
     }
 }
 
+fn os_json(os: Option<&k10_mesh::OsInfo>) -> String {
+    match os {
+        None => "null".into(),
+        Some(o) => format!(
+            "{{\"platform\":{},\"image\":\"{}\",\"committed\":{},\"updatable\":{},\"failed\":{}}}",
+            crate::admin::json_str(&o.platform),
+            to_hex(&o.image),
+            o.committed,
+            o.updatable,
+            if o.failed == [0; 8] { "null".to_string() } else { format!("\"{}\"", to_hex(&o.failed)) }
+        ),
+    }
+}
+
 fn apply_json(rep: &crate::ApplyReport, hash: &[u8; 32]) -> Vec<u8> {
     let j = rep.to_json();
     format!("{},\"hash\":\"{}\",\"cluster\":true}}", &j[..j.len() - 1], to_hex(hash)).into_bytes()
@@ -362,7 +388,7 @@ fn ranking(m: &Manifest, members: &[Member]) -> HashMap<String, Vec<NodeId>> {
         .map(|s| {
             let mut one = s.clone();
             one.replicas = n;
-            let p = place(&Manifest { version: m.version, services: vec![one] }, members);
+            let p = place(&Manifest { version: m.version, services: vec![one], ..Default::default() }, members);
             let mut v: Vec<NodeId> = Vec::new();
             for id in p.nodes(&s.name) {
                 if !v.contains(id) {
@@ -398,7 +424,7 @@ impl ClusterHooks for ClusterShared {
             .iter()
             .map(|m| {
                 format!(
-                    "{{\"id\":\"{}\",\"state\":\"{}\",\"incarnation\":{},\"gossip\":\"{}\",\"rpc\":\"{}\",\"http\":\"{}\",\"mem\":{},\"cores\":{},\"self\":{}}}",
+                    "{{\"id\":\"{}\",\"state\":\"{}\",\"incarnation\":{},\"gossip\":\"{}\",\"rpc\":\"{}\",\"http\":\"{}\",\"mem\":{},\"cores\":{},\"os\":{},\"self\":{}}}",
                     m.id,
                     state_str(m.state),
                     m.incarnation,
@@ -407,6 +433,7 @@ impl ClusterHooks for ClusterShared {
                     m.http,
                     m.capacity.mem_bytes,
                     m.capacity.cores,
+                    os_json(m.os.as_ref()),
                     m.id == self.id
                 )
             })
@@ -448,7 +475,7 @@ impl ClusterHooks for ClusterShared {
         format!(
             concat!(
                 "{{\"id\":\"{}\",\"incarnation\":{},\"gossip\":\"{}\",\"rpc\":\"{}\",\"http\":\"{}\",\"leaving\":{},\"auth\":{},",
-                "\"desired\":{},\"applied\":{},\"fetching\":{},\"last_error\":{},",
+                "\"desired\":{},\"applied\":{},\"fetching\":{},\"last_error\":{},\"os_step\":{},",
                 "\"live_members\":{},\"members\":[{}],\"placement\":{{{}}},\"unplaced\":{},\"links\":[{}],",
                 "\"stats\":{{\"gossip_packets_sent\":{},\"gossip_bytes_sent\":{},\"gossip_packets_received\":{},",
                 "\"gossip_bytes_received\":{},\"gossip_malformed\":{},\"forwarded\":{},\"forward_retries\":{},",
@@ -477,6 +504,7 @@ impl ClusterHooks for ClusterShared {
             applied,
             mv.fetching.as_deref().map(js).unwrap_or_else(|| "null".into()),
             av.last_error.as_deref().map(js).unwrap_or_else(|| "null".into()),
+            js(&self.os_step.lock().unwrap_or_else(|e| e.into_inner())),
             mv.members.iter().filter(|m| m.is_live()).count(),
             members.join(","),
             placement.join(","),
@@ -576,6 +604,20 @@ impl ClusterHooks for ClusterShared {
                 m.capacity.cores,
                 if m.id == self.id { "  (this node)" } else { "" }
             );
+            if let Some(os) = &m.os {
+                let _ = writeln!(
+                    o,
+                    "    os {} {}{}{}",
+                    os.platform,
+                    to_hex(&os.image),
+                    if os.committed { "" } else { " (trial)" },
+                    if os.failed != [0; 8] { format!(", failed {}", to_hex(&os.failed)) } else { String::new() }
+                );
+            }
+        }
+        let step = self.os_step.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if !step.is_empty() {
+            let _ = writeln!(o, "os update: {step}");
         }
         let _ = writeln!(o, "\nplacement:{}", if av.unplaced > 0 { format!(" ({} replica(s) unplaced)", av.unplaced) } else { String::new() });
         for (svc, nodes) in &av.placement {
@@ -739,6 +781,7 @@ impl ClusterSetup {
         let capacity = Capacity { mem_bytes: node.cfg.mem_limit, cores: node.shards.len() as u32 };
         let mut me = Member::new(id, adv(gossip_bound), adv(rpc_bound), adv(http_bound), capacity);
         me.incarnation = incarnation;
+        me.os = cfg.os.clone();
         let cs = Arc::new(ClusterShared {
             node: node.clone(),
             cfg: cfg.clone(),
@@ -754,6 +797,8 @@ impl ClusterSetup {
             queue_cv: Condvar::new(),
             leaving: AtomicBool::new(false),
             serving: AtomicBool::new(true),
+            expects_peers: AtomicBool::new(!cfg.join.is_empty()),
+            os_step: Mutex::new(String::new()),
         });
         let hooks: Arc<dyn ClusterHooks> = cs.clone();
         let _ = node.cluster.set(Arc::downgrade(&hooks));
@@ -881,7 +926,7 @@ mod tests {
                 calls: Default::default(),
             })
             .collect();
-        let m = Manifest { version: 1, services };
+        let m = Manifest { version: 1, services, ..Default::default() };
         let p = place(&m, &members);
         let r = ranking(&m, &members);
         for s in &m.services {

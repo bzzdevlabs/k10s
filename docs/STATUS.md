@@ -2,7 +2,7 @@
 
 PROJECT STATE: HARDENING
 
-Last updated: 2026-10-23. This file is the single place to learn where the project stands and what comes next.
+Last updated: 2026-10-24. This file is the single place to learn where the project stands and what comes next.
 
 ## State of `main`
 `main` is pushed; every push publishes a dev pre-release (v0.1.0-dev.134 = 83362ec, step 12 U1: ci, release, pages
@@ -40,6 +40,18 @@ musl, metal, bench, examples and source archives, the `vm` and `metal` disk imag
   licences. PID 1 waits for carrier before DHCP. `os/test.sh` adds image tests on SeaBIOS, OVMF and q35/NVMe/e1000e,
   an unsigned-module refusal, boot time (QEMU start → first HTTP 200, median 0.51 s) and reproducibility; the release
   tests and publishes the images built from its musl `k10s`.
+- Tier 1 updates (U2, docs/OS.md "Updates"): OS images are UKIs with an appended Ed25519 signature (hand-written
+  SHA-512/Ed25519, RFC 8032 vectors; `k10s image sign|verify|pubkey`), signed in releases by the k10s release key
+  (public half in `os/release-key.pub`, built into k10s; private half: repository secret `K10S_IMAGE_KEY`), plus
+  operator keys (`os_key`). The manifest (format 3) names one image per platform (`ARCH-PROFILE`) and the first wave;
+  images travel as blobs. Tier 1 nodes report their image in a gossip member extension record, sent only to members
+  that decode extensions (older nodes keep working). Every node runs `k10s_mesh::rollout::step`: waves of 1, 2, 4…
+  ranked by `sha256(image | id)`, left/dead members keep their rank for 5 min, a failed image stops the rollout. Init
+  verifies and writes the other A/B slot of K10S-BOOT (UKI, and kernel/initramfs/GRUB lines for BIOS), arms a 3-boot
+  trial in systemd-boot (boot-counted file names) and GRUB (`grubenv` counted down by `grub.cfg`), commits when the
+  node is back in the cluster and serves (`--os-commit-grace`), abandons after `os_trial`, records failed images.
+  `os/test.sh` adds update-bios/update-uefi (power cut at every step, a panicking image, a never-committing one) and
+  rollout (20 BIOS VMs: a bad image stops after the first wave, a good one goes through waves 1, 2, 4, 8, 5).
 - Releases: SemVer; tag `vX.Y.Z` on main → stable release, every push to main → `vX.Y.Z-dev.N` pre-release.
 - Performance vs 08f2921 (`bench/k10s/ab.py --same`, 4 interleaved rounds, host load ≈ 7 from the benchmark itself;
   medians): single node within ±2.5 %; local ingress −4 %; forwarded requests −5 % at c=1 (CPU per request +7 %) and
@@ -55,11 +67,11 @@ seek privileges on this machine.
 10. **Optional perf** — shard-owned peer links: each shard dials and reads its own link per peer, the mesh thread keeps
     gossip, fetch and accept; expected 7 → 3 wake-ups per forwarded request (≈ −40 % CPU at 1 conn).
 12. **Tier 1 universal image** (docs/TASK-universal-os.md, plan in docs/research/universal-os.md §9, decisions in
-    docs/REPORT.md §9; prototypes on branch `research/universal-os`): milestones U0 → U1 → U2 → U3 → U4 (= Tier 2 M6)
-    → U5 → U6, one session each. U0 (PID 1 mode) and U1 (x86-64 images) done; U1's last exit criterion, a real
-    Realtek or Intel mini-PC serving after a cold boot from the `metal` image, needs the hardware (user). Next U2
-    (signed image blobs over gossip, A/B slot B, boot counting, GRUB fallback on BIOS). The multi-arch
-    `coro.rs`/JIT-gating commit of the prototype branch belongs to U3.
+    docs/REPORT.md §9; the prototype branches no longer exist on the remote): milestones U0 → U1 → U2 → U3 → U4
+    (= Tier 2 M6) → U5 → U6, one session each. U0 (PID 1 mode), U1 (x86-64 images) and U2 (signed A/B updates, rollout
+    waves) done. Needs real hardware (user): U1's Realtek or Intel mini-PC serving after a cold boot from the `metal`
+    image; for U2, power cuts that reach a real disk's write cache and GRUB `save_env`/systemd-boot renames on real
+    firmware. Next U3 (arm64 + Pi 4/5, interpreter; the multi-arch `coro.rs`/JIT gating).
 13. **Tier 2 native hardware** (docs/TASK-native-hardware.md, plan in docs/research/native-hardware.md §9, decisions
     in docs/REPORT.md §9; prototypes on branch `research/native-hardware`): milestones M1 → M2 → M3 → M4 → M5 → M6 →
     M7 (x86 first), one session each.
@@ -74,12 +86,12 @@ seek privileges on this machine.
 |---|---|---|
 | Design, specs | `docs/DESIGN.md`, `TIR.md`, `HOSTAPI.md`, `JIT-ABI.md`, `TEN.md`, `NODE.md`, `research.md` | — |
 | TIR: codec, validator, reference interpreter, builder, generator | `crates/k10-ir` | unit + property |
-| Cluster layer: SWIM gossip, crypto, manifests, bundles, placement, wire, simulator | `crates/k10-mesh` | unit + simulator |
+| Cluster layer: SWIM gossip, crypto, manifests, bundles, placement, wire, simulator, signed OS images, rollout | `crates/k10-mesh` | unit + simulator |
 | Ten compiler, prelude, examples | `crates/k10-lang`, `examples/` | unit + examples |
 | x86-64 JIT (single pass, SFI masking, safepoints, speculation hardening) | `crates/k10-jit` | differential soak, red-team, objdump |
 | Node runtime, sandbox, CLI | `crates/k10-node`, `crates/k10s` | unit, cluster, chaos, soak, abuse, auth |
 | Bare-metal node (PVH, virtio-net, smoltcp, JIT, SMP, cluster member) | `metal/` | `test.sh`, `cluster-test.sh` |
-| PID 1 mode (Tier 1), k10s kernels (`vm`, `metal`), initramfs, firmware and disk image builders | `crates/k10s/src/pid1`, `os/` | unit + `os/test.sh` (QEMU) |
+| PID 1 mode (Tier 1), A/B updates, k10s kernels (`vm`, `metal`), initramfs, firmware and disk image builders | `crates/k10s/src/pid1`, `os/` | unit + `os/test.sh` (QEMU) |
 | Baselines (Kubernetes, bare processes), loadgen, k10s harness, A/B driver | `bench/` | — |
 | Editor extension, documentation site | `editors/vscode`, `website/` | — |
 | CI and releases | `.github/`, `scripts/` | — |
@@ -103,8 +115,9 @@ seek privileges on this machine.
   ones (`LINK_BUDGET`, `LINK_SOFT_CAP`, `LINK_HARD_CAP` in `crates/k10-node/src/cluster/mesh.rs`).
 - The hosted node builds for Linux x86-64 only (seccomp filter, `coro.rs`); Tier 1 needs portable versions
   (docs/TASK-universal-os.md, U3).
-- PID 1 mode and the images are tested under QEMU only (SeaBIOS, OVMF, NVMe, e1000e, Intel TCO). Needs real
-  hardware: the U1 mini-PC cold boot (Realtek RTL8111/8125 with `rtl_nic` firmware, or Intel igc/e1000e), NICs and
+- PID 1 mode, the images and updates are tested under QEMU only (SeaBIOS, OVMF, NVMe, e1000e, Intel TCO; power
+  cuts are QEMU kills, which lose only what the guest had not written). Needs real hardware: the U1 mini-PC cold boot,
+  power cuts during an update on real disks, GRUB `save_env` and systemd-boot boot counting on real firmware (Realtek RTL8111/8125 with `rtl_nic` firmware, or Intel igc/e1000e), NICs and
   USB Ethernet outside QEMU's models, AHCI/eMMC boot disks, the screen console, BIOS/UEFI firmware quirks, slow USB
   storage (`bootwait`), AMD and SMBus-attached Intel watchdogs, RTC chips, real DHCP servers, switches and NTP pools.
 - Linux 6.18's ACPI button driver no longer binds fixed-feature power buttons; both profiles use the tiny power

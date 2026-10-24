@@ -24,7 +24,7 @@
 //!   `(incarnation, last gossip address)` kept `tombstone_ttl_ms` so stale gossip cannot resurrect them.
 
 use crate::codec::{put_u32, put_u64, DecodeError, Reader, Res, Rng};
-use crate::member::{get_addr, put_addr, Addr, Member, MemberState, NodeId};
+use crate::member::{get_addr, put_addr, Addr, Member, MemberState, NodeId, OsInfo};
 use alloc::collections::{BTreeMap, BTreeSet};
 use core::ops::Bound::{Excluded, Unbounded};
 use alloc::vec::Vec;
@@ -147,7 +147,8 @@ pub enum Event {
     MemberUp(Member),
     /// A member became Dead or Left (see `member.state`). Recompute placement.
     MemberDown(Member),
-    /// A live member changed: Alive↔Suspect, or new addresses/capacity. Placement only changes if capacity did.
+    /// A live member changed: Alive↔Suspect, new addresses/capacity, or its OS report. Placement only changes if
+    /// capacity did.
     MemberUpdated(Member),
     /// A newer desired state was learned: fetch manifest `hash` (and missing blobs) over RPC, from `origin` or
     /// any live member, verify `sha256(bytes) == hash`, then apply.
@@ -203,11 +204,12 @@ impl Item {
         }
     }
 
-    fn encode(&self, out: &mut Vec<u8>) {
+    /// `ext`: the receiver decodes member extension records.
+    fn encode(&self, out: &mut Vec<u8>, ext: bool) {
         match self {
             Item::Alive(m) => {
                 out.push(I_ALIVE);
-                m.encode_into(out);
+                m.encode_with(out, ext);
             }
             Item::Suspect { id, inc, from } | Item::Dead { id, inc, from } => {
                 out.push(if matches!(self, Item::Suspect { .. }) { I_SUSPECT } else { I_DEAD });
@@ -692,6 +694,19 @@ impl Gossip {
     }
 
     /// Current desired-state pointer (highest seen).
+    /// Publishes this node's OS report (a new incarnation of its record) if it changed.
+    pub fn set_local_os(&mut self, os: Option<OsInfo>) {
+        let me = self.me;
+        let e = self.members.get_mut(&me).expect("self entry");
+        if e.m.os == os {
+            return;
+        }
+        e.m.os = os;
+        e.m.incarnation += 1;
+        let m = e.m.clone();
+        self.queue(Item::Alive(m));
+    }
+
     pub fn desired(&self) -> Option<DesiredState> {
         self.desired
     }
@@ -997,6 +1012,16 @@ impl Gossip {
             return AliveRes::Ignored;
         }
         if let Some(e) = self.members.get_mut(&id) {
+            // The same record with its extensions, after a copy without them (relayed by an older node, or sent
+            // before the sender knew we decode them).
+            if m.incarnation == e.m.incarnation && e.m.is_live() && !e.m.os_known && m.os_known {
+                e.m.os = m.os;
+                e.m.os_known = true;
+                let snapshot = e.m.clone();
+                out.events.push(Event::MemberUpdated(snapshot.clone()));
+                self.queue(Item::Alive(snapshot));
+                return AliveRes::Applied;
+            }
             if m.incarnation <= e.m.incarnation {
                 return if e.m.is_live() { AliveRes::Ignored } else { AliveRes::Rejected(e.m.incarnation) };
             }
@@ -1006,7 +1031,10 @@ impl Gossip {
                 || e.m.rpc != m.rpc
                 || e.m.http != m.http
                 || e.m.capacity != m.capacity
-                || e.m.placement != m.placement;
+                || e.m.placement != m.placement
+                || e.m.ext != m.ext
+                || e.m.os != m.os
+                || e.m.os_known != m.os_known;
             e.m = Member { state: MemberState::Alive, ..m };
             e.susp = None;
             let snapshot = e.m.clone();
@@ -1204,6 +1232,11 @@ impl Gossip {
 
     // ----- packet construction --------------------------------------------------------------------------------
 
+    /// Member records go to `to` with extensions only if it is known to decode them (older nodes reject them).
+    fn ext_capable(&self, to: Option<NodeId>) -> bool {
+        to.and_then(|id| self.members.get(&id)).is_some_and(|e| e.m.ext)
+    }
+
     fn header(&self, ty: u8) -> Vec<u8> {
         let mut v = Vec::with_capacity(self.cfg.max_packet);
         v.push(MAGIC);
@@ -1247,6 +1280,7 @@ impl Gossip {
     /// transmitted / newest) within `max_packet`, and emits the datagram.
     fn send(&mut self, to: Addr, to_id: Option<NodeId>, mut pkt: Vec<u8>, out: &mut Output) {
         let max = self.cfg.max_packet;
+        let ext = self.ext_capable(to_id);
         let count_pos = pkt.len();
         pkt.push(0);
         let mut count: u8 = 0;
@@ -1257,7 +1291,7 @@ impl Gossip {
                 continue;
             }
             let mark = pkt.len();
-            self.hints[i].1.encode(&mut pkt);
+            self.hints[i].1.encode(&mut pkt, ext);
             if pkt.len() > max {
                 pkt.truncate(mark);
                 i += 1;
@@ -1280,7 +1314,7 @@ impl Gossip {
                     break;
                 }
                 let mark = pkt.len();
-                b.item.encode(&mut pkt);
+                b.item.encode(&mut pkt, ext);
                 if pkt.len() > max {
                     pkt.truncate(mark);
                     continue;
@@ -1298,13 +1332,14 @@ impl Gossip {
     /// Full state (self first, then every known member incl. retained dead ones), split over as many datagrams
     /// as needed. Each datagram is self-contained, so losing one only loses those records.
     fn send_sync(&mut self, to: Addr, to_id: Option<NodeId>, want_reply: bool, out: &mut Output) {
+        let ext = self.ext_capable(to_id);
         let mut blob = Vec::new();
         let mut ends = Vec::with_capacity(self.members.len());
-        self.local().encode_into(&mut blob);
+        self.local().encode_with(&mut blob, ext);
         ends.push(blob.len());
         for e in self.members.values() {
             if e.m.id != self.me {
-                e.m.encode_into(&mut blob);
+                e.m.encode_with(&mut blob, ext);
                 ends.push(blob.len());
             }
         }
@@ -1438,6 +1473,57 @@ mod tests {
             }
             q = next;
         }
+    }
+
+    #[test]
+    fn os_reports_spread_but_never_reach_nodes_without_extensions() {
+        let cfg = Config { probe_interval_ms: 100, probe_timeout_ms: 40, sync_interval_ms: 1000, ..Config::default() };
+        // Node 2 predates extensions (its record says so); nodes 1 and 3 decode them.
+        let mut gs: Vec<Gossip> = (1..=3).map(|i| Gossip::new(Member { ext: i != 2, ..node(i) }, cfg.clone(), i)).collect();
+        let os = OsInfo { platform: "x86_64-vm".into(), image: [5; 8], committed: true, updatable: true, failed: [0; 8] };
+        let addr = |i: usize| node(i as u64 + 1).gossip;
+        let mut now = 0;
+        let mut q: Vec<(usize, Addr, Vec<u8>)> = Vec::new();
+        for j in [1, 2] {
+            q.extend(gs[j].join(&[addr(0)], now).packets.into_iter().map(|(t, p)| (j, t, p)));
+        }
+        let mut published = false;
+        let mut to_old = 0;
+        for step in 0..600 {
+            now += 10;
+            if step == 100 {
+                gs[0].set_local_os(Some(os.clone()));
+                published = true;
+            }
+            let mut next = Vec::new();
+            for (from, to, p) in q.drain(..) {
+                let j = (0..3).find(|&j| addr(j) == to).unwrap();
+                if j == 1 {
+                    let pkt = parse(&p).unwrap();
+                    let mut members: Vec<&Member> = pkt.items.iter().filter_map(|i| if let Item::Alive(m) = i { Some(m) } else { None }).collect();
+                    if let Body::Sync { records, .. } = &pkt.body {
+                        members.extend(records.iter());
+                    }
+                    assert!(members.iter().all(|m| m.os.is_none() && !m.os_known), "extension sent to a node without them");
+                    to_old += members.iter().filter(|m| m.id == NodeId(1001)).count();
+                }
+                let out = gs[j].on_packet(addr(from), &p, now);
+                next.extend(out.packets.into_iter().map(|(t, p)| (j, t, p)));
+            }
+            for (j, g) in gs.iter_mut().enumerate() {
+                next.extend(g.tick(now).packets.into_iter().map(|(t, p)| (j, t, p)));
+            }
+            q = next;
+        }
+        assert!(published && to_old > 0);
+        assert_eq!(gs[2].member(NodeId(1001)).and_then(|m| m.os.clone()), Some(os.clone()));
+        assert_eq!(gs[1].member(NodeId(1001)).map(|m| (m.os.is_none(), m.ext)), Some((true, true)));
+        assert!(!gs[0].member(NodeId(1002)).unwrap().ext);
+        // A copy without the extension (relayed by node 2) does not erase the report: same incarnation.
+        let plain = gs[1].member(NodeId(1001)).unwrap().clone();
+        let mut out = Output::default();
+        gs[2].on_alive(plain, true, now, &mut out);
+        assert_eq!(gs[2].member(NodeId(1001)).and_then(|m| m.os.clone()), Some(os));
     }
 
     #[test]

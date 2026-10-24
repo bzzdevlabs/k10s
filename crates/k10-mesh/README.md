@@ -11,12 +11,14 @@ adds a UDP driver, a thread runner and a deterministic simulator. The crate has 
 | module | what |
 |---|---|
 | `gossip` | `Gossip` state machine: SWIM probes, suspicion, refutation, dissemination, push-pull sync, desired-state pointer |
-| `manifest` | `Manifest`/`ServiceSpec`, canonical binary codec, `hash()`, operator text format parser (`parse_text`) |
+| `manifest` | `Manifest`/`ServiceSpec`/`OsPlan`, canonical binary codec, `hash()`, operator text format parser (`parse_document`) |
 | `placement` | `place(&Manifest, &[Member]) -> Placement` (capacity-aware weighted rendezvous hashing) |
-| `member` | `NodeId`, `Addr` (= `core::net::SocketAddr`), `Capacity`, `Member`, `MemberState` |
+| `member` | `NodeId`, `Addr` (= `core::net::SocketAddr`), `Capacity`, `Member`, `MemberState`, `OsInfo` (extension record) |
+| `osimage` | signed OS images (Tier 1 updates): `sign`, `inspect`, `verify` |
+| `rollout` | `rollout::step(&OsPlan, &[Member], me)`: the OS update waves, evaluated by every node |
 | `wire` | TCP peer protocol framing: `Msg` (borrowed, copy-free), `FrameDecoder` (incremental) |
 | `sha256` | SHA-256, `to_hex`/`from_hex` |
-| `crypto` | ChaCha20 (AVX2 or SSE2 on x86-64), Poly1305, (X)ChaCha20-Poly1305, HMAC/HKDF-SHA256, `ct_eq` (RFC vectors) |
+| `crypto` | ChaCha20 (AVX2 or SSE2 on x86-64), Poly1305, (X)ChaCha20-Poly1305, HMAC/HKDF-SHA256, SHA-512, Ed25519, `ct_eq` (RFC vectors) |
 | `secure` | cluster keys (current + next), `GossipCipher` (sealed datagrams, anti-replay), `Link` (peer-link handshake, sealed records; hosted and metal) |
 | `admin_auth` | signed admin requests: `AdminKey` (client), `AdminVerifier` (clock window, nonce cache), `check_body` |
 | `driver` (std) | `UdpDriver` (caller-owned epoll loop) and `MeshThread` (self-contained thread) |
@@ -57,8 +59,10 @@ Sync    (4) flags:u8(1 want_reply, 2 has_desired) [desired] n:u8 member*n   push
 Gossip  (5) —                                        piggyback only
 item    = 1 Alive member | 2 Suspect id inc from | 3 Dead id inc from | 4 Left id inc
         | 5 Desired version:u64 hash:[32] origin:u64          (ids/inc: u64 LE)
-member  = id:u64 inc:varint state:u8 gossip:addr rpc:raddr http:raddr mem_bytes:varint cores:varint
+member  = id:u64 inc:varint state:u8 gossip:addr rpc:raddr http:raddr mem_bytes:varint cores:varint [ext]
 addr    = 4 ip[4] port:u16 | 6 ip[16] port:u16;  raddr = 0 port:u16 (same IP as gossip) | addr
+ext     = len:u8 (type:u8 len:u8 value)*        present when bit 30 of cores is set; unknown types skipped
+          type 1 OS: platform_len:u8 platform image:[8] failed:[8] flags:u8 (1 committed, 2 updatable)
 ```
 
 - **Probing.** Every `probe_interval` (200 ms), ping the next member of a shuffled round-robin list. With no
@@ -80,8 +84,14 @@ addr    = 4 ip[4] port:u16 | 6 ip[16] port:u16;  raddr = 0 port:u16 (same IP as 
   room for refutation. Reconnects heal partitions and restarts: one sync per `join_retry_ms`, round-robin over the
   addresses of dead members, tombstones (which keep the last address of failed members, also learned from syncs),
   seeds that are not live and, while isolated, the fallback seeds; each address backs off 1 s → 60 s.
-- **Placement version.** The top byte of a member's `cores` varint carries the placement algorithm version it
-  implements (0 from older nodes = 1); `place` uses the lowest live version.
+- **Placement version and extensions.** The top byte of a member's `cores` varint carries the placement algorithm
+  version it implements in its low 6 bits (0 from older nodes = 1; `place` uses the lowest live version), bit 7
+  "decodes extensions" and bit 6 "extension records follow". Nodes that predate extensions read bit 7 as a high
+  placement version (they keep their own, lower one) and would reject the records, so a node sends records with
+  extensions only to members whose bit 7 is set. Capable members always get the extension block (empty: no OS
+  report); a copy without it (sent before the receiver was known, or relayed by an older node) leaves the report
+  unknown, never erases one of the same incarnation, and makes `rollout` wait. The OS record is a Tier 1 node's
+  report for the update waves (`rollout`, docs/OS.md).
 - **Leave.** `Left` is sent to 16 random members, which re-gossip it.
 - **Desired-state pointer.** `(version, hash, origin)`: the highest version wins, and ties go to the larger
   hash.
@@ -109,7 +119,8 @@ The binary format is canonical: services are sorted by name and varints minimal,
 The decoder is strict and bounded. Format 2 adds each service's `calls` grant: an "any" flag bit, or strictly
 increasing indices into the sorted service list (existing and canonical by construction, 4 bytes each in memory).
 A manifest without any grant is encoded as format 1 (the original bytes, so older manifests keep their hash and
-decode with nothing granted). The operator text format (`k10s apply`) looks like this:
+decode with nothing granted). Format 3 adds the OS plan after the services: one image hash per platform (sorted) and
+the first wave's size. The operator text format (`k10s apply`) looks like this:
 
 ```
 service echo {
@@ -124,9 +135,17 @@ service echo {
 }
 ```
 
+```
+os {
+  images = ["k10s-os-0.1.0-x86_64-vm.efi"]  # signed OS images, at most one per platform
+  wave = 1                                  # nodes in the first update wave (default 1), then doubling
+}
+```
+
 `calls` names must be services of the same manifest (an error otherwise: typos are caught); the list is sorted
-and deduplicated. `parse_text` returns `ServiceDecl`s; errors read `line N: message`. Convert each one with
-`decl.to_spec(code_hash)`.
+and deduplicated. `parse_document` returns the `ServiceDecl`s and the `OsDecl` (`parse_text` the services of a file
+without `os`); errors read `line N: message`. Convert each declaration with `decl.to_spec(code_hash)`; the CLI reads
+each image, takes its platform from the signed trailer and adds it as a blob.
 
 ## Placement
 

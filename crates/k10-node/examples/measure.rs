@@ -39,7 +39,7 @@ fn bundle(svcs: &[(&str, k10_ir::Module, u8, u32)]) -> Bundle {
             blobs.push(code);
         }
     }
-    Bundle::new(Manifest { version: 0, services: specs }, blobs)
+    Bundle::new(Manifest { version: 0, services: specs, ..Default::default() }, blobs)
 }
 
 /// Lets `caller` call `callees` (its `calls` allowlist in the manifest).

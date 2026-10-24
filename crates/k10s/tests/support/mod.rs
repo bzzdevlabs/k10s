@@ -385,7 +385,7 @@ pub fn bundle(version: u64, svcs: &[Svc]) -> Bundle {
     let mut blobs: Vec<Vec<u8>> = svcs.iter().map(|s| s.code.clone()).collect();
     blobs.sort();
     blobs.dedup();
-    Bundle::new(Manifest { version, services }, blobs)
+    Bundle::new(Manifest { version, services, ..Default::default() }, blobs)
 }
 
 /// `POST /_k10s/apply` of raw bytes; returns (status, body).

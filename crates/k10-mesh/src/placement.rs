@@ -258,7 +258,7 @@ mod tests {
     #[test]
     fn deterministic_and_order_independent() {
         let ms: Vec<Member> = (1..=20).map(|i| member(i * 7919, 1 << 30)).collect();
-        let m = Manifest { version: 1, services: (0..50).map(|i| svc(&format!("s{i}"), 3, 16)).collect() };
+        let m = Manifest { version: 1, services: (0..50).map(|i| svc(&format!("s{i}"), 3, 16)).collect(), ..Default::default() };
         let a = place(&m, &ms);
         let mut ms2 = ms.clone();
         ms2.reverse();
@@ -280,7 +280,7 @@ mod tests {
         let mut ms: Vec<Member> = (1..=3).map(|i| member(i, 1 << 30)).collect();
         ms[2].state = MemberState::Dead;
         ms.push(Member { state: MemberState::Suspect, ..member(4, 1 << 30) });
-        let m = Manifest { version: 1, services: vec![svc("a", 5, 12)] };
+        let m = Manifest { version: 1, services: vec![svc("a", 5, 12)], ..Default::default() };
         let p = place(&m, &ms);
         let nodes = p.nodes("a");
         assert_eq!(nodes.len(), 5);
@@ -296,7 +296,7 @@ mod tests {
         // 4 nodes × room for 4 instances of 256 KiB (+ tail page): 16 slots
         let cap = 4 * (instance_bytes(&svc("x", 1, 18)));
         let ms: Vec<Member> = (1..=4).map(|i| member(i, cap)).collect();
-        let m = Manifest { version: 1, services: (0..6).map(|i| svc(&format!("s{i}"), 3, 18)).collect() };
+        let m = Manifest { version: 1, services: (0..6).map(|i| svc(&format!("s{i}"), 3, 18)).collect(), ..Default::default() };
         let p = place(&m, &ms);
         assert_eq!(p.placed(), 16);
         assert_eq!(p.unplaced, 2);

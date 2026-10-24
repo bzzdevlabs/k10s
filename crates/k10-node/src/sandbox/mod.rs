@@ -73,13 +73,17 @@ fn sc(nr: libc::c_long, a: [libc::c_long; 5]) -> io::Result<libc::c_long> {
     }
 }
 
-/// First thing in `k10s node`: closes inherited descriptors ≥ 3 and sets no_new_privs.
-pub fn early() -> io::Result<()> {
-    if sc(libc::SYS_close_range, [3, u32::MAX as _, 0, 0, 0]).is_err() {
+/// First thing in `k10s node`: closes inherited descriptors ≥ 3 except `keep` (init's update channel) and sets
+/// no_new_privs.
+pub fn early(keep: Option<i32>) -> io::Result<()> {
+    let k = keep.filter(|&k| k > 2).map_or(u32::MAX, |k| k as u32);
+    let ranges = [(3, k.saturating_sub(1)), (k.saturating_add(1), u32::MAX)];
+    let closed = ranges.iter().filter(|(lo, hi)| lo <= hi).all(|&(lo, hi)| sc(libc::SYS_close_range, [lo as _, hi as _, 0, 0, 0]).is_ok());
+    if !closed {
         // Linux < 5.9: collect first (closing while iterating would close the walker's descriptor).
         let fds: Vec<i32> = std::fs::read_dir("/proc/self/fd")?
             .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
-            .filter(|&fd| fd > 2)
+            .filter(|&fd| fd > 2 && Some(fd) != keep)
             .collect();
         for fd in fds {
             let _ = sc(libc::SYS_close, [fd as _, 0, 0, 0, 0]);
@@ -208,7 +212,7 @@ pub(crate) mod tests {
         let d = std::env::temp_dir().join(format!("k10s-sandbox-{tag}-{}", std::process::id()));
         let dc = d.clone();
         let st = in_child(move || {
-            let r = early().map_err(|e| e.to_string()).and_then(|()| enter(mode, None, &Policy { data_dir: Some(dc.clone()), write_dirs: vec![] }));
+            let r = early(None).map_err(|e| e.to_string()).and_then(|()| enter(mode, None, &Policy { data_dir: Some(dc.clone()), write_dirs: vec![] }));
             match r {
                 Ok(line) if probe(&dc, &line) => 0,
                 Ok(_) => 1,
@@ -218,6 +222,23 @@ pub(crate) mod tests {
         });
         let _ = std::fs::remove_dir_all(&d);
         st
+    }
+
+    #[test]
+    fn early_keeps_only_the_given_descriptor() {
+        let st = in_child(|| {
+            // SAFETY: dup2/fcntl on descriptor numbers in a forked child.
+            let open = |fd| unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0;
+            for fd in [5, 6, 9] {
+                // SAFETY: as above.
+                unsafe { libc::dup2(2, fd) };
+            }
+            if early(Some(6)).is_err() {
+                return 2;
+            }
+            if open(6) && !open(5) && !open(9) { 0 } else { 1 }
+        });
+        assert!(exited(st, 0), "status {st:#x}");
     }
 
     #[test]

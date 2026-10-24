@@ -4,9 +4,9 @@ The static `k10s` binary is the only userspace program of a Linux image: the ker
 shell, udev, systemd, DHCP daemon or SSH. This is Tier 1 of the platform plan (docs/REPORT.md §9,
 docs/research/universal-os.md §8–9); Tier 2 is the native kernel in `metal/`.
 
-What exists today (milestones U0 and U1): PID 1 mode in `crates/k10s/src/pid1/`, the k10s kernels (`vm` and `metal`
-profiles, `os/`), x86-64 disk images that boot on BIOS and UEFI, and QEMU tests of all of them. Signed A/B updates,
-arm64 and the Raspberry Pi come next (U2, U3).
+What exists today (milestones U0 to U2): PID 1 mode in `crates/k10s/src/pid1/`, the k10s kernels (`vm` and `metal`
+profiles, `os/`), x86-64 disk images that boot on BIOS and UEFI, signed A/B updates of the image rolled out by the
+cluster in waves, and QEMU tests of all of them. arm64 and the Raspberry Pi come next (U3).
 
 ## Boot sequence
 
@@ -41,9 +41,10 @@ of a container, `docker run … k10s node`, it keeps its normal command line).
    else `pool.ntp.org`; offsets of 128 ms or more step the clock, smaller ones slew it, and it polls every 17 minutes.
    A reply must echo the random transmit timestamp of its request (SNTP itself is unauthenticated).
 8. **Node:** `k10s node --data /data --http 0.0.0.0:80 --user 65532:65532` plus every non-init key, as a child
-   process. The node reads its key files, binds, then enters the normal sandbox (user switch, no capabilities,
-   Landlock, seccomp); init keeps the privileges the system work needs. When the node exits, init restarts it after
-   1 s, doubling to 60 s (reset after a minute of uptime).
+   process (with `--os-agent-fd 3`, the update channel, when the image booted from one of its slots: "Updates").
+   The node reads its key files, binds, then enters the normal sandbox (user switch, no capabilities, Landlock,
+   seccomp); init keeps the privileges the system work needs. When the node exits, init restarts it after 1 s,
+   doubling to 60 s (reset after a minute of uptime).
 9. **Health and watchdog:** init probes `GET /_k10s/health` on loopback and logs when the node is first ready. With
    `watchdog=1` it opens `/dev/watchdog` and pets it every 5 s while the node answered within the last minute (or is
    still starting, up to 5 minutes), so a hung node or kernel resets the machine.
@@ -74,7 +75,11 @@ prefix). Init consumes these keys:
 | `grow` | `0` to keep the size of `K10S-DATA` | grow to the end of the disk |
 | `watchdog` | `1` to arm `/dev/watchdog` | off |
 | `prune_modules` | `1` to free unused module files from the RAM initramfs after boot | off |
+| `os_key` | public keys (`HEX,…`) trusted for OS images besides the k10s release key | none |
+| `os_trial` | seconds a trial boot of a new image has to commit before init falls back | 600 |
 | `debug` | `1` to log each module match | off |
+
+GRUB sets `slot` on the command line of BIOS boots (the slot booted, "Updates").
 
 Every other key is a `k10s node` flag: `KEY=VALUE` becomes `--KEY VALUE`, and the valueless flags (`log-stderr`,
 `pin`, `insecure-unauthenticated-cluster`) are on unless `0`, `false`, `no` or `off`. `http` defaults to
@@ -97,7 +102,7 @@ disk, and a release publishes them with their UKIs:
 |---|---|---|---|
 | `k10s-os-V-x86_64-vm.img.xz` | QEMU/KVM guests and clouds | `vm` profile, every driver built in; console on serial | 4.3 MB |
 | `k10s-os-V-x86_64-metal.img.xz` | PCs, mini-PCs, servers | `metal` profile, signed driver modules, NIC firmware; console on the screen | 6.7 MB |
-| `k10s-os-V-x86_64-{vm,metal}.efi` | PXE or another UEFI loader | the slot-A UKI of the image | 4.2 / 6.6 MB |
+| `k10s-os-V-x86_64-{vm,metal}.efi` | updates (`os` in `k10s apply`), PXE or another UEFI loader | the signed slot-A UKI of the image | 4.2 / 6.6 MB |
 
 Write an image to the whole disk (`xz -dc IMG.xz | dd of=/dev/sdX bs=4M conv=fsync`, or any image writer that reads
 `.xz`), copy `k10s.conf` and key files to the `K10S-BOOT` partition (FAT, readable on any PC), and boot. The first boot
@@ -110,20 +115,80 @@ MBR  GRUB boot.img in the first 440 bytes (BIOS), protective MBR
 p1   bios-boot   1 MiB    GRUB core.img (BIOS)
 p2   K10S-BOOT   256 MiB  EFI system partition, FAT32:
        /EFI/BOOT/BOOTX64.EFI   systemd-boot (UEFI)
-       /EFI/Linux/k10s-a.efi   slot A: UKI = systemd-stub + kernel + initramfs + command line
-       /loader/loader.conf     no menu, command-line editor off
-       /boot/grub/grub.cfg     BIOS: GRUB boots /k10s/a/vmlinuz and /k10s/a/initrd, the payload of the UKI
+       /EFI/Linux/k10s-a.efi   slot A: UKI = systemd-stub + kernel + initramfs + command line, signed
+       /loader/loader.conf     no menu, command-line editor off, default k10s-a.efi
+       /boot/grub/grub.cfg     BIOS: boots the slot of grubenv (k10s_slot), or a trial slot counted down
+       /boot/grub/grubenv      k10s_slot=a
+       /k10s/a/                vmlinuz, initrd, boot.cfg: the payload of the UKI and GRUB's lines for it
        /k10s/tier              auto (for the Tier 2 loader)
        /k10s.conf              node configuration (a commented template)
 p3   K10S-DATA   256 MiB  ext4, grown to the end of the disk on first boot
 ```
 
 UEFI firmware starts systemd-boot, which starts the UKI; BIOS starts GRUB from the MBR, which reads `grub.cfg` from
-the ESP of the boot disk. The kernel command line is fixed in both (`console=ttyS0,115200 quiet panic=5` for `vm`;
+the ESP of the boot disk; GRUB shows nothing unless it fails, and then prints to the screen and the first serial
+port. Slot B (`k10s-b.efi`, `/k10s/b/`) appears with the first update. The kernel command line is fixed in both (`console=ttyS0,115200 quiet panic=5` for `vm`;
 `metal` adds `console=tty0` last, so init's lines appear on the screen); everything else is configured in
 `k10s.conf`. Images are reproducible: fixed GUIDs, volume ids, ext4 hash seed, and every timestamp from
 `SOURCE_DATE_EPOCH` (the commit time). On the ESP, `BOOTX64.EFI` becomes the Tier 2 loader (`k10boot`, which reads
-`/k10s/tier`) and slot B appears with milestones M1 and U2.
+`/k10s/tier`) with milestone M1.
+
+## Updates
+
+A node installs a new image when the cluster's desired state names one for its platform, in waves, and keeps it only
+once it is back in the cluster; anything else ends on the image it ran before.
+
+**Images.** An OS image is a UKI with an Ed25519 signature appended (`crates/k10-mesh/src/osimage.rs`): the file
+stays bootable, and its SHA-256 is the image hash. It names its architecture, kernel profile and version; the
+platform of a node is `ARCH-PROFILE` of the image it runs (`x86_64-vm`, `x86_64-metal`). A release signs its images
+(the `.efi` files) with the k10s release key, whose public key (`os/release-key.pub`) is built into `k10s`;
+`os_key` adds keys of your own, and `k10s image sign --key KEY --arch x86_64 --profile vm --version V IN OUT` signs an
+image you built (`k10s keygen -o KEY` makes a key, `k10s image pubkey KEY` prints the public key to pin,
+`k10s image verify FILE` checks one).
+
+**Rolling out.** The images go in the desired state like code, one per platform, with the size of the first wave:
+
+```
+os {
+    images = ["k10s-os-0.1.0-x86_64-vm.efi", "k10s-os-0.1.0-x86_64-metal.efi"]
+    wave = 1    # nodes in the first wave; each next wave is twice as large
+}
+```
+
+`k10s apply` sends the files with the manifest (they must carry a valid signature), and every node fetches them from
+its peers like code blobs. Nodes report the image they run in gossip (platform, image, trial or committed, the last
+image that failed there). Every node evaluates the same rollout on its own view of the membership
+(`crates/k10-mesh/src/rollout.rs`): the nodes of a platform, ranked by `sha256(image | node id)`, form waves of
+`wave`, `2·wave`, `4·wave`, … nodes; a node starts when every node of the earlier waves runs the image, committed.
+Nodes that left or died stay in the ranking for 5 minutes (the time gossip remembers them), so a node rebooting into
+the image keeps its place, and a node that just started with peers (configured or remembered) judges its turn only
+once it sees one and after 15 s, when gossip has given it the membership. When a node falls back from an image, every node sees it failed and the rollout stops
+until the desired state names another image. Nodes that did not boot from a slot (another loader, a `-kernel` boot)
+report nothing and never update; neither do nodes outside cluster mode.
+
+**Installing** (init, `crates/k10s/src/pid1/update.rs`). On its turn the node asks init over the update channel to
+install the image from `DATA/blobs/HASH`. Init reads it without following links, checks the hash, the signature
+against the trusted keys and the platform, refuses images that failed here before, and writes the other slot on
+`K10S-BOOT` (remounted read-write for the writes only): the kernel, initramfs and GRUB lines under `/k10s/X/`, then
+the UKI as `EFI/Linux/k10s-X+3.efi`. It then arms a trial boot in both loaders and reboots (the node first leaves the
+cluster and drains):
+
+- UEFI: `loader.conf` says `default k10s-X+[1-9]*`; systemd-boot counts the tries down in the file name
+  (`k10s-X+2-1.efi`, …) and, once none are left, boots the committed slot (entries without tries sort last).
+- BIOS: `grubenv` says `k10s_try=X3`; `grub.cfg` counts it down to `X0`, then boots `k10s_slot`.
+
+Every file is written under a temporary name, synced, renamed and synced again (vfat fills the new name's directory
+entry only when the file itself is written back), and the GRUB environment block is rewritten in place within its
+first sector, so a power cut at any point boots a complete image.
+
+**Committing.** A trial boot (init knows it from systemd-boot's `LoaderEntrySelected` in efivarfs, or from GRUB's
+`slot` and `k10s_try`) starts the node as usual. Once the node holds and applied the cluster's desired state, sees a
+peer again (if it had peers before) and stayed so for `--os-commit-grace` seconds (a node flag, default 30), it asks
+init to commit: init drops the counter from the file name, sets `default k10s-X.efi` and `k10s_slot=X`. A trial that
+crashes or hangs (the watchdog, `watchdog=1`, resets it) uses up its 3 boots; one that does not commit within
+`os_trial` seconds is abandoned by init. Either way the machine boots the previous slot, whose init records the image
+in `K10S-BOOT/k10s/failed` (the node reports it, so the rollout stops), removes the other slot's files and points both
+loaders at itself.
 
 ### Kernels
 
@@ -195,21 +260,38 @@ it on the k10s binary of the release's musl archive and publishes the images it 
 - **boottime**: QEMU start → first HTTP 200 from the node, `vm` image on SeaBIOS (GRUB, KVM, 512 MiB, fresh disk
   each time), median of 5 below 1 s (measured 0.50–0.54 s).
 - **repro**: the same image built twice is bit-identical, UKI included.
+- **update-bios, update-uefi**: a single-node cluster on the `vm` image applies a re-signed copy of it (another
+  version, so another hash; the test signing key is pinned with `os_key`). On a fresh disk per step, the power is
+  cut (QEMU killed within a millisecond of the console line) at every step: image verified, slot written, trial
+  armed, trial booted, commit requested, committed; each next boot comes up on the old or the new image and serves,
+  the update completes, and the KV state survives. Then an image
+  whose kernel finds no init (it panics; `panic=5` reboots) falls back after 3 boots, and one whose node never asks
+  to commit is abandoned after `os_trial`; both are recorded as failed and stop the rollout.
+- **rollout**: 20 BIOS VMs (192 MiB each) in one cluster, reaching each other through QEMU's forwarded ports. The
+  panicking image goes to the first wave only (one node), which falls back; every other node sees the rollout stopped.
+  Then a good image reaches all 20 nodes in waves of 1, 2, 4, 8 and 5, each wave starting after the previous one
+  committed.
 
 Unit tests cover the configuration precedence, module tree parsing and modalias matching, the DHCP state machine
 against a fake server, SNTP sample checks and the GPT rewrite that grows `K10S-DATA` (512-byte and 4 KiB sectors,
-checksums, partitions that are not last, corrupt tables).
+checksums, partitions that are not last, corrupt tables). The slot logic is tested against models of systemd-boot's
+entry selection and of `grub.cfg`, with the power cut after every durable step of an install and of a commit on both
+firmware types, and with images that never come up or never commit; the image format, Ed25519 (RFC 8032 vectors),
+the manifest's OS plan, the gossip extension (never sent to nodes that predate it) and the rollout waves have their
+own tests in `k10-mesh`.
 
 Real hardware is needed for: a real machine serving after a cold boot from the `metal` image (the U1 exit criterion
-for a Realtek or Intel mini-PC), NIC drivers and firmware outside QEMU's models (r8169/RTL8125, igc, tg3, USB
+for a Realtek or Intel mini-PC), power cuts that reach the disk's own write cache (QEMU's kill loses only what the
+guest had not written), GRUB's `save_env` and systemd-boot's renames on real firmware and disks, NIC drivers and firmware outside QEMU's models (r8169/RTL8125, igc, tg3, USB
 Ethernet), AHCI and eMMC boot disks, the screen console, firmware quirks of real BIOS and UEFI implementations
 (boot drive numbers, removable-media boot paths), slow USB storage (`bootwait`), the AMD and newer Intel (SMBus)
 watchdogs, RTC chips, real DHCP servers, switches (link and STP delays) and NTP pools.
 
 ## Limits
 
-- One boot slot: signed A/B updates come with U2; until then a new release is written over the image (`K10S-BOOT` and
-  `K10S-DATA` survive only if you keep them).
+- Updates need cluster mode and an image booted through its own loaders; nodes are not grouped into zones yet.
+- A rollback is an update to the older image (signed images of any version install); the cluster key is the trust
+  boundary for which signed image a cluster runs.
 - Secure Boot must be off (U6 documents signing the image with an own key).
 - The image uses 512-byte logical sectors; disks with 4 KiB logical sectors (rare outside servers) need a rebuilt
   image.

@@ -170,7 +170,7 @@ the caveats. Highlights beyond §0:
 1. **Cluster security:** node identity and signed bundles (done: shared-key authenticated/encrypted gossip and peer
    links, signed admin requests).
 2. **Replicated state:** per-service replicated KV (Raft per shard group) and leases for singletons.
-3. **Tier 1 images** (U0–U2): PID-1 mode in main, x86 images, signed A/B updates spread over gossip.
+3. **Tier 1 images** (U0–U2, done): PID-1 mode in main, x86 images, signed A/B updates spread over gossip.
 4. **arm64:** interpreter everywhere now; arm64 JIT backend (shared by both tiers).
 5. **Tier 2 M1–M2:** UEFI + BIOS + ACPI + modern virtio + NVMe + durable KV log on the native kernel; then clouds
    (ENA, VMBus, gVNIC) and curated x86 bare metal before the Pi.

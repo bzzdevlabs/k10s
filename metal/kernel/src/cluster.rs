@@ -1583,7 +1583,7 @@ fn ranking(m: &Manifest, members: &[Member]) -> BTreeMap<String, Vec<NodeId>> {
         .map(|s| {
             let mut one = s.clone();
             one.replicas = n;
-            let p = place(&Manifest { version: m.version, services: vec![one] }, members);
+            let p = place(&Manifest { version: m.version, services: vec![one], ..Default::default() }, members);
             let mut v: Vec<NodeId> = Vec::new();
             for id in p.nodes(&s.name) {
                 if !v.contains(id) {

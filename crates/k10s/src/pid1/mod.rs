@@ -6,7 +6,7 @@
 //! data partition, the hardware watchdog and the power button. It runs the node as its child, `k10s node … --user
 //! 65532:65532`, which enters the normal sandbox (user switch, no capabilities, Landlock, seccomp), restarts it when
 //! it exits, and on a power-off request stops it, syncs, unmounts and powers off. If init itself panics, the kernel
-//! panics: images boot with `panic=5` to reboot.
+//! panics: images boot with `panic=5` to reboot. Signed A/B updates of the image itself: [`update`].
 
 mod config;
 mod dhcp;
@@ -14,6 +14,7 @@ mod grow;
 mod modules;
 mod net;
 mod sntp;
+mod update;
 
 use std::fs;
 use std::io::{self, Read, Write};
@@ -24,12 +25,17 @@ use std::time::{Duration, Instant};
 
 use config::Config;
 pub use modules::modprobe;
+pub use update::release_keys;
 
 /// systemd's convention and the default of the kernel's ACPI "tiny power button": SIGRTMIN+4 asks init to power off.
 const SIG_POWEROFF: libc::c_int = 38;
 const DATA: &str = "/data";
 /// The node gets this long to drain on shutdown before SIGKILL.
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
+/// The update agent asks for a reboot into a new slot (or back from a failed trial).
+const SIG_UPDATE: libc::c_int = libc::SIGUSR1;
+/// The node's end of the update channel (`--os-agent-fd`).
+const OS_AGENT_FD: libc::c_int = 3;
 
 pub(crate) fn boot_secs() -> f64 {
     let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
@@ -90,7 +96,7 @@ fn signal_set() -> libc::sigset_t {
     unsafe {
         let mut set: libc::sigset_t = std::mem::zeroed();
         libc::sigemptyset(&mut set);
-        for s in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGCHLD, libc::SIGPWR, SIG_POWEROFF] {
+        for s in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGCHLD, libc::SIGPWR, SIG_POWEROFF, SIG_UPDATE] {
             libc::sigaddset(&mut set, s);
         }
         set
@@ -129,21 +135,31 @@ pub fn main() -> ! {
     }
     // Boot partition (GPT name K10S-BOOT, FAT): read-only, root-only; holds k10s.conf and the operator's key files.
     let bootwait = Duration::from_millis(cfg.get("bootwait").and_then(|v| v.parse().ok()).unwrap_or(0));
+    let mut boot_mounted = false;
     if let Some(dev) = find_partition("K10S-BOOT", bootwait) {
         modules::load_by_name(&["vfat", "nls_cp437", "nls_iso8859_1"]);
         let ro = libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
         // Explicit charsets: kernels differ in their defaults and may lack the default's module.
         match mount(&dev, "/boot", "vfat", ro, "uid=0,gid=0,fmask=0177,dmask=0077,codepage=437,iocharset=iso8859-1") {
-            Ok(()) => match fs::read_to_string("/boot/k10s.conf") {
-                Ok(text) => {
-                    cfg.merge(&text);
-                    say!("config: {dev} (K10S-BOOT): k10s.conf merged");
+            Ok(()) => {
+                boot_mounted = true;
+                match fs::read_to_string("/boot/k10s.conf") {
+                    Ok(text) => {
+                        cfg.merge(&text);
+                        say!("config: {dev} (K10S-BOOT): k10s.conf merged");
+                    }
+                    Err(e) => say!("config: {dev} (K10S-BOOT): k10s.conf: {e}"),
                 }
-                Err(e) => say!("config: {dev} (K10S-BOOT): k10s.conf: {e}"),
-            },
+            }
             Err(e) => say!("config: mounting {dev} (K10S-BOOT): {e}"),
         }
     }
+    // Reading the slots hashes the booted image: alongside the network setup.
+    let slots = boot_mounted.then(|| {
+        let keys = |k: &str| cfg.get(k).map(str::to_string);
+        let (slot, os_key, os_trial) = (keys("slot"), keys("os_key"), keys("os_trial"));
+        std::thread::spawn(move || open_slots(slot.as_deref(), os_key.as_deref(), os_trial.as_deref()))
+    });
     let lease = Arc::new(dhcp::Shared::default());
     let iface = network(&cfg, &lease);
     set_hostname(&cfg, iface.as_deref());
@@ -162,8 +178,45 @@ pub fn main() -> ! {
     if cfg.flag("watchdog") {
         spawn_watchdog(health.clone());
     }
-    let how = supervise(&cfg, &set, &health);
+    let agent = slots.and_then(|t| t.join().ok().flatten());
+    let how = supervise(&cfg, &set, &health, agent.as_ref());
     shutdown(how)
+}
+
+/// The image's A/B slots on K10S-BOOT ([`update`]); `None` when this boot did not come from one (no updates).
+fn open_slots(slot: Option<&str>, os_key: Option<&str>, os_trial: Option<&str>) -> Option<update::Agent> {
+    let firmware = if Path::new("/sys/firmware/efi").exists() {
+        let flags = libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
+        if let Err(e) = mount("efivarfs", "/sys/firmware/efi/efivars", "efivarfs", flags, "") {
+            say!("update: efivarfs: {e}");
+        }
+        update::Firmware::Uefi
+    } else {
+        update::Firmware::Bios
+    };
+    let entry = update::efi_selected_entry();
+    let slots = update::Slots::open(update::Esp::new("/boot", true), firmware, entry.as_deref(), slot);
+    let (Some(st), Some(b)) = (slots.status(), slots.booted) else {
+        say!("update: not booted from a slot of this image's loaders; updates are off");
+        return None;
+    };
+    say!(
+        "update: {:?} boot of slot {} ({}, {}{})",
+        firmware,
+        b.letter(),
+        st.platform,
+        k10_mesh::sha256::to_hex(&st.image[..4]),
+        if st.committed { "" } else { ", trial" }
+    );
+    let mut trusted = release_keys();
+    for k in os_key.unwrap_or("").split(',').map(str::trim).filter(|k| !k.is_empty()) {
+        match k10_node::cluster::os::parse_hex32(k) {
+            Some(key) => trusted.push(key),
+            None => say!("update: os_key `{k}` is not a public key (64 hex digits)"),
+        }
+    }
+    let trial = Duration::from_secs(os_trial.and_then(|v| v.parse().ok()).unwrap_or(600));
+    Some(update::Agent::spawn(slots, trusted, DATA.into(), trial))
 }
 
 fn early_mounts() {
@@ -438,10 +491,22 @@ enum Halt {
 /// The node, by `posix_spawn` of our own binary: std's spawn would link glibc symbols newer than the gnu build's floor
 /// (2.34). The child starts with an empty signal mask and default dispositions; it reads its secrets, binds, then
 /// sandboxes itself.
-fn spawn_node(cfg: &Config) -> io::Result<libc::pid_t> {
+fn spawn_node(cfg: &Config, agent: Option<&update::Agent>) -> io::Result<libc::pid_t> {
     use std::ffi::CString;
+    use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStringExt;
-    let args = cfg.node_args(DATA, crate::NODE_BOOLEANS);
+    let mut args = cfg.node_args(DATA, crate::NODE_BOOLEANS);
+    // The update channel becomes the node's fd 3 (a descriptor already numbered 3 would keep close-on-exec).
+    let channel = match agent.map(update::Agent::connect).transpose() {
+        Ok(c) => c.map(|fd| if fd.as_raw_fd() == OS_AGENT_FD { fd.try_clone() } else { Ok(fd) }).transpose()?,
+        Err(e) => {
+            say!("update: {e}");
+            None
+        }
+    };
+    if channel.is_some() {
+        args.extend(["--os-agent-fd".to_string(), OS_AGENT_FD.to_string()]);
+    }
     say!("node: k10s {}", args.join(" "));
     let argv: Vec<CString> =
         std::iter::once("k10s").chain(args.iter().map(String::as_str)).map(CString::new).collect::<Result<_, _>>().map_err(io::Error::other)?;
@@ -464,6 +529,9 @@ fn spawn_node(cfg: &Config) -> io::Result<libc::pid_t> {
         libc::posix_spawnattr_setsigdefault(&mut attr, &signal_set());
         libc::posix_spawnattr_setflags(&mut attr, (libc::POSIX_SPAWN_SETSIGMASK | libc::POSIX_SPAWN_SETSIGDEF) as libc::c_short);
         libc::posix_spawn_file_actions_addopen(&mut fa, 0, c"/dev/null".as_ptr(), libc::O_RDONLY, 0);
+        if let Some(c) = &channel {
+            libc::posix_spawn_file_actions_adddup2(&mut fa, c.as_raw_fd(), OS_AGENT_FD);
+        }
         let r = libc::posix_spawn(&mut pid, c"/proc/self/exe".as_ptr(), &fa, &attr, argv_p.as_ptr(), env_p.as_ptr());
         libc::posix_spawn_file_actions_destroy(&mut fa);
         libc::posix_spawnattr_destroy(&mut attr);
@@ -508,14 +576,14 @@ fn describe(st: libc::c_int) -> String {
 
 /// Runs the node until init is asked to stop: restarts it when it exits (backoff 1 s doubling to 60 s, reset after a
 /// minute of uptime), and on SIGHUP (address change) when it advertises the lease's address.
-fn supervise(cfg: &Config, set: &libc::sigset_t, health: &Health) -> Halt {
+fn supervise(cfg: &Config, set: &libc::sigset_t, health: &Health, agent: Option<&update::Agent>) -> Halt {
     let mut node: Option<(libc::pid_t, Instant)> = None;
     let mut restart_at = Some(Instant::now());
     let mut backoff = Duration::from_secs(1);
     loop {
         if node.is_none() && restart_at.is_some_and(|t| t <= Instant::now()) {
             restart_at = None;
-            match spawn_node(cfg) {
+            match spawn_node(cfg, agent) {
                 Ok(pid) => node = Some((pid, Instant::now())),
                 Err(e) => {
                     say!("node: cannot start: {e}");
@@ -549,6 +617,7 @@ fn supervise(cfg: &Config, set: &libc::sigset_t, health: &Health) -> Halt {
                 }
             }
             Some(libc::SIGINT) => return stop(node, Halt::Reboot, set, health), // Ctrl-Alt-Del
+            Some(SIG_UPDATE) => return stop(node, Halt::Reboot, set, health),
             Some(libc::SIGTERM) | Some(libc::SIGPWR) | Some(SIG_POWEROFF) => return stop(node, Halt::PowerOff, set, health),
             _ => {}
         }

@@ -9,8 +9,11 @@
 //!           | cpu_ms:varint | flags:u8 | config_len:varint config | calls
 //! format 1: flags = fresh (bit0); no calls
 //! format 2: flags = fresh (bit0), any (bit1); calls = n:varint index:varint* (strictly increasing service indices)
+//! format 3: as format 2, then the OS plan: n:varint (platform_len:u8 platform image:[32])* wave:varint
+//!           (platforms sorted, unique; n >= 1, wave >= 1)
 //! ```
-//! The encoder emits format 1 when no service may call anything (such manifests keep their earlier hash), else 2.
+//! The encoder emits format 3 when the manifest names OS images, else format 1 when no service may call anything
+//! (such manifests keep their earlier hash), else 2.
 
 use crate::codec::{put_u64, put_varint, DecodeError, Reader};
 use crate::sha256::sha256;
@@ -41,6 +44,9 @@ pub const CALL_ANY: &str = "*";
 const MAGIC: &[u8; 4] = b"K10M";
 const FORMAT_V1: u8 = 1;
 const FORMAT_V2: u8 = 2;
+const FORMAT_V3: u8 = 3;
+/// Maximum OS images (platforms) in one manifest.
+pub const MAX_OS_IMAGES: usize = 64;
 const FLAG_FRESH: u8 = 1;
 const FLAG_ANY: u8 = 2;
 const MIN_SERVICE_BYTES: usize = 1 + 1 + 32 + 1 + 1 + 1 + 1 + 1 + 1;
@@ -224,11 +230,64 @@ fn varint_u32(r: &mut Reader<'_>) -> Result<u32, DecodeError> {
     u32::try_from(varint(r)?).map_err(|_| DecodeError::Invalid("u32 varint"))
 }
 
+/// One OS image of the desired state: Tier 1 nodes whose image is for `platform` update to `image`.
+#[derive(Clone, PartialEq, Eq, Debug, Hash, PartialOrd, Ord)]
+pub struct OsImage {
+    /// `ARCH-PROFILE` of the signed image (`x86_64-vm`, `x86_64-metal`), see [`crate::osimage`].
+    pub platform: String,
+    /// SHA-256 of the signed image blob.
+    pub image: [u8; 32],
+}
+
+/// The OS part of the desired state (docs/OS.md, "Updates"): which image each platform runs, rolled out in waves.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Hash)]
+pub struct OsPlan {
+    /// Unique platforms (encoded sorted).
+    pub images: Vec<OsImage>,
+    /// Nodes of a platform in the first update wave; each following wave is twice as large. 0 without images.
+    pub wave: u32,
+}
+
+impl OsPlan {
+    pub fn image_for(&self, platform: &str) -> Option<&[u8; 32]> {
+        self.images.iter().find(|i| i.platform == platform).map(|i| &i.image)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.images.len() > MAX_OS_IMAGES {
+            return Err(format!("more than {MAX_OS_IMAGES} OS images"));
+        }
+        let mut seen: Vec<&str> = Vec::with_capacity(self.images.len());
+        for i in &self.images {
+            if !valid_platform(&i.platform) {
+                return Err(format!("invalid OS platform `{}` (want ARCH-PROFILE of [a-z0-9_.-])", i.platform));
+            }
+            if seen.contains(&i.platform.as_str()) {
+                return Err(format!("two OS images for platform `{}`", i.platform));
+            }
+            seen.push(&i.platform);
+        }
+        match (self.images.is_empty(), self.wave) {
+            (false, 0) => Err("the OS update wave must be >= 1".to_string()),
+            (true, w) if w != 0 => Err("an OS update wave without OS images".to_string()),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// `ARCH-PROFILE`: 3..=64 characters of `[a-z0-9_.-]` with a `-` that is neither first nor last.
+pub fn valid_platform(p: &str) -> bool {
+    (3..=64).contains(&p.len())
+        && p.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"_.-".contains(&c))
+        && p.find('-').is_some_and(|i| i > 0 && i + 1 < p.len())
+}
+
 /// The desired state of the cluster.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Hash)]
 pub struct Manifest {
     pub version: u64,
     pub services: Vec<ServiceSpec>,
+    pub os: OsPlan,
 }
 
 impl Manifest {
@@ -243,7 +302,13 @@ impl Manifest {
     pub fn encode_into(&self, out: &mut Vec<u8>) {
         let mut order: Vec<&ServiceSpec> = self.services.iter().collect();
         order.sort_by(|a, b| a.name.cmp(&b.name));
-        let format = if order.iter().all(|s| s.calls.is_none()) { FORMAT_V1 } else { FORMAT_V2 };
+        let format = if !self.os.images.is_empty() {
+            FORMAT_V3
+        } else if order.iter().all(|s| s.calls.is_none()) {
+            FORMAT_V1
+        } else {
+            FORMAT_V2
+        };
         out.extend_from_slice(MAGIC);
         out.push(format);
         put_u64(out, self.version);
@@ -261,12 +326,25 @@ impl Manifest {
             out.push(if s.fresh { FLAG_FRESH } else { 0 } | if s.calls.is_any() { FLAG_ANY } else { 0 });
             put_varint(out, s.config.len() as u64);
             out.extend_from_slice(&s.config);
-            if format == FORMAT_V2 {
+            if format != FORMAT_V1 {
                 let idx: Vec<usize> =
                     s.calls.names().filter_map(|c| order.binary_search_by(|t| t.name.as_str().cmp(c)).ok()).collect();
                 put_varint(out, idx.len() as u64);
                 idx.into_iter().for_each(|i| put_varint(out, i as u64));
             }
+        }
+        if format == FORMAT_V3 {
+            let mut images: Vec<&OsImage> = self.os.images.iter().collect();
+            images.sort();
+            put_varint(out, images.len() as u64);
+            for i in images {
+                let p = i.platform.as_bytes();
+                let n = p.len().min(255);
+                out.push(n as u8);
+                out.extend_from_slice(&p[..n]);
+                out.extend_from_slice(&i.image);
+            }
+            put_varint(out, self.os.wave as u64);
         }
     }
 
@@ -281,7 +359,7 @@ impl Manifest {
             return Err(DecodeError::Invalid("manifest magic"));
         }
         let format = r.u8()?;
-        if format != FORMAT_V1 && format != FORMAT_V2 {
+        if !(FORMAT_V1..=FORMAT_V3).contains(&format) {
             return Err(DecodeError::Invalid("manifest format"));
         }
         let version = r.u64()?;
@@ -290,11 +368,11 @@ impl Manifest {
             return Err(DecodeError::TooLarge("service count"));
         }
         let count = count as usize;
-        let min_service = MIN_SERVICE_BYTES + (format == FORMAT_V2) as usize;
+        let min_service = MIN_SERVICE_BYTES + (format != FORMAT_V1) as usize;
         if count > r.remaining() / min_service {
             return Err(DecodeError::Truncated);
         }
-        let flag_mask = if format == FORMAT_V2 { FLAG_FRESH | FLAG_ANY } else { FLAG_FRESH };
+        let flag_mask = if format == FORMAT_V1 { FLAG_FRESH } else { FLAG_FRESH | FLAG_ANY };
         let mut services: Vec<ServiceSpec> = Vec::with_capacity(count);
         // Callee indices per service, turned into names once every name is known.
         let mut pending: Vec<(usize, Vec<u32>)> = Vec::new();
@@ -324,7 +402,7 @@ impl Manifest {
             }
             let config = r.bytes(clen as usize)?.to_vec();
             let calls = if flags & FLAG_ANY != 0 { Calls::any() } else { Calls::none() };
-            if format == FORMAT_V2 {
+            if format != FORMAT_V1 {
                 let n = varint(&mut r)?;
                 // Strictly increasing indices below `count`, at least a byte each: bounds n before allocating.
                 if n > count as u64 || n > r.remaining() as u64 {
@@ -359,6 +437,25 @@ impl Manifest {
             s.validate().map_err(|_| DecodeError::Invalid("service field"))?;
             services.push(s);
         }
+        let mut os = OsPlan::default();
+        if format == FORMAT_V3 {
+            let n = varint(&mut r)?;
+            if n == 0 || n > MAX_OS_IMAGES as u64 {
+                return Err(DecodeError::Invalid("OS image count"));
+            }
+            for _ in 0..n {
+                let len = r.u8()? as usize;
+                let platform = core::str::from_utf8(r.bytes(len)?).map_err(|_| DecodeError::Invalid("OS platform"))?;
+                if !valid_platform(platform) || os.images.last().is_some_and(|p: &OsImage| p.platform.as_str() >= platform) {
+                    return Err(DecodeError::Invalid("OS platform (must be valid, sorted, unique)"));
+                }
+                os.images.push(OsImage { platform: platform.to_string(), image: r.array::<32>()? });
+            }
+            os.wave = varint_u32(&mut r)?;
+            if os.wave == 0 {
+                return Err(DecodeError::Invalid("OS update wave"));
+            }
+        }
         if !r.is_empty() {
             return Err(DecodeError::Invalid("trailing bytes"));
         }
@@ -371,7 +468,7 @@ impl Manifest {
         if format == FORMAT_V2 && services.iter().all(|s| s.calls.is_none()) {
             return Err(DecodeError::Invalid("manifest format (2 without calls)"));
         }
-        Ok(Manifest { version, services })
+        Ok(Manifest { version, services, os })
     }
 
     /// Content hash: SHA-256 of the canonical encoding.
@@ -399,7 +496,18 @@ impl Manifest {
                 return Err(format!("service `{}` calls `{c}`, which is not a service of this manifest", s.name));
             }
         }
-        Ok(())
+        self.os.validate()
+    }
+
+    /// Every blob the manifest references: code (in service order), then OS images; deduplicated.
+    pub fn blob_hashes(&self) -> Vec<[u8; 32]> {
+        let mut v: Vec<[u8; 32]> = Vec::new();
+        for h in self.services.iter().map(|s| &s.code_hash).chain(self.os.images.iter().map(|i| &i.image)) {
+            if !v.contains(h) {
+                v.push(*h);
+            }
+        }
+        v
     }
 
     pub fn service(&self, name: &str) -> Option<&ServiceSpec> {
@@ -704,10 +812,102 @@ fn parse_calls(lx: &mut Lexer<'_>, line: u32) -> Result<Calls, ParseError> {
     Calls::from_list(&list).or_else(|e| err(line, e))
 }
 
-/// Parses the operator text format into service declarations (defaults applied, names unique, callees declared).
+/// The `os { … }` block of the operator text format: signed image files (paths as written) and the first wave.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct OsDecl {
+    pub images: Vec<String>,
+    pub wave: u32,
+    pub line: u32,
+}
+
+/// A parsed operator text file.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Document {
+    pub services: Vec<ServiceDecl>,
+    pub os: Option<OsDecl>,
+}
+
+/// Parses a text file that declares services only (an `os` block is an error here; see [`parse_document`]).
 pub fn parse_text(src: &str) -> Result<Vec<ServiceDecl>, ParseError> {
+    let doc = parse_document(src)?;
+    match doc.os {
+        Some(os) => err(os.line, "`os` blocks are not allowed here"),
+        None => Ok(doc.services),
+    }
+}
+
+fn parse_os(lx: &mut Lexer<'_>, line: u32) -> Result<OsDecl, ParseError> {
+    match lx.next()? {
+        Some((Tok::LBrace, _)) => {}
+        Some((t, l)) => return err(l, format!("expected `{{` after `os`, found {}", describe(&t))),
+        None => return err(line, "expected `{` after `os`, found end of input"),
+    }
+    let mut d = OsDecl { images: Vec::new(), wave: 1, line };
+    let mut seen: Vec<String> = Vec::new();
+    loop {
+        let (key, kline) = match lx.next()? {
+            Some((Tok::RBrace, _)) => break,
+            Some((Tok::Semi, _)) => continue,
+            Some((Tok::Word(k), l)) => (k, l),
+            Some((t, l)) => return err(l, format!("expected a key or `}}`, found {}", describe(&t))),
+            None => return err(line, "unterminated `os` block (missing `}`)"),
+        };
+        if seen.contains(&key) {
+            return err(kline, format!("duplicate key `{key}`"));
+        }
+        match lx.next()? {
+            Some((Tok::Eq, _)) => {}
+            Some((t, l)) => return err(l, format!("expected `=` after `{key}`, found {}", describe(&t))),
+            None => return err(kline, format!("expected `=` after `{key}`")),
+        }
+        let Some((val, vline)) = lx.next()? else { return err(kline, format!("missing value for `{key}`")) };
+        match (key.as_str(), val) {
+            ("images", Tok::LBracket) => loop {
+                match lx.next()? {
+                    Some((Tok::RBracket, _)) => break,
+                    Some((Tok::Str(s), l)) => {
+                        let path = String::from_utf8(s).or_else(|_| err(l, "image path is not UTF-8"))?;
+                        if path.is_empty() {
+                            return err(l, "empty image path");
+                        }
+                        d.images.push(path);
+                        match lx.next()? {
+                            Some((Tok::Comma, _)) => {}
+                            Some((Tok::RBracket, _)) => break,
+                            Some((t, l)) => return err(l, format!("expected `,` or `]` in `images`, found {}", describe(&t))),
+                            None => return err(vline, "unterminated `images` list (missing `]`)"),
+                        }
+                    }
+                    Some((t, l)) => return err(l, format!("`images` expects quoted file names, found {}", describe(&t))),
+                    None => return err(vline, "unterminated `images` list (missing `]`)"),
+                }
+            },
+            ("wave", Tok::Word(w)) => {
+                d.wave = parse_u32(&w, vline, "wave")?;
+                if d.wave == 0 {
+                    return err(vline, "`wave` must be >= 1");
+                }
+            }
+            ("images" | "wave", t) => return err(vline, format!("bad value for `{key}`: {}", describe(&t))),
+            (_, _) => return err(kline, format!("unknown key `{key}` in `os` (expected images, wave)")),
+        }
+        seen.push(key);
+    }
+    if d.images.is_empty() {
+        return err(line, "`os` needs `images = [\"FILE.efi\", …]`");
+    }
+    if d.images.len() > MAX_OS_IMAGES {
+        return err(line, format!("more than {MAX_OS_IMAGES} OS images"));
+    }
+    Ok(d)
+}
+
+/// Parses the operator text format: service declarations (defaults applied, names unique, callees declared) and
+/// at most one `os` block.
+pub fn parse_document(src: &str) -> Result<Document, ParseError> {
     let mut lx = Lexer::new(src);
     let mut out: Vec<ServiceDecl> = Vec::new();
+    let mut os: Option<OsDecl> = None;
     let mut seen: BTreeSet<String> = BTreeSet::new();
     // (declaration index, `calls` line): callees are checked once every service is known.
     let mut calls_at: Vec<(usize, u32)> = Vec::new();
@@ -715,7 +915,14 @@ pub fn parse_text(src: &str) -> Result<Vec<ServiceDecl>, ParseError> {
         match tok {
             Tok::Semi => continue,
             Tok::Word(w) if w == "service" => {}
-            other => return err(line, format!("expected `service`, found {}", describe(&other))),
+            Tok::Word(w) if w == "os" => {
+                if os.is_some() {
+                    return err(line, "more than one `os` block");
+                }
+                os = Some(parse_os(&mut lx, line)?);
+                continue;
+            }
+            other => return err(line, format!("expected `service` or `os`, found {}", describe(&other))),
         }
         let name = match lx.next()? {
             Some((Tok::Word(w), _)) => w,
@@ -834,7 +1041,7 @@ pub fn parse_text(src: &str) -> Result<Vec<ServiceDecl>, ParseError> {
             return err(line, format!("service `{}` calls `{c}`, which is not declared in this manifest", d.name));
         }
     }
-    Ok(out)
+    Ok(Document { services: out, os })
 }
 
 #[cfg(test)]
@@ -911,6 +1118,7 @@ mod tests {
                 calling("kv-store", &["kv-store"]),
                 calling("gateway", &["*"]),
             ],
+            ..Default::default()
         };
         a.validate().unwrap();
         let bytes = a.encode();
@@ -958,11 +1166,11 @@ mod tests {
 
     #[test]
     fn format1_still_decodes_and_keeps_its_hash() {
-        let m = Manifest { version: 9, services: vec![spec("web", 2), spec("echo", 1)] };
+        let m = Manifest { version: 9, services: vec![spec("web", 2), spec("echo", 1)], ..Default::default() };
         let legacy = legacy_encode(&m);
         assert_eq!(m.encode(), legacy, "without calls: the same bytes as before");
         let back = Manifest::decode(&legacy).unwrap();
-        assert_eq!(back, Manifest { version: 9, services: vec![spec("echo", 1), spec("web", 2)] });
+        assert_eq!(back, Manifest { version: 9, services: vec![spec("echo", 1), spec("web", 2)], ..Default::default() });
         assert!(back.services.iter().all(|s| s.calls.is_none() && !s.calls.allows(b"echo")));
         assert_eq!(back.hash(), sha256(&legacy));
         // Non-minimal varints and unknown formats are refused (they would not be canonical).
@@ -1004,7 +1212,7 @@ mod tests {
 
     #[test]
     fn calls_validation() {
-        let check = |svcs: Vec<ServiceSpec>| Manifest { version: 1, services: svcs }.validate();
+        let check = |svcs: Vec<ServiceSpec>| Manifest { version: 1, services: svcs, ..Default::default() }.validate();
         assert!(check(vec![calling("a", &["b"]), spec("b", 1)]).is_ok());
         let e = check(vec![calling("a", &["b", "typo"]), spec("b", 1)]).unwrap_err();
         assert!(e.contains("calls `typo`") && e.contains("not a service"), "{e}");
@@ -1030,7 +1238,7 @@ service gw { code = "g.ten" calls = ["*"] }
         assert_eq!(names(&d[1].calls), ["echo", "kv-store"]);
         assert!(d[2].calls.is_none());
         assert!(d[3].calls.is_any());
-        let m = Manifest { version: 1, services: d.iter().map(|d| d.to_spec([0; 32])).collect() };
+        let m = Manifest { version: 1, services: d.iter().map(|d| d.to_spec([0; 32])).collect(), ..Default::default() };
         m.validate().unwrap();
         assert_eq!(Manifest::decode(&m.encode()).unwrap().hash(), m.hash());
         let cases: &[(&str, u32, &str)] = &[
@@ -1054,7 +1262,7 @@ service gw { code = "g.ten" calls = ["*"] }
 
     #[test]
     fn binary_roundtrip_canonical_hash() {
-        let a = Manifest { version: 7, services: vec![spec("web", 3), spec("echo", 1), spec("db-1", 2)] };
+        let a = Manifest { version: 7, services: vec![spec("web", 3), spec("echo", 1), spec("db-1", 2)], ..Default::default() };
         let bytes = a.encode();
         let back = Manifest::decode(&bytes).unwrap();
         assert_eq!(back.version, 7);
@@ -1070,7 +1278,7 @@ service gw { code = "g.ten" calls = ["*"] }
 
     #[test]
     fn decode_never_panics_on_garbage_or_truncation() {
-        let bytes = Manifest { version: 1, services: vec![spec("a", 1), spec("b", 2)] }.encode();
+        let bytes = Manifest { version: 1, services: vec![spec("a", 1), spec("b", 2)], ..Default::default() }.encode();
         for n in 0..bytes.len() {
             assert!(Manifest::decode(&bytes[..n]).is_err());
         }
@@ -1088,7 +1296,7 @@ service gw { code = "g.ten" calls = ["*"] }
         evil.extend_from_slice(&[0xff, 0xff, 0x03]);
         assert!(Manifest::decode(&evil).is_err());
         // duplicates rejected
-        let dup = Manifest { version: 1, services: vec![spec("a", 1), spec("a", 2)] };
+        let dup = Manifest { version: 1, services: vec![spec("a", 1), spec("a", 2)], ..Default::default() };
         assert!(Manifest::decode(&dup.encode()).is_err());
         assert!(dup.validate().is_err());
     }
@@ -1165,5 +1373,71 @@ service minimal {
         assert_eq!(d[0].mem_log2, 36);
         assert!(parse_text("").unwrap().is_empty());
         assert!(parse_text("# only a comment\n").unwrap().is_empty());
+    }
+
+    #[test]
+    fn os_plan_format3_and_text() {
+        let img = |p: &str, b: u8| OsImage { platform: p.to_string(), image: [b; 32] };
+        let base = Manifest { version: 4, services: vec![spec("web", 2)], ..Default::default() };
+        let m = Manifest { os: OsPlan { images: vec![img("x86_64-vm", 1), img("aarch64-pi", 2)], wave: 2 }, ..base.clone() };
+        m.validate().unwrap();
+        let bytes = m.encode();
+        assert_eq!(bytes[4], FORMAT_V3);
+        let back = Manifest::decode(&bytes).unwrap();
+        // Decoded images come back sorted by platform; the hash does not depend on the order given.
+        assert_eq!(back.os.images, vec![img("aarch64-pi", 2), img("x86_64-vm", 1)]);
+        assert_eq!((back.os.wave, back.hash(), back.blob_hashes().len()), (2, m.hash(), 3));
+        assert_eq!(back.os.image_for("x86_64-vm"), Some(&[1; 32]));
+        // Without OS images the earlier formats (and hashes) stay.
+        assert_eq!(base.encode()[4], FORMAT_V1);
+        for bad in [
+            OsPlan { images: vec![img("x86_64-vm", 1)], wave: 0 },
+            OsPlan { images: vec![], wave: 1 },
+            OsPlan { images: vec![img("x86_64-vm", 1), img("x86_64-vm", 2)], wave: 1 },
+            OsPlan { images: vec![img("x86_64", 1)], wave: 1 },
+            OsPlan { images: vec![img("X86-vm", 1)], wave: 1 },
+        ] {
+            assert!(Manifest { os: bad, ..base.clone() }.validate().is_err());
+        }
+        // Non-canonical encodings are refused: unsorted platforms, wave 0, no images.
+        let enc = |images: &[(&str, u8)], wave: u64| {
+            let mut out = base.encode();
+            out[4] = FORMAT_V3;
+            let mut v = Vec::new();
+            put_varint(&mut v, 0); // web calls nothing
+            let svc_end = out.len();
+            out.splice(svc_end..svc_end, v);
+            put_varint(&mut out, images.len() as u64);
+            for (p, b) in images {
+                out.push(p.len() as u8);
+                out.extend_from_slice(p.as_bytes());
+                out.extend_from_slice(&[*b; 32]);
+            }
+            put_varint(&mut out, wave);
+            out
+        };
+        assert!(Manifest::decode(&enc(&[("a-b", 1), ("c-d", 2)], 1)).is_ok());
+        assert!(Manifest::decode(&enc(&[("c-d", 1), ("a-b", 2)], 1)).is_err());
+        assert!(Manifest::decode(&enc(&[("a-b", 1)], 0)).is_err());
+        assert!(Manifest::decode(&enc(&[], 1)).is_err());
+        for n in 0..bytes.len() {
+            assert!(Manifest::decode(&bytes[..n]).is_err());
+        }
+
+        let doc = parse_document("service web { code = \"w.k10\" }\nos {\n images = [\"a.efi\", \"b.efi\"]\n wave = 3\n}\n").unwrap();
+        assert_eq!(doc.services.len(), 1);
+        assert_eq!(doc.os, Some(OsDecl { images: vec!["a.efi".into(), "b.efi".into()], wave: 3, line: 2 }));
+        assert_eq!(parse_document("os { images = [\"a.efi\"] }").unwrap().os.unwrap().wave, 1);
+        for (src, line, msg) in [
+            ("os { wave = 1 }", 1, "needs `images"),
+            ("os { images = [\"a\"] wave = 0 }", 1, "`wave` must be >= 1"),
+            ("os { images = [\"a\"] }\nos { images = [\"b\"] }", 2, "more than one `os`"),
+            ("os { image = [\"a\"] }", 1, "unknown key `image`"),
+            ("os { images = [a] }", 1, "quoted file names"),
+        ] {
+            let e = parse_document(src).unwrap_err();
+            assert!(e.line == line && e.msg.contains(msg), "{src}: {e}");
+        }
+        assert!(parse_text("os { images = [\"a\"] }").is_err());
     }
 }

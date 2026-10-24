@@ -7,6 +7,7 @@
 //! * [`wire`] — framing codec for the TCP peer protocol (the node runtime owns the sockets).
 //! * [`sha256`] — content addressing.
 //! * [`crypto`] / [`secure`] — cluster authentication: ChaCha20-Poly1305, HKDF, sealed gossip, authenticated peer links.
+//! * [`osimage`] — Ed25519-signed OS images (Tier 1 updates) and [`rollout`], the update waves.
 //! * `driver` / `sim` (feature `std`) — a UDP driver for real sockets and a deterministic network simulator.
 //!
 //! The core is `no_std + alloc`; see README.md for the protocol.
@@ -22,7 +23,9 @@ pub mod crypto;
 pub mod gossip;
 pub mod manifest;
 pub mod member;
+pub mod osimage;
 pub mod placement;
+pub mod rollout;
 pub mod secure;
 pub mod sha256;
 pub mod wire;
@@ -35,6 +38,6 @@ pub mod sim;
 pub use bundle::Bundle;
 pub use codec::DecodeError;
 pub use gossip::{Config, DesiredState, Event, Gossip, Output, Stats};
-pub use manifest::{Calls, Manifest, ServiceSpec};
-pub use member::{Addr, Capacity, Member, MemberState, NodeId, PLACEMENT_VERSION};
+pub use manifest::{Calls, Manifest, OsImage, OsPlan, ServiceSpec};
+pub use member::{Addr, Capacity, Member, MemberState, NodeId, OsInfo, PLACEMENT_VERSION};
 pub use placement::{instance_bytes, place, Placement};

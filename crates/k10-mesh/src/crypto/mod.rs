@@ -1,9 +1,12 @@
-//! Hand-written `no_std` crypto for [`crate::secure`], RFC-vector tested; no secret-dependent branches or indexing.
+//! Hand-written `no_std` crypto for [`crate::secure`] and [`crate::osimage`], RFC-vector tested; no secret-dependent
+//! branches or indexing.
 
 pub mod aead;
 pub mod chacha20;
+pub mod ed25519;
 pub mod hkdf;
 pub mod poly1305;
+pub mod sha512;
 
 pub use aead::TAG_LEN;
 pub use hkdf::{hkdf_expand, hkdf_extract, HmacSha256};

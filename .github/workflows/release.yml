@@ -230,8 +230,24 @@ jobs:
         run: |
           tar -xzf dist/k10s-*-x86_64-unknown-linux-musl.tar.gz -C "$RUNNER_TEMP"
           echo "K10S_BIN=$(echo "$RUNNER_TEMP"/k10s-*-x86_64-unknown-linux-musl/k10s)" >> "$GITHUB_ENV"
+      # The release key signs the images (os/images.sh); its public half is os/release-key.pub, built into k10s.
+      - name: The OS image signing key
+        env:
+          IMAGE_KEY: ${{ secrets.K10S_IMAGE_KEY }}
+        run: |
+          if [[ -z $IMAGE_KEY ]]; then
+            echo "::error::the repository secret K10S_IMAGE_KEY (the OS image signing key) is not set"
+            exit 1
+          fi
+          (umask 077 && printf '%s\n' "$IMAGE_KEY" >"$RUNNER_TEMP/image.key")
+          echo "K10S_IMAGE_KEY=$RUNNER_TEMP/image.key" >>"$GITHUB_ENV"
       - name: scripts/ci-test.sh os
         run: scripts/ci-test.sh os
+      - name: The images verify against the release key built into k10s
+        run: for f in target/os/images/*.efi; do "$K10S_BIN" image verify "$f"; done
+      - name: Remove the signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/image.key"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: os-images

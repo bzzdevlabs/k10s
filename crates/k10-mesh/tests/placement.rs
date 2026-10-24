@@ -26,6 +26,7 @@ fn manifest(services: usize, replicas: u32, mem_log2: u8) -> Manifest {
                 calls: Default::default(),
             })
             .collect(),
+        ..Default::default()
     }
 }
 

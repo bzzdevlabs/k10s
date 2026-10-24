@@ -320,6 +320,9 @@ impl Mesh {
         // The members last seen alive are contacted whenever this node is isolated: it rejoins even with dead,
         // moved or no `--join` seeds.
         self.peers_saved = self.cs.store.load_peers(&self.peers_stamps);
+        if !self.peers_saved.is_empty() {
+            self.cs.expects_peers.store(true, Release);
+        }
         self.inc_saved = self.udp.gossip().local().incarnation;
         self.udp.set_fallback_seeds(&self.peers_saved);
         let seeds = self.cs.cfg.join.clone();
@@ -480,6 +483,10 @@ impl Mesh {
                     self.view_dirty = true;
                 }
                 MeshMsg::Ranking(r) => self.ranking = r,
+                MeshMsg::SetOs(os) => {
+                    self.udp.set_local_os(os);
+                    self.view_dirty = true;
+                }
                 MeshMsg::Leave => {
                     let now = self.now_ms();
                     let r = self.udp.leave(now);

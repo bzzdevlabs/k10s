@@ -1,8 +1,8 @@
-//! Bundle: the unit an operator deploys — a manifest plus every code blob it references.
+//! Bundle: the unit an operator deploys — a manifest plus every blob it references (code, OS images).
 //!
 //! Layout (all integers little-endian):
 //! `"K10B" | version: u8 (=1) | manifest_len: u32 | manifest | n_blobs: u32 | (blob_len: u32 | blob)*`
-//! Blobs are addressed by their SHA-256; decoding checks that every service's `code_hash` is present.
+//! Blobs are addressed by their SHA-256; decoding checks that every blob the manifest references is present.
 
 use alloc::vec::Vec;
 
@@ -87,8 +87,8 @@ impl Bundle {
             return Err(DecodeError::Invalid("trailing bytes"));
         }
         let bundle = Bundle { manifest, blobs };
-        if bundle.manifest.services.iter().any(|s| bundle.blob(&s.code_hash).is_none()) {
-            return Err(DecodeError::Invalid("missing code blob"));
+        if bundle.manifest.blob_hashes().iter().any(|h| bundle.blob(h).is_none()) {
+            return Err(DecodeError::Invalid("missing blob"));
         }
         Ok(bundle)
     }
@@ -114,7 +114,7 @@ mod tests {
             config: vec![],
             calls: Default::default(),
         };
-        Bundle::new(Manifest { version: 7, services: vec![spec] }, vec![code])
+        Bundle::new(Manifest { version: 7, services: vec![spec], ..Default::default() }, vec![code])
     }
 
     #[test]

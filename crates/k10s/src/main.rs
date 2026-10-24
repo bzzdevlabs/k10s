@@ -11,6 +11,7 @@
 //!                           [--gossip-max-skew SECS]
 //!             tuning: [--probe-ms N] [--suspicion-mult N] [--leave-grace-ms N]
 //! k10s keygen [-o FILE]
+//! k10s image  pubkey KEY | sign --key KEY --arch A --profile P --version V IN OUT | verify FILE [--trust PUB,…]
 //! k10s apply  FILE.k10s [--node HOST:PORT] [--admin-token-file FILE]
 //! k10s build  FILE.ten [-o FILE.k10]
 //! k10s run    FILE.ten|FILE.k10 [--path /p?q=1] [--method GET|POST|PUT|DELETE] [--body STR|@FILE]
@@ -22,12 +23,13 @@
 //! Argument parsing is hand-written (no dependencies beyond the workspace). The default backend is `K10S_BACKEND`
 //! (`jit` | `interp`) if set, else the JIT.
 
-use k10_mesh::manifest::parse_text;
+use k10_mesh::manifest::{parse_document, OsImage, OsPlan};
+use k10_mesh::osimage;
 use k10_mesh::admin_auth::AdminKey;
 use k10_mesh::secure::{ClusterKey, ClusterKeys};
 use k10_mesh::sha256::sha256;
 use k10_mesh::{Bundle, Manifest, ServiceSpec};
-use k10_node::cluster::{ClusterConfig, ClusterSetup};
+use k10_node::cluster::{os, ClusterConfig, ClusterSetup};
 use k10_node::http;
 use k10_node::router::{NoRemote, RemoteRouter};
 use k10_node::sandbox;
@@ -62,7 +64,12 @@ const USAGE: &str = "usage:
               [--probe-ms N] (gossip probe period, 200)  [--suspicion-mult N] (4)  [--leave-grace-ms N] (1000)
   k10s keygen [-o FILE]                           (32 random bytes as hex: a cluster key or an admin key;
                                                    FILE is created with mode 0600, never overwritten)
-  k10s apply  FILE.k10s [--node HOST:PORT]        (code = \"x.ten\" sources are compiled, \"x.k10\" sent as is)
+  k10s image pubkey KEY                           (the public key of a signing key made by keygen)
+  k10s image sign --key KEY --arch ARCH --profile PROFILE --version V IN.efi OUT.efi
+                                                  (signs an OS image for Tier 1 updates, docs/OS.md)
+  k10s image verify FILE [--trust PUBKEY,...]     (checks an OS image; trusted: the k10s release key and PUBKEY)
+  k10s apply  FILE.k10s [--node HOST:PORT]        (code = \"x.ten\" sources are compiled, \"x.k10\" sent as is;
+                                                   os { images = [\"x.efi\"] } rolls out OS images)
   k10s build  FILE.ten [-o FILE.k10]              (compile Ten to TIR)
   k10s run    FILE.ten|FILE.k10 [--path /p?q=1] [--method GET|POST|PUT|DELETE] [--body STR|@FILE]
               [--backend jit|interp] [--memory SIZE] [--config STR] [--cpu-ms N]
@@ -110,6 +117,7 @@ fn main() -> ExitCode {
             Ok(())
         }
         "keygen" => cmd_keygen(rest),
+        "image" => cmd_image(rest),
         "help" | "--help" | "-h" => {
             println!("{USAGE}");
             Ok(())
@@ -315,21 +323,75 @@ fn cmd_keygen(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_image(args: &[String]) -> Result<(), String> {
+    let usage = "usage: k10s image pubkey KEY | sign --key KEY --arch ARCH --profile PROFILE --version V IN OUT | verify FILE [--trust PUBKEY,...]";
+    let Some((sub, rest)) = args.split_first() else { return Err(usage.into()) };
+    let a = Args::parse(rest, &[])?;
+    let seed = |path: &str| -> Result<[u8; 32], String> {
+        let s = read_secret("key", Path::new(path))?;
+        let k = os::parse_hex32(s.text().trim()).ok_or_else(|| format!("--key {path}: not 64 hex digits (make one with `k10s keygen -o FILE`)"))?;
+        Ok(k)
+    };
+    match sub.as_str() {
+        "pubkey" => {
+            a.check_known(&[])?;
+            let [key] = a.positional.as_slice() else { return Err(usage.into()) };
+            let mut s = seed(key)?;
+            println!("{}", k10_mesh::sha256::to_hex(&k10_mesh::crypto::ed25519::public_key(&s)));
+            k10_mesh::crypto::zeroize(&mut s);
+        }
+        "sign" => {
+            a.check_known(&["key", "arch", "profile", "version"])?;
+            let ([input, output], Some(key)) = (a.positional.as_slice(), a.get("key")) else { return Err(usage.into()) };
+            let need = |k: &str| a.get(k).map(str::to_string).ok_or_else(|| format!("missing --{k}"));
+            let meta = osimage::ImageMeta { arch: need("arch")?, profile: need("profile")?, version: need("version")? };
+            let payload = std::fs::read(input).map_err(|e| format!("{input}: {e}"))?;
+            let mut s = seed(key)?;
+            let signed = osimage::sign(&payload, &meta, &s);
+            k10_mesh::crypto::zeroize(&mut s);
+            let signed = signed.map_err(|e| format!("{input}: {e}"))?;
+            std::fs::write(output, &signed).map_err(|e| format!("{output}: {e}"))?;
+            eprintln!("k10s: {output}: {}-{} {} image, sha256 {}", meta.arch, meta.profile, meta.version, k10_mesh::sha256::to_hex(&sha256(&signed)));
+        }
+        "verify" => {
+            a.check_known(&["trust"])?;
+            let [file] = a.positional.as_slice() else { return Err(usage.into()) };
+            let mut trusted = pid1::release_keys();
+            for k in a.get("trust").into_iter().flat_map(|t| t.split(',')).filter(|k| !k.is_empty()) {
+                trusted.push(os::parse_hex32(k).ok_or_else(|| format!("--trust: `{k}` is not a public key (64 hex digits)"))?);
+            }
+            let blob = std::fs::read(file).map_err(|e| format!("{file}: {e}"))?;
+            let info = osimage::verify(&blob, &trusted).map_err(|e| format!("{file}: {e}"))?;
+            println!(
+                "{file}: platform {}-{}, version {}, signed by {}, sha256 {}",
+                info.meta.arch,
+                info.meta.profile,
+                info.meta.version,
+                k10_mesh::sha256::to_hex(&info.key),
+                k10_mesh::sha256::to_hex(&sha256(&blob))
+            );
+        }
+        _ => return Err(usage.into()),
+    }
+    Ok(())
+}
+
 fn cmd_node(args: &[String]) -> Result<(), String> {
     let a = Args::parse(args, NODE_BOOLEANS)?;
     a.check_known(&[
         "http", "data", "shards", "backend", "name", "mem", "kv-max", "conn-buffer-max", "snapshots", "idle-timeout", "idle-spin-us", "log-stderr",
         "pin", "rpc", "gossip", "join", "advertise", "probe-ms", "suspicion-mult", "leave-grace-ms",
         "timer-res-us", "jit-indirect", "admin", "admin-token-file", "cluster-key-file", "cluster-next-key-file",
-        "insecure-unauthenticated-cluster", "gossip-max-skew", "sandbox", "user",
+        "insecure-unauthenticated-cluster", "gossip-max-skew", "sandbox", "user", "os-agent-fd", "os-commit-grace",
     ])?;
     // Process sandbox (k10-node/src/sandbox): early() here, enter() between binding the sockets and starting threads.
     let sandbox_mode = match a.get("sandbox") {
         None => sandbox::Mode::from_env()?,
         Some(m) => sandbox::Mode::parse(m).ok_or_else(|| format!("invalid --sandbox `{m}` (on|seccomp-only|log|off)"))?,
     };
+    let os_fd = a.get("os-agent-fd").map(|fd| fd.parse::<i32>().map_err(|_| format!("invalid --os-agent-fd `{fd}`"))).transpose()?;
     if sandbox_mode != sandbox::Mode::Off {
-        sandbox::early().map_err(|e| format!("sandbox: {e} (use --sandbox off to run without it)"))?;
+        sandbox::early(os_fd).map_err(|e| format!("sandbox: {e} (use --sandbox off to run without it)"))?;
     }
     let user = a.get("user").map(sandbox::User::resolve).transpose()?;
     if !a.positional.is_empty() {
@@ -383,7 +445,23 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
         cfg.jit_indirect =
             k10_node::IndirectBranch::parse(s).ok_or_else(|| format!("invalid --jit-indirect `{s}` (jump|lfence|retpoline)"))?;
     }
-    let cluster_cfg = cluster_config(&a)?;
+    let mut cluster_cfg = cluster_config(&a)?;
+    // Tier 1 (docs/OS.md, "Updates"): init's update channel and the running image, in the gossip record from the start.
+    let os_link = match os_fd {
+        None => None,
+        Some(fd) => {
+            let mut link = os::OsLink::from_fd(fd).map_err(|e| format!("--os-agent-fd {fd}: {e}"))?;
+            let st = link.first_status(Duration::from_secs(10)).map_err(|e| format!("--os-agent-fd {fd}: {e}"))?;
+            if let Some(cc) = cluster_cfg.as_mut() {
+                cc.os = Some(st.info());
+            }
+            Some((link, st))
+        }
+    };
+    let os_grace = match a.get("os-commit-grace") {
+        None => Duration::from_secs(30),
+        Some(s) => Duration::from_secs(s.parse().map_err(|_| format!("invalid --os-commit-grace `{s}` (seconds)"))?),
+    };
     // Block SIGINT/SIGTERM/SIGHUP in every thread (inherited by the threads the node spawns) and wait for them here.
     let set = signal_set();
     // SAFETY: plain libc calls on a properly initialized sigset_t.
@@ -418,6 +496,9 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
         Some(s) => Some(s.start(node.shared().clone()).map_err(|e| format!("cannot start cluster mode: {e}"))?),
     };
     eprintln!("{sandbox_line}");
+    if let Some((link, st)) = os_link {
+        os::spawn(link, st, cluster.as_ref().map(|c| c.shared().clone()), os_grace).map_err(|e| format!("os agent: {e}"))?;
+    }
     let admin_where = match node.shared().admin_addr.get() {
         Some(a) => format!("on http://{a}"),
         None => "on the ingress".into(),
@@ -693,7 +774,7 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         ..NodeConfig::default()
     };
     let node = Node::start(cfg).map_err(|e| format!("cannot start the runtime: {e}"))?;
-    let r = node.apply(Bundle::new(Manifest { version: 0, services: vec![spec] }, vec![blob]));
+    let r = node.apply(Bundle::new(Manifest { version: 0, services: vec![spec], ..Default::default() }, vec![blob]));
     if let Err(e) = r {
         node.shutdown();
         return Err(format!("{file}: {e}"));
@@ -751,11 +832,26 @@ fn cmd_apply(args: &[String]) -> Result<(), String> {
     let [file] = a.positional.as_slice() else { return Err("usage: k10s apply FILE.k10s [--node HOST:PORT]".into()) };
     let path = Path::new(file);
     let src = std::fs::read_to_string(path).map_err(|e| format!("{file}: {e}"))?;
-    let decls = parse_text(&src).map_err(|e| format!("{file}: {e}"))?;
+    let doc = parse_document(&src).map_err(|e| format!("{file}: {e}"))?;
     let base = path.parent().unwrap_or(Path::new("."));
     let mut services = Vec::new();
     let mut blobs: Vec<Vec<u8>> = Vec::new();
-    for d in &decls {
+    let mut os = OsPlan::default();
+    if let Some(d) = &doc.os {
+        for f in &d.images {
+            let p = base.join(f);
+            let blob = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+            let info = osimage::inspect(&blob).map_err(|e| format!("{}: {e}", p.display()))?;
+            let platform = format!("{}-{}", info.meta.arch, info.meta.profile);
+            if os.image_for(&platform).is_some() {
+                return Err(format!("{file}: line {}: two images for platform {platform}", d.line));
+            }
+            os.images.push(OsImage { platform, image: sha256(&blob) });
+            blobs.push(blob);
+        }
+        os.wave = d.wave;
+    }
+    for d in &doc.services {
         if d.code.is_empty() {
             return Err(format!("{file}: line {}: service `{}` has no `code`", d.line, d.name));
         }
@@ -766,7 +862,7 @@ fn cmd_apply(args: &[String]) -> Result<(), String> {
         }
     }
     // Version 0: the node assigns current + 1.
-    let bundle = Bundle::new(Manifest { version: 0, services }, blobs);
+    let bundle = Bundle::new(Manifest { version: 0, services, os }, blobs);
     let bytes = bundle.encode();
     let r = admin_request(&a, "POST", "/_k10s/apply", &bytes, Duration::from_secs(60))?;
     println!("{}", r.text());
