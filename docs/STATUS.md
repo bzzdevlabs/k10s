@@ -55,8 +55,8 @@ and `aarch64-pi` disk images with their UKIs signed by the release key (verified
   `os/test.sh` adds update-bios/update-uefi (power cut at every step, a panicking image, a never-committing one) and
   rollout (20 BIOS VMs: a bad image stops after the first wave, a good one goes through waves 1, 2, 4, 8, 5).
 - arm64 and the Raspberry Pi (U3, docs/OS.md): the hosted runtime builds for aarch64 (AAPCS64 `coro.rs` switch with
-  d8–d15, aarch64 seccomp filter, `BackendKind::native()` = interpreter off x86-64, the JIT module and its tests
-  x86-64 only); `scripts/ci-test.sh arm64` runs every suite but the JIT's on a GitHub arm64 runner (gnu and musl).
+  d8–d15, aarch64 seccomp filter); `scripts/ci-test.sh arm64` runs every suite on a GitHub arm64 runner (gnu and
+  musl, the node and CLI suites on the JIT and the interpreter).
   `os/kbuild.sh arm64`: one kernel for QEMU virt/arm64 guests (UEFI+ACPI or DT) and the Pi 4/5 (RP1, GENET/GEM,
   `bcm2835_wdt`), plus `os/kpatches/` (the Pi firmware's tryboot reboot flag, from the Raspberry Pi kernel).
   `os/images.sh --arch aarch64`: `k10s-os-V-aarch64-vm.img.xz` (GPT, systemd-boot, UKI; 3.9 MB) and
@@ -68,6 +68,36 @@ and `aarch64-pi` disk images with their UKIs signed by the release key (verified
   boot-arm64, image-arm64, update-arm64, pi (a model of the Pi firmware on QEMU virt: power cut at every step, a
   panicking image, a never-committing one), mixed (a Pi joins an x86-64 host node's cluster). The dist build adds
   `k10s-V-aarch64-unknown-linux-musl.tar.gz` (cross-linked with rust-lld).
+- arm64 JIT (U4 = the hosted half of Tier 2 M6, docs/JIT-ABI.md): k10-jit has an AArch64 backend (`a64.rs` encoder,
+  `codegen/a64`) with the x86-64 guarantees: every access is `[x27, (addr+off) & x28]`, safepoints at function entries
+  and loop headers, jump tables clamped with `csel` + `csdb`, the Lfence mode as `sb` or `dsb nsh; isb` and a
+  Retpoline thunk, Cortex-A53 erratum 835769 avoided (Pi 3). Code is mapped with the kernel's page size, the I-cache
+  synced once per module (CTR_EL0 IDC/DIC) then `membarrier` SYNC_CORE (allowed by seccomp on aarch64). The JIT is the
+  native backend on arm64 nodes. An independent A64 decoder (cross-checked against objdump) and SFI verifier check
+  every module the test suites compile. The x86-64 code generator moved unchanged (byte-identical output on 20,288
+  blobs). JIT vs interpreter on an arm64 Linux VM (Apple Silicon), medians of 15 interleaved runs: sha 14.0×,
+  nbody 9.8×, sort 9.6×.
+- Best-effort tier (U5, docs/OS.md): the hosted runtime builds for i686 and armv7 (static musl, rust-lld; interpreter
+  only): i386 cdecl and AAPCS-VFP `coro.rs` switches, k10-jit only under `cfg(any(target_arch = "x86_64",
+  target_arch = "aarch64"))`, slots ≤ 2^28 in 64 MiB regions (larger `memory` refused at apply), 256 KiB fibers,
+  seccomp for AUDIT_ARCH_I386/ARM (106 calls), 32-bit-id syscalls for `--user`. Kernels `os/kbuild.sh i386` (M686,
+  PAE/NX, IDE/SATA built in, 72 signed modules) and `armv7` (virt, UEFI); the arm64 kernel adds the Pi 3. Images
+  `k10s-os-V-i686-metal` (MBR, BIOS-only GRUB A/B), `k10s-os-V-armv7-vm` (systemd-boot + UKI) with `.efi` update files;
+  the Pi image also boots the Pi 3 B/B+ (bootcode.bin, start_cd, bcm2710 DTBs, the same autoboot.txt/tryboot A/B).
+  `os/test.sh --arch i686|armv7` (CI suite `os-legacy`: Atom N270 with IDE and RTL8139 on SeaBIOS; armv7 on AAVMF32),
+  `pi3` on QEMU raspi3b with a hotplugged usb-net in `os-arm64`, CI suites `i686` (x86-64 runner) and `armv7`
+  (natively on the arm64 runner), all release gates.
+  Releases add `k10s-V-i686-unknown-linux-musl.tar.gz` and `k10s-V-armv7-unknown-linux-musleabihf.tar.gz`.
+- Secure Boot (U6, docs/OS.md "Secure Boot"): the images stay unsigned for Secure Boot; three documented and tested
+  ways to boot them: Secure Boot off, own keys (sbctl: PK/KEK/db enrolled next to Microsoft's, systemd-boot and the
+  UKIs signed with the db key), a MOK under Debian's Microsoft-signed shim 16.1 (`os/bootfiles.sh shim-ARCH`). On an
+  Authenticode-signed UKI, `k10s image sign` stores the Ed25519 trailer as a `WIN_CERT_TYPE_EFI_GUID` entry of its PE
+  certificate table, so both signatures hold; `k10s image payload` strips it. systemd-boot/stub 262 (Debian, pinned):
+  `reboot-on-error auto` lets boot counting roll back a trial the firmware refuses; trials are armed with `preferred
+  k10s-X.efi` plus the counted `default` that the 252 of older installs matches. Init logs `efi: Secure Boot on|off`.
+  `os/test.sh` secureboot (OVMF q35+SMM, Microsoft keys) and secureboot-arm64 (AAVMF) gate releases: the release image
+  is refused, and it serves with Secure Boot off, with own keys and with a MOK; under own keys a re-signed update
+  commits and one signed by k10s only is refused 3 times and rolled back.
 - Releases: SemVer; tag `vX.Y.Z` on main → stable release, every push to main → `vX.Y.Z-dev.N` pre-release.
 - Performance vs 08f2921 (`bench/k10s/ab.py --same`, 4 interleaved rounds, host load ≈ 7 from the benchmark itself;
   medians): single node within ±2.5 %; local ingress −4 %; forwarded requests −5 % at c=1 (CPU per request +7 %) and
@@ -80,23 +110,52 @@ updated with every change and written as the current state, no perf regression b
 security features (`bench/k10s/ab.py --same` vs 08f2921), no stable tag without the user, never create namespaces or
 seek privileges on this machine.
 
+13. **Tier 2: k10s on its own kernel, on QEMU and on real x86 machines** — NEXT (docs/TASK-native-hardware.md, plan
+    in docs/research/native-hardware.md §9, decisions in docs/REPORT.md §9; the prototype branches no longer exist).
+    Goal: the `metal/` kernel boots from the shared image (universal-os.md §8.4) on VMs and on a real x86 machine and
+    serves in a k10s cluster with hosted and Tier 1 nodes. One session each, in this order:
+    - 13a **M1 boot** (in parallel with 13b): the `k10boot` UEFI loader handing the kernel a PVH `start_info` (kernel,
+      bundle, `k10s.conf` and secrets from K10S-BOOT instead of fw_cfg; GOP info; AP trampoline reservation), a
+      Multiboot2 shim for BIOS through GRUB, the tier selector (`tier=auto|linux|metal`: PCI scan against the
+      supported-device table, chain-load of the Tier 1 loader, boot-counted fallback to `linux`), the kernel in the
+      x86-64 images.
+    - 13b **M1 platform and virtio** (in parallel with 13a): ACPI tables (MADT with targeted SIPI, x2APIC, ≥ 64 CPUs,
+      FADT reset/S5, SPCR, HPET/PM timer), all RAM and every BAR mapped (above 4 GiB), a coalesced memory map, a full
+      ECAM scan with 64-bit BARs, virtio 1.x net + blk + mmio behind `NetDevice`/`BlockDevice`, DHCPv4 or a static IP,
+      no QEMU-only exits; 16 GiB and 32 vCPUs under QEMU.
+    - 13c **x86 bare metal** (M4's first part; after 13a and 13b, in parallel with 13d): Intel e1000e (I219 with
+      ME/ULP handling, 82574L) and igc (I225/I226), Realtek r8169-class (8111/8125), GOP text console, UDP log
+      console, watchdog; a USB-bootable image; then bring-up on the user's machine.
+    - 13d **M2 storage** (after 13b, in parallel with 13c): NVMe, virtio-blk, AHCI, GPT `K10S-DATA`, the segmented KV
+      log shared with the hosted node (`no_std` record codec; Tier 1 moves from ext4 to it), raw A/B kernel slots
+      read by the loader, crash-injection tests.
+    - Then M3 big-cloud NICs (ENA, VMBus, gVNIC; needs cloud accounts), the rest of M4 (tg3, IOMMU, HWP, a hardware
+      CI rack), M5 arm64 arch layer, M6's metal half (the arm64 JIT from U4 on metal: I-cache sync and cross-CPU
+      synchronization of its own), M7 Pi 4/5.
 10. **Optional perf** — shard-owned peer links: each shard dials and reads its own link per peer, the mesh thread keeps
     gossip, fetch and accept; expected 7 → 3 wake-ups per forwarded request (≈ −40 % CPU at 1 conn).
-12. **Tier 1 universal image** (docs/TASK-universal-os.md, plan in docs/research/universal-os.md §9, decisions in
-    docs/REPORT.md §9; the prototype branches no longer exist on the remote): milestones U0 → U1 → U2 → U3 → U4
-    (= Tier 2 M6) → U5 → U6, one session each. U0 (PID 1 mode), U1 (x86-64 images) and U2 (signed A/B updates, rollout
-    waves) and U3 (arm64, Pi 4/5 on the interpreter) done. Needs real hardware (user): U1's Realtek or Intel mini-PC
-    serving after a cold boot from the `metal` image; for U2, power cuts that reach a real disk's write cache and GRUB
-    `save_env`/systemd-boot renames on real firmware; for U3 (its exit criteria), a Pi 4 and a Pi 5 joining an x86
-    cluster from the Pi image, surviving power cuts and updating A/B: the real firmware honouring `autoboot.txt` and
-    the tryboot flag set by the patched kernel, the mainline DTBs under the Pi firmware, GENET/RP1 Ethernet, SD/NVMe,
-    `bcm2835_wdt`. Next U4 (= Tier 2 M6: the arm64 JIT).
-13. **Tier 2 native hardware** (docs/TASK-native-hardware.md, plan in docs/research/native-hardware.md §9, decisions
-    in docs/REPORT.md §9; prototypes on branch `research/native-hardware`): milestones M1 → M2 → M3 → M4 → M5 → M6 →
-    M7 (x86 first), one session each.
+16. **Hosted page size** — the hosted runtime assumes 4 KiB pages (`sys::PAGE`, the slot tail page and stride,
+    snapshots, coroutine guard pages; only the JIT's code mapping uses the kernel's page size): port it to the
+    kernel's page size so the aarch64 binaries run on 16 KiB-page kernels (Raspberry Pi OS on the Pi 5, Asahi), with
+    a test under a 16 KiB-page arm64 kernel in QEMU.
 14. **Final audit** — adversarial in-depth audit of the whole code base (isolation, JIT, host ABI, crypto and peer
     protocol, admin API, sandbox, KV durability, metal, release pipeline), every finding verified by independent
     refutation before it is reported, then fixed.
+12. **Tier 1 universal image** — done (U0–U6) and frozen: fixes and maintenance only, no new platforms, boards or
+    boot flows (docs/TASK-universal-os.md, plan in docs/research/universal-os.md §9, decisions in docs/REPORT.md §9).
+    Done under QEMU/qemu-user; what remains needs real hardware (user): U1's Realtek or Intel mini-PC serving after
+    a cold boot from the `metal` image; for U2, power cuts that reach a real disk's
+    write cache and GRUB `save_env`/systemd-boot renames on real firmware; for U3 (its exit criteria), a Pi 4 and a
+    Pi 5 joining an x86 cluster from the Pi image, surviving power cuts and updating A/B: the real firmware honouring
+    `autoboot.txt` and the tryboot flag set by the patched kernel, the mainline DTBs under the Pi firmware, GENET/RP1
+    Ethernet, SD/NVMe, `bcm2835_wdt`; for U4, the JIT suites and speed-up on Graviton/Neoverse and on Pi 3/4/5 cores
+    (CI's arm64 runner is a Cobalt 100: I-cache sync on cores without IDC/DIC, membarrier across real cores, the cost
+    of `csdb`/`sb`, the A53 erratum on silicon); for U5 (its exit criteria), a Pi 3B+ (whether its `bootcode.bin`
+    honours `autoboot.txt`/tryboot — if not, a trial boots the committed slot and the image is recorded as failed —,
+    the LAN9514/LAN7515, SD, `bcm2835_wdt` resets) and an old PC (real BIOS booting GRUB from the MBR of an
+    IDE/SATA/USB disk, real NIC/disk chips, PAE CPUs, 1–4 GiB HIGHMEM); for U6, real firmware setup screens (Secure
+    Boot off, setup mode, enrolling keys), `sbctl`/`mokutil` on a running OS, MokManager's screens, machines with only
+    the 2023 Microsoft CAs or the third-party CA disabled, firmware rejecting RSA-4096 keys.
 15. **User** — delete the GHCR images `k10s-bench-*` tagged `0.1.0`, `0.1.0-dev.46`, `latest`, `dev`, or grant `gh`
     the packages scope.
 
@@ -107,10 +166,10 @@ seek privileges on this machine.
 | TIR: codec, validator, reference interpreter, builder, generator | `crates/k10-ir` | unit + property |
 | Cluster layer: SWIM gossip, crypto, manifests, bundles, placement, wire, simulator, signed OS images, rollout | `crates/k10-mesh` | unit + simulator |
 | Ten compiler, prelude, examples | `crates/k10-lang`, `examples/` | unit + examples |
-| x86-64 JIT (single pass, SFI masking, safepoints, speculation hardening) | `crates/k10-jit` | differential soak, red-team, objdump |
+| x86-64 and AArch64 JIT (single pass, SFI masking, safepoints, speculation hardening), A64 decoder and SFI verifier | `crates/k10-jit` | differential soak, red-team, objdump, verifier |
 | Node runtime, sandbox, CLI | `crates/k10-node`, `crates/k10s` | unit, cluster, chaos, soak, abuse, auth |
 | Bare-metal node (PVH, virtio-net, smoltcp, JIT, SMP, cluster member) | `metal/` | `test.sh`, `cluster-test.sh` |
-| PID 1 mode (Tier 1), A/B updates, k10s kernels (`vm`, `metal`, `arm64`), initramfs, firmware and disk image builders (x86-64, arm64, Raspberry Pi) | `crates/k10s/src/pid1`, `os/` | unit + `os/test.sh [--arch aarch64]` (QEMU) |
+| PID 1 mode (Tier 1), A/B updates, Secure Boot flows, k10s kernels (`vm`, `metal`, `arm64`, `i386`, `armv7`), initramfs, firmware and disk image builders (x86-64, i686, armv7, arm64, Raspberry Pi 3/4/5) | `crates/k10s/src/pid1`, `os/` | unit + `os/test.sh [--arch aarch64\|i686\|armv7]` (QEMU) |
 | Baselines (Kubernetes, bare processes), loadgen, k10s harness, A/B driver | `bench/` | — |
 | Editor extension, documentation site | `editors/vscode`, `website/` | — |
 | CI and releases | `.github/`, `scripts/` | — |
@@ -132,8 +191,17 @@ seek privileges on this machine.
 - Metal has no per-service memory reservations (it shares placement, not the accounting), and its peer links have no
   unsent-byte cap or per-iteration budget (a key holder that stops reading grows the write buffer): port the hosted
   ones (`LINK_BUDGET`, `LINK_SOFT_CAP`, `LINK_HARD_CAP` in `crates/k10-node/src/cluster/mesh.rs`).
-- arm64 nodes run on the interpreter (U4 adds the arm64 JIT); i686/armv7/riscv64 builds (U5) need their `coro.rs`
-  switch and seccomp arch, and 32-bit targets a k10-jit-free build.
+- Hosted aarch64 nodes on 16 KiB-page kernels are unsupported until step 16; the k10s arm64 kernel uses 4 KiB pages.
+- 32-bit nodes (U5): `k10-nospec` clamps are plain code there (`GUARANTEED = false`, docs/OS.md Limits); placement
+  does not know a node's word size, so a 32-bit node refuses the whole desired state if a service over 256 MiB is
+  placed on it. riscv64 has no build (no `coro.rs` switch or seccomp arch). The i686 image is BIOS-only (no 32-bit
+  UEFI); the armv7 image has no SoC drivers for real boards.
+- arm64 JIT (U4): the SFI verifiers run in the tests only, not when code is loaded; `csdb` costs ~12 ns per jump
+  table on Apple cores.
+- systemd-boot/stub 262.1-1 is pinned from Debian unstable (snapshot.debian.org fallback once the pool drops it).
+  Machines installed from pre-U6 images keep systemd-boot 252: updates work through the counted `default`, but a
+  trial the firmware refuses (Secure Boot) stops in the firmware; the docs say to copy in a current systemd-boot
+  before turning Secure Boot on. The shim pin may need updates as SBAT revocations evolve.
 - PID 1 mode, the images and updates are tested under QEMU only (SeaBIOS, OVMF, AAVMF, NVMe, e1000e, Intel TCO; the
   Pi through a model of its firmware on QEMU virt; power cuts are QEMU kills, which lose only what the guest had not
   written). The Pi's tryboot flag needs the patched kernel's mailbox call, untested on a real Pi. Needs real hardware: the U1 mini-PC cold boot,
@@ -141,6 +209,7 @@ seek privileges on this machine.
   USB Ethernet outside QEMU's models, AHCI/eMMC boot disks, the screen console, BIOS/UEFI firmware quirks, slow USB
   storage (`bootwait`), AMD and SMBus-attached Intel watchdogs, RTC chips, real DHCP servers, switches and NTP pools.
 - The x86-64 `update` test timed out once waiting for the commit (release run of 2d12614, before U3); it passed on
-  the next run. Watch for a recurrence.
+  the next run. Watch for a recurrence. Same for `graceful_leave_and_join_under_load` (musl suite, "placement includes
+  the newcomer" not within 10 s; release run of 08a3fb7, first failure in the release history).
 - Linux 6.18's ACPI button driver no longer binds fixed-feature power buttons; both profiles use the tiny power
   button driver (signal to init). The evdev path of PID 1 stays for distribution kernels.

@@ -47,12 +47,15 @@ import { Aside } from '@astrojs/starlight/components';
 
 ## Roadmap
 
-1. **Cluster security:** per-node identity and signed bundles, on top of today's authenticated and encrypted gossip
+1. **Native bare metal (next):** the native kernel boots from the shared image through UEFI or BIOS, with ACPI,
+   modern virtio and the Intel and Realtek NICs of common x86 machines, then NVMe and a durable key-value log, and
+   serves in a cluster next to hosted and Linux-based nodes; then cloud NICs, arm64 and the Raspberry Pi. The
+   Linux-based tier is in maintenance meanwhile.
+2. **Cluster security:** per-node identity and signed bundles, on top of today's authenticated and encrypted gossip
    and peer links.
-2. **Replicated state:** a replicated key-value store per service (Raft per shard group) and leases for singletons.
-3. **arm64:** the JIT runs on arm64 hosts and in the arm64 and Raspberry Pi 3/4/5 images; the native kernel's arm64
+3. **Replicated state:** a replicated key-value store per service (Raft per shard group) and leases for singletons.
+4. **arm64:** the JIT runs on arm64 hosts and in the arm64 and Raspberry Pi 3/4/5 images; the native kernel's arm64
    port will reuse it. 32-bit (i686, armv7) stays on the interpreter.
-4. **Native bare metal:** UEFI, ACPI, modern virtio, NVMe and a durable key-value log; then cloud NICs.
 5. **Performance:** register allocation in the JIT, 32-bit TIR operations, cheaper cross-node forwarding.
 6. **Ecosystem:** a Wasm → TIR translator, so Rust, C, Go and Zig can target k10s.
 

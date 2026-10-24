@@ -92,6 +92,7 @@ host API and the runtime's `unsafe` code. It is attacked from several sides:
 
 ## Defense in depth
 
-A bug in the trusted base would still meet the process sandbox of `k10s node`: seccomp (96 allowed syscalls; no
-`execve`, no new listening sockets, no executable `mmap`) and Landlock (files limited to the data directory). See
+A bug in the trusted base would still meet the process sandbox of `k10s node`: seccomp (89 to 106 allowed syscalls,
+by architecture; no `execve`, no new listening sockets, no executable `mmap`) and Landlock (files limited to the data
+directory). See
 [Production setup](/k10s/guides/production/).

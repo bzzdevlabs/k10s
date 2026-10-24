@@ -167,13 +167,15 @@ the caveats. Highlights beyond §0:
 - **Bare metal:** VM guests only today (PVH, legacy virtio-net, 4 GiB mapped, no storage driver).
 
 ## 8. Roadmap (recommended order)
-1. **Cluster security:** node identity and signed bundles (done: shared-key authenticated/encrypted gossip and peer
+1. **Tier 2 (next), M1–M2 and x86 bare metal:** UEFI + BIOS + ACPI + modern virtio + Intel/Realtek NICs + NVMe +
+   durable KV log on the native kernel; then clouds (ENA, VMBus, gVNIC), the rest of the curated x86 bare metal, arm64
+   and the Pi.
+2. **Cluster security:** node identity and signed bundles (done: shared-key authenticated/encrypted gossip and peer
    links, signed admin requests).
-2. **Replicated state:** per-service replicated KV (Raft per shard group) and leases for singletons.
-3. **Tier 1 images** (U0–U2, done): PID-1 mode in main, x86 images, signed A/B updates spread over gossip.
-4. **arm64:** the hosted node runs the AArch64 JIT (U4); the native kernel's arm64 port (Tier 2 M5, M6) will reuse it.
-5. **Tier 2 M1–M2:** UEFI + BIOS + ACPI + modern virtio + NVMe + durable KV log on the native kernel; then clouds
-   (ENA, VMBus, gVNIC) and curated x86 bare metal before the Pi.
+3. **Replicated state:** per-service replicated KV (Raft per shard group) and leases for singletons.
+4. **Tier 1 images** (U0–U6, done, in maintenance): PID-1 mode, x86-64/arm64/Pi/i686/armv7 images, signed A/B updates
+   spread over gossip, Secure Boot flows.
+5. **arm64:** the hosted node runs the AArch64 JIT (U4); the native kernel's arm64 port (Tier 2 M5, M6) will reuse it.
 6. **Performance:** register allocation in the JIT, 32-bit TIR ops, cheaper cross-node forwarding (fewer hand-offs).
 7. **Ecosystem:** a Wasm → TIR translator so existing languages (Rust, C, Go, Zig) can target k10s.
 
