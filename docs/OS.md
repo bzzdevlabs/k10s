@@ -127,9 +127,9 @@ p3   K10S-DATA   256 MiB  ext4, grown to the end of the disk on first boot
 
 UEFI firmware starts systemd-boot, which starts the UKI; BIOS starts GRUB from the MBR, which reads `grub.cfg` from
 the ESP of the boot disk; GRUB shows nothing unless it fails, and then prints to the screen and the first serial
-port. Slot B (`k10s-b.efi`, `/k10s/b/`) appears with the first update. The kernel command line is fixed in both (`console=ttyS0,115200 quiet panic=5` for `vm`;
-`metal` adds `console=tty0` last, so init's lines appear on the screen); everything else is configured in
-`k10s.conf`. Images are reproducible: fixed GUIDs, volume ids, ext4 hash seed, and every timestamp from
+port. Slot B (`k10s-b.efi`, `/k10s/b/`) appears with the first update. The kernel command line is fixed in both
+(`console=ttyS0,115200 quiet panic=5` for `vm`; `metal` adds `console=tty0` last, so init's lines appear on the
+screen); everything else is configured in `k10s.conf`. Images are reproducible: fixed GUIDs, volume ids, ext4 hash seed, and every timestamp from
 `SOURCE_DATE_EPOCH` (the commit time). On the ESP, `BOOTX64.EFI` becomes the Tier 2 loader (`k10boot`, which reads
 `/k10s/tier`) with milestone M1.
 
@@ -223,9 +223,9 @@ licences, not k10s's Apache-2.0. Intel e1000e/igb/igc/ixgbe/i40e need no firmwar
 
 | Script | Does |
 |---|---|
-| `os/images.sh [OUT]` | the release images and UKIs (above), `SHA256SUMS.os`; fails when a compressed image exceeds its budget (`vm` 5 MB, `metal` 40 MB). `K10S_BIN` picks the static k10s |
+| `os/images.sh [OUT]` | the release images and their signed UKIs (above), `SHA256SUMS.os`; fails when a compressed image exceeds its budget (`vm` 5 MB, `metal` 40 MB). `K10S_BIN` picks the static k10s, `K10S_IMAGE_KEY` the signing key file (default: a throwaway `target/os/image-test.key`, trusted only where pinned with `os_key`) |
 | `os/kbuild.sh [vm\|metal] [OUT]` | a k10s kernel, rootless; fails if a fragment option does not survive `olddefconfig`; reproducible build metadata; `metal` also installs the signed module tree with its `depmod` output |
-| `os/mkimage.py OUT.img --kernel K --initrd I… --cmdline C --boot DIR [--conf F] [--uki OUT.efi]` | a disk image: GPT, GRUB patched into the MBR and `bios-boot` (no `grub-install`), the UKI built with `objcopy`, FAT with mtools, ext4 with `mkfs.ext4`; no root, no loop devices |
+| `os/mkimage.py OUT.img --kernel K --initrd I… --cmdline C --boot DIR [--conf F] [--uki OUT.efi] [--version V --sign KEY --k10s K10S --profile P]` | a disk image: GPT, GRUB patched into the MBR and `bios-boot` (no `grub-install`), the UKI built with `objcopy` and signed with `k10s image sign` (unsigned without `--sign`: it boots but cannot update), the A/B slot layout, FAT with mtools, ext4 with `mkfs.ext4`; no root, no loop devices |
 | `os/bootfiles.sh` | the pinned Debian 12 GRUB (`i386-pc`, `grub-mkimage`) and systemd-boot packages (systemd-boot, systemd-stub), SHA-256 checked |
 | `os/firmware.sh` | the firmware archive (above) |
 | `os/debian-kernel.sh` | the pinned Debian 13 kernel (6.12, SHA-256 checked) with its module tree and `depmod` output |

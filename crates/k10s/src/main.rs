@@ -10,6 +10,7 @@
 //!             cluster auth: --cluster-key-file FILE [--cluster-next-key-file FILE] | --insecure-unauthenticated-cluster
 //!                           [--gossip-max-skew SECS]
 //!             tuning: [--probe-ms N] [--suspicion-mult N] [--leave-grace-ms N]
+//!             disk images (docs/OS.md): [--os-commit-grace SECS], and `--os-agent-fd N` from init
 //! k10s keygen [-o FILE]
 //! k10s image  pubkey KEY | sign --key KEY --arch A --profile P --version V IN OUT | verify FILE [--trust PUB,…]
 //! k10s apply  FILE.k10s [--node HOST:PORT] [--admin-token-file FILE]
@@ -62,6 +63,8 @@ const USAGE: &str = "usage:
               [--cluster-next-key-file FILE] (key rotation: also accepted, see docs/NODE.md)
               [--gossip-max-skew SECS] (clock skew allowed on gossip, default 300, at least 1)
               [--probe-ms N] (gossip probe period, 200)  [--suspicion-mult N] (4)  [--leave-grace-ms N] (1000)
+              [--os-commit-grace SECS] (disk images: a trial boot of a new OS image serves this long before it
+                commits, 30; docs/OS.md)
   k10s keygen [-o FILE]                           (32 random bytes as hex: a cluster key or an admin key;
                                                    FILE is created with mode 0600, never overwritten)
   k10s image pubkey KEY                           (the public key of a signing key made by keygen)

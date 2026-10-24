@@ -16,7 +16,8 @@ kube-proxy, sidecars, probes, and a control plane to manage it all. k10s isolate
 - **No control plane**: desired state spreads by gossip, membership is SWIM, and placement is a pure function every
   node computes on its own. Self-healing falls out of membership changes.
 - The same runtime also boots **as its own kernel** (`metal/`), with no Linux underneath, or as the only program
-  (PID 1) of a minimal Linux image: disk images for VMs and PCs, BIOS and UEFI (`os/`, [docs/OS.md](docs/OS.md)).
+  (PID 1) of a minimal Linux image: disk images for VMs and PCs, BIOS and UEFI, which the cluster updates itself in
+  waves with signed A/B images (`os/`, [docs/OS.md](docs/OS.md)).
 
 Design rationale: [docs/DESIGN.md](docs/DESIGN.md) · evidence from the literature: [docs/research.md](docs/research.md)
 
@@ -96,7 +97,7 @@ is the release's version (e.g. `0.1.0`, or `0.1.1-dev.45`).
 | `k10s-metal-V-x86_64.tar.gz` | the bare-metal kernel ([metal/](metal/)): `k10-metal.elf`, `k10-metal-embedded.elf` (test bundle baked in), `bundle.k10b` (19 test services), `mkbundle` (static; pass `--ten-dir examples` or `--no-ten`), `examples/*.ten`, metal README |
 | `k10s-os-V-x86_64-vm.img.xz` | disk image (GPT, BIOS and UEFI) with `k10s` as PID 1 of the `vm` k10s kernel, for VMs and clouds ([docs/OS.md](docs/OS.md)); write it to a disk with `xz -dc … \| dd` |
 | `k10s-os-V-x86_64-metal.img.xz` | the same for PCs and servers: `metal` kernel, signed driver modules, NIC firmware (linux-firmware files under their own licences, in `/lib/firmware/LICENSES/`) |
-| `k10s-os-V-x86_64-{vm,metal}.efi` | the UKIs of the images (kernel, initramfs and command line in one EFI file) for PXE or another UEFI loader |
+| `k10s-os-V-x86_64-{vm,metal}.efi` | the UKIs of the images (kernel, initramfs and command line in one EFI file), signed by the k10s release key: OS updates of running machines (`os` in `k10s apply`, [docs/OS.md](docs/OS.md#updates)), PXE or another UEFI loader |
 | `k10s-bench-V-linux-amd64.tar.gz` | [bench/](bench/) tools, static Go: workloads `echo` `compute` `chain` `counter` `compute-purego`, and `loadgen` |
 | `k10s-V-src.tar.gz` | the sources of the commit, stamped with its version (`.k10s-version`) for builds without git |
 | `SHA256SUMS` | `sha256sum -c SHA256SUMS --ignore-missing`; build provenance: `gh attestation verify FILE --repo bzzdevlabs/k10s` |

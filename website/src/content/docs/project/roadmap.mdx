@@ -23,7 +23,9 @@ import { Aside } from '@astrojs/starlight/components';
   cycles, fd exhaustion, peers that never read: a well-behaved neighbour kept 0 errors.
 - **OS images:** PID 1 mode and both x86-64 disk images under QEMU on SeaBIOS and OVMF: DHCP renew, rebind and NAK,
   growth of the data partition to the disk, signed driver modules (an unsigned one is refused), state across
-  reboots, reproducible builds; QEMU start to first HTTP 200 in about 0.5 s.
+  reboots, reproducible builds; QEMU start to first HTTP 200 in about 0.5 s. Updates: the power cut at every step of
+  an A/B update on BIOS and UEFI (always back on a good image, data kept), images that panic or never commit fall
+  back, and a 20-node rollout where a bad image stops after the first wave and a good one goes through every wave.
 
 ## Limits
 

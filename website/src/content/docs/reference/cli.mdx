@@ -52,6 +52,9 @@ Runs a node.
 | `--probe-ms N` | `200` | gossip probe period |
 | `--suspicion-mult N` | `4` | suspicion timeout multiplier |
 | `--leave-grace-ms N` | `1000` | time given to peers to converge on a graceful leave |
+| `--os-commit-grace SECS` | `30` | disk images: how long a trial boot of a new OS image must hold the desired state and serve before it asks to commit ([Updating the image](/k10s/guides/bare-metal/#updating-the-image)) |
+
+On a k10s disk image, init starts the node with `--os-agent-fd 3`, its update channel; it is not for other uses.
 
 ## k10s apply
 
@@ -60,7 +63,8 @@ k10s apply FILE.k10s [--node HOST:PORT]
 ```
 
 Compiles `code = "x.ten"` sources, sends `x.k10` modules as they are, and deploys the manifest as the new desired
-state. Prints the apply report as JSON. See [Manifests](/k10s/guides/manifests/).
+state; the signed OS images of an `os` block are checked and sent along. Prints the apply report as JSON. See
+[Manifests](/k10s/guides/manifests/).
 
 ## k10s build
 
@@ -102,7 +106,21 @@ The service's recent log lines.
 k10s keygen [-o FILE]
 ```
 
-32 random bytes as hex: a cluster key or an admin key. `FILE` is created with mode 0600 and never overwritten.
+32 random bytes as hex: a cluster key, an admin key or an OS image signing key. `FILE` is created with mode 0600
+and never overwritten.
+
+## k10s image
+
+```bash
+k10s image pubkey KEY
+k10s image sign --key KEY --arch ARCH --profile PROFILE --version V IN.efi OUT.efi
+k10s image verify FILE [--trust PUBKEY,…]
+```
+
+OS images for [updates of k10s disk images](/k10s/guides/bare-metal/#updating-the-image): `pubkey` prints the
+public key of a signing key (pin it on machines with `os_key=` in `k10s.conf`), `sign` appends an Ed25519 signature
+and the image's platform (`ARCH-PROFILE`, e.g. `x86_64-metal`) and version to a UKI, `verify` checks an image
+against the k10s release key and the `--trust` keys and prints its platform, version, signer and SHA-256.
 
 ## k10s version
 

@@ -48,6 +48,10 @@ machine-code verification matters most there.
   is served on a link before the peer has proved it holds the key, and what an unauthenticated peer can make a
   node buffer is capped. Manifests and blobs are still checked against their SHA-256 when fetched; key material is
   wiped from memory when dropped.
+- **OS images** (disk images updated by the cluster): installed only when signed (Ed25519) by the k10s release key
+  built into the image or by a key pinned on the machine (`os_key`), for the machine's platform. Init verifies them
+  itself; the node, which fetched them, is sandboxed and not trusted with that. Any validly signed image installs, an
+  older one too: which one a cluster runs is the choice of whoever holds an admin key or the cluster key.
 
 ### Key rotation
 
