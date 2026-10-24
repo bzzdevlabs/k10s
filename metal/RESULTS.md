@@ -317,18 +317,38 @@ medians of 10 boots (`k10.exit_on_ready`) and 10 × 5 s loadgen runs (`/hello/`,
 
 * **Throughput** is 3–5 % below 13a's kernel under TCG, in every interleaved series (three more series with fixes
   in between gave the same gap). It is not the trait-object dispatch (a build with the NIC statically dispatched
-  measured the same), nor x2APIC (`k10.apic=xapic`: the same), nor the reclaimed low memory (now allocated last). The
-  gap is within what emulation magnifies (every extra instruction on the per-packet path costs tens of nanoseconds
-  under TCG); the KVM figure is CI's (below).
+  measured the same), nor x2APIC (`k10.apic=xapic`: the same), nor DHCP, nor the reclaimed low memory (now
+  allocated last). Bisecting found it in the per-CPU array sized for 64 CPUs instead of 8 (a 13b build with
+  `MAX_CPUS = 8`: 29.6k rps, 13a 30.1k, 13b 28.6k in that series): the layout of the per-CPU state and the statics after it, which TCG's
+  translation-block cache and the host's caches see, not more work per packet. Under KVM (CI) 13b is not slower
+  (below).
 * **Boot**: under TCG the TSC is calibrated against the HPET (20 ms window, for tens of ppm instead of the old
   10 ms PIT); with KVM (CI, and every KVM cloud) kvmclock gives the frequency and no calibration runs. The other
   additions are the ACPI parse (microseconds), the page-table rebuild, a full bus-0 PCI scan instead of stopping at
-  the NIC, and DHCP (a round trip to slirp before the ready line; `k10.ip=` skips it).
+  the NIC, and DHCP (two round trips to slirp; the DISCOVER goes out before the bundle is applied, so most of it
+  overlaps the apply; `k10.ip=` skips it).
 * **Memory**: 13b grew the image by 100 KiB (ACPI, PCI ECAM, virtio modern/MMIO/blk, DHCP, the power code, per-CPU
   state for 64 CPUs; 13a added 88 KiB, mostly a 128 KiB boot stack), and the kernel now also uses the RAM between
   64 KiB and 640 KiB, which it left idle before (allocated last: it is mapped with 4 KiB pages). Net effect at the
   small end (`-m 3M`, 2.5 MiB visible): **1,500 KiB usable instead of 1,116, 15 of the 19 test services placed
   instead of 9**, `hello` with 16 connections at 23.0k rps instead of 19.2k (TCG).
+* **KVM** (the release workflow's `metal/test.sh` on GitHub's ubuntu-24.04 runners, nested KVM; one run each, boot
+  with DHCP for 13b):
+
+  | ready (kernel entry → ready line) | aca1a86 (= 44da5b5's kernel) | 13a (716899e) | 13b (9e5df1f) | 13b (26aca76) |
+  |---|---|---|---|---|
+  | jit, 64 MiB / 8 MiB | 10.0 / 8.7 ms | 12.5 / 10.6 ms | 18.7 / 18.5 ms | 15.8 / 16.1 ms |
+  | interpreter, 64 MiB / 8 MiB | 9.3 / 9.6 ms | 9.9 / 12.1 ms | 15.5 / 18.1 ms | 12.9 / 15.6 ms |
+  | jit, 4 CPUs, 64 MiB / 8 MiB | 11.8 / 11.7 ms | 14.2 / 11.8 ms | 20.7 / 17.8 ms | 17.4 / 17.8 ms |
+  | memory used at ready, jit 64 MiB | 840 KiB | 840 KiB | 848 KiB | 848 KiB |
+
+  26aca76 cut 3 ms of 9e5df1f's increase (fewer configuration-space and I/O APIC accesses, each an exit to the L1
+  hypervisor; DHCP during the apply); 3–4 ms remain over 13a, mostly DHCP's round trips and the device probe's
+  exits (nested KVM makes each exit tens of microseconds; on a non-nested host they are 1–2 µs). Throughput on
+  these runners is bimodal whatever the kernel (`hello`, 64 connections: 21k rps or 28–42k from one run to the
+  next; aca1a86 28.6k / 28.8k / 42.5k, 13a 36.9k / 21.3k / 21.1k, 13b 41.6k / 21.1k / 21.6k and 21.6k / 21.5k /
+  20.9k for jit / interpreter / jit with 4 CPUs), so CI shows no throughput regression and cannot resolve one of a
+  few percent; the controlled comparison is the TCG series above.
 
 Platforms covered by `test.sh` (each: self test with a virtio-blk disk, serve, reboot and power off on a signed
 request), and the others:

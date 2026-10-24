@@ -2,14 +2,14 @@
 
 PROJECT STATE: HARDENING
 
-Last updated: 2026-10-24. This file is the single place to learn where the project stands and what comes next.
+Last updated: 2026-10-25. This file is the single place to learn where the project stands and what comes next.
 
 ## State of `main`
-`main` is pushed; every push publishes a dev pre-release (v0.1.0-dev.147 = 44da5b5, step 12 U4–U6: ci, release, pages
-workflows green; the `unit`, `musl`, `i686`, `arm64` (JIT and interpreter), `armv7`, `dist`, `os`, `os-arm64` and
+`main` is pushed; every push publishes a dev pre-release (v0.1.0-dev.153 = 26aca76, steps 13a and 13b: release and
+pages workflows green; the `unit`, `musl`, `i686`, `arm64` (JIT and interpreter), `armv7`, `dist`, `os`, `os-arm64` and
 `os-legacy` suites gate the release; glibc, musl (x86-64, aarch64, i686, armv7), metal, bench, examples and source
-archives; disk images x86-64 `vm` 4.4 MB and `metal` 6.8 MB, `i686-metal` 5.7 MB, `armv7-vm` 3.5 MB, `aarch64-vm`
-4.0 MB, `aarch64-pi` 5.3 MB (xz) with their update files (`.efi`, the Pi's `.fat`) signed by the release key and
+archives; disk images x86-64 `vm` 4.8 MB and `metal` 7.2 MB (13a added k10boot and the native kernel),
+`i686-metal` 5.7 MB, `armv7-vm` 3.5 MB, `aarch64-vm` 4.0 MB, `aarch64-pi` 5.3 MB (xz) with their update files (`.efi`, the Pi's `.fat`) signed by the release key and
 verified against the key built into k10s; `SHA256SUMS`).
 `main` contains:
 - Isolation: SFI-masked JIT and interpreter, validator, red-team and differential suites, objdump encoder fuzzing and
