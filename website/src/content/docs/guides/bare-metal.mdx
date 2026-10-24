@@ -154,8 +154,8 @@ exits. The power button drains the node and powers off.
 [docs/OS.md](https://github.com/bzzdevlabs/k10s/blob/main/docs/OS.md) has the boot sequence, the image layout and
 every key.
 
-Each release publishes four disk images. The x86-64 ones boot on BIOS and on UEFI (Secure Boot off); on arm64 the
-node runs on the interpreter (no arm64 JIT yet):
+Each release publishes four disk images. The x86-64 ones boot on BIOS and on UEFI (with Secure Boot on, see
+[Secure Boot](#secure-boot)); on arm64 the node runs on the interpreter (no arm64 JIT yet):
 
 | Image | For | Kernel | Size |
 |---|---|---|---|
@@ -184,7 +184,7 @@ node runs on the interpreter (no arm64 JIT yet):
    printf 'admin-token-file=/boot/admin.key\n' >> /media/K10S-BOOT/k10s.conf
    ```
 
-3. Boot the machine (Secure Boot off) and deploy to the address it shows on screen:
+3. Boot the machine (Secure Boot off, or [signed for it](#secure-boot)) and deploy to the address it shows on screen:
 
    ```bash
    k10s apply examples/app.k10s --node 192.168.1.50:80 --admin-token-file admin.key
@@ -253,9 +253,38 @@ fixed; `os/images.sh` and `os/mkimage.py` build images with your own command lin
 `os/kbuild.sh`, `os/mkinitramfs.py` a kernel plus initramfs for `-kernel` boots. A distribution kernel works too,
 with its modules in the initramfs: `os/debian-kernel.sh` and `os/test.sh` show how for Debian 13's.
 
+### Secure Boot
+
+The images are not signed for Secure Boot, so firmware with Secure Boot on refuses them. BIOS boots and the Raspberry
+Pi are not concerned. Turn Secure Boot off in the firmware setup, or make the machine trust a key of yours:
+
+- **Own keys** ([sbctl](https://github.com/Foxboron/sbctl)): `sbctl create-keys`, then from a live Linux system on the
+  machine, with the firmware in setup mode (Secure Boot keys cleared in its setup), `sbctl enroll-keys --microsoft`
+  (keep Microsoft's keys: graphics and network cards' firmware drivers are signed with them). Sign systemd-boot on
+  `K10S-BOOT` once: `sbctl sign /media/K10S-BOOT/EFI/BOOT/BOOTX64.EFI`.
+- **A MOK under Debian's shim**, for machines whose keys stay as they are: the shim (Debian's `shim-signed`, signed by
+  Microsoft) becomes `EFI/BOOT/BOOTX64.EFI` and systemd-boot, signed with your MOK, `EFI/BOOT/grubx64.efi`;
+  MokManager enrolls the MOK at the first boot ("Enroll key from disk").
+
+Either way every image, the first one and each update, is signed twice: for Secure Boot with your key, then for k10s
+with an image key of yours, pinned with `os_key` (the release key's signature does not cover yours):
+
+```bash
+k10s image payload k10s-os-V-x86_64-metal.efi uki.efi        # the UKI without the release signature
+sbctl sign uki.efi                                           # or sbsign with the MOK
+k10s image sign --key os.key --arch x86_64 --profile metal --version V uki.efi k10s-os-V-x86_64-metal.sb.efi
+cp k10s-os-V-x86_64-metal.sb.efi /media/K10S-BOOT/EFI/Linux/k10s-a.efi   # a new machine's slot A
+echo "os_key=$(k10s image pubkey os.key)" >> /media/K10S-BOOT/k10s.conf
+```
+
+Updates then name the `.sb.efi` files. An image the firmware refuses fails its 3 trial boots (systemd-boot reboots
+after each refusal) and the rollout stops on it.
+[docs/OS.md](https://github.com/bzzdevlabs/k10s/blob/main/docs/OS.md#secure-boot) has every step, the shim's file
+layout and what to expect from real firmware (Microsoft's 2011 and 2023 CAs, SBAT revocations).
+
 <Aside type="caution" title="PID 1 mode limits">
-	Secure Boot must be off. arm64 nodes run on the interpreter. The Pi image is tested under QEMU behind a model of
-	the Pi firmware (A/B through `autoboot.txt` and tryboot, power cuts during updates, a Pi in a cluster with an x86-64
-	node), the x86-64 images under QEMU (SeaBIOS, OVMF, NVMe, e1000e, Intel TCO watchdog, power cuts during updates, a
-	20-node rollout); none yet on a physical machine.
+	Secure Boot needs your own keys or a MOK (above). arm64 nodes run on the interpreter. The Pi image is tested under
+	QEMU behind a model of the Pi firmware (A/B through `autoboot.txt` and tryboot, power cuts during updates, a Pi in
+	a cluster with an x86-64 node), the x86-64 images under QEMU (SeaBIOS, OVMF, NVMe, e1000e, Intel TCO watchdog,
+	power cuts during updates, a 20-node rollout, Secure Boot with Microsoft's keys); none yet on a physical machine.
 </Aside>

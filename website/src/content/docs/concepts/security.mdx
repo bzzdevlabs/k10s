@@ -52,6 +52,10 @@ machine-code verification matters most there.
   built into the image or by a key pinned on the machine (`os_key`), for the machine's platform. Init verifies them
   itself; the node, which fetched them, is sandboxed and not trusted with that. Any validly signed image installs, an
   older one too: which one a cluster runs is the choice of whoever holds an admin key or the cluster key.
+- **Secure Boot:** the images are not signed for it (no k10s shim signed by Microsoft). Turn it off, or have the
+  firmware trust your own keys, or a MOK under Debian's Microsoft-signed shim, and sign systemd-boot and each image
+  with that key, then the image with your k10s image key ([Secure Boot](/k10s/guides/bare-metal/#secure-boot)).
+  Init logs the firmware's Secure Boot state; the kernel is in lockdown (integrity) either way.
 
 ### Key rotation
 

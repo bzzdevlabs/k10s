@@ -13,6 +13,10 @@
 #   update-bios, update-uefi  A/B update with a power cut at every step, an image that panics, one that never
 #                           commits (single node; the update images are signed with a test key pinned by os_key)
 #   rollout                 20 BIOS VMs: a bad image stops after the first wave, a good one rolls out in waves
+#   secureboot              the vm image on OVMF with Secure Boot on and Microsoft's keys (docs/OS.md "Secure Boot"):
+#                           refused as released; serves with Secure Boot off, with a MOK under Debian's shim and with
+#                           own keys; under own keys a re-signed update commits, an update not signed for Secure Boot is
+#                           refused by the firmware and rolled back
 # --arch aarch64 (the arm64 kernel and images of os/images.sh --arch aarch64, on qemu-system-aarch64 virt, TCG unless
 # the host is arm64 with KVM):
 #   boot-arm64              kernel + initramfs (devicetree): boot → apply → serve → power key → boot again → state kept
@@ -22,12 +26,14 @@
 #                           K10S-DATA by label on MBR, A/B update with a power cut at every step, a panicking image
 #                           (3 tries), a never-committing one
 #   mixed                   a Pi joins a cluster whose first member is an x86-64 k10s on the host (K10S_HOST_X86)
+#   secureboot-arm64        the aarch64-vm image on AAVMF with Secure Boot on and Microsoft's keys, as secureboot
 # usage: os/test.sh [--arch x86_64|aarch64] [TEST...]   (default: all of the arch). K10S_BIN: the static musl k10s
 # of the arch to test (default: built here); K10S_HOST_BIN: a k10s the host runs (keys, apply, signing; default
 # K10S_BIN when it is the host's arch); K10S_HOST_X86: the x86-64 k10s of `mixed` (default K10S_HOST_BIN).
 # Needs the musl target, qemu-system-x86_64 or qemu-system-aarch64 (KVM when /dev/kvm is usable), OVMF or AAVMF,
 # python3, zstd, xz, mkfs.fat, mtools, mkfs.ext4, sfdisk, dpkg-deb, depmod, dtc (aarch64) and the kernel build tools
-# of os/kbuild.sh (an aarch64-linux-gnu- cross compiler for arm64 on other hosts).
+# of os/kbuild.sh (an aarch64-linux-gnu- cross compiler for arm64 on other hosts); secureboot also sbsign, virt-fw-vars,
+# openssl and the firmware builds with Microsoft's keys (OVMF_*_4M.ms.fd, AAVMF_*.ms.fd).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 arch=x86_64
@@ -38,8 +44,8 @@ fi
 tests=("$@")
 if [[ ${#tests[@]} == 0 ]]; then
     case $arch in
-    x86_64) tests=(boot-debian boot-k10s dhcp image-bios image-uefi image-metal unsigned boottime repro update-bios update-uefi rollout) ;;
-    aarch64) tests=(boot-arm64 image-arm64 update-arm64 pi mixed) ;;
+    x86_64) tests=(boot-debian boot-k10s dhcp image-bios image-uefi image-metal unsigned boottime repro update-bios update-uefi rollout secureboot) ;;
+    aarch64) tests=(boot-arm64 image-arm64 update-arm64 pi mixed secureboot-arm64) ;;
     *) echo "os/test.sh: unknown arch $arch" >&2; exit 2 ;;
     esac
 fi
@@ -59,7 +65,7 @@ if [[ -z $host ]]; then
     host=$k10s
 fi
 has() { for t in "$@"; do [[ " ${tests[*]} " == *" $t "* ]] && return 0; done; return 1; }
-if has boot-arm64 image-arm64 update-arm64 pi mixed; then
+if has boot-arm64 image-arm64 update-arm64 pi mixed secureboot-arm64; then
     [[ $arch == aarch64 ]] || { echo "os/test.sh: arm64 tests need --arch aarch64" >&2; exit 2; }
     K10S_BIN=$k10s K10S_HOST_BIN=$host os/images.sh --arch aarch64 "$out/images"
     arm=$(os/kbuild.sh arm64)
@@ -80,7 +86,7 @@ if has boot-debian; then
         --mod 'fs/nls/nls_cp437.ko*' --mod 'fs/nls/nls_iso8859-1.ko*' --mod 'drivers/acpi/button.ko*' \
         --mod 'drivers/input/evdev.ko*' --mod 'drivers/watchdog/i6300esb.ko*'
 fi
-if has image-bios image-uefi image-metal unsigned boottime update-bios update-uefi rollout; then
+if has image-bios image-uefi image-metal unsigned boottime update-bios update-uefi rollout secureboot; then
     K10S_BIN=$k10s os/images.sh --arch x86_64 "$out/images"
     metal=$(os/kbuild.sh metal)
     kmods=$(echo "$metal"/modroot/lib/modules/*)
@@ -90,6 +96,12 @@ if has update-bios update-uefi rollout; then
     [[ -f $image_key ]] || "$k10s" keygen -o "$image_key"
     upd=(--image "$out/k10s-os-x86_64-vm.img" --uki "$(echo "$out"/images/k10s-os-*-x86_64-vm.efi)" --image-key "$image_key"
         --boot "$(os/bootfiles.sh)" --k10s "$k10s" --examples examples)
+fi
+if has secureboot secureboot-arm64; then
+    image_key=$out/image-test.key
+    [[ -f $image_key ]] || "$host" keygen -o "$image_key"
+    sb=(--image "$out/k10s-os-$arch-vm.img" --uki "$(echo "$out"/images/k10s-os-*-"$arch"-vm.efi)" --image-key "$image_key"
+        --shim "$(os/bootfiles.sh "shim-$arch")" --k10s "$host" --examples examples)
 fi
 if has image-metal; then
     python3 os/mkimage.py "$out/metal-serial.img" --kernel "$metal/arch/x86/boot/bzImage" --initrd "$out/initrd-metal.cpio.zst" \
@@ -129,6 +141,8 @@ for t in "${tests[@]}"; do
         python3 os/test.py mixed --image "$out/k10s-os-aarch64-pi.img" --k10s "$host" --host-k10s "${K10S_HOST_X86:-$host}" \
             --examples examples --work "$work"
         ;;
+    secureboot) python3 os/test.py secureboot "${sb[@]}" --work "$work" ;;
+    secureboot-arm64) python3 os/test.py secureboot --arch aarch64 "${sb[@]}" --work "$work" ;;
     repro)
         boot=$(os/bootfiles.sh)
         for i in 1 2; do

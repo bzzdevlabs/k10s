@@ -6,8 +6,9 @@ docs/research/universal-os.md §8–9); Tier 2 is the native kernel in `metal/`.
 
 What exists today (milestones U0 to U3): PID 1 mode in `crates/k10s/src/pid1/`, the k10s kernels (`vm` and `metal`
 profiles for x86-64, one `arm64` kernel, `os/`), x86-64 disk images that boot on BIOS and UEFI, an arm64 UEFI image
-and a Raspberry Pi 4/5 image, signed A/B updates of every image rolled out by the cluster in waves, and QEMU tests of
-all of them. On arm64 the node runs on the interpreter; the arm64 JIT comes next (U4).
+and a Raspberry Pi 4/5 image, signed A/B updates of every image rolled out by the cluster in waves, Secure Boot with
+your own keys or a MOK (U6), and QEMU tests of all of them. On arm64 the node runs on the interpreter; the arm64 JIT
+comes next (U4).
 
 ## Boot sequence
 
@@ -100,7 +101,8 @@ generator is seeded early.
 ## Disk images
 
 `os/images.sh` builds the images of a release, per architecture (`--arch x86_64|aarch64`); the x86-64 ones boot on
-BIOS and on UEFI (Secure Boot off) from any disk. A release publishes them with their update files:
+BIOS and on UEFI from any disk (with Secure Boot on, see "Secure Boot"). A release publishes them with their update
+files:
 
 | Release file | For | Kernel | Compressed size |
 |---|---|---|---|
@@ -124,7 +126,7 @@ p1   bios-boot   1 MiB    GRUB core.img (BIOS)
 p2   K10S-BOOT   256 MiB  EFI system partition, FAT32:
        /EFI/BOOT/BOOTX64.EFI   systemd-boot (UEFI)
        /EFI/Linux/k10s-a.efi   slot A: UKI = systemd-stub + kernel + initramfs + command line, signed
-       /loader/loader.conf     no menu, command-line editor off, default k10s-a.efi
+       /loader/loader.conf     no menu, command-line editor off, default k10s-a.efi, reboot-on-error auto
        /boot/grub/grub.cfg     BIOS: boots the slot of grubenv (k10s_slot), or a trial slot counted down
        /boot/grub/grubenv      k10s_slot=a
        /k10s/a/                vmlinuz, initrd, boot.cfg: the payload of the UKI and GRUB's lines for it
@@ -211,8 +213,13 @@ against the trusted keys and the platform, refuses images that failed here befor
 the UKI as `EFI/Linux/k10s-X+3.efi`. It then arms a trial boot in both loaders and reboots (the node first leaves the
 cluster and drains):
 
-- UEFI: `loader.conf` says `default k10s-X+[1-9]*`; systemd-boot counts the tries down in the file name
-  (`k10s-X+2-1.efi`, …) and, once none are left, boots the committed slot (entries without tries sort last).
+- UEFI: `loader.conf` says `preferred k10s-X.efi` and `default k10s-X+[1-9]*`; systemd-boot counts the tries down
+  in the file name (`k10s-X+2-1.efi`, …) and, once none are left, boots the committed slot (entries without tries
+  sort last). The images' systemd-boot (262) names the entry `k10s-X.efi` and prefers it while it has tries left;
+  the systemd-boot 252 of machines installed from earlier images (updates never replace the loader) ignores
+  `preferred` and matches the counted name with `default`. A trial that the firmware refuses to start (Secure Boot)
+  uses a try too: systemd-boot 262 then reboots (`reboot-on-error auto`), where 252 hands the machine back to the
+  firmware, which tries its other boot options.
 - BIOS: `grubenv` says `k10s_try=X3`; `grub.cfg` counts it down to `X0`, then boots `k10s_slot`.
 
 Every file is written under a temporary name, synced, renamed and synced again (vfat fills the new name's directory
@@ -228,8 +235,9 @@ of `autoboot.txt`, and any later boot (a crash, a hang reset by the watchdog, a 
 is never written during an update. Mainline Linux has no way to set the flag: `os/kpatches/` adds the Raspberry Pi
 kernel's reboot hook (`RPI_FIRMWARE_SET_REBOOT_FLAGS` from the firmware driver's reboot notifier).
 
-**Committing.** A trial boot (init knows it from systemd-boot's `LoaderEntrySelected` in efivarfs, from GRUB's
-`slot` and `k10s_try`, or from the Pi firmware's tryboot flag) starts the node as usual. Once the node holds and applied the cluster's desired state, sees a
+**Committing.** A trial boot (init knows it on UEFI from the boot counter still in the file name of the slot that
+systemd-boot's `LoaderEntrySelected` in efivarfs names, from GRUB's `slot` and `k10s_try`, or from the Pi firmware's
+tryboot flag) starts the node as usual. Once the node holds and applied the cluster's desired state, sees a
 peer again (if it had peers before) and stayed so for `--os-commit-grace` seconds (a node flag, default 30), it asks
 init to commit: init drops the counter from the file name, sets `default k10s-X.efi` and `k10s_slot=X`. A trial that
 crashes or hangs (the watchdog, `watchdog=1`, resets it) uses up its 3 boots; one that does not commit within
@@ -275,6 +283,129 @@ signs with a key you keep instead, which makes the kernel build reproducible.
 (`/lib/firmware/LICENSES/`). It is a separate cpio appended to the initramfs; the files keep their own redistributable
 licences, not k10s's Apache-2.0. Intel e1000e/igb/igc/ixgbe/i40e need no firmware.
 
+## Secure Boot
+
+The images are not signed for UEFI Secure Boot (docs/REPORT.md §9: k10s has no shim of its own signed by Microsoft),
+so firmware with Secure Boot on refuses their systemd-boot ("Access Denied", or a security violation screen). BIOS
+boots and the Raspberry Pi (its firmware has no Secure Boot) are not concerned. Three ways to boot them on UEFI, each
+tested under OVMF and AAVMF with Microsoft's keys enrolled (`secureboot` in "Testing"):
+
+- **Secure Boot off**, in the firmware setup (often Security or Boot → Secure Boot → Disabled; "OS type: Other OS" on
+  some boards; some laptops allow it only once a supervisor password is set). The enrolled keys stay, so switching it
+  back on restores Secure Boot for other systems.
+- **Own keys**: your platform key (PK), KEK and db key enrolled next to Microsoft's; systemd-boot and every UKI signed
+  with your db key.
+- **A MOK** (Machine Owner Key) under Debian's shim: the shim, signed by Microsoft's UEFI CA, boots wherever
+  Microsoft's third-party CA is enrolled, and trusts the keys in its MokList; systemd-boot and every UKI signed with
+  your MOK. For machines whose keys you cannot or do not want to replace.
+
+At boot init logs the firmware's state: `efi: Secure Boot on`, `off`, or `off (setup mode: no platform key)`. The
+kernel is in lockdown (integrity) either way.
+
+**Signing an image.** Signed for Secure Boot, a UKI is no longer the file the k10s release key signed, so each image
+is signed twice: with your db key or MOK (Authenticode), then with an image key of yours (`k10s image sign`, the key
+pinned with `os_key`). In that order: `k10s image sign` puts its signature in the UKI's certificate table, as the last
+entry, of a type that firmware and shim skip (`crates/k10-mesh/src/osimage.rs`), and grows the table's size in the PE
+header, neither of which the Authenticode hash covers; data after the certificate table is refused by firmware and
+shim, and an Authenticode signature added after the k10s one would leave that one inside the signed data, where k10s
+no longer finds it. `k10s image payload` gives the UKI of a signed image without its k10s signature. For each image
+(the slot A of a new machine and every update; here the x86-64 `metal` one, the others alike):
+
+```bash
+k10s keygen -o os.key                                         # once: your image key
+k10s image payload k10s-os-V-x86_64-metal.efi uki.efi         # the release's UKI without the release signature
+sbctl sign uki.efi                                            # own keys; with a MOK, or without sbctl:
+                                                              # sbsign --key mok.key --cert mok.crt --output uki.efi uki.efi
+k10s image sign --key os.key --arch x86_64 --profile metal --version V uki.efi k10s-os-V-x86_64-metal.sb.efi
+k10s image verify k10s-os-V-x86_64-metal.sb.efi --trust "$(k10s image pubkey os.key)"   # "signed for Secure Boot"
+```
+
+`sbverify --cert CERT FILE` (sbsigntool) checks the Authenticode signature of the result too (exit status 0); it also
+tries to read the k10s entry as a signature and prints an error about it.
+
+A new machine: write the image to its disk, then on its `K10S-BOOT` (mounted on `/mnt`) sign systemd-boot once
+(updates never replace it), replace slot A and pin your image key:
+
+```bash
+sbctl sign /mnt/EFI/BOOT/BOOTX64.EFI                          # BOOTAA64.EFI on arm64; for a MOK see below
+cp k10s-os-V-x86_64-metal.sb.efi /mnt/EFI/Linux/k10s-a.efi
+echo "os_key=$(k10s image pubkey os.key)" >> /mnt/k10s.conf
+```
+
+A machine installed from an image older than U6 has systemd-boot 252, which does not reboot after a refused trial
+(below): copy `EFI/BOOT/BOOTX64.EFI` from a current image before signing it.
+
+Updates name the `.sb.efi` files in the `os` block. Init writes an image into its slot as it is, both signatures
+included. An image the firmware refuses (not signed for Secure Boot, or by a key it does not trust) cannot cost more
+than its trial: systemd-boot reboots after the refusal (`reboot-on-error auto` in `loader.conf`), so the 3 trial boots
+end on the committed slot, which records the image as failed and stops the rollout. Whoever holds the db key or the
+MOK and an image key your machines trust can make images they boot: keep those keys off the machines.
+
+**Enrolling own keys** with [sbctl](https://github.com/Foxboron/sbctl). sbctl writes the keys from a running Linux
+system while the firmware is in setup mode; k10s images have no userland, so boot a live Linux system with sbctl on
+the machine (from USB), with the keys of `sbctl create-keys` in its `/var/lib/sbctl/keys`:
+
+1. In the firmware setup, delete the Secure Boot keys to enter setup mode ("Reset to Setup Mode", "Clear Secure Boot
+   keys", "Delete all Secure Boot variables"; some firmware first needs Secure Boot mode "Custom"). `sbctl status`
+   then reports setup mode.
+2. `sbctl enroll-keys --microsoft`: your PK, KEK and db, plus Microsoft's KEK and db certificates. Keep Microsoft's:
+   the firmware drivers of graphics cards and network adapters (option ROMs) are usually signed by Microsoft's UEFI
+   CA, and without it a machine may lose its screen or network before any OS runs.
+3. Turn Secure Boot on and boot the k10s disk.
+
+Some firmware setups also enroll keys from files on a USB stick instead: DER certificates (sbctl's are the `*.pem`
+files under its `keys` directory: `openssl x509 -in db.pem -outform DER -out db.cer`), or the signed `.auth` files of
+`sbctl enroll-keys --microsoft --export auth`.
+
+**A MOK with Debian's shim.**
+
+1. The shim and its MokManager come from Debian 13's packages `shim-signed` (`/usr/lib/shim/shimx64.efi.signed`,
+   signed by Microsoft's UEFI CA 2011) and `shim-helpers-amd64-signed` (`/usr/lib/shim/mmx64.efi.signed`, signed by
+   Debian, whose key the shim trusts); on arm64 `shimaa64.efi.signed` and `mmaa64.efi.signed` from
+   `shim-helpers-arm64-signed`. Download the `.deb` files from deb.debian.org and unpack them with `dpkg-deb -x` (any
+   Linux) or `ar x` and `tar`; `os/bootfiles.sh shim-x86_64` (or `shim-aarch64`) fetches the versions the tests use
+   (shim 16.1), SHA-256 checked.
+2. A MOK and its DER form for MokManager:
+   `openssl req -new -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=k10s MOK/" -keyout mok.key -out mok.crt`,
+   `openssl x509 -in mok.crt -outform DER -out mok.cer`.
+3. Sign systemd-boot and the UKIs with it (`sbsign --key mok.key --cert mok.crt`; the UKIs as above), and lay out
+   `K10S-BOOT` (arm64: `BOOTAA64.EFI`, `grubaa64.efi`, `mmaa64.efi`):
+
+   ```
+   /EFI/BOOT/BOOTX64.EFI   shimx64.efi.signed (the firmware starts the shim)
+   /EFI/BOOT/grubx64.efi   systemd-boot signed with the MOK (the shim starts grubx64.efi from its own directory)
+   /EFI/BOOT/mmx64.efi     mmx64.efi.signed (MokManager)
+   /EFI/Linux/k10s-a.efi   the UKI signed with the MOK, then by k10s (above)
+   /mok.cer                the MOK, for MokManager
+   ```
+
+4. Enroll the MOK at the first boot with Secure Boot on: the shim cannot verify `grubx64.efi` yet ("Verification
+   failed: (0x1A) Security Violation") and starts MokManager: "Enroll key from disk", the `K10S-BOOT` volume,
+   `mok.cer`, "Continue", "Yes", "Reboot". `mokutil --import mok.cer` does the same from another Linux system booted
+   on the machine (it asks for a one-time password, which MokManager asks for at the next boot).
+
+The shim then verifies systemd-boot, and systemd-boot each UKI through the shim (keys in the firmware's db count too).
+Updates are signed with the MOK as above.
+
+**On real machines.** Tested under OVMF and AAVMF only, with Debian's and Ubuntu's firmware builds whose variable
+store has Microsoft's KEK CA, Windows PCA and UEFI CA 2011 (Ubuntu's also the 2023 CAs), and keys written into it
+directly (`virt-fw-vars`). Not tested: real firmware setup screens (switching Secure Boot off, clearing keys,
+enrolling from files), `sbctl` itself (the tests sign with `sbsign`), MokManager's screens and `mokutil`. Things to
+expect:
+
+- **Microsoft UEFI CA 2011 or 2023.** Debian's shim 16.1 is signed by the 2011 CA; since June 2026 Microsoft signs new
+  shims with the "Microsoft UEFI CA 2023" only. Firmware whose db lacks the CA that signed a shim refuses it: older
+  machines may know only the 2011 CA, new ones (or after an update that removed it) only the 2023 CA. Own keys do not
+  depend on either.
+- **Third-party CA off.** Some PCs (Secured-core) ship with Microsoft's third-party UEFI CA disabled: allow it in the
+  setup ("Allow Microsoft 3rd Party UEFI CA") for the shim, or use own keys.
+- **SBAT revocations.** The shim refuses components whose security generation was revoked in the `SbatLevel`
+  variable (raised by newer shims and by Windows updates), and old shims are revoked through dbx updates: keep the
+  shim current from Debian's `shim-signed`. systemd-boot's generation (`systemd-boot,1` in its `.sbat`) is checked the
+  same way.
+- **Key sizes.** sbctl's keys are RSA-4096, which some older firmware is reported to reject; RSA-2048 (the MOK above)
+  is the size every implementation takes. The tests use both.
+
 ## Building
 
 | Script | Does |
@@ -282,14 +413,15 @@ licences, not k10s's Apache-2.0. Intel e1000e/igb/igc/ixgbe/i40e need no firmwar
 | `os/images.sh [--arch x86_64\|aarch64] [OUT]` | the release images of the arch and their update files (above), `SHA256SUMS.os-ARCH`; fails when a compressed image exceeds its budget (`x86_64-vm` 5 MB, `x86_64-metal` 40 MB, `aarch64-vm` 6 MB, `aarch64-pi` 8 MB). `K10S_BIN` picks the static k10s of the arch, `K10S_HOST_BIN` one the host runs to sign (default `K10S_BIN`), `K10S_IMAGE_KEY` the signing key file (default: a throwaway `target/os/image-test.key`, trusted only where pinned with `os_key`) |
 | `os/kbuild.sh [vm\|metal\|arm64] [OUT]` | a k10s kernel, rootless; fails if a fragment option does not survive `olddefconfig`; reproducible build metadata; `metal` also installs the signed module tree with its `depmod` output, `arm64` builds `Image`, `Image.gz` and the Raspberry Pi devicetrees |
 | `os/mkimage.py OUT.img --kernel K --initrd I… --cmdline C --boot DIR [--arch x86_64\|aarch64] [--pi --dtbs DIR] [--conf F] [--uki OUT] [--version V --sign KEY --k10s K10S --profile P]` | a disk image: GPT, GRUB patched into the MBR and `bios-boot` (x86-64, no `grub-install`), the UKI (systemd-stub plus sections, written by the script itself) signed with `k10s image sign` (unsigned without `--sign`: it boots but cannot update), the A/B slot layout; `--pi`: the MBR Pi image with its signed slot image; FAT with mtools, ext4 with `mkfs.ext4`; no root, no loop devices |
-| `os/bootfiles.sh [x86_64\|aarch64]` | the pinned Debian packages, SHA-256 checked: GRUB (`i386-pc`, `grub-mkimage`) and systemd-boot (systemd-boot, systemd-stub) 252 for x86-64; systemd-boot 252 for arm64 and the Raspberry Pi firmware (`raspi-firmware` 1.20260408) |
+| `os/bootfiles.sh [x86_64\|aarch64\|shim-x86_64\|shim-aarch64]` | the pinned Debian packages, SHA-256 checked: GRUB (`i386-pc`, `grub-mkimage`) and systemd-boot (systemd-boot, systemd-stub) 262 for x86-64; systemd-boot 262 for arm64 and the Raspberry Pi firmware (`raspi-firmware` 1.20260408); `shim-*`: Debian's shim 16.1 and MokManager ("Secure Boot"; not in the images) |
 | `os/firmware.sh` | the firmware archive (above) |
 | `os/debian-kernel.sh` | the pinned Debian 13 kernel (6.12, SHA-256 checked) with its module tree and `depmod` output |
 | `os/mkinitramfs.py OUT [--init K10S] [--kmods DIR --mod GLOB…] [--firmware DIR --fw GLOB…] [--conf FILE]` | a reproducible newc initramfs (gzip, xz or zstd), module subsets with their dependencies, filtered `modules.alias`; without `--init`, an archive to append to another |
 
 The kernel builds need make, gcc (or `aarch64-linux-gnu-gcc` for arm64 on other hosts), flex, bison, bc, openssl,
 patch, depmod and the libelf and libssl headers; the images need sfdisk, mkfs.fat, mtools, mkfs.ext4, dpkg-deb, zstd
-and xz.
+and xz; the Secure Boot tests `sbsign` (sbsigntool), `virt-fw-vars` (virt-firmware), openssl and the firmware builds
+with Microsoft's keys (`OVMF_CODE_4M.ms.fd`, `AAVMF_CODE.ms.fd` and their variable stores).
 
 ## Testing
 
@@ -343,6 +475,16 @@ the arm64 kernel and images with the release's aarch64 musl k10s.
   the power cut at every step, an image that panics (tried 3 times, then recorded), one that never commits.
 - **mixed**: a Pi (as above) joins a cluster whose first member is an x86-64 k10s on the host (the x86-64 musl binary;
   JIT); both see each other's OS report and serve the example services placed on either node.
+- **secureboot** (x86-64, OVMF on `q35` with SMM) and **secureboot-arm64** (AAVMF): the `vm` image under the firmware
+  build with Secure Boot on and Microsoft's keys enrolled, each case on a fresh disk and a copy of its variable store
+  (changed with `virt-fw-vars`, signed with `sbsign`, as "Secure Boot" describes). As released, the firmware refuses
+  it ("Access Denied"). Secure Boot switched off (the setup's `SecureBootEnable`, keys kept): it serves. MOK: Debian's
+  Microsoft-signed shim as `BOOTX64.EFI`, systemd-boot and the UKI signed with a MOK that is in shim's MokList: it
+  serves with init logging `Secure Boot on`. Own keys (RSA-4096 PK, KEK and db enrolled next to Microsoft's,
+  systemd-boot and the UKI signed with the db key): it serves with Secure Boot on; as a single-node cluster it then
+  installs an update signed the same way, which commits, and one signed only by k10s, which the firmware refuses on
+  each of its 3 trial boots (systemd-boot reboots after each) before the committed slot comes back, records it as
+  failed and the rollout stops.
 
 `scripts/ci-test.sh arm64` (CI and release gate, on a GitHub arm64 runner) runs every crate's unit and integration
 tests but the x86-64 JIT's natively on arm64, for the gnu and musl targets, on the interpreter.
@@ -350,11 +492,12 @@ tests but the x86-64 JIT's natively on arm64, for the gnu and musl targets, on t
 Unit tests cover the configuration precedence, module tree parsing and modalias matching, the DHCP state machine
 against a fake server, SNTP sample checks and the GPT rewrite that grows `K10S-DATA` (512-byte and 4 KiB sectors,
 checksums, partitions that are not last, corrupt tables) and its MBR variant. The slot logic is tested against models
-of systemd-boot's entry selection, of `grub.cfg` and of the Pi firmware's `autoboot.txt` and tryboot flag, with the
-power cut after every durable step of an install and of a commit on every firmware type, and with images that never
-come up or never commit; the image format, Ed25519 (RFC 8032 vectors),
-the manifest's OS plan, the gossip extension (never sent to nodes that predate it) and the rollout waves have their
-own tests in `k10-mesh`.
+of systemd-boot's entry selection (262, and the 252 of machines installed from earlier images), of `grub.cfg` and of
+the Pi firmware's `autoboot.txt` and tryboot flag, with the power cut after every durable step of an install and of a
+commit on every firmware type, updates alternating between the slots, and images that never come up or never commit;
+the image format (also with an Authenticode certificate table: both signatures intact, the payload restored), Ed25519
+(RFC 8032 vectors), the manifest's OS plan, the gossip extension (never sent to nodes that predate it) and the
+rollout waves have their own tests in `k10-mesh`.
 
 Real hardware is needed for: a real machine serving after a cold boot from the `metal` image (the U1 exit criterion
 for a Realtek or Intel mini-PC), power cuts that reach the disk's own write cache (QEMU's kill loses only what the
@@ -365,14 +508,18 @@ watchdogs, RTC chips, real DHCP servers, switches (link and STP delays) and NTP 
 criteria: a Pi 4 and a Pi 5 join an x86 cluster, survive power cuts and update A/B): the real firmware reading
 `autoboot.txt` and honouring the tryboot flag set by the patched kernel through the mailbox, the mainline devicetrees
 under the Pi firmware, the Pi 4's GENET and the Pi 5's RP1 Ethernet, SD/USB/NVMe boot, `bcm2835_wdt` resets, the
-serial consoles, and power cuts on SD cards (whose controllers may lose more than the last write).
+serial consoles, and power cuts on SD cards (whose controllers may lose more than the last write). For Secure Boot
+(the U6 exit criterion, both documented flows booting under OVMF with Microsoft's keys, holds in QEMU): real firmware
+setup screens (Secure Boot off, setup mode, enrolling keys from files), `sbctl enroll-keys` and `mokutil` on a
+running system, MokManager's screens, machines that ship the 2023 Microsoft CAs only or the third-party CA disabled,
+and firmware that rejects RSA-4096 keys ("Secure Boot").
 
 ## Limits
 
 - Updates need cluster mode and an image booted through its own loaders; nodes are not grouped into zones yet.
 - A rollback is an update to the older image (signed images of any version install); the cluster key is the trust
   boundary for which signed image a cluster runs.
-- Secure Boot must be off (U6 documents signing the image with an own key).
+- The images are not signed for Secure Boot: turn it off, or sign them with your own keys or a MOK ("Secure Boot").
 - The image uses 512-byte logical sectors; disks with 4 KiB logical sectors (rare outside servers) need a rebuilt
   image.
 - arm64 nodes run on the interpreter (the arm64 JIT is U4); the Pi 3, 32-bit ARM and i386 are U5. The arm64 image

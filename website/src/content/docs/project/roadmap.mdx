@@ -26,6 +26,8 @@ import { Aside } from '@astrojs/starlight/components';
   reboots, reproducible builds; QEMU start to first HTTP 200 in about 0.5 s. Updates: the power cut at every step of
   an A/B update on BIOS and UEFI (always back on a good image, data kept), images that panic or never commit fall
   back, and a 20-node rollout where a bad image stops after the first wave and a good one goes through every wave.
+  Secure Boot under OVMF and AAVMF with Microsoft's keys: the released image is refused, and boots with Secure Boot
+  off, with own keys and with a MOK under Debian's shim; an update the firmware refuses rolls back.
   arm64: the arm64 image on AAVMF and the Raspberry Pi image behind a model of the Pi firmware (A/B through
   `autoboot.txt` and tryboot, the same power cuts), a Pi in a cluster with an x86-64 node, and every test suite on an
   arm64 host.
@@ -56,7 +58,7 @@ import { Aside } from '@astrojs/starlight/components';
 
 - **Network:** wired Ethernet only (DHCPv4 or a static address); no Wi-Fi.
 - **Boot:** UEFI and legacy BIOS. Images are not signed for Secure Boot: turn it off, or sign the image with your own
-  key and enroll it.
+  key and enroll it (sbctl, or a MOK under Debian's shim).
 - **Order:** x86-64 first, then arm64 and the Raspberry Pi 4/5; i386 and armv7 are best effort, on the interpreter.
 - **Updates:** OS images are signed by the k10s release key and spread over gossip like code.
 - **One image:** a single installed image boots the Linux-based tier or the native kernel, chosen from the hardware

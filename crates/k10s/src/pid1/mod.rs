@@ -193,6 +193,7 @@ fn open_slots(boot_dev: &str, slot: Option<&str>, os_key: Option<&str>, os_trial
         if let Err(e) = mount("efivarfs", "/sys/firmware/efi/efivars", "efivarfs", flags, "") {
             say!("update: efivarfs: {e}");
         }
+        say!("efi: Secure Boot {}", update::efi_secure_boot());
         update::Firmware::Uefi
     } else {
         update::Firmware::Bios

@@ -72,6 +72,8 @@ const USAGE: &str = "usage:
                                                   (signs an OS image for Tier 1 updates, a UKI or a Pi boot
                                                    slot, docs/OS.md)
   k10s image verify FILE [--trust PUBKEY,...]     (checks an OS image; trusted: the k10s release key and PUBKEY)
+  k10s image payload IN OUT                       (the UKI or Pi slot of an OS image without its signature: to
+                                                   sign for Secure Boot, then again with image sign)
   k10s apply  FILE.k10s [--node HOST:PORT]        (code = \"x.ten\" sources are compiled, \"x.k10\" sent as is;
                                                    os { images = [\"x.efi\"] } rolls out OS images)
   k10s build  FILE.ten [-o FILE.k10]              (compile Ten to TIR)
@@ -328,7 +330,7 @@ fn cmd_keygen(args: &[String]) -> Result<(), String> {
 }
 
 fn cmd_image(args: &[String]) -> Result<(), String> {
-    let usage = "usage: k10s image pubkey KEY | sign --key KEY --arch ARCH --profile PROFILE --version V IN OUT | verify FILE [--trust PUBKEY,...]";
+    let usage = "usage: k10s image pubkey KEY | sign --key KEY --arch ARCH --profile PROFILE --version V IN OUT | verify FILE [--trust PUBKEY,...] | payload IN OUT";
     let Some((sub, rest)) = args.split_first() else { return Err(usage.into()) };
     let a = Args::parse(rest, &[])?;
     let seed = |path: &str| -> Result<[u8; 32], String> {
@@ -367,13 +369,22 @@ fn cmd_image(args: &[String]) -> Result<(), String> {
             let blob = std::fs::read(file).map_err(|e| format!("{file}: {e}"))?;
             let info = osimage::verify(&blob, &trusted).map_err(|e| format!("{file}: {e}"))?;
             println!(
-                "{file}: platform {}-{}, version {}, signed by {}, sha256 {}",
+                "{file}: platform {}-{}, version {}, signed by {}, sha256 {}{}",
                 info.meta.arch,
                 info.meta.profile,
                 info.meta.version,
                 k10_mesh::sha256::to_hex(&info.key),
-                k10_mesh::sha256::to_hex(&sha256(&blob))
+                k10_mesh::sha256::to_hex(&sha256(&blob)),
+                if osimage::authenticode_signed(&blob) { ", signed for Secure Boot (Authenticode)" } else { "" }
             );
+        }
+        "payload" => {
+            a.check_known(&[])?;
+            let [input, output] = a.positional.as_slice() else { return Err(usage.into()) };
+            let blob = std::fs::read(input).map_err(|e| format!("{input}: {e}"))?;
+            let payload = osimage::payload(&blob).map_err(|e| format!("{input}: {e}"))?;
+            std::fs::write(output, &payload).map_err(|e| format!("{output}: {e}"))?;
+            eprintln!("k10s: {output}: the {}-byte payload of {input}", payload.len());
         }
         _ => return Err(usage.into()),
     }

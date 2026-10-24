@@ -17,7 +17,7 @@ BOOTAA64.EFI):
   p2   K10S-BOOT, the EFI system partition (FAT32):
          /EFI/BOOT/BOOTX64.EFI   systemd-boot
          /EFI/Linux/k10s-a.efi   slot A, a UKI: systemd-stub + kernel + initramfs + command line (+ signature)
-         /loader/loader.conf     no menu, no command-line editor, default k10s-a.efi
+         /loader/loader.conf     no menu, no command-line editor, default k10s-a.efi, reboot-on-error auto
          /boot/grub/grub.cfg     BIOS: boots slot k10s_slot of grubenv, or a trial slot (k10s_try) counted down
          /boot/grub/grubenv      k10s_slot=a
          /k10s/a/                vmlinuz, initrd and boot.cfg (GRUB's linux/initrd lines): the UKI's payload
@@ -77,7 +77,7 @@ start_file=start4cd.elf
 fixup_file=fixup4cd.dat
 [all]
 """
-LOADER_CONF = "timeout 0\ndefault k10s-a.efi\neditor no\nauto-entries no\nauto-firmware no\nconsole-mode keep\n"
+LOADER_CONF = "timeout 0\ndefault k10s-a.efi\neditor no\nauto-entries no\nauto-firmware no\nconsole-mode keep\nreboot-on-error auto\n"
 # BIOS: slot k10s_slot, unless a trial (k10s_try=X3) is armed: counted down, slot X booted until X0 (GRUB has no
 # arithmetic, hence the chain); init commits or clears it (crates/k10s/src/pid1/update.rs models the same).
 # GRUB's own messages (errors only: no menu) go to the screen and the first serial port.

@@ -32,7 +32,13 @@ and, for the DHCP test, a host-side DHCP server on a QEMU socket netdev. os/test
   test.py mixed --image IMG --k10s K10S --host-k10s X86_K10S --examples DIR
       A Pi (the Pi image, as above) joins a cluster whose first member is an x86-64 k10s on the host; both serve
       services placed on either node.
---arch aarch64 runs boot, image and update on qemu-system-aarch64 (virt; UEFI: AAVMF); pi and mixed are aarch64 only.
+  test.py secureboot --image IMG --uki EFI --image-key KEY --shim DIR --k10s K10S --examples DIR
+      docs/OS.md "Secure Boot" under the firmware build with Microsoft's keys enrolled (OVMF/AAVMF .ms.fd), a fresh
+      disk and variable store per case: the released image is refused; it serves with Secure Boot off, with a MOK under
+      Debian's shim (--shim: os/bootfiles.sh shim-ARCH) and with own keys; under own keys an update re-signed for
+      Secure Boot commits, and one signed by k10s only is refused by the firmware 3 times and rolled back.
+--arch aarch64 runs boot, image, update and secureboot on qemu-system-aarch64 (virt; UEFI: AAVMF); pi and mixed are
+aarch64 only.
 """
 import argparse
 import hashlib
@@ -1040,10 +1046,182 @@ def rollout_test(a, work):
     print(f"test.py: rollout: good image on all {n} nodes in waves {waves}", file=sys.stderr)
 
 
+# OVMF and AAVMF with Secure Boot on and Microsoft's keys enrolled (Debian and Ubuntu name them .ms.fd).
+MS_FIRMWARE = {"x86_64": ("/usr/share/OVMF/OVMF_CODE_4M.ms.fd", "/usr/share/OVMF/OVMF_VARS_4M.ms.fd"),
+               "aarch64": ("/usr/share/AAVMF/AAVMF_CODE.ms.fd", "/usr/share/AAVMF/AAVMF_VARS.ms.fd")}
+# Owner GUID of the test's own keys in the variable store.
+OWNER = "6b10c5a0-0000-4000-8000-00000000000e"
+
+
+def ms_firmware(work, name, *edits):
+    """pflash arguments for the Microsoft-key firmware with a private copy of its variable store, changed by
+    virt-fw-vars `edits` (what enrolling keys or the firmware setup's Secure Boot switch writes there)."""
+    code, vars_ = MS_FIRMWARE[ARCH]
+    if not (os.path.exists(code) and os.path.exists(vars_)):
+        sys.exit(f"test.py: {code} or {vars_} not found (package ovmf or qemu-efi-aarch64)")
+    mine = os.path.join(work, f"{name}.vars.fd")
+    subprocess.run([tool("virt-fw-vars"), "-i", vars_, *edits, "-o", mine], check=True, capture_output=True)
+    # x86-64: the variable store is protected by SMM, which Secure Boot builds of OVMF require.
+    machine = ["-M", "q35,smm=on", "-global", "driver=cfi.pflash01,property=secure,value=on"] if ARCH == "x86_64" else []
+    return machine + ["-drive", f"if=pflash,format=raw,readonly=on,file={code}", "-drive", f"if=pflash,format=raw,file={mine}"]
+
+
+def secureboot_test(a, work):
+    """docs/OS.md "Secure Boot", under the Microsoft-key firmware: the image as released is refused; with Secure Boot
+    turned off it serves; with own keys (PK, KEK, db enrolled next to Microsoft's, systemd-boot and the UKI signed with
+    the db key) and with a MOK (Debian's Microsoft-signed shim, systemd-boot and the UKI signed with the MOK) it serves
+    with Secure Boot on. Under own keys, an update re-signed the same way commits, and one not signed for Secure Boot is
+    refused by the firmware and rolled back by boot counting."""
+    efi = "x64" if ARCH == "x86_64" else "aa64"
+    loader = f"EFI/BOOT/BOOT{efi.upper()}.EFI"
+    key = keys(work, a.k10s)
+    pub = subprocess.run([a.k10s, "image", "pubkey", a.image_key], check=True, capture_output=True, text=True).stdout.strip()
+    run_ = lambda *cmd: subprocess.run([tool(cmd[0]), *cmd[1:]], check=True, capture_output=True)
+
+    def cert(name, bits):
+        k, c = os.path.join(work, f"{name}.key"), os.path.join(work, f"{name}.crt")
+        run_("openssl", "req", "-new", "-x509", "-newkey", f"rsa:{bits}", "-nodes", "-days", "3650", "-subj", f"/CN=k10s test {name}/",
+             "-keyout", k, "-out", c)
+        return k, c
+
+    def sbsign(k, c, src, name):
+        out = os.path.join(work, name)
+        run_("sbsign", "--key", k, "--cert", c, "--output", out, src)
+        return out
+
+    def os_image(src, version):
+        """`k10s image sign` with the test key (pinned with os_key), as the operator signs with theirs."""
+        out = os.path.join(work, f"{version}.img")
+        run_(a.k10s, "image", "sign", "--key", a.image_key, "--arch", ARCH, "--profile", "vm", "--version", version, src, out)
+        verified = subprocess.run([a.k10s, "image", "verify", out, "--trust", pub], check=True, capture_output=True, text=True).stdout
+        if ("signed for Secure Boot" in verified) != (src != payload):
+            fail(f"k10s image verify: {verified}")
+        return out, hashlib.sha256(open(out, "rb").read()).hexdigest()
+
+    def disk(name, files=(), conf=()):
+        """The released image on a fresh 2 GiB disk, `files` [(source, path)] copied to K10S-BOOT."""
+        d = os.path.join(work, f"{name}.img")
+        subprocess.run(["cp", "--sparse=always", a.image, d], check=True)
+        with open(d, "r+b") as f:
+            f.truncate(2 << 30)
+        configure(d, work, a.k10s, ["admin-token-file=/boot/admin.key", "ntp=none", *conf], name)
+        for src, dst in files:
+            mtools("mcopy", d, 2 << 20, "-o", src, f"::/{dst}")
+        return d
+
+    def power_on(name, d, fw):
+        port = free_port()
+        g = Guest(work, name, None, None, None, fw + ["-drive", f"file={d},if=virtio,format=raw", "-device", "i6300esb",
+                  "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:80", "-device", "virtio-net-pci,netdev=n0"], reboot=True)
+        g.port = port
+        return g
+
+    def serves(g, state, since=0):
+        m = g.wait_for(r"efi: Secure Boot (\w+)", "the Secure Boot state", since)
+        if m.group(1) != state:
+            fail(f"Secure Boot {m.group(1)}, want {state}", g.log)
+        m = g.wait_for(BOOTED, "booted slot", m.end())
+        g.wait_for(r"ready: the node answers", "node ready", m.end())
+        return m
+
+    def serve_and_stop(g):
+        apply(a, key, g.port, os.path.join(a.examples, "app.k10s"))
+        if http(g.port, "/hello/") != (200, "hello"):
+            fail("GET /hello/", g.log)
+        g.power_button()
+        g.wait_for(r"powering off", "power off")
+        g.wait_exit()
+
+    payload = os.path.join(work, "payload.efi")
+    run_(a.k10s, "image", "payload", a.uki, payload)
+    sd = os.path.join(work, "systemd-boot.efi")
+    mtools("mcopy", a.image, 2 << 20, "-o", f"::/{loader}", sd)
+
+    # As released: neither systemd-boot nor the UKI is signed for Secure Boot, and the firmware refuses to start it.
+    g = power_on("refused", disk("refused"), ms_firmware(work, "refused"))
+    g.wait_for(r"Access Denied", "the firmware's refusal")
+    time.sleep(2)
+    if "k10s-init" in g.text():
+        fail("the unsigned image booted with Secure Boot on", g.log)
+    g.kill()
+    print("test.py: secureboot: the released image is refused with Secure Boot on: ok", file=sys.stderr)
+
+    # Secure Boot turned off in the firmware's setup (its SecureBootEnable switch; the keys stay enrolled).
+    g = power_on("off", disk("off"), ms_firmware(work, "off", "--set-false", "SecureBootEnable"))
+    serves(g, "off")
+    serve_and_stop(g)
+    print("test.py: secureboot: Secure Boot turned off: serves: ok", file=sys.stderr)
+
+    # MOK: Debian's shim (signed by Microsoft's UEFI CA) starts systemd-boot as grubX.efi; both it and the UKI are
+    # signed with the MOK, which is in shim's MokList (as MokManager's "Enroll key from disk" leaves it).
+    mok_key, mok_crt = cert("MOK", 2048)
+    mok_cer = os.path.join(work, "mok.cer")
+    run_("openssl", "x509", "-in", mok_crt, "-outform", "DER", "-out", mok_cer)
+    shim = os.path.join(a.shim, "usr/lib/shim")
+    mok_a, _ = os_image(sbsign(mok_key, mok_crt, payload, "mok-a.efi"), "test-mok-a")
+    d = disk("mok", [(os.path.join(shim, f"shim{efi}.efi.signed"), loader), (os.path.join(shim, f"mm{efi}.efi.signed"), f"EFI/BOOT/mm{efi}.efi"),
+                     (sbsign(mok_key, mok_crt, sd, "systemd-boot.mok.efi"), f"EFI/BOOT/grub{efi}.efi"), (mok_cer, "mok.cer"),
+                     (mok_a, "EFI/Linux/k10s-a.efi")], [f"os_key={pub}"])
+    g = power_on("mok", d, ms_firmware(work, "mok", "--add-mok", OWNER, mok_crt))
+    serves(g, "on")
+    serve_and_stop(g)
+    print("test.py: secureboot: MOK under Debian's shim: serves with Secure Boot on: ok", file=sys.stderr)
+
+    # Own keys enrolled next to Microsoft's (what `sbctl enroll-keys --microsoft` writes in setup mode; RSA-4096 like
+    # sbctl's), systemd-boot and the UKI signed with the db key, then the UKI with the operator's image key.
+    (_, pk), (_, kek), (db_key, db) = cert("PK", 4096), cert("KEK", 4096), cert("db", 4096)
+    own_a, own_a_id = os_image(sbsign(db_key, db, payload, "own-a.efi"), "test-own-a")
+    own_b, own_b_id = os_image(sbsign(db_key, db, payload, "own-b.efi"), "test-own-b")
+    unsigned, unsigned_id = os_image(payload, "test-unsigned")
+    d = disk("own", [(sbsign(db_key, db, sd, "systemd-boot.own.efi"), loader), (own_a, "EFI/Linux/k10s-a.efi")],
+             ["cluster-key-file=/boot/cluster.key", "gossip=0.0.0.0:7946", "watchdog=1", f"os_key={pub}", "os-commit-grace=3"])
+    g = power_on("own", d, ms_firmware(work, "own", "--set-pk", OWNER, pk, "--add-kek", OWNER, kek, "--add-db", OWNER, db))
+    m = serves(g, "on")
+    if (m.group(1), m.group(2), m.group(3)) != ("a", own_a_id[:8], None):
+        fail(f"first boot: {m.group(0)}", g.log)
+    print("test.py: secureboot: own keys: serves with Secure Boot on: ok", file=sys.stderr)
+
+    def manifest(image, name):
+        p = os.path.join(work, f"{name}.k10s")
+        ex = os.path.abspath(a.examples)
+        open(p, "w").write(f'service hello {{ code = "{ex}/hello.ten" memory = 64KiB }}\n'
+                           f'os {{ images = ["{os.path.abspath(image)}"] wave = 1 }}\n')
+        return p
+
+    # An update signed for Secure Boot like the running image installs, boots as a trial and commits.
+    mark = len(g.text())
+    apply(a, key, g.port, manifest(own_b, "to-b"))
+    g.wait_for(r"update: slot b armed", "image armed", mark)
+    m = serves(g, "on", mark)
+    if (m.group(1), m.group(2), m.group(3)) != ("b", own_b_id[:8], ", trial"):
+        fail(f"trial boot: {m.group(0)}", g.log)
+    g.wait_for(r"update: committed slot b", "commit", m.end(), 180)
+    print("test.py: secureboot: own keys: an update signed for Secure Boot commits: ok", file=sys.stderr)
+    # One signed by the operator only: the firmware refuses it on each of its 3 trial boots, systemd-boot reboots
+    # (reboot-on-error), and the committed slot comes back and records it as failed.
+    mark = len(g.text())
+    apply(a, key, g.port, manifest(unsigned, "to-unsigned"))
+    g.wait_for(r"update: slot a armed", "image armed", mark)
+    g.wait_for(rf"update: slot a \({unsigned_id[:8]}\) did not come up in 3 boots; back on slot b", "fallback", mark, 600)
+    refusals = len(re.findall(r"Error loading .*k10s-a\+\S*: Access denied", g.text()[mark:], re.IGNORECASE))
+    if refusals != 3:
+        fail(f"the firmware refused the image {refusals} times, want 3", g.log)
+    m = serves(g, "on", mark)
+    if (m.group(1), m.group(2), m.group(3)) != ("b", own_b_id[:8], None):
+        fail(f"after the refused image: {m.group(0)}", g.log)
+    g.wait_for(rf"os: rollout of {unsigned_id[:8]} stopped: node \w+ failed to commit it", "rollout halted", mark)
+    if http(g.port, "/hello/") != (200, "hello"):
+        fail("GET /hello/", g.log)
+    g.power_button()
+    g.wait_for(r"powering off", "power off")
+    g.wait_exit()
+    print("test.py: secureboot: own keys: an update not signed for Secure Boot is refused and rolled back: ok", file=sys.stderr)
+
+
 def main():
     ap = argparse.ArgumentParser()
     tests = {"boot": boot_test, "dhcp": dhcp_test, "image": image_test, "unsigned": unsigned_test, "boottime": boottime_test,
-             "update": update_test, "rollout": rollout_test, "pi": pi_test, "mixed": mixed_test}
+             "update": update_test, "rollout": rollout_test, "pi": pi_test, "mixed": mixed_test, "secureboot": secureboot_test}
     ap.add_argument("test", choices=tests)
     ap.add_argument("--arch", choices=["x86_64", "aarch64"], default="x86_64")
     ap.add_argument("--host-k10s")
@@ -1058,6 +1236,7 @@ def main():
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--uki")
     ap.add_argument("--image-key")
+    ap.add_argument("--shim")
     ap.add_argument("--boot")
     ap.add_argument("--nodes", type=int, default=20)
     ap.add_argument("--k10s")

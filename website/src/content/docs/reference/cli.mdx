@@ -115,13 +115,17 @@ and never overwritten.
 k10s image pubkey KEY
 k10s image sign --key KEY --arch ARCH --profile PROFILE --version V IN OUT
 k10s image verify FILE [--trust PUBKEY,…]
+k10s image payload IN OUT
 ```
 
 OS images for [updates of k10s disk images](/k10s/guides/bare-metal/#updating-the-image): `pubkey` prints the
 public key of a signing key (pin it on machines with `os_key=` in `k10s.conf`), `sign` appends an Ed25519 signature
 and the image's platform (`ARCH-PROFILE`, e.g. `x86_64-metal`, `aarch64-pi`) and version to a UKI or a Raspberry Pi
 boot slot image, `verify` checks an image
-against the k10s release key and the `--trust` keys and prints its platform, version, signer and SHA-256.
+against the k10s release key and the `--trust` keys and prints its platform, version, signer and SHA-256 (and whether
+the UKI carries a Secure Boot signature), `payload` writes the UKI or boot slot of an image without its k10s
+signature. For Secure Boot, sign the payload with your db key or MOK first, then with `sign`, which keeps the
+Authenticode signature valid ([Secure Boot](/k10s/guides/bare-metal/#secure-boot)).
 
 ## k10s version
 

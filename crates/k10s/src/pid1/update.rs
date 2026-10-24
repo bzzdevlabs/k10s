@@ -2,9 +2,13 @@
 //! (`/EFI/Linux/k10s-X.efi`, booted by systemd-boot on UEFI) and its kernel, initramfs and command line extracted for
 //! GRUB (`/k10s/X/`, BIOS). An update writes the other slot completely, then arms a trial boot of it in both loaders:
 //!
-//! * UEFI: the file is named `k10s-X+3.efi` and `loader.conf` says `default k10s-X+[1-9]*`. systemd-boot counts
-//!   the tries down in the name (`k10s-X+2-1.efi`, …); at `+0` the pattern stops matching and it boots the other,
-//!   committed slot (entries without tries left sort last).
+//! * UEFI: the file is named `k10s-X+3.efi` and `loader.conf` says `preferred k10s-X.efi` and
+//!   `default k10s-X+[1-9]*`. systemd-boot counts the tries down in the name (`k10s-X+2-1.efi`, …). The images'
+//!   systemd-boot (262) names the entry `k10s-X.efi` and prefers it while it has tries left; the systemd-boot 252 of
+//!   machines installed before (updates never replace the loader) ignores `preferred` and matches the counted name.
+//!   At `+0` neither matches and both boot the first entry, the committed slot (entries without tries left sort
+//!   last). A UKI the firmware refuses to start (Secure Boot) uses up a try as well: systemd-boot 262 then reboots
+//!   (`reboot-on-error auto`).
 //! * BIOS: `grubenv` says `k10s_try=X3`; `grub.cfg` counts it down (`X2`, `X1`, `X0`) and boots `k10s_slot` once
 //!   the tries are used up.
 //!
@@ -42,7 +46,7 @@ const MAX_FAILED: usize = 16;
 const GRUBENV_HEADER: &str = "# GRUB Environment Block\n";
 const GRUBENV_LEN: usize = 1024;
 /// systemd-boot's loader.conf with `default` filled in (os/mkimage.py writes the same with `k10s-a.efi`).
-const LOADER_CONF: &str = "timeout 0\ndefault {}\neditor no\nauto-entries no\nauto-firmware no\nconsole-mode keep\n";
+const LOADER_CONF: &str = "timeout 0\ndefault {}\neditor no\nauto-entries no\nauto-firmware no\nconsole-mode keep\nreboot-on-error auto\n";
 
 /// Hex public keys, one per line (`#` comments).
 pub fn parse_keys(text: &str) -> Vec<[u8; 32]> {
@@ -289,6 +293,13 @@ impl Esp {
         self.write("loader/loader.conf", LOADER_CONF.replace("{}", pattern).as_bytes())
     }
 
+    /// Arms the trial of `t` (module docs).
+    fn set_trial(&self, t: Slot) -> io::Result<()> {
+        let l = t.letter();
+        let conf = LOADER_CONF.replace("{}", &format!("k10s-{l}+[1-9]*")) + &format!("preferred k10s-{l}.efi\n");
+        self.write("loader/loader.conf", conf.as_bytes())
+    }
+
     /// The UKI file name of `slot` in `EFI/Linux`, with its boot counter if it has one.
     fn uki(&self, slot: Slot) -> Option<String> {
         let prefix = format!("k10s-{}", slot.letter());
@@ -397,7 +408,8 @@ impl Slots {
             Firmware::Uefi => {
                 let e = efi_entry.map(str::to_ascii_lowercase);
                 let slot = e.as_deref().and_then(|e| e.strip_prefix("k10s-")).and_then(|r| r.chars().next()).and_then(Slot::parse);
-                (slot, e.is_some_and(|e| e.contains('+')))
+                // systemd-boot names the entry without its boot counter: a trial is a slot whose file still has one.
+                (slot, slot.and_then(|b| esp.uki(b)).is_some_and(|n| n.contains('+')))
             }
             Firmware::Bios => {
                 let slot = cmdline_slot.and_then(|s| s.chars().next()).and_then(Slot::parse);
@@ -605,7 +617,7 @@ impl Slots {
             self.esp.rename(&format!("EFI/Linux/{name}.new"), &format!("EFI/Linux/{name}+{TRIES}.efi"))?;
             say!("update: slot {} written; arming its trial boot", t.letter());
             self.esp.write_grubenv(&[("k10s_slot", &b.letter().to_string()), ("k10s_try", &format!("{}{TRIES}", t.letter()))])?;
-            self.esp.set_default(&format!("k10s-{}+[1-9]*", t.letter()))
+            self.esp.set_trial(t)
         })();
         self.esp.end();
         r.map_err(|e| format!("writing slot {}: {e}", t.letter()))?;
@@ -803,6 +815,17 @@ pub fn read_blob(data: &Path, h: &[u8; 32]) -> io::Result<Vec<u8>> {
     Ok(v)
 }
 
+/// UEFI Secure Boot as the firmware reports it in efivarfs (`SecureBoot`, `SetupMode`: 4 attribute bytes, then 0 or 1).
+pub fn efi_secure_boot() -> &'static str {
+    let var = |name: &str| fs::read(format!("/sys/firmware/efi/efivars/{name}-8be4df61-93ca-11d2-aa0d-00e098032b8c")).ok()?.get(4).copied();
+    match (var("SecureBoot"), var("SetupMode")) {
+        (Some(1), _) => "on",
+        (_, Some(1)) => "off (setup mode: no platform key)",
+        (Some(_), _) => "off",
+        (None, _) => "off (not supported by the firmware)",
+    }
+}
+
 /// systemd-boot's `LoaderEntrySelected` from efivarfs (4 attribute bytes, then UTF-16LE).
 pub fn efi_selected_entry() -> Option<String> {
     let b = fs::read("/sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f").ok()?;
@@ -876,20 +899,26 @@ mod tests {
         }
     }
 
-    /// systemd-boot 252: entries sorted (no tries left last, then by id descending), the first matching
-    /// `default`, else the first; a counted entry is renamed before it boots. Returns the booted file's id.
-    fn uefi_boot(dir: &Path) -> Option<String> {
+    /// systemd-boot as far as k10s relies on it: entries without tries left sorted last; the first matching
+    /// `preferred` that has tries left (262 only), else the first matching `default`, else the first entry; a counted
+    /// entry is renamed before it boots. 262 names an entry by its file name without the counter, 252 with it.
+    /// Returns the booted entry's id. (systemd-boot orders the other entries by their os-release first, the model by
+    /// id; the slots never leave two of them without a matching `default`.)
+    fn uefi_boot(dir: &Path, sd262: bool) -> Option<String> {
         let conf = fs::read_to_string(dir.join("loader/loader.conf")).ok()?;
-        let pat = conf.lines().find_map(|l| l.strip_prefix("default ")).unwrap().to_string();
-        let mut entries: Vec<String> = fs::read_dir(dir.join("EFI/Linux")).ok()?.flatten().map(|e| e.file_name().into_string().unwrap()).filter(|n| n.ends_with(".efi")).collect();
-        entries.sort_by(|a, b| (tries_left(a) == Some(0)).cmp(&(tries_left(b) == Some(0))).then(b.cmp(a)));
-        let id = entries.iter().find(|e| fnmatch(&pat, e)).or(entries.first())?.clone();
-        if let Some(left) = tries_left(&id).filter(|&l| l > 0) {
-            let stem = id.rsplit_once('+').unwrap().0;
-            let done: u32 = id.strip_suffix(".efi").unwrap().rsplit_once('+').unwrap().1.split('-').nth(1).map_or(0, |d| d.parse().unwrap());
-            fs::rename(dir.join("EFI/Linux").join(&id), dir.join("EFI/Linux").join(format!("{stem}+{}-{}.efi", left - 1, done + 1))).unwrap();
+        let key = |k: &str| conf.lines().find_map(|l| l.strip_prefix(k)).map(str::to_string);
+        let mut files: Vec<String> = fs::read_dir(dir.join("EFI/Linux")).ok()?.flatten().map(|e| e.file_name().into_string().unwrap()).filter(|n| n.ends_with(".efi")).collect();
+        let id = |f: &str| if sd262 { f.split_once('+').map_or(f.to_string(), |(stem, _)| format!("{stem}.efi")) } else { f.to_string() };
+        files.sort_by(|a, b| (tries_left(a) == Some(0)).cmp(&(tries_left(b) == Some(0))).then(id(b).cmp(&id(a))));
+        let preferred = key("preferred ").filter(|_| sd262).and_then(|p| files.iter().find(|f| fnmatch(&p, &id(f)) && tries_left(f) != Some(0)));
+        let default = key("default ").and_then(|p| files.iter().find(|f| fnmatch(&p, &id(f))));
+        let file = preferred.or(default).or(files.first())?.clone();
+        if let Some(left) = tries_left(&file).filter(|&l| l > 0) {
+            let stem = file.rsplit_once('+').unwrap().0;
+            let done: u32 = file.strip_suffix(".efi").unwrap().rsplit_once('+').unwrap().1.split('-').nth(1).map_or(0, |d| d.parse().unwrap());
+            fs::rename(dir.join("EFI/Linux").join(&file), dir.join("EFI/Linux").join(format!("{stem}+{}-{}.efi", left - 1, done + 1))).unwrap();
         }
-        Some(id)
+        Some(id(&file))
     }
 
     /// os/mkimage.py's grub.cfg: returns the slot GRUB boots.
@@ -913,26 +942,34 @@ mod tests {
         if slot == "b" { 'b' } else { 'a' }
     }
 
-    /// One boot on `fw` up to init's slot inspection.
-    fn boot(dir: &Path, fw: Firmware) -> Slots {
-        let esp = Esp::new(dir, false);
-        let s = match fw {
-            Firmware::Uefi => {
-                let id = uefi_boot(dir).expect("UEFI finds an entry");
-                Slots::open(esp, fw, Some(&id), None)
-            }
-            Firmware::Bios => {
-                let c = bios_boot(&esp);
-                assert!(dir.join(format!("k10s/{c}/boot.cfg")).exists() || c == 'a', "GRUB boots a slot that has files");
-                Slots::open(esp, fw, None, Some(&c.to_string()))
-            }
-            Firmware::Pi => unreachable!("pi_boot"),
-        };
-        s
+    /// The loaders of the UEFI/BIOS images: systemd-boot as the images ship it, the 252 of machines installed before
+    /// U6, GRUB.
+    #[derive(Clone, Copy, Debug)]
+    enum Loader {
+        SystemdBoot,
+        SystemdBoot252,
+        Grub,
     }
 
-    /// The loaders of the UEFI/BIOS images (BIOS: x86 only).
-    const LOADERS: &[Firmware] = if cfg!(target_arch = "x86_64") { &[Firmware::Uefi, Firmware::Bios] } else { &[Firmware::Uefi] };
+    /// GRUB: x86 only.
+    const LOADERS: &[Loader] =
+        if cfg!(target_arch = "x86_64") { &[Loader::SystemdBoot, Loader::SystemdBoot252, Loader::Grub] } else { &[Loader::SystemdBoot, Loader::SystemdBoot252] };
+
+    /// One boot through `l` up to init's slot inspection.
+    fn boot(dir: &Path, l: Loader) -> Slots {
+        let esp = Esp::new(dir, false);
+        match l {
+            Loader::SystemdBoot | Loader::SystemdBoot252 => {
+                let id = uefi_boot(dir, matches!(l, Loader::SystemdBoot)).expect("UEFI finds an entry");
+                Slots::open(esp, Firmware::Uefi, Some(&id), None)
+            }
+            Loader::Grub => {
+                let c = bios_boot(&esp);
+                assert!(dir.join(format!("k10s/{c}/boot.cfg")).exists() || c == 'a', "GRUB boots a slot that has files");
+                Slots::open(esp, Firmware::Bios, None, Some(&c.to_string()))
+            }
+        }
+    }
 
     fn trusted() -> Vec<[u8; 32]> {
         vec![ed25519::public_key(&SEED)]
@@ -997,6 +1034,26 @@ mod tests {
         }
     }
 
+    /// Updates alternate between the slots: each one boots as a trial of the other slot and commits.
+    #[test]
+    fn updates_alternate_slots() {
+        let images: Vec<_> = ["v1", "v2", "v3", "v4"].iter().map(|v| image(v)).collect();
+        for &fw in LOADERS {
+            let dir = tmp(&format!("alternate-{fw:?}"));
+            fresh(&dir, &images[0].0);
+            let mut s = boot(&dir, fw);
+            for (i, (blob, h)) in images.iter().enumerate().skip(1) {
+                let t = s.install(h, blob, &trusted()).unwrap();
+                s = boot(&dir, fw);
+                assert_eq!((s.booted, s.trial, s.image), (Some(t), true, Some(*h)), "{fw:?} update {i}");
+                s.commit().unwrap();
+                s = boot(&dir, fw);
+                assert_eq!((s.booted, s.trial, s.image), (Some(t), false, Some(*h)), "{fw:?} update {i}");
+            }
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
     /// A bad image (never reaches init, or never commits): the loaders fall back after the tries, init records it,
     /// refuses it afterwards, and the next good image installs.
     #[test]
@@ -1012,9 +1069,9 @@ mod tests {
             // The bad image crashes before init: the loader just boots again.
             for _ in 0..TRIES {
                 match fw {
-                    Firmware::Uefi => assert!(uefi_boot(&dir).unwrap().starts_with("k10s-b+")),
-                    Firmware::Bios => assert_eq!(bios_boot(&Esp::new(&dir, false)), 'b'),
-                    Firmware::Pi => unreachable!(),
+                    Loader::SystemdBoot => assert_eq!(uefi_boot(&dir, true).as_deref(), Some("k10s-b.efi")),
+                    Loader::SystemdBoot252 => assert!(uefi_boot(&dir, false).unwrap().starts_with("k10s-b+")),
+                    Loader::Grub => assert_eq!(bios_boot(&Esp::new(&dir, false)), 'b'),
                 }
             }
             let mut s = boot(&dir, fw);
@@ -1039,7 +1096,7 @@ mod tests {
         let (a, _) = image("v1");
         let dir = tmp("refuse");
         fresh(&dir, &a);
-        let mut s = boot(&dir, Firmware::Uefi);
+        let mut s = boot(&dir, Loader::SystemdBoot);
         let (b, hb) = image("v2");
         assert!(s.install(&hb, &b, &[[1; 32]]).unwrap_err().contains("untrusted"));
         assert!(s.install(&[0; 32], &b, &trusted()).unwrap_err().contains("hash"));

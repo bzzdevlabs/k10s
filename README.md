@@ -16,8 +16,8 @@ kube-proxy, sidecars, probes, and a control plane to manage it all. k10s isolate
 - **No control plane**: desired state spreads by gossip, membership is SWIM, and placement is a pure function every
   node computes on its own. Self-healing falls out of membership changes.
 - The same runtime also boots **as its own kernel** (`metal/`), with no Linux underneath, or as the only program
-  (PID 1) of a minimal Linux image: disk images for VMs and PCs, BIOS and UEFI, which the cluster updates itself in
-  waves with signed A/B images (`os/`, [docs/OS.md](docs/OS.md)).
+  (PID 1) of a minimal Linux image: disk images for VMs and PCs, BIOS and UEFI (Secure Boot with your own keys or a
+  MOK), which the cluster updates itself in waves with signed A/B images (`os/`, [docs/OS.md](docs/OS.md)).
 
 Design rationale: [docs/DESIGN.md](docs/DESIGN.md) · evidence from the literature: [docs/research.md](docs/research.md)
 

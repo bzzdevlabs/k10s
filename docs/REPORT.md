@@ -180,7 +180,8 @@ the caveats. Highlights beyond §0:
 ## 9. Decisions
 Platform decisions for both tiers (rationale in research/universal-os.md §10 and research/native-hardware.md §11):
 - **Secure Boot:** not required in v1. Images ship unsigned; the docs explain how to disable Secure Boot or sign the
-  image with an own key and enroll it (sbctl, MOK). No own Microsoft-signed shim.
+  image with an own key and enroll it (sbctl, MOK; docs/OS.md "Secure Boot", tested under OVMF and AAVMF with
+  Microsoft's keys). No own Microsoft-signed shim.
 - **Legacy BIOS:** in scope for both tiers (Tier 1 through GRUB, Tier 2 through a Multiboot2 shim).
 - **Wi-Fi:** not supported; wired Ethernet only (USB Ethernet adapters on Tier 1).
 - **Tier 1 kernel:** our own Linux 6.18 LTS kernels (`vm` and `metal` configs) from U1; the Debian kernel is kept as
