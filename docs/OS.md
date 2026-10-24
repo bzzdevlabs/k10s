@@ -111,7 +111,7 @@ update files:
 | `k10s-os-V-x86_64-vm.img.xz` | QEMU/KVM guests and clouds | `vm` profile, every driver built in; console on serial; and the native kernel | 4.8 MB |
 | `k10s-os-V-x86_64-metal.img.xz` | PCs, mini-PCs, servers | `metal` profile, signed driver modules, NIC firmware; console on the screen; and the native kernel | 7.2 MB |
 | `k10s-os-V-x86_64-{vm,metal}.efi` | updates (`os` in `k10s apply`), PXE or another UEFI loader | the signed slot-A UKI of the image | 4.2 / 6.6 MB |
-| `k10s-os-V-x86_64-native.elf` | the native kernel (Tier 2, "Tiers") as both x86-64 images carry it | `metal/`, signed (profile `native`) | 0.9 MB |
+| `k10s-os-V-x86_64-native.elf` | the native kernel (Tier 2, "Tiers") as both x86-64 images carry it | `metal/`, signed (profile `native`) | 1.0 MB |
 | `k10s-os-V-aarch64-vm.img.xz` | QEMU virt (UEFI) and arm64 cloud guests | `arm64`, every driver built in; console on the PL011 serial port | 4.0 MB |
 | `k10s-os-V-aarch64-vm.efi` | updates, another UEFI loader | the signed slot-A UKI of the image | 9.5 MB |
 | `k10s-os-V-aarch64-pi.img.xz` | Raspberry Pi 3 B and 3 B+, 4 B, 400, CM4 and Pi 5 (SD card, USB or NVMe boot) | `arm64`; console on the serial pins (Pi 3, Pi 4) or the debug UART connector (Pi 5) | 5.3 MB |
