@@ -9,7 +9,8 @@ What exists today (milestones U0 to U6): PID 1 mode in `crates/k10s/src/pid1/`, 
 images that boot on BIOS and UEFI, an arm64 UEFI image, a Raspberry Pi 3/4/5 image, an i686 BIOS image for old PCs and
 an armv7 UEFI image, signed A/B updates of every image rolled out by the cluster in waves, Secure Boot with your own
 keys or a MOK (U6), and QEMU tests of all of them. The node runs services on the JIT on x86-64 and arm64 (U4), and
-on the interpreter on i686 and armv7 (no 32-bit JIT).
+on the interpreter on i686 and armv7 (no 32-bit JIT). The x86-64 images also carry the native kernel of Tier 2 and
+its loader, k10boot: `/k10s/tier` on the boot partition picks the tier ("Tiers").
 
 ## Boot sequence
 
@@ -107,9 +108,10 @@ update files:
 
 | Release file | For | Kernel | Compressed size |
 |---|---|---|---|
-| `k10s-os-V-x86_64-vm.img.xz` | QEMU/KVM guests and clouds | `vm` profile, every driver built in; console on serial | 4.4 MB |
-| `k10s-os-V-x86_64-metal.img.xz` | PCs, mini-PCs, servers | `metal` profile, signed driver modules, NIC firmware; console on the screen | 6.8 MB |
+| `k10s-os-V-x86_64-vm.img.xz` | QEMU/KVM guests and clouds | `vm` profile, every driver built in; console on serial; and the native kernel | 4.8 MB |
+| `k10s-os-V-x86_64-metal.img.xz` | PCs, mini-PCs, servers | `metal` profile, signed driver modules, NIC firmware; console on the screen; and the native kernel | 7.2 MB |
 | `k10s-os-V-x86_64-{vm,metal}.efi` | updates (`os` in `k10s apply`), PXE or another UEFI loader | the signed slot-A UKI of the image | 4.2 / 6.6 MB |
+| `k10s-os-V-x86_64-native.elf` | the native kernel (Tier 2, "Tiers") as both x86-64 images carry it | `metal/`, signed (profile `native`) | 0.9 MB |
 | `k10s-os-V-aarch64-vm.img.xz` | QEMU virt (UEFI) and arm64 cloud guests | `arm64`, every driver built in; console on the PL011 serial port | 4.0 MB |
 | `k10s-os-V-aarch64-vm.efi` | updates, another UEFI loader | the signed slot-A UKI of the image | 9.5 MB |
 | `k10s-os-V-aarch64-pi.img.xz` | Raspberry Pi 3 B and 3 B+, 4 B, 400, CM4 and Pi 5 (SD card, USB or NVMe boot) | `arm64`; console on the serial pins (Pi 3, Pi 4) or the debug UART connector (Pi 5) | 5.3 MB |
@@ -129,28 +131,30 @@ Layout (GPT, the shared layout of docs/research/universal-os.md §8.4):
 MBR  GRUB boot.img in the first 440 bytes (BIOS), protective MBR
 p1   bios-boot   1 MiB    GRUB core.img (BIOS)
 p2   K10S-BOOT   256 MiB  EFI system partition, FAT32:
-       /EFI/BOOT/BOOTX64.EFI   systemd-boot (UEFI)
+       /EFI/BOOT/BOOTX64.EFI   k10boot, the tier selector (UEFI; "Tiers")
+       /EFI/systemd/systemd-bootx64.efi   systemd-boot, Tier 1's loader
        /EFI/Linux/k10s-a.efi   slot A: UKI = systemd-stub + kernel + initramfs + command line, signed
        /loader/loader.conf     no menu, command-line editor off, default k10s-a.efi, reboot-on-error auto
-       /boot/grub/grub.cfg     BIOS: boots the slot of grubenv (k10s_slot), or a trial slot counted down
+       /boot/grub/grub.cfg     BIOS: the native kernel if /k10s/tier says tier=metal; else the slot of grubenv
+                               (k10s_slot), or a trial slot counted down
        /boot/grub/grubenv      k10s_slot=a
        /k10s/a/                vmlinuz, initrd, boot.cfg: the payload of the UKI and GRUB's lines for it
-       /k10s/tier              auto (for the Tier 2 loader)
-       /k10s.conf              node configuration (a commented template)
+       /k10s/metal.elf         the native kernel, signed
+       /k10s/tier              tier=linux, metal_cmdline= ("Tiers")
+       /k10s.conf              node configuration of both tiers (a commented template)
 p3   K10S-DATA   256 MiB  ext4, grown to the end of the disk on first boot
 ```
 
-UEFI firmware starts systemd-boot, which starts the UKI; BIOS starts GRUB from the MBR, which reads `grub.cfg` from
-the ESP of the boot disk; GRUB shows nothing unless it fails, and then prints to the screen and the first serial
-port. Slot B (`k10s-b.efi`, `/k10s/b/`) appears with the first update. The kernel command line is fixed in both
-(`console=ttyS0,115200 quiet panic=5` for `vm`; `metal` adds `console=tty0` last, so init's lines appear on the
-screen, and `k10s.bootwait=30000`, since a USB disk appears only after init has started); everything else is
-configured in `k10s.conf`. Images are reproducible: fixed GUIDs, volume ids, ext4 hash seed, and every timestamp from
-`SOURCE_DATE_EPOCH` (the commit time). On the ESP, `BOOTX64.EFI` becomes the Tier 2 loader (`k10boot`, which reads
-`/k10s/tier`) with milestone M1.
+UEFI firmware starts k10boot, which starts systemd-boot (as shipped, `tier=linux`), which starts the UKI; BIOS starts
+GRUB from the MBR, which reads `grub.cfg` from the ESP of the boot disk; GRUB shows nothing unless it fails, and then
+prints to the screen and the first serial port. Slot B (`k10s-b.efi`, `/k10s/b/`) appears with the first update. The
+kernel command line is fixed in both (`console=ttyS0,115200 quiet panic=5` for `vm`; `metal` adds `console=tty0`
+last, so init's lines appear on the screen, and `k10s.bootwait=30000`, since a USB disk appears only after init has
+started); everything else is configured in `k10s.conf`. Images are reproducible: fixed GUIDs, volume ids, ext4 hash
+seed, and every timestamp from `SOURCE_DATE_EPOCH` (the commit time).
 
-The `aarch64-vm` image has the same layout without the BIOS parts: p1 `K10S-BOOT` (systemd-boot as
-`/EFI/BOOT/BOOTAA64.EFI`, the UKI, `loader.conf`, `k10s.conf`), p2 `K10S-DATA`. UEFI arm64 machines boot it with ACPI
+The `aarch64-vm` image has the same layout without the BIOS parts and the native kernel: p1 `K10S-BOOT` (systemd-boot
+as `/EFI/BOOT/BOOTAA64.EFI`, the UKI, `loader.conf`, `k10s.conf`), p2 `K10S-DATA`. UEFI arm64 machines boot it with ACPI
 (the power button is the ACPI one, the clock the firmware's RTC); its command line is `console=ttyAMA0,115200 quiet
 panic=5`. The `armv7-vm` image is the same with systemd-boot as `/EFI/BOOT/BOOTARM.EFI`; 32-bit ARM UEFI firmware
 passes a devicetree (the power key is `gpio-keys`, the clock the EFI RTC, since the firmware keeps the PL031 for
@@ -198,6 +202,99 @@ OS updates"); a `bootcode.bin` that did not apply `tryboot_a_b` would read `tryb
 is why it is a copy of `config.txt`. Its Ethernet is USB (the LAN9514 of the 3 B, smsc95xx; the LAN7515 of the 3 B+,
 lan78xx), behind the dwc2 controller: the interface appears a few seconds after boot (`netwait`, 10 s by default,
 covers it).
+
+## Tiers
+
+The x86-64 images boot either tier from the same disk: Tier 1, Linux with k10s as PID 1 (everything above), or Tier
+2, the native kernel of `metal/` (metal/README.md), which runs the same node with no Linux underneath. Both read
+`k10s.conf` and join the same clusters. `/k10s/tier` on `K10S-BOOT` picks one:
+
+| `tier=` | UEFI (k10boot) | BIOS (GRUB) |
+|---|---|---|
+| `linux` (as shipped) | systemd-boot and the A/B UKIs, as above | the slot of `grubenv`, as above |
+| `metal` | the native kernel, `/k10s/metal.elf` | the native kernel, through Multiboot2 |
+| `auto` | the native kernel if it drives one of the machine's network adapters, else Tier 1 | Tier 1 |
+
+The file is a GRUB environment block, so that GRUB reads it too (`load_env`), and k10boot parses it the way GRUB does:
+
+```
+# GRUB Environment Block
+# This machine's tier (docs/OS.md "Tiers"), read by k10boot (UEFI) and GRUB (BIOS):
+#   tier=linux  Tier 1, Linux (the default)
+#   tier=metal  the native kernel, /k10s/metal.elf
+#   tier=auto   UEFI: the native kernel if it drives one of the network adapters, else Tier 1; BIOS: Tier 1
+# metal_cmdline= is the native kernel's command line. Edit lines in place: no blank lines, a newline at the end.
+tier=linux
+metal_cmdline=
+```
+
+Change the `tier=` line with any editor (the partition is FAT). Keep the first line, add no blank lines and end the
+file with a newline: GRUB ignores a file without the first line and a last line without its newline, and a blank line
+spoils the variable after it; k10boot then boots Tier 1, as it does for an unknown value. `metal_cmdline` takes the
+native kernel's `k10.*` arguments (metal/README.md); its node settings come from `k10s.conf`.
+
+**k10boot** (`metal/boot`, about 1,200 lines, no dependencies beyond the repository's crates) is the image's UEFI
+loader, `\EFI\BOOT\BOOTX64.EFI`:
+
+- `linux`: it starts `\EFI\systemd\systemd-bootx64.efi` through the firmware's LoadImage, so Tier 1 boots as
+  before: systemd-boot's entry selection and boot counting ("Updates"), and under Secure Boot the firmware's (or the
+  shim's) verification of systemd-boot and of each UKI ("Secure Boot").
+- `metal`: it reads `/k10s/metal.elf`, a k10s image (`k10s image sign`, profile `native`) whose payload is the
+  kernel's ELF, and verifies its signature: trusted are the k10s release key and the keys built into k10boot, and with
+  Secure Boot off also the `os_key` keys of `k10s.conf`. It loads the kernel at its physical addresses and hands it a
+  PVH `start_info`, the interface QEMU's `-kernel` uses too: the memory map (UEFI's, as E820 entries, merged), the
+  command line, the ACPI RSDP and modules: `k10s.conf`, the optional deployment bundle `/k10s/bundle.k10b`, the key
+  files that `k10s.conf` names (`admin-token-file=/boot/admin.key` and so on, Tier 1's paths: `K10S-BOOT` is `/boot`
+  there), the screen's GOP mode (the framebuffer), and where the UEFI runtime services are. It keeps the page the
+  kernel starts its other CPUs from (0x8000) out of the firmware's hands, exits boot services (taking the memory map
+  again when the firmware changed it meanwhile) and enters the kernel in 32-bit protected mode with paging off.
+- `auto`: it enumerates PCI through the firmware (the PCI I/O protocol) and boots the native kernel if a network
+  adapter is in the kernel's supported-device table (`metal/bootproto/src/devices.rs`: today the virtio-net of VMs,
+  with its legacy interface), else Tier 1. Each decision is printed on the console.
+- When the native kernel cannot boot (no kernel file, a signature that does not verify or a signer not trusted, a
+  kernel that cannot be placed, the start-up page in firmware memory, the boot counter below or a counter it cannot
+  read or write), k10boot says why, wipes the key files it had loaded, and boots Tier 1. UEFI load options that are text (a firmware boot entry's, the UEFI shell's, QEMU's `-kernel
+  k10boot.efi -append`) replace `metal_cmdline`; `k10s.tier=X` among them overrides the file.
+
+**Boot counting.** A native kernel that does not get healthy on two boots in a row pins the machine to Tier 1. k10boot
+counts each native boot in a non-volatile UEFI variable, `K10sNativeBoot-6b10c5a0-0000-4000-8000-0000000000e2`, before
+starting the kernel, and refuses a third boot of the same kernel while the count is 2. The kernel deletes the variable
+through UEFI runtime services once it is healthy: ready for 15 s and at least one frame received from the network.
+The record holds the kernel's hash and the modification time of `/k10s/tier`, so installing another kernel, or
+writing `/k10s/tier` again (even unchanged), gives it two new boots. Why a UEFI variable: the kernel cannot write
+`K10S-BOOT` (it has no FAT code, and no disk driver before M2), while runtime services are there on every UEFI machine
+from the first native boot, and the variable store survives power cuts; a boot that dies anywhere before the
+deletion (the kernel crashing, hanging until a watchdog or a person resets the machine, losing power) stays counted,
+so the count only goes down on proof of health. A counter that cannot be read or written means Tier 1: an uncounted
+native boot would have no way back. Likewise a Secure Boot state k10boot cannot read counts as on. The kernel calls the firmware on its own page tables (the firmware's
+runtime regions mapped executable for that call only, on one CPU with interrupts off; metal/kernel/src/efi.rs).
+
+**Configuration of both tiers.** The native kernel reads `k10s.conf` too. Keys that mean the same for it become its
+arguments (metal/README.md has the table): `join`, `backend`, `jit-indirect`, `timer-res-us`, `idle-spin-us`,
+`probe-ms`, `suspicion-mult`, `gossip-max-skew` and `insecure-unauthenticated-cluster`; any of `gossip`, `rpc`, `join`
+and `advertise` turns cluster mode on, as on Tier 1, and the addresses it gives peers are the ports of `gossip`, `rpc`
+and `http` (7946, 7947, 80 by default) at `advertise`, else at the configured address unless it is `0.0.0.0`. It
+listens on 7946, 7947 and 80 whatever the ports say. The key files of `admin-token-file`, `cluster-key-file` and
+`cluster-next-key-file` reach it as modules (k10boot reads them from `K10S-BOOT`); it wipes them once parsed. Keys
+of Tier 1 alone (`net`, `ip`, `ntp`, `data`, `watchdog`, `os_trial`…) do not concern it, and its own arguments
+(`k10.*`) go in `metal_cmdline`, never in `k10s.conf`, where Tier 1 would take them for node flags.
+
+**Data.** The native kernel does not use `K10S-DATA` yet: its key-value store is in memory until M2 (STATUS step 13d)
+gives both tiers one `K10S-DATA` format. That is why the images ship `tier=linux`. A node switched to `metal` leaves
+its Tier 1 state untouched on `K10S-DATA` and has it back when switched to `linux` again; in between it serves
+like a fresh node, with the desired state from the cluster.
+
+**BIOS.** GRUB reads `/k10s/tier` with `load_env`; with `tier=metal` it boots `/k10s/metal.elf` through Multiboot2
+(the kernel's own Multiboot2 entry turns GRUB's information into the same `start_info`), with `metal_cmdline` as the
+command line and as modules `k10s.conf`, `/k10s/bundle.k10b` and the key files `admin.key`, `cluster.key` and
+`cluster-next.key` of the partition's root (so on BIOS the key files must have these names, `k10s.conf` naming them
+`/boot/admin.key` and so on). GRUB checks no signature (nothing is verified on BIOS, GRUB included) and counts no
+boots (the kernel cannot reset a counter before it has a disk driver), and `tier=auto` boots Tier 1. If the native
+kernel cannot be loaded, GRUB goes on with Tier 1.
+
+**Without a disk image.** `/k10s/metal.elf`, signed, is still a PVH ELF: `qemu-system-x86_64 -kernel` boots it as it
+is (metal/README.md), and k10boot boots from QEMU's `-kernel` as well, finding the files on whichever volume has
+`/k10s/metal.elf`.
 
 ## Updates
 
@@ -334,7 +431,7 @@ them (rtl_nic, tigon, bnx2).
 ## Secure Boot
 
 The images are not signed for UEFI Secure Boot (docs/REPORT.md §9: k10s has no shim of its own signed by Microsoft),
-so firmware with Secure Boot on refuses their systemd-boot ("Access Denied", or a security violation screen). BIOS
+so firmware with Secure Boot on refuses their loader ("Access Denied", or a security violation screen). BIOS
 boots (the i686 image is BIOS-only) and the Raspberry Pi (its firmware has no Secure Boot) are not concerned; the armv7
 image is meant for firmware without Secure Boot (the own-keys flow below applies to it but is untested, and Debian
 ships no 32-bit ARM shim). Three ways to boot the images on UEFI, each tested under OVMF and AAVMF with Microsoft's
@@ -343,10 +440,10 @@ keys enrolled (`secureboot` in "Testing"):
 - **Secure Boot off**, in the firmware setup (often Security or Boot → Secure Boot → Disabled; "OS type: Other OS" on
   some boards; some laptops allow it only once a supervisor password is set). The enrolled keys stay, so switching it
   back on restores Secure Boot for other systems.
-- **Own keys**: your platform key (PK), KEK and db key enrolled next to Microsoft's; systemd-boot and every UKI signed
-  with your db key.
+- **Own keys**: your platform key (PK), KEK and db key enrolled next to Microsoft's; the loaders (k10boot and
+  systemd-boot on x86-64, systemd-boot on arm64) and every UKI signed with your db key.
 - **A MOK** (Machine Owner Key) under Debian's shim: the shim, signed by Microsoft's UEFI CA, boots wherever
-  Microsoft's third-party CA is enrolled, and trusts the keys in its MokList; systemd-boot and every UKI signed with
+  Microsoft's third-party CA is enrolled, and trusts the keys in its MokList; the loaders and every UKI signed with
   your MOK. For machines whose keys you cannot or do not want to replace.
 
 At boot init logs the firmware's state: `efi: Secure Boot on`, `off`, or `off (setup mode: no platform key)`. The
@@ -373,17 +470,19 @@ k10s image verify k10s-os-V-x86_64-metal.sb.efi --trust "$(k10s image pubkey os.
 `sbverify --cert CERT FILE` (sbsigntool) checks the Authenticode signature of the result too (exit status 0); it also
 tries to read the k10s entry as a signature and prints an error about it.
 
-A new machine: write the image to its disk, then on its `K10S-BOOT` (mounted on `/mnt`) sign systemd-boot once
-(updates never replace it), replace slot A and pin your image key:
+A new machine: write the image to its disk, then on its `K10S-BOOT` (mounted on `/mnt`) sign the loaders once
+(updates never replace them), replace slot A and pin your image key:
 
 ```bash
-sbctl sign /mnt/EFI/BOOT/BOOTX64.EFI                          # BOOTAA64.EFI on arm64; for a MOK see below
+sbctl sign /mnt/EFI/BOOT/BOOTX64.EFI                          # k10boot (on arm64 BOOTAA64.EFI: systemd-boot)
+sbctl sign /mnt/EFI/systemd/systemd-bootx64.efi               # x86-64: systemd-boot, which k10boot starts
 cp k10s-os-V-x86_64-metal.sb.efi /mnt/EFI/Linux/k10s-a.efi
 echo "os_key=$(k10s image pubkey os.key)" >> /mnt/k10s.conf
 ```
 
 A machine installed from an image older than U6 has systemd-boot 252, which does not reboot after a refused trial
-(below): copy `EFI/BOOT/BOOTX64.EFI` from a current image before signing it.
+(below), and one installed before k10boot (milestone M1) has systemd-boot as `EFI/BOOT/BOOTX64.EFI`: copy
+`EFI/BOOT/BOOTX64.EFI` and `EFI/systemd/` from a current image before signing them.
 
 Updates name the `.sb.efi` files in the `os` block. Init writes an image into its slot as it is, both signatures
 included. An image the firmware refuses (not signed for Secure Boot, or by a key it does not trust) cannot cost more
@@ -418,12 +517,13 @@ files under its `keys` directory: `openssl x509 -in db.pem -outform DER -out db.
 2. A MOK and its DER form for MokManager:
    `openssl req -new -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=k10s MOK/" -keyout mok.key -out mok.crt`,
    `openssl x509 -in mok.crt -outform DER -out mok.cer`.
-3. Sign systemd-boot and the UKIs with it (`sbsign --key mok.key --cert mok.crt`; the UKIs as above), and lay out
-   `K10S-BOOT` (arm64: `BOOTAA64.EFI`, `grubaa64.efi`, `mmaa64.efi`):
+3. Sign the loaders and the UKIs with it (`sbsign --key mok.key --cert mok.crt`; the UKIs as above), and lay out
+   `K10S-BOOT` (arm64: `BOOTAA64.EFI`, `grubaa64.efi` being systemd-boot, `mmaa64.efi`):
 
    ```
    /EFI/BOOT/BOOTX64.EFI   shimx64.efi.signed (the firmware starts the shim)
-   /EFI/BOOT/grubx64.efi   systemd-boot signed with the MOK (the shim starts grubx64.efi from its own directory)
+   /EFI/BOOT/grubx64.efi   k10boot signed with the MOK (the shim starts grubx64.efi from its own directory)
+   /EFI/systemd/systemd-bootx64.efi  systemd-boot signed with the MOK (k10boot starts it)
    /EFI/BOOT/mmx64.efi     mmx64.efi.signed (MokManager)
    /EFI/Linux/k10s-a.efi   the UKI signed with the MOK, then by k10s (above)
    /mok.cer                the MOK, for MokManager
@@ -434,8 +534,18 @@ files under its `keys` directory: `openssl x509 -in db.pem -outform DER -out db.
    `mok.cer`, "Continue", "Yes", "Reboot". `mokutil --import mok.cer` does the same from another Linux system booted
    on the machine (it asks for a one-time password, which MokManager asks for at the next boot).
 
-The shim then verifies systemd-boot, and systemd-boot each UKI through the shim (keys in the firmware's db count too).
-Updates are signed with the MOK as above.
+The shim then verifies k10boot, k10boot starts systemd-boot through LoadImage, which shim 16 takes over and verifies
+the same way, and systemd-boot each UKI through the shim (keys in the firmware's db count too). Updates are signed
+with the MOK as above.
+
+**The native kernel** ("Tiers") is verified by k10boot itself, so a Secure Boot machine keeps a verified chain on
+Tier 2 too: firmware (or shim) → k10boot, by your key → `/k10s/metal.elf`, by its k10s image signature. With Secure
+Boot on, k10boot trusts only the k10s release key and the keys built into it: `k10s.conf` is no signed file, so its
+`os_key` does not count for the kernel then (k10boot says so, and boots Tier 1 instead of a kernel signed by such a
+key). The released kernel needs nothing more. To boot native kernels of your own, build k10boot with your image keys,
+`K10BOOT_KEYS=keys.pub metal/build.sh` (hex public keys, one per line), and sign that `out/k10boot.efi` like the other
+loaders. What the kernel gets besides is configuration, read from `K10S-BOOT` unsigned as on Tier 1 (`k10s.conf`, its
+key files, the bundle, whose services are isolated like any applied ones).
 
 **On real machines.** Tested under OVMF and AAVMF only, with Debian's and Ubuntu's firmware builds whose variable
 store has Microsoft's KEK CA, Windows PCA and UEFI CA 2011 (Ubuntu's also the 2023 CAs), and keys written into it
@@ -451,8 +561,8 @@ expect:
   setup ("Allow Microsoft 3rd Party UEFI CA") for the shim, or use own keys.
 - **SBAT revocations.** The shim refuses components whose security generation was revoked in the `SbatLevel`
   variable (raised by newer shims and by Windows updates), and old shims are revoked through dbx updates: keep the
-  shim current from Debian's `shim-signed`. systemd-boot's generation (`systemd-boot,1` in its `.sbat`) is checked the
-  same way.
+  shim current from Debian's `shim-signed`. The loaders' generations (`systemd-boot,1` and `k10boot,1` in their
+  `.sbat` sections; shim starts no image without one) are checked the same way.
 - **Key sizes.** sbctl's keys are RSA-4096, which some older firmware is reported to reject; RSA-2048 (the MOK above)
   is the size every implementation takes. The tests use both.
 
@@ -460,9 +570,9 @@ expect:
 
 | Script | Does |
 |---|---|
-| `os/images.sh [--arch x86_64\|aarch64\|i686\|armv7] [OUT]` | the release images of the arch and their update files (above), `SHA256SUMS.os-ARCH`; fails when a compressed image exceeds its budget (`x86_64-vm` 5 MB, `x86_64-metal` 40 MB, `aarch64-vm` 6 MB, `aarch64-pi` 8 MB, `i686-metal` 40 MB, `armv7-vm` 6 MB). `K10S_BIN` picks the static k10s of the arch, `K10S_HOST_BIN` one the host runs to sign (default `K10S_BIN`), `K10S_IMAGE_KEY` the signing key file (default: a throwaway `target/os/image-test.key`, trusted only where pinned with `os_key`) |
+| `os/images.sh [--arch x86_64\|aarch64\|i686\|armv7] [OUT]` | the release images of the arch and their update files (above), `SHA256SUMS.os-ARCH`; fails when a compressed image exceeds its budget (`x86_64-vm` 5.5 MB, `x86_64-metal` 40 MB, `aarch64-vm` 6 MB, `aarch64-pi` 8 MB, `i686-metal` 40 MB, `armv7-vm` 6 MB). `K10S_BIN` picks the static k10s of the arch, `K10S_HOST_BIN` one the host runs to sign (default `K10S_BIN`), `K10S_IMAGE_KEY` the signing key file (default: a throwaway `target/os/image-test.key`, trusted only where pinned with `os_key`), `K10S_METAL_DIR` (x86-64) a directory with the native kernel and k10boot (the release's metal archive; default: `metal/build.sh` builds them), the kernel signed here as `k10s-os-V-x86_64-native.elf` |
 | `os/kbuild.sh [vm\|metal\|arm64\|i386\|armv7] [OUT]` | a k10s kernel, rootless; fails if a fragment option does not survive `olddefconfig`; reproducible build metadata; `metal` and `i386` also install the signed module tree with its `depmod` output, `arm64` builds `Image`, `Image.gz` and the Raspberry Pi devicetrees, `armv7` a `zImage` |
-| `os/mkimage.py OUT.img --kernel K --initrd I… --cmdline C --boot DIR [--arch x86_64\|aarch64\|i686\|armv7] [--pi --dtbs DIR] [--conf F] [--uki OUT] [--version V --sign KEY --k10s K10S --profile P]` | a disk image: GPT, GRUB patched into the MBR and `bios-boot` (x86-64, no `grub-install`), the UKI (systemd-stub plus sections, written by the script itself) signed with `k10s image sign` (unsigned without `--sign`: it boots but cannot update), the A/B slot layout; i686: the MBR BIOS image, GRUB's core.img before p1; `--pi`: the MBR Pi image with its signed slot image; FAT with mtools, ext4 with `mkfs.ext4`; no root, no loop devices |
+| `os/mkimage.py OUT.img --kernel K --initrd I… --cmdline C --boot DIR [--arch x86_64\|aarch64\|i686\|armv7] [--pi --dtbs DIR] [--conf F] [--uki OUT] [--version V --sign KEY --k10s K10S --profile P] [--k10boot EFI --metal ELF]` | a disk image: GPT, GRUB patched into the MBR and `bios-boot` (x86-64, no `grub-install`; with `multiboot2`), k10boot and the signed native kernel (x86-64, "Tiers"), the UKI (systemd-stub plus sections, written by the script itself) signed with `k10s image sign` (unsigned without `--sign`: it boots but cannot update), the A/B slot layout; i686: the MBR BIOS image, GRUB's core.img before p1; `--pi`: the MBR Pi image with its signed slot image; FAT with mtools, ext4 with `mkfs.ext4`; no root, no loop devices |
 | `os/bootfiles.sh [x86_64\|aarch64\|i686\|armv7\|shim-x86_64\|shim-aarch64]` | the pinned Debian packages, SHA-256 checked: GRUB (`i386-pc`, and the build host's `grub-mkimage`, amd64 or arm64) and systemd-boot (systemd-boot, systemd-stub) 262 for x86-64; GRUB and systemd-stub 262 (ia32) for i686; systemd-boot 262 for arm64 and armv7, and for arm64 the Raspberry Pi firmware (`raspi-firmware` 1.20260408); `shim-*`: Debian's shim 16.1 and MokManager ("Secure Boot"; not in the images) |
 | `os/firmware.sh` | the firmware archive (above) |
 | `os/debian-kernel.sh` | the pinned Debian 13 kernel (6.12, SHA-256 checked) with its module tree and `depmod` output |
@@ -504,6 +614,19 @@ kernels and images with the release's i686 and armv7 musl k10s.
 - **boottime**: QEMU start → first HTTP 200 from the node, `vm` image on SeaBIOS (GRUB, KVM, 512 MiB, fresh disk
   each time), median of 5 below 1 s (measured 0.50–0.54 s).
 - **repro**: the same image built twice is bit-identical, UKI included.
+- **tier**: the tiers of the `vm` image through k10boot ("Tiers"), on OVMF; every other UEFI test of the x86-64 images
+  boots Tier 1 through it (`tier=linux`), the A/B updates included. `tier=metal` on `pc` and on `q35` (with a VGA
+  device, whose GOP mode reaches the kernel): the native kernel gets `k10s.conf`, the admin and cluster keys from
+  `K10S-BOOT`, joins a cluster with a hosted `k10s node` on the host, serves the services applied through it on both
+  nodes, answers requests signed with the admin key of `k10s.conf`, and once healthy clears k10boot's boot counter.
+  `tier=auto`: a legacy virtio-net boots the native kernel, an e1000e alone Tier 1. A native kernel that fails (a bad
+  `metal_cmdline`, the machine reset after the error) boots twice, then Tier 1 serves; `/k10s/tier` written again gives
+  it new boots, which get healthy, and the next boot counts from zero. A kernel signed by an untrusted key, and one
+  changed after signing, are refused and Tier 1 serves. The signed kernel file boots as it is through PVH (`-kernel`,
+  SeaBIOS).
+- **mb2**: the `vm` image on SeaBIOS with `tier=metal`: GRUB boots the native kernel through Multiboot2 with its
+  `metal_cmdline`, `k10s.conf`, the deployment bundle (the release's `bundle.k10b`) and the key files as modules; the
+  bundle's services answer and so do requests signed with the admin key.
 - **update-bios, update-uefi**: a single-node cluster on the `vm` image applies a re-signed copy of it (another
   version, so another hash; the test signing key is pinned with `os_key`). On a fresh disk per step, the power is
   cut (QEMU killed within a millisecond of the console line) at every step: image verified, slot written, trial
@@ -548,9 +671,11 @@ kernels and images with the release's i686 and armv7 musl k10s.
   build with Secure Boot on and Microsoft's keys enrolled, each case on a fresh disk and a copy of its variable store
   (changed with `virt-fw-vars`, signed with `sbsign`, as "Secure Boot" describes). As released, the firmware refuses
   it ("Access Denied"). Secure Boot switched off (the setup's `SecureBootEnable`, keys kept): it serves. MOK: Debian's
-  Microsoft-signed shim as `BOOTX64.EFI`, systemd-boot and the UKI signed with a MOK that is in shim's MokList: it
-  serves with init logging `Secure Boot on`. Own keys (RSA-4096 PK, KEK and db enrolled next to Microsoft's,
-  systemd-boot and the UKI signed with the db key): it serves with Secure Boot on; as a single-node cluster it then
+  Microsoft-signed shim as `BOOTX64.EFI`, the loaders (k10boot as `grubx64.efi` and systemd-boot on x86-64) and the
+  UKI signed with a MOK that is in shim's MokList: it serves with init logging `Secure Boot on`. Own keys (RSA-4096
+  PK, KEK and db enrolled next to Microsoft's, the loaders and the UKI signed with the db key): on x86-64 with
+  `tier=metal` and a native kernel signed by an `os_key` of `k10s.conf` only, k10boot refuses the kernel and Tier 1
+  serves; with `tier=linux` it serves with Secure Boot on; as a single-node cluster it then
   installs an update signed the same way, which commits, and one signed only by k10s, which the firmware refuses on
   each of its 3 trial boots (systemd-boot reboots after each) before the committed slot comes back, records it as
   failed and the rollout stops.
@@ -593,7 +718,13 @@ and the CPU's speed with the interpreter, and boards with 1-4 GiB (HIGHMEM). For
 (the U6 exit criterion, both documented flows booting under OVMF with Microsoft's keys, holds in QEMU): real firmware
 setup screens (Secure Boot off, setup mode, enrolling keys from files), `sbctl enroll-keys` and `mokutil` on a
 running system, MokManager's screens, machines that ship the 2023 Microsoft CAs only or the third-party CA disabled,
-and firmware that rejects RSA-4096 keys ("Secure Boot").
+and firmware that rejects RSA-4096 keys ("Secure Boot"). For the tiers (STATUS step 13a, all of it holds under QEMU:
+OVMF `pc` and `q35`, SeaBIOS with GRUB, KVM and TCG): k10boot on real UEFI firmware (memory maps with hundreds of
+entries, firmware that uses the page at 0x8000 or the kernel's addresses at 1 MiB, load options of real boot entries,
+runtime services on SMM-protected flash, other CPUs left in x2APIC mode), the boot counter's variable writes on real
+flash, GRUB's Multiboot2 loading on a real BIOS, clouds (a Hetzner or Vultr VM with virtio: UEFI or BIOS; a
+DigitalOcean droplet: BIOS only, through GRUB and Multiboot2; they need modern virtio-net, the native kernel's driver
+of step 13b) and real machines (their NICs: steps 13c and M4).
 
 ## Limits
 
@@ -601,6 +732,8 @@ and firmware that rejects RSA-4096 keys ("Secure Boot").
 - A rollback is an update to the older image (signed images of any version install); the cluster key is the trust
   boundary for which signed image a cluster runs.
 - The images are not signed for Secure Boot: turn it off, or sign them with your own keys or a MOK ("Secure Boot").
+- The native kernel keeps its key-value store in memory until M2 (STATUS step 13d), so the images ship `tier=linux`;
+  on BIOS it boots only with `tier=metal`, without a signature check or boot counting ("Tiers").
 - The image uses 512-byte logical sectors; disks with 4 KiB logical sectors (rare outside servers) need a rebuilt
   image.
 - The arm64 image has the virtio drivers of VMs and the Pi's; arm64 servers need their NIC drivers added. The Pi

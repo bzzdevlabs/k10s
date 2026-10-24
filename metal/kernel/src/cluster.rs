@@ -3,9 +3,10 @@
 //!
 //! * **Membership**: the sans-IO `k10_mesh::Gossip` state machine over a smoltcp UDP socket (port 7946). Time is the
 //!   kernel's monotonic clock; datagrams and events come back as return values and are handled on the main loop.
-//! * **Authentication**: as hosted (`k10_mesh::secure`): the cluster key, and while rotating the next one, from QEMU
-//!   fw_cfg files `opt/k10s/cluster_key` / `opt/k10s/cluster_next_key` (`k10s keygen -o FILE`, passed with
-//!   `-fw_cfg name=opt/k10s/cluster_key,file=FILE`), or `k10.insecure_unauthenticated_cluster`.
+//! * **Authentication**: as hosted (`k10_mesh::secure`): the cluster key, and while rotating the next one, from the
+//!   key files of k10s.conf (`cluster-key-file`, `cluster-next-key-file`) that the boot loader hands over, or under
+//!   QEMU's `-kernel` from fw_cfg files `opt/k10s/cluster_key` / `opt/k10s/cluster_next_key` (`k10s keygen -o FILE`,
+//!   passed with `-fw_cfg name=opt/k10s/cluster_key,file=FILE`) (bootcfg.rs); or `k10.insecure_unauthenticated_cluster`.
 //! * **Peer links**: `k10_mesh::secure::Link` over smoltcp TCP (port 7947): `Auth` (with a key), then `Hello` in the
 //!   first sealed record, then requests multiplexed by id. A peer that has not completed the handshake within
 //!   [`HANDSHAKE_TIMEOUT_NS`] is dropped, and at most [`UNAUTH_LINKS_MAX`] accepted links may be in that state (the
@@ -31,8 +32,8 @@
 //! `k10.rpc=ADDR`, `k10.http=ADDR` (advertised addresses; default 127.0.0.1:7946/7947/80), `k10.node_id=HEX`
 //! (default random; reuse it to rejoin as the same member), `k10.probe_ms=N`, `k10.suspicion_mult=N`,
 //! `k10.mem=BYTES` (advertised capacity; default the free memory at boot), `k10.host_alias=IP` (10.0.2.2),
-//! `k10.insecure_unauthenticated_cluster` (no fw_cfg cluster key), `k10.gossip_max_skew_s=N` (300, at least 1).
-//! Any of `k10.join`, `k10.gossip` or `k10.cluster` turns cluster mode on.
+//! `k10.insecure_unauthenticated_cluster` (no cluster key), `k10.gossip_max_skew_s=N` (300, at least 1).
+//! Any of `k10.join`, `k10.gossip` or `k10.cluster` turns cluster mode on; k10s.conf sets them too (bootcfg.rs).
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::rc::Rc;
@@ -93,15 +94,17 @@ pub struct Config {
     pub max_skew_ms: u64,
 }
 
-/// Cluster configuration from the kernel command line and fw_cfg (`None`: single node); halts on a configuration
+/// Cluster configuration from the boot arguments and key files (`None`: single node); halts on a configuration
 /// error (no key and no insecure flag, a bad key file, no RDRAND for handshake nonces).
 pub fn config(bi: &BootInfo) -> Option<Config> {
     if !(bi.has_flag("k10.cluster") || bi.arg("k10.join").is_some() || bi.arg("k10.gossip").is_some()) {
         return None;
     }
     let fatal = |msg: &str| -> ! { crate::fatal(format_args!("cluster: {msg}")) };
-    let key = |name: &str| crate::fw_cfg::secret(name, ClusterKey::parse_hex).unwrap_or_else(|e| fatal(&e));
-    let (current, next) = (key("opt/k10s/cluster_key"), key("opt/k10s/cluster_next_key"));
+    use crate::bootcfg::{secret, Secret};
+    let key = |s: Secret| secret(bi, s, ClusterKey::parse_hex).unwrap_or_else(|e| fatal(&e));
+    let (current, next) = (key(Secret::Cluster), key(Secret::ClusterNext));
+    let (cur_src, next_src) = (Secret::Cluster.source(bi), Secret::ClusterNext.source(bi));
     let keys = match (current, next, bi.has_flag("k10.insecure_unauthenticated_cluster")) {
         (Some(c), n, false) => {
             if !crate::arch::has_rdrand() {
@@ -114,12 +117,12 @@ pub fn config(bi: &BootInfo) -> Option<Config> {
             None
         }
         (Some(_), _, true) => {
-            fatal("a cluster key (fw_cfg opt/k10s/cluster_key) and k10.insecure_unauthenticated_cluster exclude each other")
+            fatal(&alloc::format!("a cluster key ({cur_src}) and k10.insecure_unauthenticated_cluster exclude each other"))
         }
-        (None, Some(_), _) => fatal("fw_cfg opt/k10s/cluster_next_key without opt/k10s/cluster_key"),
+        (None, Some(_), _) => fatal(&alloc::format!("{next_src} without {cur_src}")),
         (None, None, false) => fatal(
-            "cluster mode needs a cluster key (`k10s keygen -o FILE`, then -fw_cfg name=opt/k10s/cluster_key,file=FILE), \
-             or k10.insecure_unauthenticated_cluster",
+            "cluster mode needs a cluster key (`k10s keygen -o FILE`, then cluster-key-file=/boot/FILE in k10s.conf, or \
+             -fw_cfg name=opt/k10s/cluster_key,file=FILE under QEMU's -kernel), or k10.insecure_unauthenticated_cluster",
         ),
     };
     let max_skew_s = match bi.arg("k10.gossip_max_skew_s") {

@@ -11,11 +11,13 @@
 #                   implements no seccomp; os-legacy runs the armv7 node's filter under a real kernel) and the timing
 #                   bounds
 #   campaign        chaos_short + soak_short_* on both backends (minutes long, noise-sensitive)
-#   metal-selftest  kernel self tests (k10.selftest) under QEMU/KVM on 1 and 4 CPUs
+#   metal-selftest  kernel self tests (k10.selftest) under QEMU/KVM on 1 and 4 CPUs; the boot protocol's unit tests
+#                   (metal/bootproto: k10s.conf, the tier file, boot counter, E820)
 #   metal           metal/test.sh end-to-end (TEST_PORT, default 18090)
 #   dist            the k10s integration tests against the static k10s of dist/ (K10S_BIN), both backends
 #   os              PID 1 mode under QEMU (os/test.sh): boot, apply, serve, power off on the Debian and k10s
-#                   kernels; DHCP renew, rebind and address change; the x86-64 images, A/B updates, rollout
+#                   kernels; DHCP renew, rebind and address change; the x86-64 images, A/B updates, rollout; the
+#                   tiers of the x86-64 image (k10boot: native kernel, Tier 1, auto, fallback, signatures; Multiboot2)
 #   os-arm64        os/test.sh --arch aarch64: the arm64 kernel, the aarch64-vm and Pi images (the Pi 3 on raspi3b),
 #                   their A/B updates, a Pi in a cluster with an x86-64 node (K10S_BIN, K10S_HOST_BIN as os/test.sh; on
 #                   an x86-64 host both are built here, the aarch64 one linked by rust-lld)
@@ -149,6 +151,7 @@ for suite in "$@"; do
     dist) dist ;;
     metal-selftest)
         run env -u CARGO_TARGET_DIR metal/build.sh
+        (cd metal && run env -u CARGO_TARGET_DIR cargo test --release --locked -p k10-bootproto)
         qemu_selftest 1
         qemu_selftest 4
         ;;

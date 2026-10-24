@@ -17,7 +17,8 @@ kube-proxy, sidecars, probes, and a control plane to manage it all. k10s isolate
   node computes on its own. Self-healing falls out of membership changes.
 - The same runtime also boots **as its own kernel** (`metal/`), with no Linux underneath, or as the only program
   (PID 1) of a minimal Linux image: disk images for VMs and PCs, BIOS and UEFI (Secure Boot with your own keys or a
-  MOK), which the cluster updates itself in waves with signed A/B images (`os/`, [docs/OS.md](docs/OS.md)).
+  MOK), which the cluster updates itself in waves with signed A/B images (`os/`, [docs/OS.md](docs/OS.md)). The
+  x86-64 images carry both: their loader boots the tier `/k10s/tier` names ([docs/OS.md](docs/OS.md#tiers)).
 
 Design rationale: [docs/DESIGN.md](docs/DESIGN.md) · evidence from the literature: [docs/research.md](docs/research.md)
 
@@ -97,10 +98,11 @@ is the release's version (e.g. `0.1.0`, or `0.1.1-dev.45`).
 | `k10s-V-aarch64-unknown-linux-musl.tar.gz` | `k10s` for arm64 Linux (CLI, node daemon, Ten compiler, AArch64 JIT), static |
 | `k10s-V-i686-unknown-linux-musl.tar.gz`, `k10s-V-armv7-unknown-linux-musleabihf.tar.gz` | `k10s` for 32-bit x86 (SSE2) and 32-bit ARM (hard-float) Linux, static, interpreter only; best effort (instances up to 256 MiB) |
 | `k10s-examples-V.tar.gz` | [examples/](examples/): Ten sources, the compiled `.k10` modules, `app.k10s` (`k10s apply app.k10s`) |
-| `k10s-metal-V-x86_64.tar.gz` | the bare-metal kernel ([metal/](metal/)): `k10-metal.elf`, `k10-metal-embedded.elf` (test bundle baked in), `bundle.k10b` (19 test services), `mkbundle` (static; pass `--ten-dir examples` or `--no-ten`), `examples/*.ten`, metal README |
-| `k10s-os-V-x86_64-vm.img.xz` | disk image (GPT, BIOS and UEFI) with `k10s` as PID 1 of the `vm` k10s kernel, for VMs and clouds ([docs/OS.md](docs/OS.md)); write it to a disk with `xz -dc … \| dd` |
+| `k10s-metal-V-x86_64.tar.gz` | the bare-metal kernel ([metal/](metal/)): `k10-metal.elf`, `k10-metal-embedded.elf` (test bundle baked in), `k10boot.efi` (its UEFI loader and tier selector), `bundle.k10b` (19 test services), `mkbundle` (static; pass `--ten-dir examples` or `--no-ten`), `examples/*.ten`, metal README |
+| `k10s-os-V-x86_64-vm.img.xz` | disk image (GPT, BIOS and UEFI) with `k10s` as PID 1 of the `vm` k10s kernel, for VMs and clouds ([docs/OS.md](docs/OS.md)), and the native kernel with k10boot (`/k10s/tier`, [docs/OS.md](docs/OS.md#tiers)); write it to a disk with `xz -dc … \| dd` |
 | `k10s-os-V-x86_64-metal.img.xz` | the same for PCs and servers: `metal` kernel, signed driver modules, NIC firmware (linux-firmware files under their own licences, in `/lib/firmware/LICENSES/`) |
 | `k10s-os-V-x86_64-{vm,metal}.efi` | the UKIs of the images (kernel, initramfs and command line in one EFI file), signed by the k10s release key: OS updates of running machines (`os` in `k10s apply`, [docs/OS.md](docs/OS.md#updates)), PXE or another UEFI loader |
+| `k10s-os-V-x86_64-native.elf` | the native kernel as the x86-64 images carry it (`/k10s/metal.elf`), signed by the k10s release key |
 | `k10s-os-V-aarch64-vm.img.xz`, `k10s-os-V-aarch64-vm.efi` | the arm64 disk image (GPT, UEFI) for VMs and clouds, and its signed UKI |
 | `k10s-os-V-aarch64-pi.img.xz`, `k10s-os-V-aarch64-pi.fat` | the Raspberry Pi 3/4/5 image (MBR, A/B boot partitions through the Pi firmware's `autoboot.txt` and tryboot; Pi firmware under its own licence), and its signed boot slot for OS updates |
 | `k10s-os-V-i686-metal.img.xz`, `k10s-os-V-i686-metal.efi` | best effort: the image for old PCs (MBR, BIOS, i686 with PAE and SSE2; signed driver modules, NIC firmware), and its signed slot image for OS updates |
@@ -149,7 +151,7 @@ Then set the next version (`scripts/set-version.sh X.Y.(Z+1)`, or a minor or maj
 | [crates/k10-jit](crates/k10-jit) | single-pass TIR → x86-64 and AArch64 compiler (the isolation boundary) |
 | [crates/k10-mesh](crates/k10-mesh) | gossip membership, manifests, bundles, placement, wire protocol |
 | [crates/k10-node](crates/k10-node), [crates/k10s](crates/k10s) | node runtime and the `k10s` binary (also PID 1 of a Linux image) |
-| [metal/](metal/) | the node as a bare-metal kernel (PVH, virtio-net, SMP, JIT, cluster member) |
+| [metal/](metal/) | the node as a bare-metal kernel (PVH, Multiboot2 and its UEFI loader k10boot, virtio-net, SMP, JIT, cluster member) |
 | [os/](os/) | the k10s Linux kernels (`vm`, `metal`), initramfs, firmware and disk image builders, PID 1 and image tests under QEMU ([docs/OS.md](docs/OS.md)) |
 | [examples/](examples/) | Ten services: hello, echo, compute (SHA-256), chain, counter, todo, nbody, sort |
 | [bench/](bench/) | Kubernetes / bare-process / k10s benchmark harness and results |

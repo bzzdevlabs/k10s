@@ -42,8 +42,17 @@ and, for the DHCP test, a host-side DHCP server on a QEMU socket netdev. os/test
   test.py secureboot --image IMG --uki EFI --image-key KEY --shim DIR --k10s K10S --examples DIR
       docs/OS.md "Secure Boot" under the firmware build with Microsoft's keys enrolled (OVMF/AAVMF .ms.fd), a fresh
       disk and variable store per case: the released image is refused; it serves with Secure Boot off, with a MOK under
-      Debian's shim (--shim: os/bootfiles.sh shim-ARCH) and with own keys; under own keys an update re-signed for
-      Secure Boot commits, and one signed by k10s only is refused by the firmware 3 times and rolled back.
+      Debian's shim (--shim: os/bootfiles.sh shim-ARCH) and with own keys (x86-64: k10boot in front of systemd-boot,
+      and a native kernel trusted through k10s.conf only is refused); under own keys an update re-signed for Secure
+      Boot commits, and one signed by k10s only is refused by the firmware 3 times and rolled back.
+  test.py tier --image IMG --image-key KEY --k10s K10S --examples DIR
+      The tiers of the x86-64 image through k10boot (docs/OS.md "Tiers"), OVMF: tier=metal on pc and q35 (the native
+      kernel, its k10s.conf and keys from K10S-BOOT, joins a hosted node on the host, serves, clears the boot counter),
+      tier=auto (legacy virtio-net: native; e1000e: Tier 1), a failing native kernel (2 boots, then Tier 1 until the
+      tier file is written again), kernels with an untrusted or broken signature refused, the signed kernel on PVH.
+  test.py mb2 --image IMG --image-key KEY --k10s K10S --examples DIR [--bundle K10B]
+      The x86-64 image on SeaBIOS with tier=metal: GRUB boots the native kernel through Multiboot2 with k10s.conf,
+      the bundle and the keys as modules; it serves.
 --arch aarch64 runs boot, image, update and secureboot on qemu-system-aarch64 (virt; UEFI: AAVMF); pi, pi3 and mixed
 are aarch64 only. --arch armv7 runs boot, image and update on qemu-system-arm (virt without highmem, Cortex-A15; UEFI:
 AAVMF32), --arch i686 on qemu-system-i386 (pc, an Atom N270; BIOS: SeaBIOS).
@@ -107,11 +116,11 @@ CPU = {"i686": "n270", "armv7": "cortex-a15"}
 EFI_ARCH = {"x86_64": "x64", "aarch64": "aa64", "i686": "ia32", "armv7": "arm"}
 
 
-def uefi_firmware(work):
-    """pflash arguments for OVMF/AAVMF (Secure Boot off) with a private copy of its variable store."""
+def uefi_firmware(work, name="OVMF_VARS"):
+    """pflash arguments for OVMF/AAVMF (Secure Boot off) with a private copy of its variable store, `name`.fd."""
     for code, vars_ in OVMF[ARCH]:
         if os.path.exists(code) and os.path.exists(vars_):
-            mine = os.path.join(work, "OVMF_VARS.fd")
+            mine = os.path.join(work, f"{name}.fd")
             shutil.copyfile(vars_, mine)
             return ["-drive", f"if=pflash,format=raw,readonly=on,file={code}", "-drive", f"if=pflash,format=raw,file={mine}"]
     sys.exit("test.py: UEFI firmware not found (package ovmf, qemu-efi-aarch64 or qemu-efi-arm)")
@@ -617,6 +626,8 @@ def image_test(a, work):
         g = Guest(work, f"image{run}", None, None, None,
                   fw + hw + ["-rtc", "base=2001-01-01T00:00:00", "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:80",
                              "-device", f"{nic},netdev=n0"])
+        if a.uefi and ARCH == "x86_64":
+            g.wait_for(r"k10boot: tier linux \(from /k10s/tier\)", "k10boot boots Tier 1")
         g.wait_for(r"k10s-init\[ *[\d.]+\]: k10s \S+ as PID 1", "init banner")
         if a.metal or ARCH == "i686":
             # The only NIC (e1000e, 8139too) and the watchdog (iTCO_wdt behind lpc_ich, i6300esb) are modules: the lease
@@ -1136,6 +1147,206 @@ def rollout_test(a, work):
     print(f"test.py: rollout: good image on all {n} nodes in waves {waves}", file=sys.stderr)
 
 
+TIER1_READY = r"ready: the node answers"
+METAL_READY = r"k10-metal ready [\d.]+ms"
+
+
+def tier_file(path, tier, cmdline=""):
+    """/k10s/tier as os/mkimage.py writes it: a GRUB environment block (k10-bootproto `tier`)."""
+    with open(path, "w") as f:
+        f.write(f"# GRUB Environment Block\ntier={tier}\nmetal_cmdline={cmdline}\n")
+    return path
+
+
+class TierDisks:
+    """Fresh copies of the x86-64 image with a tier, k10s.conf, the admin and cluster keys, the native kernel's
+    signing key pinned (os_key: in releases the image's kernel is signed by the release key, here maybe by the test
+    key) and more files on K10S-BOOT."""
+
+    def __init__(self, a, work):
+        self.a, self.work = a, work
+        self.key = keys(work, a.k10s)
+        self.pub = subprocess.run([a.k10s, "image", "pubkey", a.image_key], check=True, capture_output=True, text=True).stdout.strip()
+        self.kernel = os.path.join(work, "metal.elf")
+        mtools("mcopy", a.image, boot_offset(a.image), "-o", "::/k10s/metal.elf", self.kernel)
+
+    def disk(self, name, tier, cmdline="", conf=(), files=()):
+        d = os.path.join(self.work, f"{name}.img")
+        subprocess.run(["cp", "--sparse=always", self.a.image, d], check=True)
+        with open(d, "r+b") as f:
+            f.truncate(2 << 30)
+        configure(d, self.work, self.a.k10s, ["admin-token-file=/boot/admin.key", "ntp=none", f"os_key={self.pub}", *conf], name)
+        self.set_tier(d, tier, cmdline)
+        for src, dst in files:
+            mtools("mcopy", d, boot_offset(d), "-o", src, f"::/{dst}")
+        return d
+
+    def set_tier(self, d, tier, cmdline=""):
+        mtools("mcopy", d, boot_offset(d), "-o", tier_file(os.path.join(self.work, "tier"), tier, cmdline), "::/k10s/tier")
+
+    def power_on(self, name, d, machine="pc", nic="virtio-net-pci,disable-modern=on", fwd="", fw=None, port=None, extra=()):
+        """UEFI (OVMF, Secure Boot off) unless `fw` says otherwise ([] for SeaBIOS); HTTP forwarded from `port`."""
+        port = port or free_port()
+        fw = uefi_firmware(self.work, name) if fw is None else fw
+        g = Guest(self.work, name, None, None, None, fw + ["-M", machine, "-drive", f"file={d},if=virtio,format=raw",
+                  "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:80{fwd}", "-device", f"{nic},netdev=n0,romfile=", *extra])
+        g.port = port
+        return g
+
+    def sign(self, payload, name, key=None):
+        out = os.path.join(self.work, name)
+        subprocess.run([self.a.k10s, "image", "sign", "--key", key or self.a.image_key, "--arch", "x86_64", "--profile", "native",
+                        "--version", "test", payload, out], check=True, capture_output=True)
+        return out
+
+
+def until(what, check, log, limit=180):
+    end = time.time() + limit
+    while True:
+        try:
+            if check():
+                return
+        except OSError:
+            pass
+        if time.time() > end:
+            fail(what, log)
+        time.sleep(1)
+
+
+def tier_test(a, work):
+    """docs/OS.md "Tiers": the x86-64 image under OVMF through k10boot (its Tier 1 path, tier=linux, is what every
+    other UEFI test of the image boots). tier=metal on pc and q35: the native kernel gets k10s.conf and its key files
+    from K10S-BOOT, joins a cluster with a hosted node on the host and serves the cluster's services; once healthy it
+    clears k10boot's boot counter. tier=auto: a legacy virtio-net boots the native kernel, an e1000e alone Tier 1. A
+    kernel that fails its boots (a bad command line) is booted twice, then Tier 1 is pinned until /k10s/tier is
+    written again; the next healthy boots count from zero. Kernels signed by an untrusted key, or changed after
+    signing, are refused (Tier 1 boots). The signed kernel file also boots as it is through PVH (-kernel)."""
+    t = TierDisks(a, work)
+    clu = os.path.join(work, "cluster.key")
+    status = lambda port: subprocess.run([a.k10s, "status", "--node", f"127.0.0.1:{port}", "--admin-token-file", t.key],
+                                         capture_output=True, text=True).stdout
+    gp, rp, hp = free_port(socket.SOCK_DGRAM), free_port(), free_port()
+    host_log = os.path.join(work, "host.log")
+    host = subprocess.Popen([a.k10s, "node", "--name", "host", "--data", os.path.join(work, "host-data"), "--http", f"127.0.0.1:{hp}",
+                             "--gossip", f"127.0.0.1:{gp}", "--rpc", f"127.0.0.1:{rp}", "--advertise", "10.0.2.2",
+                             "--cluster-key-file", clu, "--admin-token-file", t.key, "--sandbox", "off"],
+                            stdout=open(host_log, "w"), stderr=subprocess.STDOUT)
+    try:
+        # q35 with a display: its GOP mode goes to the kernel too.
+        for machine, extra, fb in (("pc", (), ""), ("q35", ("-device", "VGA"), "k10s.framebuffer, ")):
+            vgp, vrp, vhp = free_port(socket.SOCK_DGRAM), free_port(), free_port()
+            d = t.disk(f"metal-{machine}", "metal", conf=["cluster-key-file=/boot/cluster.key", f"gossip=0.0.0.0:{vgp}", f"rpc=0.0.0.0:{vrp}",
+                                                       f"http=0.0.0.0:{vhp}", "advertise=127.0.0.1", f"join=10.0.2.2:{gp}"])
+            g = t.power_on(f"metal-{machine}", d, machine, fwd=f",hostfwd=udp:127.0.0.1:{vgp}-:7946,hostfwd=tcp:127.0.0.1:{vrp}-:7947",
+                           port=vhp, extra=extra)
+            g.wait_for(r"k10boot: tier metal \(from /k10s/tier\)", "k10boot reads /k10s/tier")
+            g.wait_for(r"k10boot: native boot 1 of 2 before Tier 1 is pinned", "the boot counted")
+            g.wait_for(rf"k10-metal: boot loader modules: k10s.conf, {fb}k10s.efi, /boot/admin.key, /boot/cluster.key; ACPI RSDP at 0x[1-9a-f]",
+                       "modules from K10S-BOOT")
+            g.wait_for(METAL_READY, "native kernel ready")
+            if machine == "pc":
+                until("the native kernel did not join the hosted node", lambda: "members: 2 live" in status(hp), g.log)
+                apply(a, t.key, hp, os.path.join(a.examples, "app.k10s"))
+            # The services of the cluster, through both nodes (the q35 guest has to fetch them from the cluster).
+            until("the services do not answer on both nodes",
+                  lambda: [http(p, "/hello/") for p in (hp, g.port)] == [(200, "hello")] * 2 and http(g.port, "/counter/")[0] == 200, g.log)
+            if "k10-metal" not in status(g.port):
+                fail("the native kernel does not answer requests signed with the admin key of k10s.conf", g.log)
+            g.wait_for(r"efi: healthy: k10boot's boot counter cleared", "boot counter cleared", timeout=240)
+            g.kill()
+            print(f"test.py: tier: metal on {machine}: joins the hosted node, serves, clears the boot counter: ok", file=sys.stderr)
+    finally:
+        host.kill()
+
+    d = t.disk("auto-virtio", "auto")
+    g = t.power_on("auto-virtio", d, "pc")
+    g.wait_for(r"k10boot: tier auto: virtio-net \(legacy\) 1af4:1000 at \S+ is supported: native kernel", "auto: native")
+    g.wait_for(METAL_READY, "native kernel ready")
+    until("GET /_k10s/health", lambda: http(g.port, "/_k10s/health")[0] == 200, g.log)
+    g.kill()
+    d = t.disk("auto-e1000e", "auto")
+    g = t.power_on("auto-e1000e", d, "q35", "e1000e")
+    g.wait_for(r"k10boot: tier auto: no supported network adapter \(8086:10d3 at \S+\): linux", "auto: linux")
+    g.wait_for(TIER1_READY, "Tier 1 ready")
+    g.kill()
+    print("test.py: tier: auto: native with a legacy virtio-net, Tier 1 with an e1000e: ok", file=sys.stderr)
+
+    d = t.disk("fallback", "metal", "k10.engine=bogus")
+    fw = uefi_firmware(work, "fallback")
+    for n in (1, 2):
+        g = t.power_on(f"fallback{n}", d, fw=fw)
+        g.wait_for(rf"k10boot: native boot {n} of 2 before Tier 1 is pinned", f"native boot {n} counted")
+        g.wait_for(r"k10-metal: k10.engine=bogus: want jit\|interp", "the kernel fails")
+        g.kill()
+    g = t.power_on("fallback3", d, fw=fw)
+    g.wait_for(r"k10boot: native kernel not booted: pinned to Tier 1: the last 2 boots of this kernel never got healthy", "pinned")
+    g.wait_for(TIER1_READY, "Tier 1 ready")
+    g.kill()
+    # Written again (another modification time): tried again; healthy, so the next boot counts from zero again.
+    time.sleep(2)
+    t.set_tier(d, "metal")
+    for n in (1, 2):
+        g = t.power_on(f"retry{n}", d, fw=fw)
+        g.wait_for(r"k10boot: native boot 1 of 2 before Tier 1 is pinned", "native boot counted from zero")
+        g.wait_for(METAL_READY, "native kernel ready")
+        until("GET /_k10s/health", lambda: http(g.port, "/_k10s/health")[0] == 200, g.log)
+        g.wait_for(r"efi: healthy: k10boot's boot counter cleared", "boot counter cleared", timeout=240)
+        g.kill()
+    print("test.py: tier: a failing native kernel: 2 boots, then Tier 1 until the tier file is written again: ok", file=sys.stderr)
+
+    payload = unsigned_payload(open(t.kernel, "rb").read())
+    raw = os.path.join(work, "metal.payload")
+    open(raw, "wb").write(payload)
+    other = os.path.join(work, "other.key")
+    if not os.path.exists(other):
+        subprocess.run([a.k10s, "keygen", "-o", other], check=True, capture_output=True)
+    changed = bytearray(open(t.kernel, "rb").read())
+    changed[0x3000] ^= 1
+    open(os.path.join(work, "changed.elf"), "wb").write(changed)
+    for name, kernel, why in (("untrusted", t.sign(raw, "untrusted.elf", other), "image signed by an untrusted key"),
+                              ("changed", os.path.join(work, "changed.elf"), "the image payload does not match its signed hash")):
+        d = t.disk(name, "metal", files=[(kernel, "k10s/metal.elf")])
+        g = t.power_on(name, d)
+        g.wait_for(rf"k10boot: native kernel not booted: /k10s/metal.elf refused: {why}", f"{name} kernel refused")
+        g.wait_for(TIER1_READY, "Tier 1 ready")
+        g.kill()
+    print("test.py: tier: kernels signed by an untrusted key or changed after signing are refused: ok", file=sys.stderr)
+
+    port = free_port()
+    g = Guest(work, "pvh", None, None, None, ["-kernel", t.kernel, "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:80",
+                                             "-device", "virtio-net-pci,disable-modern=on,netdev=n0,romfile="])
+    g.wait_for(METAL_READY, "native kernel ready (PVH)")
+    until("GET /_k10s/health", lambda: http(port, "/_k10s/health")[0] == 200, g.log)
+    g.kill()
+    print("test.py: tier: the signed kernel file boots through PVH (-kernel): ok", file=sys.stderr)
+
+
+def mb2_test(a, work):
+    """BIOS: SeaBIOS boots the x86-64 image's GRUB, which loads the native kernel through Multiboot2 since /k10s/tier
+    says tier=metal, with its command line, k10s.conf, the bundle (--bundle) and the key files of K10S-BOOT as
+    modules: the bundle's services answer (else an applied app's), and requests signed with the admin key of k10s.conf."""
+    t = TierDisks(a, work)
+    files = [(a.bundle, "k10s/bundle.k10b")] if a.bundle else []
+    d = t.disk("mb2", "metal", "k10.verbose", files=files)
+    g = t.power_on("mb2", d, fw=[])
+    m = g.wait_for(r"k10-metal: boot loader modules: ([^;]*); ACPI RSDP at (0x[0-9a-f]+)", "modules from GRUB")
+    want = "k10s.conf, " + ("k10s.bundle, " if a.bundle else "") + "/boot/admin.key, /boot/cluster.key"
+    if m.group(1) != want or int(m.group(2), 16) == 0:
+        fail(f"modules {m.group(1)!r}, RSDP {m.group(2)}: want {want!r} and an RSDP", g.log)
+    g.wait_for(r'cmdline "k10.verbose"', "the command line of /k10s/tier")
+    m = g.wait_for(METAL_READY + r" vm->kmain=\S+ svc=(\d+) src=(\w+)", "native kernel ready")
+    if a.bundle and (m.group(2) != "loader" or m.group(1) == "0"):
+        fail(f"the bundle module was not applied: {m.group(0)}", g.log)
+    if not a.bundle:
+        apply(a, t.key, g.port, os.path.join(a.examples, "app.k10s"))
+    until("GET /hello/", lambda: http(g.port, "/hello/")[0] == 200, g.log)
+    status = subprocess.run([a.k10s, "status", "--node", f"127.0.0.1:{g.port}", "--admin-token-file", t.key], capture_output=True, text=True)
+    if "k10-metal" not in status.stdout:
+        fail(f"a request signed with the admin key of k10s.conf: {status.stdout} {status.stderr}", g.log)
+    g.kill()
+    print("test.py: mb2: SeaBIOS, GRUB, Multiboot2: the native kernel serves: ok", file=sys.stderr)
+
+
 # OVMF and AAVMF with Secure Boot on and Microsoft's keys enrolled (Debian and Ubuntu name them .ms.fd).
 MS_FIRMWARE = {"x86_64": ("/usr/share/OVMF/OVMF_CODE_4M.ms.fd", "/usr/share/OVMF/OVMF_VARS_4M.ms.fd"),
                "aarch64": ("/usr/share/AAVMF/AAVMF_CODE.ms.fd", "/usr/share/AAVMF/AAVMF_VARS.ms.fd")}
@@ -1158,12 +1369,16 @@ def ms_firmware(work, name, *edits):
 
 def secureboot_test(a, work):
     """docs/OS.md "Secure Boot", under the Microsoft-key firmware: the image as released is refused; with Secure Boot
-    turned off it serves; with own keys (PK, KEK, db enrolled next to Microsoft's, systemd-boot and the UKI signed with
-    the db key) and with a MOK (Debian's Microsoft-signed shim, systemd-boot and the UKI signed with the MOK) it serves
-    with Secure Boot on. Under own keys, an update re-signed the same way commits, and one not signed for Secure Boot is
-    refused by the firmware and rolled back by boot counting."""
+    turned off it serves; with own keys (PK, KEK, db enrolled next to Microsoft's, the loaders and the UKI signed with
+    the db key) and with a MOK (Debian's Microsoft-signed shim, the loaders and the UKI signed with the MOK) it serves
+    with Secure Boot on. The loaders: systemd-boot, and on x86-64 k10boot in front of it, which chain-loads it through
+    the firmware (or shim) and refuses a native kernel signed by an os_key of k10s.conf only. Under own keys, an update
+    re-signed the same way commits, and one not signed for Secure Boot is refused by the firmware and rolled back by boot
+    counting."""
     efi = "x64" if ARCH == "x86_64" else "aa64"
     loader = f"EFI/BOOT/BOOT{efi.upper()}.EFI"
+    # x86-64: k10boot is the firmware's loader, systemd-boot its Tier 1 (os/mkimage.py).
+    sd_path = "EFI/systemd/systemd-bootx64.efi" if ARCH == "x86_64" else loader
     key = keys(work, a.k10s)
     pub = subprocess.run([a.k10s, "image", "pubkey", a.image_key], check=True, capture_output=True, text=True).stdout.strip()
     run_ = lambda *cmd: subprocess.run([tool(cmd[0]), *cmd[1:]], check=True, capture_output=True)
@@ -1225,9 +1440,19 @@ def secureboot_test(a, work):
     payload = os.path.join(work, "payload.efi")
     run_(a.k10s, "image", "payload", a.uki, payload)
     sd = os.path.join(work, "systemd-boot.efi")
-    mtools("mcopy", a.image, 2 << 20, "-o", f"::/{loader}", sd)
+    mtools("mcopy", a.image, 2 << 20, "-o", f"::/{sd_path}", sd)
+    k10boot = os.path.join(work, "k10boot.efi")
+    if ARCH == "x86_64":
+        mtools("mcopy", a.image, 2 << 20, "-o", f"::/{loader}", k10boot)
 
-    # As released: neither systemd-boot nor the UKI is signed for Secure Boot, and the firmware refuses to start it.
+    def loaders(k, c, name):
+        """The image's loaders signed with key `k`: [(file, path on K10S-BOOT)]: systemd-boot, and k10boot on x86-64."""
+        signed = [(sbsign(k, c, sd, f"systemd-boot.{name}.efi"), sd_path)]
+        if ARCH == "x86_64":
+            signed.append((sbsign(k, c, k10boot, f"k10boot.{name}.efi"), loader))
+        return signed
+
+    # As released: neither the loaders nor the UKI are signed for Secure Boot, and the firmware refuses to start them.
     g = power_on("refused", disk("refused"), ms_firmware(work, "refused"))
     g.wait_for(r"Access Denied", "the firmware's refusal")
     time.sleep(2)
@@ -1242,30 +1467,49 @@ def secureboot_test(a, work):
     serve_and_stop(g)
     print("test.py: secureboot: Secure Boot turned off: serves: ok", file=sys.stderr)
 
-    # MOK: Debian's shim (signed by Microsoft's UEFI CA) starts systemd-boot as grubX.efi; both it and the UKI are
-    # signed with the MOK, which is in shim's MokList (as MokManager's "Enroll key from disk" leaves it).
+    # MOK: Debian's shim (signed by Microsoft's UEFI CA) starts the image's first loader as grubX.efi (on x86-64
+    # k10boot, which starts systemd-boot through shim's LoadImage); they and the UKI are signed with the MOK, which is
+    # in shim's MokList (as MokManager's "Enroll key from disk" leaves it).
     mok_key, mok_crt = cert("MOK", 2048)
     mok_cer = os.path.join(work, "mok.cer")
     run_("openssl", "x509", "-in", mok_crt, "-outform", "DER", "-out", mok_cer)
     shim = os.path.join(a.shim, "usr/lib/shim")
     mok_a, _ = os_image(sbsign(mok_key, mok_crt, payload, "mok-a.efi"), "test-mok-a")
+    mok_loaders = [(f, f"EFI/BOOT/grub{efi}.efi" if p == loader else p) for f, p in loaders(mok_key, mok_crt, "mok")]
     d = disk("mok", [(os.path.join(shim, f"shim{efi}.efi.signed"), loader), (os.path.join(shim, f"mm{efi}.efi.signed"), f"EFI/BOOT/mm{efi}.efi"),
-                     (sbsign(mok_key, mok_crt, sd, "systemd-boot.mok.efi"), f"EFI/BOOT/grub{efi}.efi"), (mok_cer, "mok.cer"),
-                     (mok_a, "EFI/Linux/k10s-a.efi")], [f"os_key={pub}"])
+                     *mok_loaders, (mok_cer, "mok.cer"), (mok_a, "EFI/Linux/k10s-a.efi")], [f"os_key={pub}"])
     g = power_on("mok", d, ms_firmware(work, "mok", "--add-mok", OWNER, mok_crt))
     serves(g, "on")
     serve_and_stop(g)
     print("test.py: secureboot: MOK under Debian's shim: serves with Secure Boot on: ok", file=sys.stderr)
 
     # Own keys enrolled next to Microsoft's (what `sbctl enroll-keys --microsoft` writes in setup mode; RSA-4096 like
-    # sbctl's), systemd-boot and the UKI signed with the db key, then the UKI with the operator's image key.
+    # sbctl's), the loaders and the UKI signed with the db key, then the UKI with the operator's image key.
     (_, pk), (_, kek), (db_key, db) = cert("PK", 4096), cert("KEK", 4096), cert("db", 4096)
+    own_keys = ("--set-pk", OWNER, pk, "--add-kek", OWNER, kek, "--add-db", OWNER, db)
+    own_loaders = loaders(db_key, db, "own")
     own_a, own_a_id = os_image(sbsign(db_key, db, payload, "own-a.efi"), "test-own-a")
     own_b, own_b_id = os_image(sbsign(db_key, db, payload, "own-b.efi"), "test-own-b")
     unsigned, unsigned_id = os_image(payload, "test-unsigned")
-    d = disk("own", [(sbsign(db_key, db, sd, "systemd-boot.own.efi"), loader), (own_a, "EFI/Linux/k10s-a.efi")],
+    if ARCH == "x86_64":
+        # tier=metal with a native kernel signed by the operator's image key: k10s.conf is not signed, so with Secure
+        # Boot on k10boot does not take its os_key and boots Tier 1 instead.
+        native = os.path.join(work, "native.elf")
+        mtools("mcopy", a.image, 2 << 20, "-o", "::/k10s/metal.elf", native)
+        open(os.path.join(work, "native.payload"), "wb").write(unsigned_payload(open(native, "rb").read()))
+        run_(a.k10s, "image", "sign", "--key", a.image_key, "--arch", "x86_64", "--profile", "native", "--version", "test",
+             os.path.join(work, "native.payload"), os.path.join(work, "native.os-key.elf"))
+        d = disk("own-metal", [*own_loaders, (own_a, "EFI/Linux/k10s-a.efi"), (os.path.join(work, "native.os-key.elf"), "k10s/metal.elf"),
+                               (tier_file(os.path.join(work, "tier"), "metal"), "k10s/tier")], [f"os_key={pub}"])
+        g = power_on("own-metal", d, ms_firmware(work, "own-metal", *own_keys))
+        g.wait_for(r"k10boot: Secure Boot is on: the os_key of k10s.conf is not trusted for the kernel", "os_key ignored")
+        g.wait_for(r"k10boot: native kernel not booted: /k10s/metal.elf refused: image signed by an untrusted key", "kernel refused")
+        serves(g, "on")
+        g.kill()
+        print("test.py: secureboot: own keys: a native kernel signed by an os_key only is refused, Tier 1 serves: ok", file=sys.stderr)
+    d = disk("own", [*own_loaders, (own_a, "EFI/Linux/k10s-a.efi")],
              ["cluster-key-file=/boot/cluster.key", "gossip=0.0.0.0:7946", "watchdog=1", f"os_key={pub}", "os-commit-grace=3"])
-    g = power_on("own", d, ms_firmware(work, "own", "--set-pk", OWNER, pk, "--add-kek", OWNER, kek, "--add-db", OWNER, db))
+    g = power_on("own", d, ms_firmware(work, "own", *own_keys))
     m = serves(g, "on")
     if (m.group(1), m.group(2), m.group(3)) != ("a", own_a_id[:8], None):
         fail(f"first boot: {m.group(0)}", g.log)
@@ -1312,7 +1556,7 @@ def main():
     ap = argparse.ArgumentParser()
     tests = {"boot": boot_test, "dhcp": dhcp_test, "image": image_test, "unsigned": unsigned_test, "boottime": boottime_test,
              "update": update_test, "rollout": rollout_test, "pi": pi_test, "pi3": pi3_test, "mixed": mixed_test,
-             "secureboot": secureboot_test}
+             "secureboot": secureboot_test, "tier": tier_test, "mb2": mb2_test}
     ap.add_argument("test", choices=tests)
     ap.add_argument("--arch", choices=["x86_64", "aarch64", "i686", "armv7"], default="x86_64")
     ap.add_argument("--host-k10s")
@@ -1328,6 +1572,7 @@ def main():
     ap.add_argument("--uki")
     ap.add_argument("--image-key")
     ap.add_argument("--shim")
+    ap.add_argument("--bundle")
     ap.add_argument("--boot")
     ap.add_argument("--nodes", type=int, default=20)
     ap.add_argument("--k10s")

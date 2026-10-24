@@ -6,8 +6,10 @@ control flow, and a closed host API. So the kernel needs no processes, no system
 and no per-workload page tables. It runs one identity-mapped address space on one or more cores (`-smp N`, up to 8),
 with a timer, a NIC and a serial console.
 
-It boots in QEMU/KVM with `-kernel`, deploys a `k10_mesh::Bundle` (manifest + TIR blobs) and serves HTTP/1.1 on
-port 80 with the same routing and host API as the hosted node (docs/NODE.md, docs/HOSTAPI.md). Services run as
+It boots in QEMU/KVM with `-kernel` (PVH), and from the x86-64 disk images of `os/` through its UEFI loader k10boot
+or through GRUB and Multiboot2 on BIOS ("Booting"; docs/OS.md, "Tiers"). It deploys a `k10_mesh::Bundle` (manifest +
+TIR blobs) and serves HTTP/1.1 on port 80 with the same routing and host API as the hosted node (docs/NODE.md,
+docs/HOSTAPI.md). Services run as
 machine code from `k10-jit` (the default) or on the `k10-ir` interpreter. With `k10.join=…` the guest joins a k10s
 cluster as a full member next to Linux-hosted `k10s node` processes: gossip membership, desired state fetched from
 peers, the same placement, forwarding both ways.
@@ -16,8 +18,8 @@ Measurements: [RESULTS.md](RESULTS.md).
 ## Quick start
 
 ```sh
-./build.sh                 # out/k10-metal.elf (kernel), out/bundle.k10b (19 test services, 4 of them compiled from
-                           # ../examples/*.ten); EMBED=1 also bakes the bundle in
+./build.sh                 # out/k10-metal.elf (kernel), out/k10boot.efi (UEFI loader), out/bundle.k10b (19 test
+                           # services, 4 of them compiled from ../examples/*.ten); EMBED=1 also bakes the bundle in
 k10s keygen -o admin.key   # admin key (mode 0600); without one the admin API serves only /_k10s/health
 ADMIN_KEY=admin.key ./run.sh # QEMU/KVM, serial on stdout, host 127.0.0.1:8090 -> guest :80 (PORT=, MEM=, BIOS=);
                            # the key goes in as fw_cfg opt/k10s/admin_key, never on the kernel command line
@@ -52,8 +54,12 @@ Cluster mode: `k10.join=HOST:PORT[,…]`, `k10.gossip=`, `k10.rpc=`, `k10.http=`
 is given. An invalid `k10.spin_us`, `k10.engine`, `k10.smp`, `k10.jit_indirect`, `k10.timer_res_us` or
 `k10.gossip_max_skew_s` value stops the boot.
 
-Secrets never go on the kernel command line (the host shows it in its process list): they are QEMU fw_cfg files,
-`-fw_cfg name=opt/k10s/<name>,file=FILE` (run.sh: `ADMIN_KEY=`, `CLUSTER_KEY=`, `CLUSTER_NEXT_KEY=`), each created
+Booted by k10boot or GRUB, the kernel also takes these from `k10s.conf` on the disk's `K10S-BOOT` ("Booting").
+
+Secrets never go on the kernel command line (the host shows it in its process list). From a disk image they are the
+key files that `k10s.conf` names (`admin-token-file=/boot/admin.key`, `cluster-key-file=`, `cluster-next-key-file=`),
+which the loader hands over as modules; under QEMU's `-kernel` they are fw_cfg files,
+`-fw_cfg name=opt/k10s/<name>,file=FILE` (run.sh: `ADMIN_KEY=`, `CLUSTER_KEY=`, `CLUSTER_NEXT_KEY=`). Each is created
 with `k10s keygen -o FILE` (mode 0600). The kernel wipes the raw bytes after parsing; a malformed file stops the boot.
 * `opt/k10s/admin_key`: the admin key (needs RDRAND, for the per-boot audience). Without it the admin API serves only
   `/_k10s/health` (403 otherwise).
@@ -61,24 +67,26 @@ with `k10s keygen -o FILE` (mode 0600). The kernel wipes the raw bytes after par
   RDRAND) unless `k10.insecure_unauthenticated_cluster`.
 * `opt/k10s/cluster_next_key`: the next cluster key while rotating (`--cluster-next-key-file` on hosted nodes).
 
-The deployment bundle comes from QEMU's `-initrd` (PVH module 0). If there is none, the kernel uses the bundle
-baked in at build time (`K10_EMBED_BUNDLE=path`). If neither exists, the node starts empty and waits for
-`POST /_k10s/apply`.
+The deployment bundle comes from QEMU's `-initrd` (PVH module 0), or from the loader (`/k10s/bundle.k10b` on
+`K10S-BOOT`). If there is none, the kernel uses the bundle baked in at build time (`K10_EMBED_BUNDLE=path`). If neither
+exists, the node starts empty and waits for `POST /_k10s/apply` (or, in a cluster, takes the cluster's desired state).
 
 ## Layout
 
 ```
 metal/                    its own cargo workspace (own target dir); path-depends on ../crates/k10-ir, k10-mesh, k10-jit
                           (kernel) and k10-lang (mkbundle)
-  kernel/                 the kernel (x86_64-unknown-none, no_std + alloc), ~8.3k lines incl. comments and self tests
+  kernel/                 the kernel (x86_64-unknown-none, no_std + alloc), ~9.5k lines incl. comments and self tests
     linker.ld, build.rs   linked at 1 MiB, non-PIE (.cargo/config.toml), optional embedded bundle
-    src/boot.rs           PVH ELF note + 32-bit entry → page tables → long mode → kmain
+    src/boot.rs           PVH ELF note + 32-bit entry → page tables → long mode → kmain; Multiboot2 header and shim
     src/arch/             port I/O, MSRs, per-CPU GDT+TSS (IST for #DF), IDT + asm entry stubs, local APIC timer
                           and IPIs, paging.rs (NX, W^X for the kernel image and JIT code, TLB generations)
     src/percpu.rs         per-CPU state through the GS base (preemption request, idle flag, load, counters)
     src/smp.rs            application processors: real-mode trampoline, INIT-SIPI-SIPI, AP entry
-    src/pvh.rs            hvm_start_info: E820 map, command line, modules
-    src/fw_cfg.rs         QEMU fw_cfg over I/O ports: CPU count, named files (secrets: cluster and admin keys)
+    src/pvh.rs            hvm_start_info: E820 map (merged), command line, RSDP, named modules
+    src/bootcfg.rs        k10s.conf → boot arguments, key files and the bundle from the loader's modules
+    src/efi.rs            UEFI runtime services: clears k10boot's boot counter once the node is healthy
+    src/fw_cfg.rs         QEMU fw_cfg over I/O ports: CPU count, named files (secrets under -kernel)
     src/mem/              frame allocator (bitmap), kernel heap, instance slots
     src/time.rs           TSC clock (kvmclock / CPUID 0x15 / PIT), wall clock (kvmclock resync), guest clock, preemption flag
                           + JIT preemption word
@@ -91,6 +99,12 @@ metal/                    its own cargo workspace (own target dir); path-depends
     src/runtime/          services, instances, per-CPU schedulers + dispatch, host API, admin API; engine.rs (engine seam),
                           jit.rs (k10-jit: code memory, VmCtx, host thunks, interrupt hook)
     src/selftest.rs       in-kernel tests (k10.selftest)
+  boot/                   k10boot, the UEFI loader and tier selector (x86_64-unknown-uefi): efi.rs (the UEFI
+                          interfaces it uses, by hand), main.rs (tier, PCI scan, chain-load of systemd-boot),
+                          native.rs (signature, ELF, start_info, modules, boot counter, ExitBootServices, jump)
+  bootproto/              k10-bootproto (no_std, host unit tests): what k10boot, the Multiboot2 shim and the kernel
+                          agree on: module names, framebuffer and EFI records, k10s.conf, the tier file, the boot
+                          counter, E820; devices.rs, the supported-device table
   mkbundle/               host tool: test services built with k10_ir::builder and compiled from Ten → Bundle
   tools/                  boottime.py, measure.py, cluster_measure.py, linux-guest (comparison /init),
                           mkinitramfs.py, linux-compare.sh, admin_auth.py (signs admin requests for curl)
@@ -113,6 +127,44 @@ the a.out kludge with a flat binary. And PVH is also what Firecracker and Cloud 
 
 The image works with SeaBIOS (QEMU's default) and with qboot (`BIOS=/usr/share/qemu/qboot.rom`, faster). qboot
 leaves PCI BARs unprogrammed, so the PCI code assigns them itself.
+
+**Booting from a disk (k10boot, Multiboot2).** The x86-64 images of `os/` carry the kernel as `/k10s/metal.elf` on
+their `K10S-BOOT` partition, signed as a k10s image (`k10s image sign --profile native`: the ELF followed by its
+trailer, which ELF loaders ignore), and `/k10s/tier` says which tier boots (docs/OS.md, "Tiers"). PVH stays the one
+entry interface; two loaders build its `start_info`:
+* **k10boot** (`boot/`, UEFI, `\EFI\BOOT\BOOTX64.EFI`; with an SBAT section, so that shim starts it under Secure
+  Boot) verifies the signature (the release key and keys built in
+  with `K10BOOT_KEYS`, plus `os_key` of k10s.conf when Secure Boot is off), allocates the segments' physical range
+  (`AllocatePages` at 1 MiB) and copies them, takes the firmware's memory map as E820 entries (merged), the ACPI
+  RSDP from the configuration table, the command line from its load options or `metal_cmdline` of `/k10s/tier`, and
+  reserves page 0x8000 (the application processors' trampoline, smp.rs; a firmware that keeps it is refused). Then
+  `ExitBootServices` (the memory map taken again when its key went stale) and a stub copied below 4 GiB: off with
+  CR4.PCIDE, a 32-bit code segment, paging and long mode off, CR4 cleared, `ebx` = `start_info`, jump to `_pvh_start`.
+* **GRUB** on BIOS (`multiboot2` in the images' `grub.cfg` when `tier=metal`): the Multiboot2 header (in the first
+  32 KiB of the file) asks for the command line, the modules (page-aligned), the memory map and the RSDP and makes
+  `_mb2_start` the entry. That 32-bit shim converts GRUB's information into a `start_info` in `.mb2`, a section past
+  `.bss` that `_pvh_start` does not clear (memory map entries copied, the RSDP copied out of GRUB's information,
+  which becomes RAM), then jumps to `_pvh_start`.
+
+Loaders name their PVH modules (`hvm_modlist_entry.cmdline_paddr`; `bootproto/src/lib.rs`): `k10s.bundle` (an unnamed
+module is QEMU's `-initrd`), `k10s.conf`, a key file under the path k10s.conf gives it (`/boot/admin.key`),
+`k10s.framebuffer` (the GOP mode: base, size, resolution, stride, pixel format) and `k10s.efi` (the UEFI system
+table, runtime services and their memory regions). Booted by a loader, the kernel takes secrets only from modules,
+never from fw_cfg (whose I/O ports mean nothing on real machines), and k10s.conf, the configuration both tiers read,
+sets the kernel's arguments whose meaning it shares (bootcfg.rs; the command line wins):
+
+| k10s.conf | argument |
+|---|---|
+| `join`, `backend`, `jit-indirect`, `timer-res-us`, `idle-spin-us`, `probe-ms`, `suspicion-mult`, `gossip-max-skew` | `k10.join`, `k10.engine`, `k10.jit_indirect`, `k10.timer_res_us`, `k10.spin_us`, `k10.probe_ms`, `k10.suspicion_mult`, `k10.gossip_max_skew_s` |
+| `insecure-unauthenticated-cluster` | `k10.insecure_unauthenticated_cluster` |
+| any of `gossip`, `rpc`, `join`, `advertise` | `k10.cluster`; `k10.gossip`, `k10.rpc`, `k10.http`: the port of `gossip`, `rpc`, `http` (7946, 7947, 80) at `advertise`, else at the address given unless unspecified, else the node's own |
+
+`k10s.KEY=VALUE` on the command line overrides the file, as on Tier 1. The kernel listens on 7946, 7947 and 80 in
+any case; the addresses are what it gives its peers (forwarded ports under QEMU). Once the node is healthy (ready for
+15 s, at least one frame received), efi.rs deletes k10boot's boot counter: a call to `SetVariable` on page tables of
+its own (the first 4 GiB and the firmware's runtime regions identity-mapped, executable), switched in on CPU 0 with
+interrupts off for the call only. Two counted native boots in a row that never get there make k10boot boot Tier 1
+(docs/OS.md, "Tiers").
 
 **Memory.** A bitmap frame allocator covers all E820 RAM above 1 MiB. It excludes the kernel image and the boot
 module until the bundle has been decoded. Each allocation is tagged, so `/_k10s/status` reports where memory goes:
@@ -311,12 +363,16 @@ k10s status --node 127.0.0.1:19003 --admin-token-file admin.key     # any member
 |---|---|---|
 | `k10-ir` (path, no default features) | kernel, mkbundle | TIR types, decoder, validator, reference interpreter (execution engine), builder |
 | `k10-jit` (path, no default features: `no_std + alloc`) | kernel | TIR → x86-64 compiler (`compile_blob`, `CodeBlob::write_to`, `BlobMeta::invoke`, `VmCtx`); the kernel provides executable memory |
-| `k10-mesh` (path, no default features) | kernel, mkbundle | `Bundle`, `Manifest`, `sha256`, `place()`, gossip state machine, peer-protocol framing |
+| `k10-mesh` (path, no default features) | kernel, mkbundle, k10boot | `Bundle`, `Manifest`, `sha256`, `place()`, gossip state machine, peer-protocol framing; signed images (`osimage`, Ed25519) |
+| `k10-bootproto` (path) | kernel, k10boot | the boot protocol between them and the supported-device table (`bootproto/`) |
 | `k10-lang` (path) | mkbundle only | compiles the Ten example services (`examples/*.ten`) into the test bundle |
 | `smoltcp` 0.14 (`alloc`, `medium-ethernet`, `proto-ipv4`, `socket-tcp`, `socket-udp`) | kernel | A correct TCP (retransmission, windows, RST/TIME-WAIT, congestion control) is the one part where writing our own would be large and risky. smoltcp is the standard `no_std` stack, 0BSD-licensed and dependency-light (`heapless`, `managed`, `byteorder`, `bitflags`, `cfg-if`). |
 | `libc` | tools/linux-guest only | ioctl/finit_module for the Linux comparison `/init` (not part of the kernel) |
 
 Deliberately *not* used:
+* The `uefi` crate in k10boot. The UEFI interfaces it needs (boot and runtime services, five protocols) are about 400
+  lines of declarations in `boot/src/efi.rs`; the loader's dependencies stay k10-bootproto and k10-mesh (image
+  signatures, SHA-256).
 * The `x86_64` crate. The GDT, IDT, APIC and port-I/O code is about 450 lines, and the interrupt entry stubs need
   assembly anyway (`extern "x86-interrupt"` is unstable).
 * An allocator crate. The heap is about 140 lines with exact per-tag accounting and grows from the same frames as
@@ -337,8 +393,9 @@ Deliberately *not* used:
 * **KV is in memory only.** There is no virtio-blk, so it is not durable across reboots.
 * **Cluster mode is volatile.** The desired state lives in memory: a rebooted guest fetches it again from its
   peers (a guest alone keeps nothing). No graceful leave (a stopped guest is detected as failed). KV is node-local,
-  as on hosted nodes. The keys are in QEMU's fw_cfg (readable by whoever controls the hypervisor, as the guest's
-  memory is). No separate admin listener and no `/_k10s/metrics`.
+  as on hosted nodes. The keys are files on `K10S-BOOT` (readable by whoever reads the disk, as on Tier 1) or QEMU's
+  fw_cfg (readable by whoever controls the hypervisor, as the guest's memory is). No separate admin listener and no
+  `/_k10s/metrics`.
 * **JIT code is page-granular per module** (W^X forbids appending to an executable page): a 300-byte module takes a
   4 KiB page; modules deployed several times share one copy by code hash.
 * **Static IP, IPv4 only.** No DHCP or TLS.
@@ -353,8 +410,9 @@ Deliberately *not* used:
   absorbs the 8-byte straddle). Hardware protection that does exist: slot memory is never executable (NX), JIT code
   and the kernel are W^X, page 0 is unmapped. There is no OS layer under the kernel: an SFI escape here reaches
   everything, which is why the JIT's output is verified independently (SECURITY.md, "Defense in depth").
-* **No ACPI.** The kernel parses no ACPI tables and assumes an xAPIC at the MSR-reported base and QEMU's fw_cfg for
-  the CPU count. Power-off works only through `isa-debug-exit`.
+* **No ACPI.** The kernel parses no ACPI tables (the loaders hand it the RSDP) and assumes an xAPIC at the
+  MSR-reported base and QEMU's fw_cfg for the CPU count. Power-off works only through `isa-debug-exit`.
+* **BIOS boots are unchecked.** GRUB verifies no signature and k10boot's boot counter exists only on UEFI.
 
 ## Changes needed in other crates
 

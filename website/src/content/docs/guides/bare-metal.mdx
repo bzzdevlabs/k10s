@@ -123,13 +123,14 @@ from it; a failed RDRAND fails the link).
 An invalid `k10.engine`, `k10.smp`, `k10.spin_us`, `k10.jit_indirect`, `k10.timer_res_us` or `k10.gossip_max_skew_s`
 value stops the boot.
 
-The bundle comes from QEMU's `-initrd`, else from a bundle baked in at build time (`EMBED=1`); with neither, the
-node starts empty and waits for `POST /_k10s/apply`.
+The bundle comes from QEMU's `-initrd` (or `/k10s/bundle.k10b` on a disk image's boot partition), else from a bundle
+baked in at build time (`EMBED=1`); with neither, the node starts empty and waits for `POST /_k10s/apply`.
 
 ## Inside
 
 - **Boot:** PVH entry (what Firecracker and Cloud Hypervisor boot), identity-mapped 4 GiB, long mode, SSE for JIT
-  code.
+  code. From the x86-64 disk images: k10boot, its UEFI loader, which verifies the kernel's signature, or GRUB through
+  the kernel's Multiboot2 entry on BIOS ([below](#choosing-the-tier)).
 - **Memory:** a tagged frame allocator shared by the heap and the instance slots; NX everywhere, the kernel and JIT
   code W^X, page 0 unmapped.
 - **Time:** kvmclock, a tickless one-shot LAPIC timer armed only for the next deadline; an idle node takes no timer
@@ -138,7 +139,8 @@ node starts empty and waits for `POST /_k10s/apply`.
   HTTP/1.1 ingress and host API as the hosted node.
 
 <Aside type="caution" title="v0 limits">
-	VM guests only (PVH, legacy virtio-net, 4 GiB mapped). No storage driver: the key-value store is in memory. No
+	VM guests only (PVH under QEMU, or the x86-64 disk images through UEFI or BIOS; legacy virtio-net, 4 GiB mapped).
+	No storage driver: the key-value store is in memory. No
 	DHCP, IPv4 only, no TLS. There is no OS layer
 	under the kernel, so the independent verification of the JIT's output matters most here. Full list:
 	[metal/README.md](https://github.com/bzzdevlabs/k10s/blob/main/metal/README.md).
@@ -160,8 +162,8 @@ best-effort 32-bit images:
 
 | Image | For | Kernel | Size |
 |---|---|---|---|
-| `k10s-os-V-x86_64-vm.img.xz` | QEMU/KVM guests and clouds | every driver built in, console on serial | 4.4 MB |
-| `k10s-os-V-x86_64-metal.img.xz` | PCs, mini-PCs, servers | signed driver modules (Intel, Realtek, Broadcom, Aquantia, USB Ethernet…), NIC firmware, console on the screen | 6.8 MB |
+| `k10s-os-V-x86_64-vm.img.xz` | QEMU/KVM guests and clouds | every driver built in, console on serial; and the native kernel | 4.8 MB |
+| `k10s-os-V-x86_64-metal.img.xz` | PCs, mini-PCs, servers | signed driver modules (Intel, Realtek, Broadcom, Aquantia, USB Ethernet…), NIC firmware, console on the screen; and the native kernel | 7.2 MB |
 | `k10s-os-V-aarch64-vm.img.xz` | QEMU virt (UEFI) and arm64 cloud guests | every driver built in, console on serial | 4.0 MB |
 | `k10s-os-V-aarch64-pi.img.xz` | Raspberry Pi 3 B and 3 B+, 4 B, 400, CM4 and Pi 5 (SD card, USB or NVMe) | one arm64 kernel with mainline devicetrees, console on the serial pins (Pi 3, Pi 4) or debug UART (Pi 5) | 5.3 MB |
 | `k10s-os-V-i686-metal.img.xz` | old PCs, BIOS only: a CPU with PAE and SSE2 (Pentium 4, Pentium M, Core, Atom, Athlon 64 and later); best effort | 32-bit kernel, IDE/SATA built in, signed NIC modules (Realtek, Intel, Broadcom, VIA, SiS, nForce, 3Com…), NIC firmware, console on the screen | 5.7 MB |
@@ -228,6 +230,17 @@ same disk and network, and `/usr/share/AAVMF/AAVMF32_CODE.fd` and `AAVMF32_VARS.
 
 `k10s.conf` holds `KEY=VALUE` lines: init's keys (`ip=10.0.0.5/24,10.0.0.1`, `watchdog=1`, `grow=0`) and every
 `k10s node` flag (`join=10.0.0.2`, `cluster-key-file=/boot/cluster.key`).
+
+### Choosing the tier
+
+The x86-64 images boot either the Linux-based tier (as shipped) or the native kernel. `/k10s/tier` on `K10S-BOOT`
+picks: change its `tier=linux` line to `tier=metal` (the native kernel, on UEFI and on BIOS) or `tier=auto` (UEFI:
+the native kernel when it drives one of the machine's network adapters, else Linux). Both tiers read the same
+`k10s.conf` and key files and join the same clusters. On UEFI the image's loader, k10boot, verifies the native
+kernel's signature and counts its boots: a kernel that fails to get healthy twice in a row hands the machine back to
+the Linux tier until you write `/k10s/tier` again. Until the native kernel has a disk driver its key-value store is
+in memory; a node keeps its Linux-tier state on `K10S-DATA` and finds it again when switched back.
+[docs/OS.md](https://github.com/bzzdevlabs/k10s/blob/main/docs/OS.md#tiers) has the details.
 
 ### Updating the image
 

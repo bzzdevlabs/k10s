@@ -1,0 +1,9 @@
+[package]
+name = "k10-bootproto"
+description = "What k10boot (UEFI), the Multiboot2 shim and the k10-metal kernel agree on: boot modules, k10s.conf, the tier file, the supported-device table"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"

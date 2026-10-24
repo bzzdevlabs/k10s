@@ -71,6 +71,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "k10-bootproto"
+version = "0.1.0"
+
+[[package]]
 name = "k10-host"
 version = "0.1.0"
 dependencies = [
@@ -109,6 +113,7 @@ version = "0.1.0"
 name = "k10-metal"
 version = "0.1.0"
 dependencies = [
+ "k10-bootproto",
  "k10-host",
  "k10-ir",
  "k10-jit",
@@ -119,6 +124,14 @@ dependencies = [
 [[package]]
 name = "k10-nospec"
 version = "0.1.0"
+
+[[package]]
+name = "k10boot"
+version = "0.1.0"
+dependencies = [
+ "k10-bootproto",
+ "k10-mesh",
+]
 
 [[package]]
 name = "libc"

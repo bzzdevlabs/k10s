@@ -14,6 +14,15 @@
 //! (PML4 → 1 PDPT → 4 PDs), enables PAE + long mode + paging (and SSE, for the future JIT), loads a minimal GDT and
 //! far-returns into 64-bit code, which sets up the boot stack and calls `kmain`. Everything is linked at 1 MiB
 //! (see linker.ld) and runs at its physical address.
+//!
+//! Two more ways in end at the same entry with a `start_info` (metal/README.md, "Booting"):
+//!   * k10boot, the UEFI loader (metal/boot), loads the ELF's segments and enters `_pvh_start` as QEMU does;
+//!   * GRUB on BIOS (`multiboot2`): the Multiboot2 header below asks for the command line, modules (page-aligned),
+//!     memory map and ACPI RSDP, and makes `_mb2_start` the entry (32-bit protected mode, paging off, eax = the
+//!     Multiboot2 magic, ebx = its information). That shim converts the information into a `start_info` in `.mb2`,
+//!     a section after .bss that `_pvh_start` does not zero: the memory map entries (their first 20 bytes are an
+//!     E820 entry), the modules with their command lines as names, the RSDP copied (GRUB's copy lives in its
+//!     information, which the kernel reuses as RAM). Then `_pvh_start`.
 
 use core::arch::global_asm;
 
@@ -34,6 +43,41 @@ global_asm!(
 .popsection
 
 /* ---------------------------------------------------------------------------------------------------------- */
+/* Multiboot2 header (GRUB finds it in the first 32 KiB of the file): requests (optional), entry, module alignment. */
+.pushsection .multiboot2, "a"
+    .balign 8
+mb2_header:
+    .long 0xE85250D6
+    .long 0                 /* i386 */
+    .long mb2_header_end - mb2_header
+    .long 0x100000000 - (0xE85250D6 + (mb2_header_end - mb2_header))
+    .balign 8
+    .word 1, 1              /* information request, optional: */
+    .long 8 + 4 * 5
+    .long 1, 3, 6, 14, 15   /* command line, modules, memory map, ACPI RSDP v1, v2 */
+    .balign 8
+    .word 3, 0              /* entry address */
+    .long 12
+    .long _mb2_start
+    .balign 8
+    .word 6, 0              /* modules page-aligned: the kernel releases module pages one module at a time */
+    .long 8
+    .balign 8
+    .word 0, 0              /* end */
+    .long 8
+mb2_header_end:
+.popsection
+
+.pushsection .mb2, "aw", @nobits
+    .balign 8
+mb2_si:      .skip 64       /* struct hvm_start_info */
+mb2_modlist: .skip 32 * 16  /* struct hvm_modlist_entry[MAX_MODULES] */
+mb2_memmap:  .skip 24 * 256 /* struct hvm_memmap_table_entry[MAX_MEMMAP] */
+mb2_rsdp:    .skip 40
+mb2_rsdp_v2: .skip 4
+.popsection
+
+/* ---------------------------------------------------------------------------------------------------------- */
 .pushsection .bss.boot, "aw", @nobits
     .balign 4096
     .global boot_pml4
@@ -44,7 +88,7 @@ boot_pd:    .skip 4096 * 4          /* 4 page directories = 4 GiB of 2 MiB pages
     .balign 16
     .global boot_stack_bottom
 boot_stack_bottom:
-    .skip 65536
+    .skip 131072                    /* kmain's frame holds the boot information (~16 KiB) */
     .global boot_stack_top
 boot_stack_top:
     .balign 8
@@ -68,6 +112,120 @@ boot_gdt_ptr:
 /* ---------------------------------------------------------------------------------------------------------- */
 .pushsection .text.boot32, "ax"
 .code32
+    .global _mb2_start
+_mb2_start:
+    cli
+    cld
+    mov $boot_stack_top, %esp
+    cmp $0x36d76289, %eax
+    jne 9f
+    mov (%ebx), %edx
+    add %ebx, %edx                  /* edx: end of the information */
+    lea 8(%ebx), %esi               /* esi: the first tag */
+    xor %eax, %eax
+    mov $mb2_si, %edi
+    mov $64, %ecx
+    rep stosb
+    movl $0, mb2_rsdp_v2
+1:  cmp %edx, %esi
+    jae 7f
+    mov (%esi), %eax                /* tag type */
+    test %eax, %eax
+    jz 7f
+    cmp $1, %eax
+    je 10f
+    cmp $3, %eax
+    je 20f
+    cmp $6, %eax
+    je 30f
+    cmp $14, %eax
+    je 40f
+    cmp $15, %eax
+    je 50f
+6:  mov 4(%esi), %eax               /* next tag: size rounded up to 8 bytes */
+    add $7, %eax
+    and $~7, %eax
+    jz 7f
+    add %eax, %esi
+    jmp 1b
+
+10: lea 8(%esi), %eax               /* command line */
+    mov %eax, mb2_si + 24
+    jmp 6b
+
+20: mov mb2_si + 12, %eax           /* module: start, end, then its command line (the name) */
+    cmp $16, %eax
+    jae 6b
+    shl $5, %eax
+    add $mb2_modlist, %eax
+    mov 8(%esi), %ecx
+    mov %ecx, (%eax)
+    mov 12(%esi), %ecx
+    sub 8(%esi), %ecx
+    mov %ecx, 8(%eax)
+    lea 16(%esi), %ecx
+    mov %ecx, 16(%eax)
+    incl mb2_si + 12
+    jmp 6b
+
+30: push %esi                       /* memory map: entry size, version, then entries */
+    push %edx
+    mov 8(%esi), %ebx
+    mov 4(%esi), %edx
+    add %esi, %edx                  /* edx: end of the tag */
+    add $16, %esi
+    cmp $24, %ebx
+    jb 39f
+31: lea (%esi, %ebx), %eax
+    cmp %edx, %eax
+    ja 39f
+    mov mb2_si + 48, %eax
+    cmp $256, %eax
+    jae 39f
+    imul $24, %eax, %edi
+    add $mb2_memmap, %edi
+    mov %esi, %ecx
+    movsl                           /* base, length, type */
+    movsl
+    movsl
+    movsl
+    movsl
+    movl $0, (%edi)
+    mov %ecx, %esi
+    add %ebx, %esi
+    incl mb2_si + 48
+    jmp 31b
+39: pop %edx
+    pop %esi
+    jmp 6b
+
+40: cmpl $0, mb2_rsdp_v2            /* ACPI RSDP v1 (20 bytes), unless v2 came first */
+    jne 6b
+    mov $20, %ecx
+    jmp 45f
+50: movl $1, mb2_rsdp_v2            /* ACPI RSDP v2 (36 bytes) */
+    mov 4(%esi), %ecx
+    sub $8, %ecx
+    cmp $40, %ecx
+    jbe 45f
+    mov $40, %ecx
+45: push %esi
+    add $8, %esi
+    mov $mb2_rsdp, %edi
+    rep movsb
+    pop %esi
+    movl $mb2_rsdp, mb2_si + 32
+    jmp 6b
+
+7:  movl $0x336ec578, mb2_si        /* magic, version 1, module list, memory map */
+    movl $1, mb2_si + 4
+    movl $mb2_modlist, mb2_si + 16
+    movl $mb2_memmap, mb2_si + 40
+    mov $mb2_si, %ebx
+    jmp _pvh_start
+9:  hlt                             /* not started by a Multiboot2 loader */
+    jmp 9b
+
     .global _pvh_start
 _pvh_start:
     cli

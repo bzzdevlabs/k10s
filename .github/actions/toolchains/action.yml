@@ -1,7 +1,7 @@
-# Toolchain pins for every workflow: Rust (+musl for x86-64, aarch64, i686 and armv7, +x86_64-unknown-none), GNU
+# Toolchain pins for every workflow: Rust (+musl for x86-64, aarch64, i686 and armv7, +x86_64-unknown-none and -uefi), GNU
 # binutils, optional Go, QEMU/KVM, arm64 and armv7 tools.
 name: k10s toolchains
-description: Pinned Rust toolchain with the musl and x86_64-unknown-none targets; optional Go, QEMU/KVM, arm64 and armv7 tools
+description: Pinned Rust toolchain with the musl, x86_64-unknown-none and x86_64-unknown-uefi targets; optional Go, QEMU/KVM, arm64 and armv7 tools
 inputs:
   rust:
     description: Rust toolchain
@@ -39,8 +39,8 @@ runs:
         RUST: ${{ inputs.rust }}
       run: |
         rustup toolchain install "$RUST" --profile minimal --no-self-update
-        rustup target add --toolchain "$RUST" x86_64-unknown-linux-musl x86_64-unknown-none aarch64-unknown-linux-musl \
-          i686-unknown-linux-musl armv7-unknown-linux-musleabihf
+        rustup target add --toolchain "$RUST" x86_64-unknown-linux-musl x86_64-unknown-none x86_64-unknown-uefi \
+          aarch64-unknown-linux-musl i686-unknown-linux-musl armv7-unknown-linux-musleabihf
         rustup default "$RUST"
         rustc -Vv
     - name: binutils ${{ inputs.binutils }}

@@ -268,10 +268,12 @@ jobs:
         with:
           name: dist
           path: dist
-      - name: The release's k10s
+      - name: The release's k10s, native kernel and k10boot
         run: |
           tar -xzf dist/k10s-*-x86_64-unknown-linux-musl.tar.gz -C "$RUNNER_TEMP"
+          tar -xzf dist/k10s-metal-*-x86_64.tar.gz -C "$RUNNER_TEMP"
           echo "K10S_BIN=$(echo "$RUNNER_TEMP"/k10s-*-x86_64-unknown-linux-musl/k10s)" >> "$GITHUB_ENV"
+          echo "K10S_METAL_DIR=$(echo "$RUNNER_TEMP"/k10s-metal-*-x86_64)" >> "$GITHUB_ENV"
       # The release key signs the images (os/images.sh); its public half is os/release-key.pub, built into k10s.
       - name: The OS image signing key
         env:
@@ -286,7 +288,7 @@ jobs:
       - name: scripts/ci-test.sh os
         run: scripts/ci-test.sh os
       - name: The images verify against the release key built into k10s
-        run: for f in target/os/images/*.efi; do "$K10S_BIN" image verify "$f"; done
+        run: for f in target/os/images/*.efi target/os/images/*.elf; do "$K10S_BIN" image verify "$f"; done
       - name: Remove the signing key
         if: always()
         run: rm -f "$RUNNER_TEMP/image.key"
@@ -530,7 +532,7 @@ jobs:
             args+=(--verify-tag)
           fi
           gh release create "$TAG" "${args[@]}" --latest="$latest" dist/*.tar.gz dist/*.img.xz dist/*.efi \
-            dist/*.fat dist/SHA256SUMS
+            dist/*.elf dist/*.fat dist/SHA256SUMS
       - name: Prune old development pre-releases
         if: needs.version.outputs.channel == 'dev'
         run: scripts/prune-dev.sh "$KEEP_DEV_RELEASES" releases

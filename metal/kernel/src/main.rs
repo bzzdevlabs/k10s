@@ -22,8 +22,10 @@ extern crate alloc;
 
 mod arch;
 mod boot;
+mod bootcfg;
 mod cluster;
 mod coro;
+mod efi;
 mod fw_cfg;
 mod http;
 mod mem;
@@ -74,6 +76,11 @@ pub fn boot_ms() -> f64 {
     BOOT_NS.load(Ordering::Relaxed) as f64 / 1e6
 }
 
+/// Clock reading (`time::now_ns`) of the "ready" line; 0 before.
+pub fn boot_ns() -> u64 {
+    BOOT_NS.load(Ordering::Relaxed)
+}
+
 /// Stops the boot on a configuration error (QEMU exits with failure).
 pub fn fatal(msg: core::fmt::Arguments) -> ! {
     kprintln!("k10-metal: {msg}");
@@ -100,6 +107,7 @@ extern "C" fn kmain() -> ! {
     let kernel = boot::kernel_image();
     frames::init(&bi, kernel);
     arch::paging::init();
+    efi::init(&bi);
     let fs = frames::stats();
     TOTAL_RAM.store(frames::total_ram(&bi), Ordering::Relaxed);
     RESERVE.store((fs.usable / 16).max(256 << 10), Ordering::Relaxed);
@@ -172,10 +180,20 @@ extern "C" fn kmain() -> ! {
         arch::halt_forever();
     }
 
-    // Admin API: requests signed with the key in fw_cfg `opt/k10s/admin_key` for this boot's random audience;
-    // without a key only /_k10s/health.
+    if bi.from_loader() {
+        let mut names = alloc::string::String::new();
+        for m in bi.modules() {
+            names.push_str(if names.is_empty() { "" } else { ", " });
+            names.push_str(m.name());
+        }
+        kprintln!("k10-metal: boot loader modules: {names}; ACPI RSDP at {:#x}", bi.rsdp);
+    }
+
+    // Admin API: requests signed with the admin key (k10s.conf admin-token-file, or fw_cfg `opt/k10s/admin_key`
+    // under QEMU's -kernel) for this boot's random audience; without a key only /_k10s/health.
     use k10_mesh::admin_auth::{AdminKey, AdminVerifier, AUDIENCE_LEN};
-    let admin_key = fw_cfg::secret("opt/k10s/admin_key", AdminKey::parse).unwrap_or_else(|e| fatal(format_args!("{e}")));
+    let admin_key =
+        bootcfg::secret(&bi, bootcfg::Secret::Admin, AdminKey::parse).unwrap_or_else(|e| fatal(format_args!("{e}")));
     runtime::admin_init(admin_key.map(|key| {
         let mut audience = [0u8; AUDIENCE_LEN];
         if !arch::rdrand_bytes(&mut audience) {
@@ -216,6 +234,7 @@ extern "C" fn kmain() -> ! {
         Some(cfg) => cluster::start(cfg, &mut net),
         None => false,
     };
+    bootcfg::wipe_unused_keys(&bi);
     let apply_boot = |bytes: &[u8]| -> Result<(), alloc::string::String> {
         if clustered {
             match cluster::operator_apply(bytes) {
@@ -228,15 +247,16 @@ extern "C" fn kmain() -> ! {
         }
     };
 
-    // Deployment: -initrd bundle (PVH module 0), else the embedded one, else wait for POST /_k10s/apply.
+    // Deployment: the loader's bundle (k10s.bundle, or QEMU's -initrd), else the embedded one, else wait for
+    // POST /_k10s/apply.
     let t_apply0 = arch::rdtsc();
     let mut source = if clustered { "cluster" } else { "none" };
-    if let Some(m) = bi.modules().first().copied() {
+    if let Some(m) = bootcfg::bundle(&bi) {
         // SAFETY: the module range is reserved in the frame allocator until released below.
         let bytes = unsafe { core::slice::from_raw_parts(m.paddr as *const u8, m.size as usize) };
         match apply_boot(bytes) {
-            Ok(_) => source = "initrd",
-            Err(e) => kprintln!("boot bundle (initrd) rejected: {e}"),
+            Ok(_) => source = if m.name().is_empty() { "initrd" } else { "loader" },
+            Err(e) => kprintln!("boot bundle ({}) rejected: {e}", if m.name().is_empty() { "initrd" } else { m.name() }),
         }
         frames::release_module(m.paddr, m.size);
     } else if !EMBEDDED_BUNDLE.is_empty() {
@@ -302,6 +322,7 @@ fn main_loop(net: &mut net::Net, spin_ns: u64) -> ! {
         net.poll_egress();
         *net::SNAPSHOT.borrow_mut() = net.snapshot();
         runtime::housekeeping();
+        efi::poll_health(net::SNAPSHOT.borrow().rx_packets);
 
         let now = time::now_ns();
         let busy = runtime::has_work() || net.dev.rx.pending() || net.has_work() || cluster::has_work(net);

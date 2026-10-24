@@ -1,0 +1,16 @@
+[package]
+name = "k10boot"
+description = "UEFI loader of k10-metal: boots the native kernel through PVH, or chain-loads Tier 1 (tier selector)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "k10boot"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+k10-bootproto.workspace = true
+k10-mesh.workspace = true

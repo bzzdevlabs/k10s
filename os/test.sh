@@ -13,6 +13,11 @@
 #   update-bios, update-uefi  A/B update with a power cut at every step, an image that panics, one that never
 #                           commits (single node; the update images are signed with a test key pinned by os_key)
 #   rollout                 20 BIOS VMs: a bad image stops after the first wave, a good one rolls out in waves
+#   tier                    the tiers of the vm image under OVMF, through k10boot (docs/OS.md "Tiers"): tier=metal on pc
+#                           and q35 (the native kernel joins a hosted node and serves, k10s.conf and keys from
+#                           K10S-BOOT, boot counter cleared once healthy), tier=auto (virtio-net: native, e1000e: Tier
+#                           1), a failing native kernel (2 boots, then Tier 1), refused signatures, PVH -kernel
+#   mb2                     the vm image on SeaBIOS with tier=metal: GRUB, Multiboot2, the native kernel serves
 #   secureboot              the vm image on OVMF with Secure Boot on and Microsoft's keys (docs/OS.md "Secure Boot"):
 #                           refused as released; serves with Secure Boot off, with a MOK under Debian's shim and with
 #                           own keys; under own keys a re-signed update commits, an update not signed for Secure Boot is
@@ -55,7 +60,7 @@ fi
 tests=("$@")
 if [[ ${#tests[@]} == 0 ]]; then
     case $arch in
-    x86_64) tests=(boot-debian boot-k10s dhcp image-bios image-uefi image-metal unsigned boottime repro update-bios update-uefi rollout secureboot) ;;
+    x86_64) tests=(boot-debian boot-k10s dhcp image-bios image-uefi image-metal unsigned boottime repro update-bios update-uefi rollout tier mb2 secureboot) ;;
     aarch64) tests=(boot-arm64 image-arm64 update-arm64 pi pi3 mixed secureboot-arm64) ;;
     i686) tests=(boot-i686 image-i686 update-i686) ;;
     armv7) tests=(boot-armv7 image-armv7 update-armv7) ;;
@@ -119,7 +124,7 @@ if has boot-debian; then
         --mod 'fs/nls/nls_cp437.ko*' --mod 'fs/nls/nls_iso8859-1.ko*' --mod 'drivers/acpi/button.ko*' \
         --mod 'drivers/input/evdev.ko*' --mod 'drivers/watchdog/i6300esb.ko*'
 fi
-if has image-bios image-uefi image-metal unsigned boottime update-bios update-uefi rollout secureboot; then
+if has image-bios image-uefi image-metal unsigned boottime repro update-bios update-uefi rollout tier mb2 secureboot; then
     K10S_BIN=$k10s os/images.sh --arch x86_64 "$out/images"
     metal=$(os/kbuild.sh metal)
     kmods=$(echo "$metal"/modroot/lib/modules/*)
@@ -130,6 +135,12 @@ if has update-bios update-uefi rollout; then
     upd=(--image "$out/k10s-os-x86_64-vm.img" --uki "$(echo "$out"/images/k10s-os-*-x86_64-vm.efi)" --image-key "$image_key"
         --boot "$(os/bootfiles.sh)" --k10s "$k10s" --examples examples)
 fi
+if has tier mb2; then
+    image_key=$out/image-test.key
+    [[ -f $image_key ]] || "$k10s" keygen -o "$image_key"
+    tier=(--image "$out/k10s-os-x86_64-vm.img" --image-key "$image_key" --k10s "$k10s" --examples examples
+        --bundle "${K10S_METAL_DIR:-metal/out}/bundle.k10b")
+fi
 if has secureboot secureboot-arm64; then
     image_key=$out/image-test.key
     [[ -f $image_key ]] || "$host" keygen -o "$image_key"
@@ -138,7 +149,8 @@ if has secureboot secureboot-arm64; then
 fi
 if has image-metal; then
     python3 os/mkimage.py "$out/metal-serial.img" --kernel "$metal/arch/x86/boot/bzImage" --initrd "$out/initrd-metal.cpio.zst" \
-        --initrd "$(os/firmware.sh)" --cmdline "console=tty0 console=ttyS0,115200 quiet panic=5 k10s.bootwait=30000" --boot "$(os/bootfiles.sh)"
+        --initrd "$(os/firmware.sh)" --cmdline "console=tty0 console=ttyS0,115200 quiet panic=5 k10s.bootwait=30000" --boot "$(os/bootfiles.sh)" \
+        --k10boot "${K10S_METAL_DIR:-metal/out}/k10boot.efi" --metal "$(echo "$out"/images/k10s-os-*-x86_64-native.elf)"
 fi
 
 for t in "${tests[@]}"; do
@@ -192,13 +204,16 @@ for t in "${tests[@]}"; do
         python3 os/test.py mixed --image "$out/k10s-os-aarch64-pi.img" --k10s "$host" --host-k10s "${K10S_HOST_X86:-$host}" \
             --examples examples --work "$work"
         ;;
+    tier) python3 os/test.py tier "${tier[@]}" --work "$work" ;;
+    mb2) python3 os/test.py mb2 "${tier[@]}" --work "$work" ;;
     secureboot) python3 os/test.py secureboot "${sb[@]}" --work "$work" ;;
     secureboot-arm64) python3 os/test.py secureboot --arch aarch64 "${sb[@]}" --work "$work" ;;
     repro)
         boot=$(os/bootfiles.sh)
         for i in 1 2; do
             python3 os/mkimage.py "$work/vm$i.img" --kernel "$bz" --initrd "$out/k10s-vm.cpio.zst" --cmdline "console=ttyS0 panic=5" \
-                --boot "$boot" --uki "$work/vm$i.efi"
+                --boot "$boot" --uki "$work/vm$i.efi" --k10boot "${K10S_METAL_DIR:-metal/out}/k10boot.efi" \
+                --metal "$(echo "$out"/images/k10s-os-*-x86_64-native.elf)"
         done
         cmp "$work/vm1.img" "$work/vm2.img" && cmp "$work/vm1.efi" "$work/vm2.efi"
         echo "test.sh: repro: ok" >&2

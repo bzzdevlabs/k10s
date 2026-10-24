@@ -99,6 +99,24 @@ verified against the key built into k10s; `SHA256SUMS`).
   `os/test.sh` secureboot (OVMF q35+SMM, Microsoft keys) and secureboot-arm64 (AAVMF) gate releases: the release image
   is refused, and it serves with Secure Boot off, with own keys and with a MOK; under own keys a re-signed update
   commits and one signed by k10s only is refused 3 times and rolled back.
+- Tier 2 boot (13a = M1's boot half, docs/OS.md "Tiers", metal/README.md "Booting"): `k10boot` (`metal/boot`,
+  x86_64-unknown-uefi, no dependencies beyond k10-mesh and `metal/bootproto`) is `BOOTX64.EFI` of the x86-64 images:
+  `/k10s/tier` (a GRUB environment block: `tier=linux|metal|auto`, `metal_cmdline=`) picks Tier 1 (LoadImage of
+  systemd-boot, moved to `EFI/systemd/`) or the native kernel `/k10s/metal.elf`, a k10s image (profile `native`)
+  verified against the release key, keys built in (`K10BOOT_KEYS`) and, with Secure Boot off only, `os_key`; `auto`
+  matches PCI (firmware PCI I/O) against `metal/bootproto/src/devices.rs` (legacy virtio-net for now). The kernel
+  gets a PVH `start_info` (merged E820, command line, RSDP) with named modules: k10s.conf, `/k10s/bundle.k10b`, the
+  key files k10s.conf names (they replace fw_cfg on real machines; fw_cfg stays for `-kernel`), the GOP framebuffer
+  (for 13c), the runtime services; page 0x8000 reserved, ExitBootServices retried on a stale key. Boot counting: a
+  NV UEFI variable counted by k10boot, deleted by the kernel through runtime services once healthy (ready 15 s and a
+  frame received; own page tables for the call); 2 unhealthy boots pin Tier 1 until `/k10s/tier` is rewritten or
+  the kernel changes. k10s.conf keys shared with Tier 1 become kernel arguments (bootcfg.rs). Multiboot2 header +
+  32-bit shim in boot.rs: BIOS boots the native kernel through GRUB when `tier=metal` (no signature check, no
+  counting). The images ship `tier=linux` (KV state: step 13d); releases sign and publish
+  `k10s-os-V-x86_64-native.elf`. `os/test.sh` tier (OVMF pc/q35: native joins a hosted node and serves, auto,
+  fallback, refused signatures, PVH), mb2 (SeaBIOS → GRUB → Multiboot2) and secureboot (k10boot in front, MOK through
+  shim's LoadImage, os_key refused under Secure Boot) gate releases; every other UEFI test boots Tier 1 through
+  k10boot.
 - Releases: SemVer; tag `vX.Y.Z` on main → stable release, every push to main → `vX.Y.Z-dev.N` pre-release.
 - Performance vs 08f2921 (`bench/k10s/ab.py --same`, 4 interleaved rounds, host load ≈ 7 from the benchmark itself;
   medians): single node within ±2.5 %; local ingress −4 %; forwarded requests −5 % at c=1 (CPU per request +7 %) and
@@ -115,11 +133,11 @@ seek privileges on this machine.
     in docs/research/native-hardware.md §9, decisions in docs/REPORT.md §9; the prototype branches no longer exist).
     Goal: the `metal/` kernel boots from the shared image (universal-os.md §8.4) on VMs and on a real x86 machine and
     serves in a k10s cluster with hosted and Tier 1 nodes. One session each, in this order:
-    - 13a **M1 boot** (in parallel with 13b): the `k10boot` UEFI loader handing the kernel a PVH `start_info` (kernel,
-      bundle, `k10s.conf` and secrets from K10S-BOOT instead of fw_cfg; GOP info; AP trampoline reservation), a
-      Multiboot2 shim for BIOS through GRUB, the tier selector (`tier=auto|linux|metal`: PCI scan against the
-      supported-device table, chain-load of the Tier 1 loader, boot-counted fallback to `linux`), the kernel in the
-      x86-64 images.
+    - 13a **M1 boot** — done ("State of main"; under QEMU only). Needs real hardware or cloud VMs: k10boot on real UEFI
+      firmware (large memory maps, firmware using page 0x8000 or 1 MiB, real boot entries' load options, runtime
+      SetVariable on SMM flash, x2APIC handover), GRUB's Multiboot2 on a real BIOS, a Hetzner or Vultr VM (UEFI and
+      BIOS) and a DigitalOcean droplet (BIOS, GRUB → Multiboot2) once 13b's modern virtio-net lands, real machines
+      with 13c's NICs.
     - 13b **M1 platform and virtio** (in parallel with 13a): ACPI tables (MADT with targeted SIPI, x2APIC, ≥ 64 CPUs,
       FADT reset/S5, SPCR, HPET/PM timer), all RAM and every BAR mapped (above 4 GiB), a coalesced memory map, a full
       ECAM scan with 64-bit BARs, virtio 1.x net + blk + mmio behind `NetDevice`/`BlockDevice`, DHCPv4 or a static IP,
@@ -169,7 +187,7 @@ seek privileges on this machine.
 | Ten compiler, prelude, examples | `crates/k10-lang`, `examples/` | unit + examples |
 | x86-64 and AArch64 JIT (single pass, SFI masking, safepoints, speculation hardening), A64 decoder and SFI verifier | `crates/k10-jit` | differential soak, red-team, objdump, verifier |
 | Node runtime, sandbox, CLI | `crates/k10-node`, `crates/k10s` | unit, cluster, chaos, soak, abuse, auth |
-| Bare-metal node (PVH, virtio-net, smoltcp, JIT, SMP, cluster member) | `metal/` | `test.sh`, `cluster-test.sh` |
+| Bare-metal node (PVH, Multiboot2, k10boot UEFI loader and tier selector, virtio-net, smoltcp, JIT, SMP, cluster member) | `metal/` | `test.sh`, `cluster-test.sh`, `os/test.sh tier mb2` |
 | PID 1 mode (Tier 1), A/B updates, Secure Boot flows, k10s kernels (`vm`, `metal`, `arm64`, `i386`, `armv7`), initramfs, firmware and disk image builders (x86-64, i686, armv7, arm64, Raspberry Pi 3/4/5) | `crates/k10s/src/pid1`, `os/` | unit + `os/test.sh [--arch aarch64\|i686\|armv7]` (QEMU) |
 | Baselines (Kubernetes, bare processes), loadgen, k10s harness, A/B driver | `bench/` | — |
 | Editor extension, documentation site | `editors/vscode`, `website/` | — |

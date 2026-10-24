@@ -1,18 +1,26 @@
-//! PVH boot information (`struct hvm_start_info`, Xen public/arch-x86/hvm/start_info.h), filled by QEMU's
-//! `pvh.bin` option ROM: E820 memory map (version ≥ 1), kernel command line, and `-initrd` as module 0.
+//! PVH boot information (`struct hvm_start_info`, Xen public/arch-x86/hvm/start_info.h): E820 memory map (version
+//! ≥ 1), kernel command line, ACPI RSDP and modules. Filled by QEMU's `pvh.bin` option ROM (`-initrd` as module 0),
+//! by k10boot (UEFI) or by the Multiboot2 shim (boot.rs); loaders name their modules (k10-bootproto).
 //!
 //! Everything is copied into fixed-size kernel structures before the frame allocator starts handing out memory,
-//! except the module *contents*, whose physical ranges are reserved until the runtime has consumed them.
+//! except the module *contents*, whose physical ranges are reserved until the runtime has consumed them. The
+//! k10s.conf module is read here too: its keys that mean the same for the native kernel become boot arguments
+//! (bootcfg.rs), so `arg`/`has_flag` see the command line and K10S-BOOT's configuration alike.
 
 use core::ptr::read_unaligned;
+use k10_bootproto::e820;
 
 const START_MAGIC: u32 = 0x336e_c578;
-pub const MAX_MEMMAP: usize = 64;
-pub const MAX_MODULES: usize = 4;
+/// As many as k10boot hands over (merged).
+pub const MAX_MEMMAP: usize = 256;
+pub const MAX_MODULES: usize = 16;
 const MAX_CMDLINE: usize = 2048;
+/// The command line plus the arguments derived from k10s.conf.
+const MAX_ARGS: usize = 4096;
+const MAX_NAME: usize = 64;
 
-/// E820 types.
-pub const E820_RAM: u32 = 1;
+pub use e820::Entry as MemRegion;
+pub const E820_RAM: u32 = e820::RAM;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -39,19 +47,29 @@ struct ModEntry {
     reserved: u64,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Default, Debug)]
-pub struct MemRegion {
-    pub addr: u64,
-    pub size: u64,
-    pub kind: u32,
-    reserved: u32,
-}
-
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct Module {
     pub paddr: u64,
     pub size: u64,
+    name: [u8; MAX_NAME],
+    name_len: usize,
+}
+
+impl Module {
+    const EMPTY: Module = Module { paddr: 0, size: 0, name: [0; MAX_NAME], name_len: 0 };
+
+    /// The loader's name for it (empty for QEMU's `-initrd`).
+    pub fn name(&self) -> &str {
+        core::str::from_utf8(&self.name[..self.name_len]).unwrap_or("")
+    }
+
+    /// The contents.
+    ///
+    /// # Safety
+    /// The module must not have been released (frames::release_module).
+    pub unsafe fn bytes(&self) -> &'static [u8] {
+        unsafe { core::slice::from_raw_parts(self.paddr as *const u8, self.size as usize) }
+    }
 }
 
 pub struct BootInfo {
@@ -59,8 +77,12 @@ pub struct BootInfo {
     pub memmap_len: usize,
     pub modules: [Module; MAX_MODULES],
     pub modules_len: usize,
+    /// Physical address of the ACPI RSDP, 0 if the loader gave none (QEMU's PVH: search the BIOS areas).
+    pub rsdp: u64,
     cmdline: [u8; MAX_CMDLINE],
     cmdline_len: usize,
+    args: [u8; MAX_ARGS],
+    args_len: usize,
 }
 
 impl BootInfo {
@@ -70,54 +92,104 @@ impl BootInfo {
     pub fn modules(&self) -> &[Module] {
         &self.modules[..self.modules_len]
     }
+    /// The module named `name`.
+    pub fn module(&self, name: &str) -> Option<(usize, &Module)> {
+        self.modules().iter().enumerate().find(|(_, m)| m.name() == name)
+    }
+    /// The command line as the loader gave it.
     pub fn cmdline(&self) -> &str {
         core::str::from_utf8(&self.cmdline[..self.cmdline_len]).unwrap_or("")
     }
-    /// `true` if the command line contains the word `flag` (or `flag=...`).
-    pub fn has_flag(&self, flag: &str) -> bool {
-        self.cmdline().split_ascii_whitespace().any(|w| w == flag || w.split('=').next() == Some(flag))
+    /// The command line and the arguments derived from k10s.conf (bootcfg.rs).
+    fn args(&self) -> &str {
+        core::str::from_utf8(&self.args[..self.args_len]).unwrap_or("")
     }
-    /// Value of `key=value` on the command line.
+    /// `true` if the arguments contain the word `flag` (or `flag=...`).
+    pub fn has_flag(&self, flag: &str) -> bool {
+        self.args().split_ascii_whitespace().any(|w| w == flag || w.split('=').next() == Some(flag))
+    }
+    /// Value of `key=value` in the arguments (the command line's first).
     pub fn arg(&self, key: &str) -> Option<&str> {
-        self.cmdline().split_ascii_whitespace().find_map(|w| w.strip_prefix(key)?.strip_prefix('='))
+        self.args().split_ascii_whitespace().find_map(|w| w.strip_prefix(key)?.strip_prefix('='))
+    }
+    /// k10s.conf as the loader handed it over (module `k10s.conf`), if it is UTF-8.
+    pub fn conf(&self) -> Option<&'static str> {
+        // SAFETY: the configuration module is never released.
+        self.module(k10_bootproto::MOD_CONF).and_then(|(_, m)| core::str::from_utf8(unsafe { m.bytes() }).ok())
+    }
+    /// Whether a boot loader that names its modules (k10boot, GRUB) booted the kernel, rather than QEMU's `-kernel`.
+    pub fn from_loader(&self) -> bool {
+        self.modules().iter().any(|m| !m.name().is_empty())
     }
 }
 
 /// Parses the start info at `paddr` (identity-mapped). Panics on a bad magic: there is no other boot path.
 ///
 /// # Safety
-/// `paddr` must be the pointer QEMU passed in `ebx`.
+/// `paddr` must be the pointer the loader passed in `ebx`.
 pub unsafe fn parse(paddr: u64) -> BootInfo {
     let si: StartInfo = read_unaligned(paddr as *const StartInfo);
     assert!(si.magic == START_MAGIC, "PVH start info: bad magic {:#x}", si.magic);
     let mut bi = BootInfo {
         memmap: [MemRegion::default(); MAX_MEMMAP],
         memmap_len: 0,
-        modules: [Module::default(); MAX_MODULES],
+        modules: [Module::EMPTY; MAX_MODULES],
         modules_len: 0,
+        rsdp: si.rsdp_paddr,
         cmdline: [0; MAX_CMDLINE],
         cmdline_len: 0,
+        args: [0; MAX_ARGS],
+        args_len: 0,
     };
     assert!(si.version >= 1 && si.memmap_paddr != 0, "PVH start info v{} has no memory map", si.version);
-    let n = (si.memmap_entries as usize).min(MAX_MEMMAP);
-    for i in 0..n {
-        bi.memmap[i] = read_unaligned((si.memmap_paddr as *const MemRegion).add(i));
+    // Merged as it is copied: UEFI maps have hundreds of entries, adjacent ones mostly of the same type.
+    let mut n = 0;
+    for i in 0..si.memmap_entries as usize {
+        let e: MemRegion = read_unaligned((si.memmap_paddr as *const MemRegion).add(i));
+        if n == MAX_MEMMAP {
+            n = e820::normalize(&mut bi.memmap);
+            if n == MAX_MEMMAP {
+                crate::kprintln!("k10-metal: memory map: entries past {MAX_MEMMAP} ignored");
+                break;
+            }
+        }
+        bi.memmap[n] = e;
+        n += 1;
     }
-    bi.memmap_len = n;
+    bi.memmap_len = e820::normalize(&mut bi.memmap[..n]);
     let n = (si.nr_modules as usize).min(MAX_MODULES);
     for i in 0..n {
         let m: ModEntry = read_unaligned((si.modlist_paddr as *const ModEntry).add(i));
-        bi.modules[i] = Module { paddr: m.paddr, size: m.size };
+        let mut module = Module { paddr: m.paddr, size: m.size, ..Module::EMPTY };
+        module.name_len = copy_cstr(m.cmdline_paddr, &mut module.name);
+        bi.modules[i] = module;
     }
     bi.modules_len = n;
-    if si.cmdline_paddr != 0 {
-        let p = si.cmdline_paddr as *const u8;
-        let mut len = 0;
-        while len < MAX_CMDLINE && *p.add(len) != 0 {
-            bi.cmdline[len] = *p.add(len);
-            len += 1;
+    bi.cmdline_len = copy_cstr(si.cmdline_paddr, &mut bi.cmdline);
+    let mut args = [0u8; MAX_ARGS];
+    let mut a = crate::bootcfg::Args::new(&mut args);
+    a.push(bi.cmdline());
+    if let Some((_, conf)) = bi.module(k10_bootproto::MOD_CONF) {
+        match core::str::from_utf8(conf.bytes()) {
+            Ok(text) => crate::bootcfg::derive(text, bi.cmdline(), &mut a),
+            Err(_) => crate::kprintln!("k10-metal: k10s.conf is not UTF-8: ignored"),
         }
-        bi.cmdline_len = len;
     }
+    bi.args_len = a.len();
+    bi.args = args;
     bi
+}
+
+/// Copies the NUL-terminated string at `paddr` (0: none) into `out`; returns its length (cut at `out`'s size).
+unsafe fn copy_cstr(paddr: u64, out: &mut [u8]) -> usize {
+    if paddr == 0 {
+        return 0;
+    }
+    let p = paddr as *const u8;
+    let mut len = 0;
+    while len < out.len() && *p.add(len) != 0 {
+        out[len] = *p.add(len);
+        len += 1;
+    }
+    len
 }

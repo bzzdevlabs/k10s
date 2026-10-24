@@ -103,7 +103,9 @@ With isolation done by the compiler, the node runtime needs from the OS only: me
 "hosted" mode it is one Linux process (good for development and for bare-metal fleets that keep Linux). In "metal"
 mode the same runtime core boots directly on a (virtual) machine as its own kernel: no syscalls, no user/kernel
 transitions, no page-table switches, polling virtio queues directly. In clouds, where every node is already a VM,
-this deletes the guest Linux entirely.
+this deletes the guest Linux entirely. Where the native kernel has no driver for the hardware, Linux stays the driver
+layer with k10s as its only program (PID 1); one installed x86-64 image carries both, and its UEFI loader picks the
+tier from a file on the boot partition or from the network adapters it finds (docs/OS.md, "Tiers").
 
 ### 2.10 Language: a thin, safe-by-construction systems language
 We do not need a big language runtime or GC per workload. **Ten** is a small C-like language with typed pointers,
@@ -142,7 +144,7 @@ Crates:
 - `k10-mesh` — sans-IO membership gossip, manifests, placement, wire codecs (no_std + alloc), plus a std driver.
 - `k10-node` — the hosted node runtime: shards, scheduler, stacks, instance pool, host API, ingress, KV, peers.
 - `k10s` — the single CLI/daemon binary.
-- `k10-metal` (`metal/`, its own workspace) — the node runtime booting without Linux.
+- `k10-metal` (`metal/`, its own workspace) — the node runtime booting without Linux, and `k10boot`, its UEFI loader.
 
 ## 4. Out of scope for v0 (deliberately)
 - Hostile multi-tenancy (side channels): the cheap Spectre gaps are closed (SECURITY.md, "CPU side channels": no

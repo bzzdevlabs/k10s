@@ -1,4 +1,4 @@
-/* k10-metal: linked at 1 MiB, loaded there by QEMU's ELF loader (PVH boot), identity-mapped afterwards. */
+/* k10-metal: linked at 1 MiB, loaded there by QEMU's ELF loader (PVH boot), k10boot or GRUB, identity-mapped afterwards. */
 ENTRY(_pvh_start)
 
 SECTIONS
@@ -8,6 +8,9 @@ SECTIONS
 
     /* The PVH entry note must be in a PT_NOTE segment, 4-byte aligned (QEMU aligns the name to p_align). */
     .note.Xen : ALIGN(4) { KEEP(*(.note.Xen)) }
+
+    /* GRUB looks for the Multiboot2 header in the first 32 KiB of the file (boot.rs). */
+    .multiboot2 : ALIGN(8) { KEEP(*(.multiboot2)) }
 
     .text : ALIGN(4K)
     {
@@ -29,6 +32,9 @@ SECTIONS
         . = ALIGN(8);
         __bss_end = .;
     }
+
+    /* The Multiboot2 shim's start_info, which _pvh_start must not zero (boot.rs). */
+    .mb2 (NOLOAD) : ALIGN(8) { *(.mb2) }
 
     . = ALIGN(4K);
     __kernel_end = .;

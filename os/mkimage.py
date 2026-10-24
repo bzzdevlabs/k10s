@@ -5,27 +5,32 @@ for the Raspberry Pi 3, 4 and 5.
 
   mkimage.py OUT.img --kernel KERNEL --initrd CPIO [--initrd CPIO ...] --cmdline "..." --boot DIR
       [--arch x86_64|aarch64|i686|armv7] [--pi --dtbs DIR] [--conf FILE] [--uki OUT] [--version V]
-      [--sign KEY --k10s K10S --profile P] [--esp-mib 256] [--data-mib 256]
+      [--sign KEY --k10s K10S --profile P] [--k10boot EFI --metal ELF] [--esp-mib 256] [--data-mib 256]
 
 --boot is the output of os/bootfiles.sh for the arch; initramfs archives are concatenated in order. --sign signs the
 UKI (the Pi: the slot image) with `K10S image sign` (an OS image for updates, docs/OS.md); unsigned images boot but
-cannot update; --uki keeps a copy of it. x86-64 layout (the shared ESP of docs/research/universal-os.md §8.4, with the
-A/B slots of crates/k10s/src/pid1/update.rs); arm64 and armv7 have the same without the BIOS parts (p1 K10S-BOOT, p2
-K10S-DATA, BOOTAA64.EFI or BOOTARM.EFI); i686 has its BIOS parts only, on an MBR disk (old BIOSes may not boot GPT):
-GRUB's core.img in the sectors before p1, p1 K10S-BOOT (FAT32, active: grub.cfg, grubenv, k10s/a/, the slot's
-signed UKI as EFI/Linux/k10s-a.efi, the image's record of the slot), p2 K10S-DATA:
+cannot update; --uki keeps a copy of it. --k10boot and --metal (x86-64): the UEFI loader and tier selector of
+metal/boot and the native kernel signed as a k10s image (profile native). x86-64 layout (the shared ESP of
+docs/research/universal-os.md §8.4, with the A/B slots of crates/k10s/src/pid1/update.rs); arm64 and armv7 have the
+same without the BIOS parts and the native kernel (p1 K10S-BOOT, p2 K10S-DATA, systemd-boot as BOOTAA64.EFI or
+BOOTARM.EFI); i686 has its BIOS parts only, on an MBR disk (old BIOSes may not boot GPT): GRUB's core.img in the
+sectors before p1, p1 K10S-BOOT (FAT32, active: grub.cfg, grubenv, k10s/a/, the slot's signed UKI as
+EFI/Linux/k10s-a.efi, the image's record of the slot), p2 K10S-DATA:
 
   MBR  GRUB boot.img (first 440 bytes) in front of the protective MBR
-  p1   BIOS boot, 1 MiB: GRUB core.img
+  p1   BIOS boot, 1 MiB: GRUB core.img (with multiboot2)
   p2   K10S-BOOT, the EFI system partition (FAT32):
-         /EFI/BOOT/BOOTX64.EFI   systemd-boot
+         /EFI/BOOT/BOOTX64.EFI   k10boot: the tier selector (systemd-boot without --k10boot)
+         /EFI/systemd/systemd-bootx64.efi  systemd-boot, Tier 1's loader (with --k10boot)
          /EFI/Linux/k10s-a.efi   slot A, a UKI: systemd-stub + kernel + initramfs + command line (+ signature)
          /loader/loader.conf     no menu, no command-line editor, default k10s-a.efi, reboot-on-error auto
-         /boot/grub/grub.cfg     BIOS: boots slot k10s_slot of grubenv, or a trial slot (k10s_try) counted down
+         /boot/grub/grub.cfg     BIOS: the native kernel through Multiboot2 if /k10s/tier says tier=metal; else
+                                 slot k10s_slot of grubenv, or a trial slot (k10s_try) counted down
          /boot/grub/grubenv      k10s_slot=a
          /k10s/a/                vmlinuz, initrd and boot.cfg (GRUB's linux/initrd lines): the UKI's payload
-         /k10s/tier              auto (read by the Tier 2 loader)
-         /k10s.conf              node configuration
+         /k10s/metal.elf         the native kernel (--metal)
+         /k10s/tier              tier=linux and metal_cmdline=, a GRUB environment block (k10boot reads it too)
+         /k10s.conf              node configuration, for both tiers
   p3   K10S-DATA (ext4); init grows it to the end of the disk on first boot
 
 --pi (KERNEL is the arm64 Image.gz, --dtbs the kernel's arch/arm64/boot/dts/broadcom):
@@ -89,12 +94,34 @@ fixup_file=fixup4cd.dat
 [all]
 """
 LOADER_CONF = "timeout 0\ndefault k10s-a.efi\neditor no\nauto-entries no\nauto-firmware no\nconsole-mode keep\nreboot-on-error auto\n"
-# BIOS: slot k10s_slot, unless a trial (k10s_try=X3) is armed: counted down, slot X booted until X0 (GRUB has no
-# arithmetic, hence the chain); init commits or clears it (crates/k10s/src/pid1/update.rs models the same).
+# BIOS: the native kernel through Multiboot2 when /k10s/tier says tier=metal (x86-64), with k10s.conf, the bundle and
+# the key files of fixed names as modules (named as k10s.conf refers to them, k10-bootproto); else slot k10s_slot,
+# unless a trial (k10s_try=X3) is armed: counted down, slot X booted until X0 (GRUB has no arithmetic, hence the
+# chain); init commits or clears it (crates/k10s/src/pid1/update.rs models the same).
 # GRUB's own messages (errors only: no menu) go to the screen and the first serial port.
-GRUB_CFG = "serial --unit=0 --speed=115200\nterminal_output --append serial\nset timeout=0\nload_env\nset slot=\"${k10s_slot}\"\n" + "".join(
+GRUB_METAL = """if [ -f /k10s/tier ]; then load_env --file /k10s/tier tier metal_cmdline; fi
+if [ "${tier}" = metal -a -f /k10s/metal.elf ]; then
+multiboot2 /k10s/metal.elf ${metal_cmdline}
+if [ -f /k10s.conf ]; then module2 /k10s.conf k10s.conf; fi
+if [ -f /k10s/bundle.k10b ]; then module2 /k10s/bundle.k10b k10s.bundle; fi
+for f in admin.key cluster.key cluster-next.key; do if [ -f /$f ]; then module2 /$f /boot/$f; fi; done
+boot
+fi
+"""
+GRUB_HEAD = "serial --unit=0 --speed=115200\nterminal_output --append serial\nset timeout=0\n"
+GRUB_SLOTS = "load_env\nset slot=\"${k10s_slot}\"\n" + "".join(
     f'{"if" if (s, n) == ("a", 3) else "elif"} [ "${{k10s_try}}" = {s}{n} ]; then set k10s_try={s}{n - 1}; set slot={s}; save_env k10s_try\n'
     for s in "ab" for n in (3, 2, 1)) + "fi\nif [ \"${slot}\" != b ]; then set slot=a; fi\nsource /k10s/${slot}/boot.cfg\nboot\n"
+# /k10s/tier: a GRUB environment block (GRUB reads it on BIOS, k10boot on UEFI; k10-bootproto `tier`).
+TIER = """# GRUB Environment Block
+# This machine's tier (docs/OS.md "Tiers"), read by k10boot (UEFI) and GRUB (BIOS):
+#   tier=linux  Tier 1, Linux (the default)
+#   tier=metal  the native kernel, /k10s/metal.elf
+#   tier=auto   UEFI: the native kernel if it drives one of the network adapters, else Tier 1; BIOS: Tier 1
+# metal_cmdline= is the native kernel's command line. Edit lines in place: no blank lines, a newline at the end.
+tier=linux
+metal_cmdline=
+"""
 
 
 def grubenv(**kv):
@@ -229,7 +256,7 @@ def grub_bios(boot, disk, tmp, mbr=False):
     core = os.path.join(tmp, "core.img")
     run(os.path.join(boot, "usr/bin/grub-mkimage"), "-d", mods, "-O", "i386-pc", "-o", core, "-p",
         "(,msdos1)/boot/grub" if mbr else "(,gpt2)/boot/grub", "biosdisk", "part_msdos" if mbr else "part_gpt", "fat",
-        "normal", "linux", "configfile", "loadenv", "test", "serial", "terminal")
+        "normal", "linux", "configfile", "loadenv", "test", "serial", "terminal", *([] if mbr else ["multiboot2"]))
     img = bytearray(open(core, "rb").read())
     # The BIOS boot partition (1 MiB), or the sectors between the MBR and p1 at 1 MiB.
     lba, room = (1, MIB - 512) if mbr else (2048, MIB)
@@ -323,11 +350,15 @@ def main():
     ap.add_argument("--sign")
     ap.add_argument("--k10s")
     ap.add_argument("--profile")
+    ap.add_argument("--k10boot")
+    ap.add_argument("--metal")
     ap.add_argument("--esp-mib", type=int, default=256)
     ap.add_argument("--data-mib", type=int, default=256)
     a = ap.parse_args()
     if a.pi and (a.arch != "aarch64" or not a.dtbs):
         sys.exit("mkimage: --pi needs --arch aarch64 and --dtbs")
+    if (a.k10boot or a.metal) and not (a.k10boot and a.metal and a.arch == "x86_64"):
+        sys.exit("mkimage: --k10boot and --metal go together, on x86_64")
     # GRUB for BIOS (x86); systemd-boot for UEFI (all but the BIOS-only i686 image, an MBR disk).
     bios, uefi = a.arch in ("x86_64", "i686"), a.arch != "i686"
     efi_arch = {"x86_64": "x64", "aarch64": "aa64", "i686": "ia32", "armv7": "arm"}[a.arch]
@@ -354,22 +385,25 @@ def main():
 
         esp = os.path.join(tmp, "esp.img")
         files = []
-        if uefi:
-            files.append((os.path.join(a.boot, f"usr/lib/systemd/boot/efi/systemd-boot{efi_arch}.efi"), f"EFI/BOOT/BOOT{efi_arch.upper()}.EFI"))
+        sdboot = os.path.join(a.boot, f"usr/lib/systemd/boot/efi/systemd-boot{efi_arch}.efi")
+        if a.k10boot:
+            files += [(a.k10boot, "EFI/BOOT/BOOTX64.EFI"), (sdboot, "EFI/systemd/systemd-bootx64.efi"), (a.metal, "k10s/metal.elf")]
+        elif uefi:
+            files.append((sdboot, f"EFI/BOOT/BOOT{efi_arch.upper()}.EFI"))
         files.append((efi, "EFI/Linux/k10s-a.efi"))
         if uefi:
             files.append((put("loader.conf", LOADER_CONF), "loader/loader.conf"))
         files.append((a.conf or put("k10s.conf", CONF), "k10s.conf"))
         if bios:
             files += [
-                (put("grub.cfg", GRUB_CFG), "boot/grub/grub.cfg"),
+                (put("grub.cfg", GRUB_HEAD + (GRUB_METAL if a.arch == "x86_64" else "") + GRUB_SLOTS), "boot/grub/grub.cfg"),
                 (put("grubenv", grubenv(k10s_slot="a")), "boot/grub/grubenv"),
                 (a.kernel, "k10s/a/vmlinuz"),
                 (initrd, "k10s/a/initrd"),
                 (put("boot.cfg", f"linux /k10s/a/vmlinuz {a.cmdline} k10s.slot=a\ninitrd /k10s/a/initrd\n"), "k10s/a/boot.cfg"),
             ]
         if a.arch == "x86_64":
-            files.append((put("tier", "auto\n"), "k10s/tier"))
+            files.append((put("tier", TIER), "k10s/tier"))
         # 2 KiB clusters: GRUB reads files one cluster at a time, and BIOS disk reads are slow.
         fat_image(esp, "K10S-BOOT", ESP_VOLID, a.esp_mib * 1024, files, env)
         data = data_fs(a, tmp, env)

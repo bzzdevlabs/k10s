@@ -2,7 +2,7 @@
 # Builds all release archives into dist/ (locally and in CI), versioned once by scripts/version.sh.
 # usage: dist.sh [--dev|--stable] [--only k10s,musl,arm64,i686,armv7,examples,metal,bench,src]
 # env: DIST, K10S_BUILD_VERSION/_COMMIT, GLIBC_MAX (highest glibc symbol version the gnu k10s may need, 2.34)
-# Needs cargo (targets x86_64-unknown-linux-musl, x86_64-unknown-none, aarch64-unknown-linux-musl,
+# Needs cargo (targets x86_64-unknown-linux-musl, x86_64-unknown-none, x86_64-unknown-uefi, aarch64-unknown-linux-musl,
 # i686-unknown-linux-musl, armv7-unknown-linux-musleabihf), go, git, binutils, GNU tar; on other hosts than arm64,
 # aarch64-linux-gnu-strip and qemu-aarch64 for the arm64 build, arm-linux-gnueabihf-strip and qemu-arm for armv7 (both
 # linked by rust-lld; i686 too, which an x86-64 host runs).
@@ -141,16 +141,16 @@ fi
 if want metal; then
     echo "== metal"
     name=k10s-metal-$V-x86_64
-    # metal/build.sh expects metal/target: no foreign CARGO_TARGET_DIR.
+    # metal/target, as the paths below expect.
     env -u CARGO_TARGET_DIR EMBED=1 metal/build.sh
     (cd metal && env -u CARGO_TARGET_DIR cargo build --release --locked -p mkbundle --target x86_64-unknown-linux-musl)
     mkdir -p "$STAGE/$name/examples"
-    cp metal/out/k10-metal.elf metal/out/k10-metal-embedded.elf metal/out/bundle.k10b "$STAGE/$name/"
+    cp metal/out/k10-metal.elf metal/out/k10-metal-embedded.elf metal/out/k10boot.efi metal/out/bundle.k10b "$STAGE/$name/"
     strip --strip-debug -o "$STAGE/$name/mkbundle" metal/target/x86_64-unknown-linux-musl/release/mkbundle
     cp examples/*.ten "$STAGE/$name/examples/"
     cp metal/README.md LICENSE NOTICE "$STAGE/$name/"
     check_version "$STAGE/$name/mkbundle" --version "mkbundle $K10S_VERSION_FULL"
-    for k in k10-metal.elf k10-metal-embedded.elf; do
+    for k in k10-metal.elf k10-metal-embedded.elf k10boot.efi; do
         grep -qaF "$K10S_VERSION_FULL" "$STAGE/$name/$k" || { echo "dist.sh: $k does not embed $K10S_VERSION_FULL" >&2; exit 1; }
     done
     pack "$name"
