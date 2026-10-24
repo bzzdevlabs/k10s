@@ -6,7 +6,8 @@ description: Install the k10s binary from a GitHub release or build it from sour
 import { Tabs, TabItem, Steps, Aside } from '@astrojs/starlight/components';
 import Terminal from '~/components/Terminal.astro';
 
-k10s is one static binary: node daemon, JIT, Ten compiler and CLI. Prebuilt binaries are for x86-64 Linux.
+k10s is one static binary: node daemon, JIT, Ten compiler and CLI. Prebuilt binaries are for x86-64 and arm64
+(aarch64) Linux; on arm64, replace `x86_64` with `aarch64` in the commands below.
 
 <Tabs syncKey="install">
 <TabItem label="Prebuilt binary">
@@ -78,11 +79,14 @@ Every release publishes these files. `V` is the version (`0.1.0`, or `0.1.1-dev.
 |---|---|
 | `k10s-V-x86_64-unknown-linux-musl.tar.gz` | `k10s`, statically linked: runs on any x86-64 Linux |
 | `k10s-V-x86_64-unknown-linux-gnu.tar.gz` | the same, linked against glibc |
+| `k10s-V-aarch64-unknown-linux-musl.tar.gz` | `k10s` for arm64 Linux, statically linked (services run on the interpreter) |
 | `k10s-examples-V.tar.gz` | Ten sources, compiled `.k10` modules and `app.k10s` |
 | `k10s-metal-V-x86_64.tar.gz` | the [bare-metal kernel](/k10s/guides/bare-metal/) and its bundle tool |
 | `k10s-os-V-x86_64-vm.img.xz` | a [disk image](/k10s/guides/bare-metal/#on-a-linux-kernel-pid-1-mode) with `k10s` as the only program of a Linux kernel, for VMs and clouds (BIOS and UEFI) |
 | `k10s-os-V-x86_64-metal.img.xz` | the same for PCs and servers: signed driver modules, NIC firmware |
 | `k10s-os-V-x86_64-{vm,metal}.efi` | the signed boot files (UKIs) of these images: [OS updates](/k10s/guides/bare-metal/#updating-the-image) of running machines, PXE or another UEFI loader |
+| `k10s-os-V-aarch64-vm.img.xz`, `k10s-os-V-aarch64-vm.efi` | the arm64 image for UEFI VMs and clouds, and its signed UKI |
+| `k10s-os-V-aarch64-pi.img.xz`, `k10s-os-V-aarch64-pi.fat` | the Raspberry Pi 4 and 5 image, and its signed boot slot (OS updates) |
 | `k10s-bench-V-linux-amd64.tar.gz` | benchmark workloads and the load generator |
 | `k10s-V-src.tar.gz` | the sources, stamped with their version |
 | `SHA256SUMS` | checksums of all of the above |
@@ -92,8 +96,8 @@ Every release publishes these files. `V` is the version (`0.1.0`, or `0.1.1-dev.
 
 ## Requirements
 
-- **x86-64 Linux** for the JIT. On other architectures, `--backend interp` runs services on the reference
-  interpreter.
+- **x86-64 Linux** for the JIT. On arm64 (and any other architecture) services run on the reference interpreter,
+  the default there; an arm64 JIT is planned.
 - **Process sandbox:** `k10s node` confines itself with Landlock (Linux 5.13+, `landlock` in the kernel's LSM list)
   and seccomp, and logs what it applied at start-up; on a kernel without Landlock, run it with
   `--sandbox seccomp-only`. See [Production setup](/k10s/guides/production/).

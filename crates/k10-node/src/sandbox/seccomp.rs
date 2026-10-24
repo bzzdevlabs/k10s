@@ -57,15 +57,34 @@ const CLONE_NEW_ANY: u32 = (libc::CLONE_NEWNS
     | libc::CLONE_NEWNET
     | libc::CLONE_NEWTIME) as u32;
 const EPERM: u16 = libc::EPERM as u16;
+/// Placeholder number of a syscall this architecture does not have; [`build`] skips it.
+const NONE: libc::c_long = -1;
 
-/// Syscalls of a running node (x86-64); anything else kills the process.
+/// The legacy (non-`*at`, non-`p*`) syscalls x86-64 still has and its libc uses; AArch64 has only the newer forms,
+/// which the table lists too.
+macro_rules! legacy {
+    ($($name:ident),*) => {
+        #[allow(non_upper_case_globals)]
+        mod legacy {
+            $(
+                #[cfg(target_arch = "x86_64")]
+                pub const $name: libc::c_long = libc::$name;
+                #[cfg(not(target_arch = "x86_64"))]
+                pub const $name: libc::c_long = super::NONE;
+            )*
+        }
+    };
+}
+legacy!(SYS_epoll_wait, SYS_poll, SYS_open, SYS_stat, SYS_lstat, SYS_rename, SYS_unlink, SYS_mkdir, SYS_rmdir, SYS_readlink);
+
+/// Syscalls of a running node; anything else kills the process.
 pub const SYSCALLS: &[Sys] = &[
-    allow(libc::SYS_epoll_wait),
+    allow(legacy::SYS_epoll_wait),
     allow(libc::SYS_epoll_pwait),
     allow(libc::SYS_epoll_pwait2),
     allow(libc::SYS_epoll_ctl),
     allow(libc::SYS_epoll_create1),
-    allow(libc::SYS_poll),
+    allow(legacy::SYS_poll),
     allow(libc::SYS_ppoll),
     allow(libc::SYS_read),
     allow(libc::SYS_write),
@@ -129,26 +148,27 @@ pub const SYSCALLS: &[Sys] = &[
     allow(libc::SYS_nanosleep),
     allow(libc::SYS_getrandom),
     allow(libc::SYS_openat),
-    allow(libc::SYS_open),
+    allow(legacy::SYS_open),
     allow(libc::SYS_newfstatat),
     allow(libc::SYS_fstat),
     allow(libc::SYS_statx),
-    allow(libc::SYS_stat), // musl std::fs::metadata
-    allow(libc::SYS_lstat), // musl std::fs::symlink_metadata
+    allow(legacy::SYS_stat), // musl std::fs::metadata
+    allow(legacy::SYS_lstat), // musl std::fs::symlink_metadata
     allow(libc::SYS_lseek),
     allow(libc::SYS_fsync),
     allow(libc::SYS_fdatasync),
     allow(libc::SYS_getdents64),
-    allow(libc::SYS_rename),
+    allow(legacy::SYS_rename),
     allow(libc::SYS_renameat),
     allow(libc::SYS_renameat2),
-    allow(libc::SYS_unlink),
+    allow(legacy::SYS_unlink),
     allow(libc::SYS_unlinkat),
-    allow(libc::SYS_mkdir),
+    allow(legacy::SYS_mkdir),
     allow(libc::SYS_mkdirat),
-    allow(libc::SYS_rmdir),
+    allow(legacy::SYS_rmdir),
     allow(libc::SYS_fcntl),
-    allow(libc::SYS_readlink), // current_exe() for panic backtraces
+    allow(legacy::SYS_readlink), // current_exe() for panic backtraces
+    allow(libc::SYS_readlinkat),
     // std's set_nonblocking and cloexec only; no terminal or device ioctl.
     sys(libc::SYS_ioctl, Rule::OneOf {
         arg: 1,
@@ -174,7 +194,12 @@ pub const SYSCALLS: &[Sys] = &[
     sys(libc::SYS_socket, Rule::Socket { deny: Deny::Errno(EPERM) }),
 ];
 
-const AUDIT_ARCH_X86_64: u32 = 0xC000_003E;
+/// `AUDIT_ARCH_X86_64`, `AUDIT_ARCH_AARCH64`: the only ABI the filter admits (no 32-bit or x32 entry points).
+#[cfg(target_arch = "x86_64")]
+const AUDIT_ARCH: u32 = 0xC000_003E;
+#[cfg(target_arch = "aarch64")]
+const AUDIT_ARCH: u32 = 0xC000_00B7;
+#[cfg(target_arch = "x86_64")]
 const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 const OFF_NR: u32 = 0;
 const OFF_ARCH: u32 = 4;
@@ -243,19 +268,20 @@ fn deny(d: Deny) -> T {
     }
 }
 
-/// The filter for `mode` (`pid` for [`Rule::OwnPid`]): arch check, x32 check, one `jeq nr` per plain allow (no
-/// argument load, so cacheable), then one block per argument rule ending in a return; returns at the end.
+/// The filter for `mode` (`pid` for [`Rule::OwnPid`]): arch check, x32 check (x86-64), one `jeq nr` per plain allow
+/// (no argument load, so cacheable), then one block per argument rule ending in a return; returns at the end.
 pub fn build(mode: Mode, pid: u32) -> Vec<libc::sock_filter> {
     let default = if mode == Mode::Log { RET_LOG } else { RET_KILL_PROCESS };
     let mut a = Asm { code: Vec::new(), skips: Vec::new() };
     a.ld(OFF_ARCH);
-    a.jeq(AUDIT_ARCH_X86_64, T::Next, T::Default);
+    a.jeq(AUDIT_ARCH, T::Next, T::Default);
     a.ld(OFF_NR);
+    #[cfg(target_arch = "x86_64")]
     a.jset(X32_SYSCALL_BIT, T::Default, T::Next);
-    for s in SYSCALLS.iter().filter(|s| s.rule == Rule::Allow) {
+    for s in SYSCALLS.iter().filter(|s| s.rule == Rule::Allow && s.nr != NONE) {
         a.jeq(s.nr as u32, T::Allow, T::Next);
     }
-    for (i, s) in SYSCALLS.iter().enumerate().filter(|(_, s)| s.rule != Rule::Allow) {
+    for (i, s) in SYSCALLS.iter().enumerate().filter(|(_, s)| s.rule != Rule::Allow && s.nr != NONE) {
         let nr = s.nr as u32;
         if let Rule::Errno(e) = s.rule {
             a.jeq(nr, T::Errno(e), T::Next);
@@ -415,7 +441,7 @@ mod tests {
             match f.code {
                 BPF_LD_W_ABS => match f.k {
                     OFF_NR => reg = nr,
-                    OFF_ARCH => reg = AUDIT_ARCH_X86_64,
+                    OFF_ARCH => reg = AUDIT_ARCH,
                     _ => return false,
                 },
                 BPF_RET_K => return f.k == RET_ALLOW,
@@ -430,11 +456,16 @@ mod tests {
         false
     }
 
-    const X64: u32 = AUDIT_ARCH_X86_64;
+    const ARCH: u32 = AUDIT_ARCH;
+    /// A 32-bit ABI of the same CPU (`AUDIT_ARCH_I386`, `AUDIT_ARCH_ARM`).
+    #[cfg(target_arch = "x86_64")]
+    const COMPAT: u32 = 0x4000_0003;
+    #[cfg(target_arch = "aarch64")]
+    const COMPAT: u32 = 0x4000_0028;
 
     #[test]
     fn table_has_no_duplicates_and_dangerous_syscalls_are_absent() {
-        let mut nrs: Vec<i64> = SYSCALLS.iter().map(|s| s.nr).collect();
+        let mut nrs: Vec<i64> = SYSCALLS.iter().map(|s| s.nr).filter(|&n| n != NONE).collect();
         nrs.sort();
         let n = nrs.len();
         nrs.dedup();
@@ -442,8 +473,6 @@ mod tests {
         for (nr, name) in [
             (libc::SYS_execve, "execve"),
             (libc::SYS_execveat, "execveat"),
-            (libc::SYS_fork, "fork"),
-            (libc::SYS_vfork, "vfork"),
             (libc::SYS_ptrace, "ptrace"),
             (libc::SYS_process_vm_readv, "process_vm_readv"),
             (libc::SYS_process_vm_writev, "process_vm_writev"),
@@ -456,7 +485,6 @@ mod tests {
             (libc::SYS_bpf, "bpf"),
             (libc::SYS_perf_event_open, "perf_event_open"),
             (libc::SYS_kexec_load, "kexec_load"),
-            (libc::SYS_kexec_file_load, "kexec_file_load"),
             (libc::SYS_init_module, "init_module"),
             (libc::SYS_finit_module, "finit_module"),
             (libc::SYS_delete_module, "delete_module"),
@@ -476,11 +504,22 @@ mod tests {
             (libc::SYS_capset, "capset"),
             (libc::SYS_seccomp, "seccomp"),
             (libc::SYS_pkey_mprotect, "pkey_mprotect"),
+            (libc::SYS_open_by_handle_at, "open_by_handle_at"),
+            (libc::SYS_landlock_create_ruleset, "landlock_create_ruleset"),
+        ] {
+            assert!(!nrs.contains(&nr), "{name} must not be allowed");
+        }
+        // libc's musl bindings for AArch64 lack the number.
+        #[cfg(target_arch = "aarch64")]
+        assert!(!nrs.contains(&294), "kexec_file_load must not be allowed");
+        #[cfg(target_arch = "x86_64")]
+        for (nr, name) in [
+            (libc::SYS_kexec_file_load, "kexec_file_load"),
+            (libc::SYS_fork, "fork"),
+            (libc::SYS_vfork, "vfork"),
             (libc::SYS_modify_ldt, "modify_ldt"),
             (libc::SYS_iopl, "iopl"),
             (libc::SYS_ioperm, "ioperm"),
-            (libc::SYS_open_by_handle_at, "open_by_handle_at"),
-            (libc::SYS_landlock_create_ruleset, "landlock_create_ruleset"),
         ] {
             assert!(!nrs.contains(&nr), "{name} must not be allowed");
         }
@@ -492,16 +531,17 @@ mod tests {
         for mode in [Mode::On, Mode::Log] {
             let deny = if mode == Mode::Log { RET_LOG } else { RET_KILL_PROCESS };
             let p = build(mode, pid);
-            let r = |nr: libc::c_long, args: [u64; 6]| run(&p, nr as u32, X64, args);
+            let r = |nr: libc::c_long, args: [u64; 6]| run(&p, nr as u32, ARCH, args);
             let z = [0u64; 6];
-            for s in SYSCALLS.iter().filter(|s| s.rule == Rule::Allow) {
-                assert_eq!(run(&p, s.nr as u32, X64, [u64::MAX; 6]), RET_ALLOW, "nr {}", s.nr);
+            for s in SYSCALLS.iter().filter(|s| s.rule == Rule::Allow && s.nr != NONE) {
+                assert_eq!(run(&p, s.nr as u32, ARCH, [u64::MAX; 6]), RET_ALLOW, "nr {}", s.nr);
             }
             for nr in [libc::SYS_execve, libc::SYS_ptrace, libc::SYS_bind, libc::SYS_getpgid, libc::SYS_io_uring_setup, 999] {
                 assert_eq!(r(nr, z), deny, "nr {nr}");
             }
-            assert_eq!(run(&p, libc::SYS_read as u32, 0x4000_0003 /* AUDIT_ARCH_I386 */, z), deny);
-            assert_eq!(run(&p, X32_SYSCALL_BIT | libc::SYS_read as u32, X64, z), deny);
+            assert_eq!(run(&p, libc::SYS_read as u32, COMPAT, z), deny);
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!(run(&p, X32_SYSCALL_BIT | libc::SYS_read as u32, ARCH, z), deny);
             let (rw, rx) = ((libc::PROT_READ | libc::PROT_WRITE) as u64, (libc::PROT_READ | libc::PROT_EXEC) as u64);
             assert_eq!(r(libc::SYS_mmap, [0, 4096, rw, 0x22, u64::MAX, 0]), RET_ALLOW);
             assert_eq!(r(libc::SYS_mmap, [0, 4096, rx, 0x22, u64::MAX, 0]), deny);
@@ -537,7 +577,7 @@ mod tests {
     #[test]
     fn plain_allows_are_served_by_the_kernel_action_cache() {
         let p = build(Mode::On, 1);
-        for s in SYSCALLS {
+        for s in SYSCALLS.iter().filter(|s| s.nr != NONE) {
             assert_eq!(const_allow(&p, s.nr as u32), s.rule == Rule::Allow, "nr {}", s.nr);
         }
     }
@@ -564,13 +604,17 @@ mod tests {
     fn denied_syscalls_kill() {
         assert!(killed_by(filtered(Mode::On, || raw(libc::SYS_getpgid, [0, 0, 0]) as i32), libc::SIGSYS));
         assert!(killed_by(filtered(Mode::On, || raw(libc::SYS_ptrace, [libc::PTRACE_TRACEME as _, 0, 0]) as i32), libc::SIGSYS));
+        #[cfg(target_arch = "x86_64")]
         assert!(killed_by(filtered(Mode::On, || raw(X32_SYSCALL_BIT as libc::c_long | libc::SYS_getpid, [0, 0, 0]) as i32), libc::SIGSYS));
-        let st = filtered(Mode::On, || {
-            // SAFETY: int 0x80 with eax = 20 (i386 getpid); only eax is clobbered.
-            unsafe { std::arch::asm!("int 0x80", inout("eax") 20u32 => _) };
-            0
-        });
-        assert!(killed_by(st, libc::SIGSYS) || killed_by(st, libc::SIGSEGV), "status {st:#x}");
+        #[cfg(target_arch = "x86_64")]
+        {
+            let st = filtered(Mode::On, || {
+                // SAFETY: int 0x80 with eax = 20 (i386 getpid); only eax is clobbered.
+                unsafe { std::arch::asm!("int 0x80", inout("eax") 20u32 => _) };
+                0
+            });
+            assert!(killed_by(st, libc::SIGSYS) || killed_by(st, libc::SIGSEGV), "status {st:#x}");
+        }
         let st = filtered(Mode::On, || {
             // SAFETY: fresh private anonymous mappings.
             unsafe {
@@ -642,7 +686,13 @@ mod tests {
                 libc::pthread_join(t.assume_init(), std::ptr::null_mut());
                 // The JIT's sequence: RW mapping, written, then RX.
                 let p = libc::mmap(std::ptr::null_mut(), 4096, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1, 0);
-                *(p as *mut u8) = 0xC3; // ret
+                #[cfg(target_arch = "x86_64")]
+                (p as *mut u8).write(0xC3); // ret
+                #[cfg(target_arch = "aarch64")]
+                {
+                    (p as *mut u32).write(0xD65F_03C0); // ret
+                    std::arch::asm!("dc cvau, {p}", "dsb ish", "ic ivau, {p}", "dsb ish", "isb", p = in(reg) p);
+                }
                 if libc::mprotect(p, 4096, libc::PROT_READ | libc::PROT_EXEC) != 0 {
                     return 8;
                 }

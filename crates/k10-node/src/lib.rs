@@ -19,6 +19,7 @@ pub mod demo;
 pub mod exec;
 pub mod host;
 pub mod http;
+#[cfg(target_arch = "x86_64")]
 pub mod jit;
 pub mod kv;
 pub mod logs;

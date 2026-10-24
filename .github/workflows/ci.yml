@@ -42,6 +42,19 @@ jobs:
         env:
           SUITE: ${{ matrix.suite }}
 
+  arm64:
+    name: Tests on arm64 (interpreter, gnu and musl)
+    if: github.event_name != 'push'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/toolchains
+      - name: scripts/ci-test.sh arm64
+        run: scripts/ci-test.sh arm64
+
   metal:
     name: Bare-metal kernel self tests (QEMU/KVM)
     if: github.event_name != 'push'
@@ -87,6 +100,37 @@ jobs:
       - name: scripts/ci-test.sh os
         run: scripts/ci-test.sh os
 
+  os-arm64:
+    name: arm64 kernel, aarch64-vm and Pi images under QEMU (os/test.sh --arch aarch64)
+    if: github.event_name != 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/toolchains
+        with:
+          qemu: "true"
+          cross-arm64: "true"
+          qemu-arm64: "true"
+      - name: Kernel build and image tools
+        run: >-
+          sudo apt-get install -y -q --no-install-recommends flex bison bc libelf-dev libssl-dev dosfstools mtools fdisk
+          zstd xz-utils libdevmapper1.02.1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/os/linux-*.tar.xz
+            target/os/*.deb
+            target/os/kernel-aarch64/arch/arm64/boot/Image
+            target/os/kernel-aarch64/arch/arm64/boot/Image.gz
+            target/os/kernel-aarch64/arch/arm64/boot/dts/broadcom/*.dtb
+            target/os/kernel-aarch64/.k10s-stamp
+          key: os-arm64-${{ hashFiles('os/kbuild.sh', 'os/bootfiles.sh', 'os/kpatches/*', 'os/kconfig/*') }}
+      - name: scripts/ci-test.sh os-arm64
+        run: scripts/ci-test.sh os-arm64
+
   metal-e2e:
     name: Bare-metal kernel end-to-end (metal/test.sh, non-blocking)
     if: github.event_name != 'push'
@@ -117,6 +161,7 @@ jobs:
       - uses: ./.github/actions/toolchains
         with:
           go: "true"
+          cross-arm64: "true"
       - name: scripts/dist.sh
         run: scripts/dist.sh --dev
       - name: scripts/ci-test.sh dist

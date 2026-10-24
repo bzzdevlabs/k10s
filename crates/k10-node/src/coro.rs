@@ -1,14 +1,19 @@
-//! Stackful coroutines: pooled stacks with guard pages and a hand-written x86-64 (SysV) context switch.
+//! Stackful coroutines: pooled stacks with guard pages and a hand-written context switch (x86-64 SysV, AArch64
+//! AAPCS64).
 //!
 //! A [`Coro`] owns a [`Stack`] and two saved stack pointers: its own (`sp`, valid while suspended) and the
 //! scheduler's (`back`, valid while the coroutine runs). [`Coro::resume`] switches scheduler -> coroutine,
-//! [`Coro::suspend`] coroutine -> scheduler. A switch pushes the callee-saved registers (rbx, rbp, r12-r15) on the
-//! current stack, stores `rsp`, loads the other `rsp` and pops the same set: 16 instructions, no syscall, no signal
-//! mask.
+//! [`Coro::suspend`] coroutine -> scheduler. A switch saves the callee-saved registers on the current stack, stores
+//! the stack pointer, loads the other one and restores the same set: no syscall, no signal mask.
 //!
-//! Invariant: MXCSR and the x87 control word are *not* switched. Nothing that runs on fibers changes them (TIR has
-//! no instruction for it, host functions are plain Rust, JIT code must not either), so they always hold the
-//! process defaults.
+//! | arch | saved | frame |
+//! |---|---|---|
+//! | x86_64 | rbx rbp r12-r15 (+ return address); no xmm register is callee-saved | 56 B |
+//! | aarch64 | x19-x28, x29 (fp), x30 (lr), d8-d15 (low halves of v8-v15) | 160 B |
+//!
+//! Invariant: the floating-point control state (MXCSR and the x87 control word, FPCR) is *not* switched. Nothing
+//! that runs on fibers changes it (TIR has no instruction for it, host functions are plain Rust, JIT code must not
+//! either), so it always holds the process defaults.
 //!
 //! The coroutine's entry function (`extern "C" fn(*mut c_void) -> !`) must never return and must not let a panic
 //! escape (there is no unwind information above it); the runtime's fiber loop catches panics per job.
@@ -81,39 +86,111 @@ impl Drop for Stack {
     }
 }
 
-/// Switches stacks: saves the callee-saved state on the current stack, stores `rsp` into `*save`, loads `to` and
-/// restores the state found there.
-///
-/// # Safety
-/// `to` must be a stack pointer previously stored by this function (or prepared by [`Coro::new`]) whose stack is
-/// still alive and not running.
-#[unsafe(naked)]
-unsafe extern "C" fn ctx_switch(save: *mut *mut u8, to: *mut u8) {
-    core::arch::naked_asm!(
-        "push rbp",
-        "push rbx",
-        "push r12",
-        "push r13",
-        "push r14",
-        "push r15",
-        "mov [rdi], rsp",
-        "mov rsp, rsi",
-        "pop r15",
-        "pop r14",
-        "pop r13",
-        "pop r12",
-        "pop rbx",
-        "pop rbp",
-        "ret",
-    )
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+compile_error!("coroutines: no context switch for this architecture");
+
+#[cfg(target_arch = "x86_64")]
+mod arch {
+    /// Switches stacks: saves the callee-saved state on the current stack, stores `rsp` into `*save`, loads `to`
+    /// and restores the state found there.
+    ///
+    /// # Safety
+    /// `to` must be a stack pointer previously stored by this function (or prepared by [`frame`]) whose stack is
+    /// still alive and not running.
+    #[unsafe(naked)]
+    pub unsafe extern "C" fn ctx_switch(save: *mut *mut u8, to: *mut u8) {
+        core::arch::naked_asm!(
+            "push rbp",
+            "push rbx",
+            "push r12",
+            "push r13",
+            "push r14",
+            "push r15",
+            "mov [rdi], rsp",
+            "mov rsp, rsi",
+            "pop r15",
+            "pop r14",
+            "pop r13",
+            "pop r12",
+            "pop rbx",
+            "pop rbp",
+            "ret",
+        )
+    }
+
+    /// First code a new coroutine runs (reached by `ret` from [`ctx_switch`]): `r12` = argument, `r13` = entry
+    /// function. `rsp` is 16-byte aligned here, so the `call` gives the entry function a standard frame.
+    #[unsafe(naked)]
+    unsafe extern "C" fn ctx_start() {
+        core::arch::naked_asm!("mov rdi, r12", "call r13", "ud2")
+    }
+
+    /// The initial frame below the 16-aligned `top` that [`ctx_switch`] pops: r15 r14 r13 r12 rbx rbp ret, then 16
+    /// bytes of padding. After `ret`, rsp = top - 16 (16-byte aligned), as the `call` in `ctx_start` requires.
+    pub fn frame(top: usize, entry: usize, arg: usize) -> (usize, [usize; 9]) {
+        (top - 72, [0, 0, entry, arg, 0, 0, ctx_start as *const () as usize, 0, 0])
+    }
 }
 
-/// First code a new coroutine runs (reached by `ret` from [`ctx_switch`]): `r12` = argument, `r13` = entry
-/// function. `rsp` is 16-byte aligned here, so the `call` gives the entry function a standard frame.
-#[unsafe(naked)]
-unsafe extern "C" fn ctx_start() {
-    core::arch::naked_asm!("mov rdi, r12", "call r13", "ud2")
+#[cfg(target_arch = "aarch64")]
+mod arch {
+    /// Switches stacks: saves the callee-saved state on the current stack, stores `sp` into `*save`, loads `to`
+    /// and restores the state found there.
+    ///
+    /// # Safety
+    /// `to` must be a stack pointer previously stored by this function (or prepared by [`frame`]) whose stack is
+    /// still alive and not running.
+    #[unsafe(naked)]
+    pub unsafe extern "C" fn ctx_switch(save: *mut *mut u8, to: *mut u8) {
+        core::arch::naked_asm!(
+            "sub sp, sp, #160",
+            "stp x19, x20, [sp, #0]",
+            "stp x21, x22, [sp, #16]",
+            "stp x23, x24, [sp, #32]",
+            "stp x25, x26, [sp, #48]",
+            "stp x27, x28, [sp, #64]",
+            "stp x29, x30, [sp, #80]",
+            "stp d8, d9, [sp, #96]",
+            "stp d10, d11, [sp, #112]",
+            "stp d12, d13, [sp, #128]",
+            "stp d14, d15, [sp, #144]",
+            "mov x9, sp",
+            "str x9, [x0]",
+            "mov sp, x1",
+            "ldp x19, x20, [sp, #0]",
+            "ldp x21, x22, [sp, #16]",
+            "ldp x23, x24, [sp, #32]",
+            "ldp x25, x26, [sp, #48]",
+            "ldp x27, x28, [sp, #64]",
+            "ldp x29, x30, [sp, #80]",
+            "ldp d8, d9, [sp, #96]",
+            "ldp d10, d11, [sp, #112]",
+            "ldp d12, d13, [sp, #128]",
+            "ldp d14, d15, [sp, #144]",
+            "add sp, sp, #160",
+            "ret",
+        )
+    }
+
+    /// First code a new coroutine runs (reached by `ret` from [`ctx_switch`]): `x19` = argument, `x20` = entry
+    /// function; `x29` = 0 ends the frame chain.
+    #[unsafe(naked)]
+    unsafe extern "C" fn ctx_start() {
+        core::arch::naked_asm!("mov x0, x19", "blr x20", "brk #1")
+    }
+
+    /// The initial frame below the 16-aligned `top` that [`ctx_switch`] pops: x19 (argument), x20 (entry),
+    /// x21-x28, x29, x30 (`ctx_start`), d8-d15. After the pop, sp = top.
+    pub fn frame(top: usize, entry: usize, arg: usize) -> (usize, [usize; 20]) {
+        let mut f = [0; 20];
+        f[0] = arg;
+        f[1] = entry;
+        f[11] = ctx_start as *const () as usize;
+        (top - 160, f)
+    }
 }
+
+use arch::ctx_switch;
 
 pub type Entry = extern "C" fn(*mut c_void) -> !;
 
@@ -133,22 +210,10 @@ impl Coro {
     /// Prepares a coroutine that will call `entry(arg)` on its first resume.
     pub fn new(stack: Stack, entry: Entry, arg: *mut c_void) -> Coro {
         let top = stack.top() as usize & !15;
-        // Initial frame popped by ctx_switch: r15 r14 r13 r12 rbx rbp ret, then 16 bytes of padding. After `ret`,
-        // rsp = top - 16 (16-byte aligned), as the `call` in `ctx_start` requires.
-        let sp = top - 72;
-        let frame: [u64; 9] = [
-            0,                                      // r15
-            0,                                      // r14
-            entry as *const () as usize as u64,     // r13
-            arg as usize as u64,                    // r12
-            0,                                      // rbx
-            0,                                      // rbp
-            ctx_start as *const () as usize as u64, // return address
-            0,
-            0,
-        ];
-        // SAFETY: [sp, top) lies within the stack's usable range (72 bytes below its 16-aligned top).
-        unsafe { ptr::copy_nonoverlapping(frame.as_ptr(), sp as *mut u64, frame.len()) };
+        let (sp, frame) = arch::frame(top, entry as *const () as usize, arg as usize);
+        debug_assert_eq!(sp + 8 * frame.len(), top);
+        // SAFETY: [sp, top) lies within the stack's usable range (one frame below its 16-aligned top).
+        unsafe { ptr::copy_nonoverlapping(frame.as_ptr(), sp as *mut usize, frame.len()) };
         Coro { stack, sp: sp as *mut u8, back: ptr::null_mut() }
     }
 
@@ -302,5 +367,54 @@ mod tests {
         unsafe { Coro::resume(c) };
         assert_eq!(a.out.get(), 2475.0);
         unsafe { drop(Box::from_raw(c)) };
+    }
+
+    /// d8-d15 are callee-saved on AArch64: the scheduler's values survive a coroutine that overwrites them.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn fp_callee_saved_registers_survive() {
+        use core::arch::asm;
+        struct C {
+            coro: *mut Coro,
+        }
+        extern "C" fn entry(arg: *mut c_void) -> ! {
+            let c = arg as *const C;
+            loop {
+                // SAFETY: plain register writes, declared as clobbered.
+                unsafe {
+                    asm!("fmov d8, #-1.0", "fmov d9, #-1.0", "fmov d10, #-1.0", "fmov d11, #-1.0", "fmov d12, #-1.0",
+                        "fmov d13, #-1.0", "fmov d14, #-1.0", "fmov d15, #-1.0",
+                        out("d8") _, out("d9") _, out("d10") _, out("d11") _, out("d12") _, out("d13") _, out("d14") _, out("d15") _);
+                    Coro::suspend((*c).coro);
+                }
+            }
+        }
+        extern "C" fn resume(c: *mut Coro) {
+            unsafe { Coro::resume(c) }
+        }
+        let mut c = Box::new(C { coro: ptr::null_mut() });
+        let cp: *mut C = &mut *c;
+        let coro = Box::into_raw(Box::new(Coro::new(Stack::new(64 * 1024).unwrap(), entry, cp as *mut c_void)));
+        c.coro = coro;
+        let mut out = [0f64; 8];
+        // SAFETY: d8-d15 are set, kept across a call that must preserve them and stored to `out`; the output
+        // pointer is kept on the stack across the call.
+        unsafe {
+            asm!(
+                "str {o}, [sp, #-16]!",
+                "fmov d8, #1.0", "fmov d9, #2.0", "fmov d10, #3.0", "fmov d11, #4.0",
+                "fmov d12, #5.0", "fmov d13, #6.0", "fmov d14, #7.0", "fmov d15, #8.0",
+                "blr {f}",
+                "ldr x9, [sp], #16",
+                "stp d8, d9, [x9]", "stp d10, d11, [x9, #16]", "stp d12, d13, [x9, #32]", "stp d14, d15, [x9, #48]",
+                o = in(reg) out.as_mut_ptr(),
+                f = in(reg) resume as extern "C" fn(*mut Coro),
+                in("x0") coro,
+                out("d8") _, out("d9") _, out("d10") _, out("d11") _, out("d12") _, out("d13") _, out("d14") _, out("d15") _,
+                clobber_abi("C"),
+            );
+        }
+        assert_eq!(out, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        unsafe { drop(Box::from_raw(coro)) };
     }
 }

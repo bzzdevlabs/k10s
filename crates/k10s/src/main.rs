@@ -68,8 +68,9 @@ const USAGE: &str = "usage:
   k10s keygen [-o FILE]                           (32 random bytes as hex: a cluster key or an admin key;
                                                    FILE is created with mode 0600, never overwritten)
   k10s image pubkey KEY                           (the public key of a signing key made by keygen)
-  k10s image sign --key KEY --arch ARCH --profile PROFILE --version V IN.efi OUT.efi
-                                                  (signs an OS image for Tier 1 updates, docs/OS.md)
+  k10s image sign --key KEY --arch ARCH --profile PROFILE --version V IN OUT
+                                                  (signs an OS image for Tier 1 updates, a UKI or a Pi boot
+                                                   slot, docs/OS.md)
   k10s image verify FILE [--trust PUBKEY,...]     (checks an OS image; trusted: the k10s release key and PUBKEY)
   k10s apply  FILE.k10s [--node HOST:PORT]        (code = \"x.ten\" sources are compiled, \"x.k10\" sent as is;
                                                    os { images = [\"x.efi\"] } rolls out OS images)

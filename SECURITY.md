@@ -42,7 +42,7 @@ bulk-memory helpers, the host API and the runtime's `unsafe` code. Two further l
   become a load-time check (decode with an in-tree length decoder, verify, then seal the code) at the cost of a
   disassembler in the TCB-adjacent path.
 
-**2. Process sandbox of `k10s node` (Linux x86-64, `--sandbox on|seccomp-only|log|off`, default `on`, or
+**2. Process sandbox of `k10s node` (Linux x86-64 and AArch64, `--sandbox on|seccomp-only|log|off`, default `on`, or
 `$K10S_SANDBOX`).**
 - At start: inherited descriptors ≥ 3 are closed, `PR_SET_NO_NEW_PRIVS` is set. The listeners are bound and the
   secrets (admin key, cluster keys) read; then, still single-threaded: `--user` (groups, gid, uid; root without
@@ -52,12 +52,13 @@ bulk-memory helpers, the host API and the runtime's `unsafe` code. Two further l
   limited to the data directory (read-write, no execution, no special files or symlinks) and a few read-only `/sys`,
   `/proc/sys` entries and the binary; `/proc/self` is not reachable (its statistics files are opened before);
   nothing can be executed. With ABI ≥ 6 (Linux 6.12) signals and abstract UNIX sockets are scoped to the node.
-- seccomp-bpf on the single thread, inherited by every thread created afterwards: an allowlist of 96 syscalls
-  (`SYSCALLS` in `crates/k10-node/src/sandbox/seccomp.rs`); anything else kills the process (`SIGSYS`). Notably
+- seccomp-bpf on the single thread, inherited by every thread created afterwards: an allowlist of 98 syscalls on
+  x86-64, 88 on AArch64, which has only their `*at`/`p*` forms (`SYSCALLS` in
+  `crates/k10-node/src/sandbox/seccomp.rs`); anything else kills the process (`SIGSYS`). Notably
   denied: `execve`, `fork`/non-thread `clone`, namespaces, `ptrace`, `process_vm_*`, `mount`, `bpf`,
   `perf_event_open`, `io_uring`, `keyctl`, modules, `personality`, `bind`/`listen` (no new ports), sockets other
   than IPv4/IPv6 stream or datagram, signals to other processes, executable `mmap` and writable+executable
-  `mprotect`, x32 and i386 syscalls. Hot-path syscalls take no argument checks, so the kernel's seccomp action cache
+  `mprotect`, x32 and i386 syscalls on x86-64, 32-bit ARM syscalls on AArch64. Hot-path syscalls take no argument checks, so the kernel's seccomp action cache
   serves them (no measurable cost; see docs/NODE.md).
 - `log` mode helps find a missing syscall: no Landlock, calls the filter would kill are logged by the kernel
   (`journalctl -k | grep type=1326`) and run, while its errno rules (`clone3`, other socket types, `prctl`, `ioctl`,

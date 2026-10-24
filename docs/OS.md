@@ -4,9 +4,10 @@ The static `k10s` binary is the only userspace program of a Linux image: the ker
 shell, udev, systemd, DHCP daemon or SSH. This is Tier 1 of the platform plan (docs/REPORT.md §9,
 docs/research/universal-os.md §8–9); Tier 2 is the native kernel in `metal/`.
 
-What exists today (milestones U0 to U2): PID 1 mode in `crates/k10s/src/pid1/`, the k10s kernels (`vm` and `metal`
-profiles, `os/`), x86-64 disk images that boot on BIOS and UEFI, signed A/B updates of the image rolled out by the
-cluster in waves, and QEMU tests of all of them. arm64 and the Raspberry Pi come next (U3).
+What exists today (milestones U0 to U3): PID 1 mode in `crates/k10s/src/pid1/`, the k10s kernels (`vm` and `metal`
+profiles for x86-64, one `arm64` kernel, `os/`), x86-64 disk images that boot on BIOS and UEFI, an arm64 UEFI image
+and a Raspberry Pi 4/5 image, signed A/B updates of every image rolled out by the cluster in waves, and QEMU tests of
+all of them. On arm64 the node runs on the interpreter; the arm64 JIT comes next (U4).
 
 ## Boot sequence
 
@@ -21,8 +22,8 @@ of a container, `docker run … k10s node`, it keeps its normal command line).
    until nothing new appears. A netlink uevent listener does the same for devices added later, and
    `/proc/sys/kernel/modprobe` points at `/init`, which loads on-demand requests (`/init -q -- NAME`). A kernel with
    every driver built in ships no modules and skips this.
-3. **Configuration:** the GPT partition named `K10S-BOOT` (FAT) is mounted read-only on `/boot`, root-only
-   (files 0600), and its `k10s.conf` merged (keys below).
+3. **Configuration:** the partition named `K10S-BOOT` (FAT; the GPT partition name, or on an MBR disk the FAT volume
+   label) is mounted read-only on `/boot`, root-only (files 0600), and its `k10s.conf` merged (keys below).
 4. **Network:** loopback and the first Ethernet interface (`iface` to choose). A static `ip`, else an address the
    kernel set (`ip=`), else DHCPv4 once the link is up (carrier, up to `netwait`): the client follows RFC 2131 (renews at T1 by unicast to its server, rebinds at T2
    by broadcast, starts over on a NAK or at the end of the lease), writes `/etc/resolv.conf` from the lease, and keeps
@@ -30,13 +31,14 @@ of a container, `docker run … k10s node`, it keeps its normal command line).
    interface's address; when the address changes, a node that advertises it is restarted. IPv6 addresses come from
    the kernel's SLAAC.
 5. **Hostname:** `name`, else `k10s-` and the last three bytes of the MAC (the node's default name).
-6. **Data:** the partition named `K10S-DATA` (or `data=/dev/X[:FSTYPE]`), ext4 by default, on `/data`, handed to the
-   node's user when fresh; without one the node's state lives in RAM. When `K10S-DATA` is the last partition of a GPT
-   disk with free space behind it (an image written to a larger disk), init grows it to the end of the disk first:
-   backup GPT moved to the disk's end, partition extended to the last 1 MiB boundary (backup table written and synced
-   before the primary), `BLKPG_RESIZE_PARTITION`, then the mounted ext4 is grown online (`EXT4_IOC_RESIZE_FS`). A
-   filesystem smaller than its partition (power lost between the two steps) is grown on the next boot. Other
-   partitions are never touched; `grow=0` keeps the size.
+6. **Data:** the partition named `K10S-DATA` (GPT name, or the ext4 label on an MBR disk; or
+   `data=/dev/X[:FSTYPE]`), ext4 by default, on `/data`, handed to the node's user when fresh; without one the node's
+   state lives in RAM. When `K10S-DATA` is the last partition of its disk with free space behind it (an image written
+   to a larger disk), init grows it to the end of the disk first: on GPT the backup GPT is moved to the disk's end and
+   the partition extended to the last 1 MiB boundary (backup table written and synced before the primary); on MBR the
+   partition entry is extended in sector 0 (up to 2^32 sectors, 2 TiB); then `BLKPG_RESIZE_PARTITION`, and the
+   mounted ext4 is grown online (`EXT4_IOC_RESIZE_FS`). A filesystem smaller than its partition (power lost between
+   the two steps) is grown on the next boot. Other partitions are never touched; `grow=0` keeps the size.
 7. **Time:** an SNTP client (RFC 4330) sets the clock in the background from `ntp`, else the lease's NTP servers,
    else `pool.ntp.org`; offsets of 128 ms or more step the clock, smaller ones slew it, and it polls every 17 minutes.
    A reply must echo the random transmit timestamp of its request (SNTP itself is unauthenticated).
@@ -48,7 +50,8 @@ of a container, `docker run … k10s node`, it keeps its normal command line).
 9. **Health and watchdog:** init probes `GET /_k10s/health` on loopback and logs when the node is first ready. With
    `watchdog=1` it opens `/dev/watchdog` and pets it every 5 s while the node answered within the last minute (or is
    still starting, up to 5 minutes), so a hung node or kernel resets the machine.
-10. **Power off:** the power button (ACPI button with evdev, or the kernel's tiny power button signal), SIGTERM or
+10. **Power off:** the power button (ACPI button or a devicetree `gpio-keys` key with evdev, or the kernel's tiny
+    power button signal), SIGTERM or
     SIGPWR stop the node (SIGTERM, 30 s to leave the cluster and drain, then SIGKILL), then init syncs, unmounts
     `/data` and `/boot` (read-only remount if busy), disarms the watchdog and powers off; Ctrl-Alt-Del reboots. If
     init itself fails, the kernel panics: boot with `panic=5` to reboot.
@@ -90,19 +93,24 @@ create it with `k10s keygen -o admin.key`, copy it to `K10S-BOOT` and set `admin
 ## Entropy
 
 Keys, nonces and node secrets use blocking `getrandom`; non-key seeds (node ids, shard generators, shuffles, DHCP
-transaction ids, SNTP nonces) use `GRND_INSECURE`, which never blocks at early boot. The k10s kernel builds the
-hardware RNG drivers in (`HW_RANDOM`, `HW_RANDOM_VIRTIO`), so the kernel's generator is seeded early.
+transaction ids, SNTP nonces) use `GRND_INSECURE`, which never blocks at early boot. The k10s kernels build the
+hardware RNG drivers in (virtio, Intel, AMD, and the Raspberry Pi's `bcm2835-rng` and `iproc-rng200`), so the kernel's
+generator is seeded early.
 
 ## Disk images
 
-`os/images.sh` builds the two x86-64 images of a release; both boot on BIOS and on UEFI (Secure Boot off) from any
-disk, and a release publishes them with their UKIs:
+`os/images.sh` builds the images of a release, per architecture (`--arch x86_64|aarch64`); the x86-64 ones boot on
+BIOS and on UEFI (Secure Boot off) from any disk. A release publishes them with their update files:
 
 | Release file | For | Kernel | Compressed size |
 |---|---|---|---|
 | `k10s-os-V-x86_64-vm.img.xz` | QEMU/KVM guests and clouds | `vm` profile, every driver built in; console on serial | 4.3 MB |
 | `k10s-os-V-x86_64-metal.img.xz` | PCs, mini-PCs, servers | `metal` profile, signed driver modules, NIC firmware; console on the screen | 6.7 MB |
 | `k10s-os-V-x86_64-{vm,metal}.efi` | updates (`os` in `k10s apply`), PXE or another UEFI loader | the signed slot-A UKI of the image | 4.2 / 6.6 MB |
+| `k10s-os-V-aarch64-vm.img.xz` | QEMU virt (UEFI) and arm64 cloud guests | `arm64`, every driver built in; console on the PL011 serial port | 3.9 MB |
+| `k10s-os-V-aarch64-vm.efi` | updates, another UEFI loader | the signed slot-A UKI of the image | 9.5 MB |
+| `k10s-os-V-aarch64-pi.img.xz` | Raspberry Pi 4 B, 400, CM4 and Pi 5 (SD card, USB or NVMe boot) | `arm64`; console on the serial pins (Pi 4) or the debug UART connector (Pi 5) | 5.2 MB |
+| `k10s-os-V-aarch64-pi.fat` | updates of Pi nodes | the signed boot slot of the image (FAT) | 8.4 MB |
 
 Write an image to the whole disk (`xz -dc IMG.xz | dd of=/dev/sdX bs=4M conv=fsync`, or any image writer that reads
 `.xz`), copy `k10s.conf` and key files to the `K10S-BOOT` partition (FAT, readable on any PC), and boot. The first boot
@@ -133,24 +141,54 @@ screen); everything else is configured in `k10s.conf`. Images are reproducible: 
 `SOURCE_DATE_EPOCH` (the commit time). On the ESP, `BOOTX64.EFI` becomes the Tier 2 loader (`k10boot`, which reads
 `/k10s/tier`) with milestone M1.
 
+The `aarch64-vm` image has the same layout without the BIOS parts: p1 `K10S-BOOT` (systemd-boot as
+`/EFI/BOOT/BOOTAA64.EFI`, the UKI, `loader.conf`, `k10s.conf`), p2 `K10S-DATA`. UEFI arm64 machines boot it with ACPI
+(the power button is the ACPI one, the clock the firmware's RTC); its command line is `console=ttyAMA0,115200 quiet
+panic=5`.
+
+The Raspberry Pi firmware boots a FAT partition by number, so the Pi image is an MBR disk whose boot slots are whole
+partitions:
+
+```
+MBR
+p1   K10S-BOOT   64 MiB   FAT32: autoboot.txt (A/B), k10s.conf, k10s/ (update records)
+p2   slot A      128 MiB  the signed slot image: a FAT16 filesystem followed by its signature
+       start4cd.elf, fixup4cd.dat   Pi 4 firmware (cut-down: no GPU features; the Pi 5 has its firmware in EEPROM)
+       config.txt                   arm_64bit, kernel8.img + initramfs8, enable_uart, gpu_mem=16
+       cmdline.txt                  console=ttyS1,115200 console=ttyAMA10,115200 quiet panic=5
+       kernel8.img, initramfs8      the arm64 kernel (gzip) and k10s
+       bcm2711-rpi-4-b.dtb, bcm2711-rpi-400.dtb, bcm2711-rpi-cm4-io.dtb, bcm2712-rpi-5-b.dtb, bcm2712d0-rpi-5-b.dtb
+       LICENCE.broadcom             the firmware's licence
+p3   slot B      128 MiB  empty until the first update
+p4   K10S-DATA   256 MiB  ext4, grown to the end of the disk on first boot
+autoboot.txt:  [all] tryboot_a_b=1 boot_partition=2   [tryboot] boot_partition=3
+```
+
+The Pi 4 bootloader (EEPROM from 2021 on) reads `autoboot.txt` from partition 1 and boots `boot_partition`, loading
+everything else from that partition; the devicetrees are the mainline ones built with the kernel (the firmware picks
+the board's). Write the image to an SD card, USB drive or NVMe disk like any other. The Pi firmware comes from Debian's
+`raspi-firmware` package (pinned, SHA-256 checked) and keeps its own licence. The Pi 400 and CM4 use the Pi 4 files;
+the Pi 500 and CM5 have no mainline devicetree in Linux 6.18.
+
 ## Updates
 
 A node installs a new image when the cluster's desired state names one for its platform, in waves, and keeps it only
 once it is back in the cluster; anything else ends on the image it ran before.
 
-**Images.** An OS image is a UKI with an Ed25519 signature appended (`crates/k10-mesh/src/osimage.rs`): the file
-stays bootable, and its SHA-256 is the image hash. It names its architecture, kernel profile and version; the
-platform of a node is `ARCH-PROFILE` of the image it runs (`x86_64-vm`, `x86_64-metal`). A release signs its images
-(the `.efi` files) with the k10s release key, whose public key (`os/release-key.pub`) is built into `k10s`;
+**Images.** An OS image is a boot payload with an Ed25519 signature appended (`crates/k10-mesh/src/osimage.rs`): a
+UKI, or on the Pi a slot's FAT filesystem; either stays bootable, and the file's SHA-256 is the image hash. It names
+its architecture, kernel profile and version; the platform of a node is `ARCH-PROFILE` of the image it runs
+(`x86_64-vm`, `x86_64-metal`, `aarch64-vm`, `aarch64-pi`). A release signs its images (the `.efi` and `.fat` files)
+with the k10s release key, whose public key (`os/release-key.pub`) is built into `k10s`;
 `os_key` adds keys of your own, and `k10s image sign --key KEY --arch x86_64 --profile vm --version V IN OUT` signs an
-image you built (`k10s keygen -o KEY` makes a key, `k10s image pubkey KEY` prints the public key to pin,
+image you built (`--arch aarch64 --profile pi` for a Pi slot image) (`k10s keygen -o KEY` makes a key, `k10s image pubkey KEY` prints the public key to pin,
 `k10s image verify FILE` checks one).
 
 **Rolling out.** The images go in the desired state like code, one per platform, with the size of the first wave:
 
 ```
 os {
-    images = ["k10s-os-0.1.0-x86_64-vm.efi", "k10s-os-0.1.0-x86_64-metal.efi"]
+    images = ["k10s-os-0.1.0-x86_64-vm.efi", "k10s-os-0.1.0-x86_64-metal.efi", "k10s-os-0.1.0-aarch64-pi.fat"]
     wave = 1    # nodes in the first wave; each next wave is twice as large
 }
 ```
@@ -179,21 +217,32 @@ cluster and drains):
 
 Every file is written under a temporary name, synced, renamed and synced again (vfat fills the new name's directory
 entry only when the file itself is written back), and the GRUB environment block is rewritten in place within its
-first sector, so a power cut at any point boots a complete image.
+first sector, so a power cut at any point boots a complete image. On arm64 UEFI images only systemd-boot's files are
+written.
 
-**Committing.** A trial boot (init knows it from systemd-boot's `LoaderEntrySelected` in efivarfs, or from GRUB's
-`slot` and `k10s_try`) starts the node as usual. Once the node holds and applied the cluster's desired state, sees a
+On a Pi (init knows it from the firmware's `/chosen/bootloader` devicetree node, which also gives the booted
+partition and the tryboot flag) init writes the signed slot image raw to the other slot partition, syncs it and reads
+it back from the device, records the trial in `K10S-BOOT/k10s/trying` (image hash and tries left) and reboots with
+`reboot(RESTART2, "0 tryboot")`. The firmware's tryboot flag is one-shot: that boot uses the `[tryboot]` partition
+of `autoboot.txt`, and any later boot (a crash, a hang reset by the watchdog, a power cut) the committed one, which
+is never written during an update. Mainline Linux has no way to set the flag: `os/kpatches/` adds the Raspberry Pi
+kernel's reboot hook (`RPI_FIRMWARE_SET_REBOOT_FLAGS` from the firmware driver's reboot notifier).
+
+**Committing.** A trial boot (init knows it from systemd-boot's `LoaderEntrySelected` in efivarfs, from GRUB's
+`slot` and `k10s_try`, or from the Pi firmware's tryboot flag) starts the node as usual. Once the node holds and applied the cluster's desired state, sees a
 peer again (if it had peers before) and stayed so for `--os-commit-grace` seconds (a node flag, default 30), it asks
 init to commit: init drops the counter from the file name, sets `default k10s-X.efi` and `k10s_slot=X`. A trial that
 crashes or hangs (the watchdog, `watchdog=1`, resets it) uses up its 3 boots; one that does not commit within
 `os_trial` seconds is abandoned by init. Either way the machine boots the previous slot, whose init records the image
 in `K10S-BOOT/k10s/failed` (the node reports it, so the rollout stops), removes the other slot's files and points both
-loaders at itself.
+loaders at itself. On a Pi the commit rewrites `autoboot.txt` (`[all]` the new slot, `[tryboot]` the other) and
+removes `k10s/trying`; a committed boot that finds `k10s/trying` reboots into the trial again (3 tries in all, like
+the boot counters above), then records the image as failed.
 
 ### Kernels
 
-Linux 6.18.57 (kernel.org tarball, SHA-256 pinned) from `tinyconfig` plus `os/kconfig/common.config`, a profile and
-`x86_64.config`; kernel lockdown in integrity mode (no unsigned modules, `/dev/mem`, kexec, MSR writes or ACPI table
+Linux 6.18.57 (kernel.org tarball, SHA-256 pinned, with the patches of `os/kpatches/`) from `tinyconfig` plus
+`os/kconfig/common.config` and a profile (and `x86_64.config` on x86-64); kernel lockdown in integrity mode (no unsigned modules, `/dev/mem`, kexec, MSR writes or ACPI table
 overrides), seccomp, Landlock, the hardware RNG drivers.
 
 - **`vm`** (3.1 MB): QEMU/KVM guests; virtio (PCI, net, block, RNG), e1000/e1000e, the i6300esb watchdog, the CMOS
@@ -205,6 +254,13 @@ overrides), seccomp, Landlock, the hardware RNG drivers.
   Aquantia; Marvell sky2; Atheros alx, atl1c; virtio-net), USB Ethernet (Realtek r8152, ASIX, CDC ECM/NCM, SMSC,
   Microchip LAN78xx), watchdogs (Intel TCO through the LPC bridge or the SMBus controller, AMD SP5100/FCH, ACPI WDAT,
   i6300esb), OHCI/UHCI.
+
+- **`arm64`** (3.6 MB gzip): one kernel for QEMU virt and arm64 cloud guests (UEFI with ACPI, or a devicetree:
+  PCIe ECAM, GICv3, virtio, PL011, PL031 and the EFI RTC, the ACPI or `gpio-keys` power key, i6300esb) and the
+  Raspberry Pi 4 and 5 (firmware mailbox and clocks, pin control, PCIe with the Pi 5's RP1 south bridge, SD/eMMC,
+  NVMe, USB host and storage, GENET and the RP1's Cadence GEM Ethernet with their Broadcom PHY, USB Ethernet,
+  `bcm2835_wdt`, the mini UART), every driver built in. `os/kbuild.sh arm64` cross-compiles it with
+  `aarch64-linux-gnu-` on other hosts and also builds the Pi devicetrees.
 
 Modules are signed (RSA-4096, SHA-512) with a key that `os/kbuild.sh` creates for the build and deletes after
 `modules_install`: no other module can ever be signed for that kernel, and the kernel refuses unsigned or foreign
@@ -223,22 +279,25 @@ licences, not k10s's Apache-2.0. Intel e1000e/igb/igc/ixgbe/i40e need no firmwar
 
 | Script | Does |
 |---|---|
-| `os/images.sh [OUT]` | the release images and their signed UKIs (above), `SHA256SUMS.os`; fails when a compressed image exceeds its budget (`vm` 5 MB, `metal` 40 MB). `K10S_BIN` picks the static k10s, `K10S_IMAGE_KEY` the signing key file (default: a throwaway `target/os/image-test.key`, trusted only where pinned with `os_key`) |
-| `os/kbuild.sh [vm\|metal] [OUT]` | a k10s kernel, rootless; fails if a fragment option does not survive `olddefconfig`; reproducible build metadata; `metal` also installs the signed module tree with its `depmod` output |
-| `os/mkimage.py OUT.img --kernel K --initrd I… --cmdline C --boot DIR [--conf F] [--uki OUT.efi] [--version V --sign KEY --k10s K10S --profile P]` | a disk image: GPT, GRUB patched into the MBR and `bios-boot` (no `grub-install`), the UKI built with `objcopy` and signed with `k10s image sign` (unsigned without `--sign`: it boots but cannot update), the A/B slot layout, FAT with mtools, ext4 with `mkfs.ext4`; no root, no loop devices |
-| `os/bootfiles.sh` | the pinned Debian 12 GRUB (`i386-pc`, `grub-mkimage`) and systemd-boot packages (systemd-boot, systemd-stub), SHA-256 checked |
+| `os/images.sh [--arch x86_64\|aarch64] [OUT]` | the release images of the arch and their update files (above), `SHA256SUMS.os-ARCH`; fails when a compressed image exceeds its budget (`x86_64-vm` 5 MB, `x86_64-metal` 40 MB, `aarch64-vm` 6 MB, `aarch64-pi` 8 MB). `K10S_BIN` picks the static k10s of the arch, `K10S_HOST_BIN` one the host runs to sign (default `K10S_BIN`), `K10S_IMAGE_KEY` the signing key file (default: a throwaway `target/os/image-test.key`, trusted only where pinned with `os_key`) |
+| `os/kbuild.sh [vm\|metal\|arm64] [OUT]` | a k10s kernel, rootless; fails if a fragment option does not survive `olddefconfig`; reproducible build metadata; `metal` also installs the signed module tree with its `depmod` output, `arm64` builds `Image`, `Image.gz` and the Raspberry Pi devicetrees |
+| `os/mkimage.py OUT.img --kernel K --initrd I… --cmdline C --boot DIR [--arch x86_64\|aarch64] [--pi --dtbs DIR] [--conf F] [--uki OUT] [--version V --sign KEY --k10s K10S --profile P]` | a disk image: GPT, GRUB patched into the MBR and `bios-boot` (x86-64, no `grub-install`), the UKI (systemd-stub plus sections, written by the script itself) signed with `k10s image sign` (unsigned without `--sign`: it boots but cannot update), the A/B slot layout; `--pi`: the MBR Pi image with its signed slot image; FAT with mtools, ext4 with `mkfs.ext4`; no root, no loop devices |
+| `os/bootfiles.sh [x86_64\|aarch64]` | the pinned Debian packages, SHA-256 checked: GRUB (`i386-pc`, `grub-mkimage`) and systemd-boot (systemd-boot, systemd-stub) 252 for x86-64; systemd-boot 252 for arm64 and the Raspberry Pi firmware (`raspi-firmware` 1.20260408) |
 | `os/firmware.sh` | the firmware archive (above) |
 | `os/debian-kernel.sh` | the pinned Debian 13 kernel (6.12, SHA-256 checked) with its module tree and `depmod` output |
 | `os/mkinitramfs.py OUT [--init K10S] [--kmods DIR --mod GLOB…] [--firmware DIR --fw GLOB…] [--conf FILE]` | a reproducible newc initramfs (gzip, xz or zstd), module subsets with their dependencies, filtered `modules.alias`; without `--init`, an archive to append to another |
 
-The kernel builds need make, gcc, flex, bison, bc, openssl, depmod and the libelf and libssl headers; the images
-need objcopy, sfdisk, mkfs.fat, mtools, mkfs.ext4, dpkg-deb, zstd and xz.
+The kernel builds need make, gcc (or `aarch64-linux-gnu-gcc` for arm64 on other hosts), flex, bison, bc, openssl,
+patch, depmod and the libelf and libssl headers; the images need sfdisk, mkfs.fat, mtools, mkfs.ext4, dpkg-deb, zstd
+and xz.
 
 ## Testing
 
 `os/test.sh` (CI suite `os`, a release gate) builds the static k10s, the kernels, the Debian kernel, the initramfs
 images and the release images, then runs `os/test.py` under QEMU (KVM when available), with no root. The release runs
-it on the k10s binary of the release's musl archive and publishes the images it tested.
+it on the k10s binary of the release's musl archive and publishes the images it tested. `os/test.sh --arch aarch64`
+(CI suite `os-arm64`, a release gate, on an x86-64 runner: the aarch64 guests run on QEMU's TCG) does the same for
+the arm64 kernel and images with the release's aarch64 musl k10s.
 
 - **boot-debian, boot-k10s**: kernel and initramfs on a GPT disk with `K10S-BOOT` (`k10s.conf`, the admin key) and
   `K10S-DATA` (ext4); the guest RTC starts in 2001, so the signed `k10s apply` only succeeds after SNTP (a host-side
@@ -271,12 +330,29 @@ it on the k10s binary of the release's musl archive and publishes the images it 
   panicking image goes to the first wave only (one node), which falls back; every other node sees the rollout stopped.
   Then a good image reaches all 20 nodes in waves of 1, 2, 4, 8 and 5, each wave starting after the previous one
   committed.
+- **boot-arm64**: as boot-k10s with the arm64 kernel on QEMU `virt` (devicetree: PL031 RTC from 2001, the
+  `gpio-keys` power key, i6300esb).
+- **image-arm64**, **update-arm64**: as image-uefi and update-uefi with the `aarch64-vm` image on AAVMF (ACPI: the
+  tiny power button, the EFI RTC), including the power cut at every step, the panicking image and the image that
+  never commits.
+- **pi**: the Pi image on QEMU `virt` behind a model of the Pi firmware (`PiNode` in `os/test.py`): each boot reads
+  `autoboot.txt` from partition 1 and boots the `[all]` partition, or the `[tryboot]` one once after a boot that ended
+  in `reboot "0 tryboot"` (the kernel logs the command); it loads `kernel8.img`, `initramfs8` and `cmdline.txt` from
+  that FAT partition and passes the partition and the flag in `/chosen/bootloader` of the devicetree. Init finds
+  `K10S-BOOT` and `K10S-DATA` by label on the MBR disk and grows `K10S-DATA`; then the update test of update-uefi:
+  the power cut at every step, an image that panics (tried 3 times, then recorded), one that never commits.
+- **mixed**: a Pi (as above) joins a cluster whose first member is an x86-64 k10s on the host (the x86-64 musl binary;
+  JIT); both see each other's OS report and serve the example services placed on either node.
+
+`scripts/ci-test.sh arm64` (CI and release gate, on a GitHub arm64 runner) runs every crate's unit and integration
+tests but the x86-64 JIT's natively on arm64, for the gnu and musl targets, on the interpreter.
 
 Unit tests cover the configuration precedence, module tree parsing and modalias matching, the DHCP state machine
 against a fake server, SNTP sample checks and the GPT rewrite that grows `K10S-DATA` (512-byte and 4 KiB sectors,
-checksums, partitions that are not last, corrupt tables). The slot logic is tested against models of systemd-boot's
-entry selection and of `grub.cfg`, with the power cut after every durable step of an install and of a commit on both
-firmware types, and with images that never come up or never commit; the image format, Ed25519 (RFC 8032 vectors),
+checksums, partitions that are not last, corrupt tables) and its MBR variant. The slot logic is tested against models
+of systemd-boot's entry selection, of `grub.cfg` and of the Pi firmware's `autoboot.txt` and tryboot flag, with the
+power cut after every durable step of an install and of a commit on every firmware type, and with images that never
+come up or never commit; the image format, Ed25519 (RFC 8032 vectors),
 the manifest's OS plan, the gossip extension (never sent to nodes that predate it) and the rollout waves have their
 own tests in `k10-mesh`.
 
@@ -285,7 +361,11 @@ for a Realtek or Intel mini-PC), power cuts that reach the disk's own write cach
 guest had not written), GRUB's `save_env` and systemd-boot's renames on real firmware and disks, NIC drivers and firmware outside QEMU's models (r8169/RTL8125, igc, tg3, USB
 Ethernet), AHCI and eMMC boot disks, the screen console, firmware quirks of real BIOS and UEFI implementations
 (boot drive numbers, removable-media boot paths), slow USB storage (`bootwait`), the AMD and newer Intel (SMBus)
-watchdogs, RTC chips, real DHCP servers, switches (link and STP delays) and NTP pools.
+watchdogs, RTC chips, real DHCP servers, switches (link and STP delays) and NTP pools. For the Pi (the U3 exit
+criteria: a Pi 4 and a Pi 5 join an x86 cluster, survive power cuts and update A/B): the real firmware reading
+`autoboot.txt` and honouring the tryboot flag set by the patched kernel through the mailbox, the mainline devicetrees
+under the Pi firmware, the Pi 4's GENET and the Pi 5's RP1 Ethernet, SD/USB/NVMe boot, `bcm2835_wdt` resets, the
+serial consoles, and power cuts on SD cards (whose controllers may lose more than the last write).
 
 ## Limits
 
@@ -295,6 +375,8 @@ watchdogs, RTC chips, real DHCP servers, switches (link and STP delays) and NTP 
 - Secure Boot must be off (U6 documents signing the image with an own key).
 - The image uses 512-byte logical sectors; disks with 4 KiB logical sectors (rare outside servers) need a rebuilt
   image.
-- x86-64 only; the hosted node builds for Linux x86-64 only (U3 ports it).
+- arm64 nodes run on the interpreter (the arm64 JIT is U4); the Pi 3, 32-bit ARM and i386 are U5. The arm64 image
+  has the virtio drivers of VMs and the Pi's; arm64 servers need their NIC drivers added. The Pi image has no screen
+  console (serial only).
 - No DHCP address conflict detection (ARP probe), no DHCPv6; one configured interface.
 - `join` host names are resolved once, when the node starts (name servers from the lease or `dns`).

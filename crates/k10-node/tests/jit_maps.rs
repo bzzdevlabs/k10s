@@ -1,6 +1,7 @@
 //! Executable mappings of JIT code, measured from `/proc/self/maps` (own test binary with a single test, so no other
 //! node in the process maps code concurrently): every apply maps the new modules, retired versions unmap theirs
 //! once drained, and shutting the node down unmaps everything.
+#![cfg(target_arch = "x86_64")]
 
 mod common;
 use common::*;

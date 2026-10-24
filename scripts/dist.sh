@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # Builds all release archives into dist/ (locally and in CI), versioned once by scripts/version.sh.
-# usage: dist.sh [--dev|--stable] [--only k10s,musl,examples,metal,bench,src]
+# usage: dist.sh [--dev|--stable] [--only k10s,musl,arm64,examples,metal,bench,src]
 # env: DIST, K10S_BUILD_VERSION/_COMMIT, GLIBC_MAX (highest glibc symbol version the gnu k10s may need, 2.34)
-# Needs cargo (targets x86_64-unknown-linux-musl, x86_64-unknown-none), go, git, binutils, GNU tar.
-# Output (V = version without +build): k10s-V-x86_64-unknown-linux-{gnu,musl}.tar.gz, k10s-examples-V.tar.gz,
-#   k10s-metal-V-x86_64.tar.gz, k10s-bench-V-linux-amd64.tar.gz, k10s-V-src.tar.gz, SHA256SUMS (see README.md).
+# Needs cargo (targets x86_64-unknown-linux-musl, x86_64-unknown-none, aarch64-unknown-linux-musl), go, git, binutils,
+# GNU tar; on other hosts than arm64, aarch64-linux-gnu-strip and qemu-aarch64 for the arm64 build (linked by rust-lld).
+# Output (V = version without +build): k10s-V-x86_64-unknown-linux-{gnu,musl}.tar.gz,
+#   k10s-V-aarch64-unknown-linux-musl.tar.gz, k10s-examples-V.tar.gz, k10s-metal-V-x86_64.tar.gz,
+#   k10s-bench-V-linux-amd64.tar.gz, k10s-V-src.tar.gz, SHA256SUMS (see README.md).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
 
 mode=()
-parts=(k10s musl examples metal bench src)
+parts=(k10s musl arm64 examples metal bench src)
 while (($#)); do
     case $1 in
     --dev | --stable) mode=("$1") ;;
@@ -63,13 +65,19 @@ GLIBC_MAX=${GLIBC_MAX:-2.34}
 
 # k10s for one target triple.
 build_k10s() {
-    local triple=$1 name="k10s-$V-$1"
+    local triple=$1 name="k10s-$V-$1" strip=strip emu=()
     echo "== k10s ($triple)"
+    if [[ $triple == aarch64-* && $(uname -m) != aarch64 ]]; then
+        # Cross build: rust-lld links the target's self-contained musl; QEMU runs the version check.
+        export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld
+        strip=aarch64-linux-gnu-strip
+        emu=(qemu-aarch64)
+    fi
     cargo build --release --locked -p k10s --target "$triple"
     mkdir -p "$STAGE/$name"
-    strip --strip-debug -o "$STAGE/$name/k10s" "target/$triple/release/k10s"
+    "$strip" --strip-debug -o "$STAGE/$name/k10s" "target/$triple/release/k10s"
     cp "${DOCS[@]}" "$STAGE/$name/"
-    check_version "$STAGE/$name/k10s" --version "k10s $K10S_VERSION_FULL"
+    check_version "${emu[@]}" "$STAGE/$name/k10s" --version "k10s $K10S_VERSION_FULL"
     if [[ $triple == *-gnu ]]; then
         local glibc
         glibc=$(objdump -T "$STAGE/$name/k10s" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)
@@ -82,12 +90,19 @@ build_k10s() {
     pack "$name"
 }
 if want k10s; then build_k10s x86_64-unknown-linux-gnu; fi
-if want musl; then
-    build_k10s x86_64-unknown-linux-musl
-    if readelf -lW "$STAGE/k10s-$V-x86_64-unknown-linux-musl/k10s" | grep -q 'program interpreter'; then
-        echo "dist.sh: the musl k10s is not static" >&2
+static() {
+    if readelf -lW "$STAGE/k10s-$V-$1/k10s" | grep -q 'program interpreter'; then
+        echo "dist.sh: the $1 k10s is not static" >&2
         exit 1
     fi
+}
+if want musl; then
+    build_k10s x86_64-unknown-linux-musl
+    static x86_64-unknown-linux-musl
+fi
+if want arm64; then
+    build_k10s aarch64-unknown-linux-musl
+    static aarch64-unknown-linux-musl
 fi
 
 if want examples; then

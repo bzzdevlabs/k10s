@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Rootless, reproducible disk image builder for k10s as PID 1 of a Linux image (docs/OS.md): one GPT disk that
-boots on BIOS and on UEFI.
+boots on BIOS and on UEFI (x86-64), a GPT disk for UEFI (arm64), or an MBR disk for the Raspberry Pi 4 and 5.
 
-  mkimage.py OUT.img --kernel BZIMAGE --initrd CPIO [--initrd CPIO ...] --cmdline "..." --boot DIR
-      [--conf FILE] [--uki OUT.efi] [--version V] [--sign KEY --k10s K10S --profile P] [--esp-mib 256]
-      [--data-mib 256]
+  mkimage.py OUT.img --kernel KERNEL --initrd CPIO [--initrd CPIO ...] --cmdline "..." --boot DIR
+      [--arch x86_64|aarch64] [--pi --dtbs DIR] [--conf FILE] [--uki OUT] [--version V]
+      [--sign KEY --k10s K10S --profile P] [--esp-mib 256] [--data-mib 256]
 
---boot is the output of os/bootfiles.sh; initramfs archives are concatenated in order. --sign signs the UKI with
-`K10S image sign` (an OS image for updates, docs/OS.md); unsigned images boot but cannot update. Layout (the shared
-ESP of docs/research/universal-os.md §8.4, with the A/B slots of crates/k10s/src/pid1/update.rs):
+--boot is the output of os/bootfiles.sh for the arch; initramfs archives are concatenated in order. --sign signs the
+UKI (the Pi: the slot image) with `K10S image sign` (an OS image for updates, docs/OS.md); unsigned images boot but
+cannot update; --uki keeps a copy of it. x86-64 layout (the shared ESP of docs/research/universal-os.md §8.4, with the
+A/B slots of crates/k10s/src/pid1/update.rs); arm64 has the same without the BIOS parts (p1 K10S-BOOT, p2 K10S-DATA,
+BOOTAA64.EFI):
 
   MBR  GRUB boot.img (first 440 bytes) in front of the protective MBR
   p1   BIOS boot, 1 MiB: GRUB core.img
@@ -23,8 +25,18 @@ ESP of docs/research/universal-os.md §8.4, with the A/B slots of crates/k10s/sr
          /k10s.conf              node configuration
   p3   K10S-DATA (ext4); init grows it to the end of the disk on first boot
 
+--pi (KERNEL is the arm64 Image.gz, --dtbs the kernel's arch/arm64/boot/dts/broadcom):
+
+  MBR (the Pi firmware reads FAT partitions by number)
+  p1   K10S-BOOT (FAT32): autoboot.txt (slot A, tryboot: slot B), k10s.conf
+  p2   slot A: the signed slot image, a FAT16 filesystem followed by its signature:
+         start4cd.elf, fixup4cd.dat (Pi 4 firmware; the Pi 5 has it in EEPROM), config.txt, cmdline.txt,
+         kernel8.img, initramfs8, the Pi 4 and Pi 5 devicetrees, LICENCE.broadcom
+  p3   slot B (empty until an update)
+  p4   K10S-DATA (ext4); init grows it to the end of the disk on first boot
+
 GUIDs, volume ids, the ext4 hash seed and every timestamp (SOURCE_DATE_EPOCH, else 0) are fixed, so the same inputs
-give the same image. Needs objcopy, sfdisk, mkfs.fat, mtools and mkfs.ext4.
+give the same image. Needs sfdisk, mkfs.fat, mtools and mkfs.ext4.
 """
 import argparse
 import os
@@ -47,6 +59,24 @@ PARTS = [  # name, type GUID, unique GUID
 ESP_VOLID = "6B10C5A0"
 DATA_UUID = "6b10c5a0-0000-4000-8000-0000000000da"
 DATA_SEED = "6b10c5a0-0000-4000-8000-0000000000db"
+# Pi slot (MiB): room for any signed image (MAX_IMAGE_BYTES is 64 MiB).
+PI_SLOT_MIB = 128
+PI_BOOT_MIB = 64
+PI_DTBS = [("bcm2711-rpi-4-b.dtb",) * 2, ("bcm2711-rpi-400.dtb",) * 2, ("bcm2711-rpi-cm4-io.dtb",) * 2,
+           ("bcm2712-rpi-5-b.dtb",) * 2, ("bcm2712-d-rpi-5-b.dtb", "bcm2712d0-rpi-5-b.dtb")]
+# The firmware's own name for the D0 stepping is bcm2712d0-rpi-5-b.dtb (mainline: bcm2712-d-rpi-5-b.dtb).
+PI_CONFIG = """# k10s (docs/OS.md): one arm64 kernel and initramfs for the Raspberry Pi 4 and 5, mainline devicetrees.
+arm_64bit=1
+kernel=kernel8.img
+initramfs initramfs8 followkernel
+enable_uart=1
+gpu_mem=16
+disable_splash=1
+[pi4]
+start_file=start4cd.elf
+fixup_file=fixup4cd.dat
+[all]
+"""
 LOADER_CONF = "timeout 0\ndefault k10s-a.efi\neditor no\nauto-entries no\nauto-firmware no\nconsole-mode keep\n"
 # BIOS: slot k10s_slot, unless a trial (k10s_try=X3) is armed: counted down, slot X booted until X0 (GRUB has no
 # arithmetic, hence the chain); init commits or clears it (crates/k10s/src/pid1/update.rs models the same).
@@ -73,30 +103,40 @@ def run(*cmd, **kw):
 
 
 def uki(stub, sections, out):
-    """systemd-stub plus sections placed after the stub's own, in order, at its section alignment (.linux last)."""
-    b = open(stub, "rb").read()
+    """systemd-stub plus sections appended after its own, in order (.linux last), as ukify does: section headers in
+    the stub's spare header room, data at its file alignment, addresses at its section alignment."""
+    b = bytearray(open(stub, "rb").read())
     pe = struct.unpack_from("<I", b, 0x3C)[0]
     nsec, optsz = struct.unpack_from("<H", b, pe + 6)[0], struct.unpack_from("<H", b, pe + 20)[0]
     opt = pe + 24
     if struct.unpack_from("<H", b, opt)[0] != 0x20B:
         sys.exit("mkimage: the stub is not PE32+")
-    base, align = struct.unpack_from("<Q", b, opt + 24)[0], struct.unpack_from("<I", b, opt + 32)[0]
-    end = max(sum(struct.unpack_from("<II", b, opt + optsz + 40 * i + 8)) for i in range(nsec))
-    args = []
+    salign, falign = struct.unpack_from("<II", b, opt + 32)
+    table, room = opt + optsz, struct.unpack_from("<I", b, opt + 60)[0]
+    if table + 40 * (nsec + len(sections)) > room:
+        sys.exit("mkimage: no room for the UKI's section headers in the stub")
+    heads = [struct.unpack_from("<IIII", b, table + 40 * i + 8) for i in range(nsec)]
+    end = max(va + vsize for vsize, va, _, _ in heads)
+    del b[max(ptr + raw for _, _, raw, ptr in heads):]
+    up = lambda n, a: -(-n // a) * a
     for name, path in sections:
-        vma = -(-end // align) * align
-        args += ["--add-section", f"{name}={path}", "--change-section-vma", f"{name}={base + vma:#x}"]
-        end = vma + os.path.getsize(path)
-    run("objcopy", *args, stub, out)
-    # objcopy stamps the PE header with the current time: fixed time, checksum recomputed.
-    img = bytearray(open(out, "rb").read())
-    struct.pack_into("<I", img, pe + 8, EPOCH & 0xFFFFFFFF)
-    struct.pack_into("<I", img, opt + 64, 0)
-    c = sum(struct.unpack(f"<{len(img) // 2}H", img[: len(img) // 2 * 2])) + (img[-1] if len(img) % 2 else 0)
+        data = open(path, "rb").read()
+        b += bytes(up(len(b), falign) - len(b))
+        va = up(end, salign)
+        # IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ
+        b[table + 40 * nsec:table + 40 * (nsec + 1)] = struct.pack("<8sIIIIIIHHI", name.encode(), len(data), va,
+                                                                    up(len(data), falign), len(b), 0, 0, 0, 0, 0x40000040)
+        b += data + bytes(up(len(data), falign) - len(data))
+        nsec, end = nsec + 1, va + len(data)
+    struct.pack_into("<H", b, pe + 6, nsec)
+    struct.pack_into("<I", b, pe + 8, EPOCH & 0xFFFFFFFF)
+    struct.pack_into("<I", b, opt + 56, up(end, salign))
+    struct.pack_into("<I", b, opt + 64, 0)
+    c = sum(struct.unpack(f"<{len(b) // 2}H", b[: len(b) // 2 * 2])) + (b[-1] if len(b) % 2 else 0)
     while c >> 16:
         c = (c & 0xFFFF) + (c >> 16)
-    struct.pack_into("<I", img, opt + 64, c + len(img))
-    open(out, "wb").write(img)
+    struct.pack_into("<I", b, opt + 64, c + len(b))
+    open(out, "wb").write(b)
 
 
 def dos_time(epoch):
@@ -105,29 +145,32 @@ def dos_time(epoch):
 
 
 def fat_fix_times(img, epoch):
-    """Sets every directory entry's timestamps of a FAT32 image to `epoch` (mtools stamps directories with now)."""
+    """Sets every directory entry's timestamps of a FAT16 or FAT32 image to `epoch` (mtools stamps directories with
+    now)."""
     date, tod = dos_time(epoch)
     with open(img, "r+b") as f:
         bs = f.read(512)
         bps, spc = struct.unpack_from("<H", bs, 11)[0], bs[13]
         reserved, nfats = struct.unpack_from("<H", bs, 14)[0], bs[16]
-        fatsz, root = struct.unpack_from("<I", bs, 36)[0], struct.unpack_from("<I", bs, 44)[0]
-        data = (reserved + nfats * fatsz) * bps
+        roots, fat16 = struct.unpack_from("<H", bs, 17)[0], struct.unpack_from("<H", bs, 22)[0]
+        fatsz = fat16 or struct.unpack_from("<I", bs, 36)[0]
+        root_dir = (reserved + nfats * fatsz) * bps
+        data = root_dir + roots * 32
         csize = spc * bps
 
         def chain(c):
-            while 2 <= c < 0x0FFFFFF8:
+            while 2 <= c < (0xFFF8 if fat16 else 0x0FFFFFF8):
                 yield c
-                f.seek(reserved * bps + 4 * c)
-                c = struct.unpack("<I", f.read(4))[0] & 0x0FFFFFFF
+                f.seek(reserved * bps + (2 if fat16 else 4) * c)
+                c = struct.unpack("<H" if fat16 else "<I", f.read(2 if fat16 else 4))[0] & 0x0FFFFFFF
 
         def walk(first):
-            for c in list(chain(first)):
-                off = data + (c - 2) * csize
+            # FAT16's root directory is a fixed area before the clusters (cluster number 0).
+            for off, size in ([(root_dir, roots * 32)] if first == 0 else [(data + (c - 2) * csize, csize) for c in list(chain(first))]):
                 f.seek(off)
-                buf = bytearray(f.read(csize))
+                buf = bytearray(f.read(size))
                 subdirs = []
-                for i in range(0, csize, 32):
+                for i in range(0, size, 32):
                     e = buf[i:i + 32]
                     if e[0] == 0:
                         break
@@ -142,7 +185,19 @@ def fat_fix_times(img, epoch):
                 for d in subdirs:
                     walk(d)
 
-        walk(root)
+        walk(0 if fat16 else struct.unpack_from("<I", bs, 44)[0])
+
+
+def fat_image(path, label, volid, size_kib, files, env, fat=32, spc=4):
+    """A FAT filesystem image holding `files` [(source, path in the image)], timestamps fixed; `spc` 512-byte
+    sectors per cluster (FAT32 needs at least 65525 clusters, FAT16 at least 4085)."""
+    run("mkfs.fat", "-F", str(fat), "-s", str(spc), "-n", label, "-i", volid, "-C", path, str(size_kib), stdout=subprocess.DEVNULL)
+    dirs = sorted({"/".join(d.split("/")[:n]) for _, d in files for n in range(1, d.count("/") + 1)})
+    if dirs:
+        run("mmd", "-i", path, *[f"::/{d}" for d in dirs], env=env)
+    for src, dst in files:
+        run("mcopy", "-i", path, src, f"::/{dst}", env=env)
+    fat_fix_times(path, EPOCH)
 
 
 def copy_sparse(src, dst, offset):
@@ -175,6 +230,67 @@ def grub_bios(boot, disk, tmp):
         f.write(img)
 
 
+def sign(a, payload, out):
+    """`K10S image sign`s `payload` into `out` (a copy when not signing)."""
+    if not a.sign:
+        shutil.copyfile(payload, out)
+        return
+    if not (a.k10s and a.profile):
+        sys.exit("mkimage: --sign needs --k10s and --profile")
+    run(a.k10s, "image", "sign", "--key", a.sign, "--arch", a.arch, "--profile", a.profile, "--version", a.version, payload, out)
+
+
+def data_fs(a, tmp, env):
+    data = os.path.join(tmp, "data.img")
+    run("mkfs.ext4", "-q", "-F", "-L", "K10S-DATA", "-U", DATA_UUID, "-E", f"hash_seed={DATA_SEED},root_owner=0:0",
+        "-b", "4096", "-T", "default", "-J", "size=64", data, f"{a.data_mib}M", env=env, stdout=subprocess.DEVNULL)
+    return data
+
+
+def disk(out, label, parts, total):
+    """Writes the partition table (sfdisk lines) and the partitions' images [(image or None, start, sfdisk line)]."""
+    if os.path.exists(out):
+        os.remove(out)
+    with open(out, "wb") as f:
+        f.truncate(total)
+    run("sfdisk", "-q", out, input=(label + "".join(line for _, _, line in parts)).encode())
+    for img, start, _ in parts:
+        if img:
+            copy_sparse(img, out, start)
+
+
+def pi(a, tmp, env, put, initrd):
+    """The Raspberry Pi image: MBR, K10S-BOOT, the signed slot A, an empty slot B, K10S-DATA."""
+    fw = os.path.join(a.boot, "usr/lib/raspi-firmware")
+    files = [(os.path.join(fw, "start4cd.elf"), "start4cd.elf"), (os.path.join(fw, "fixup4cd.dat"), "fixup4cd.dat"),
+             (os.path.join(a.boot, "usr/share/doc/raspi-firmware/copyright"), "LICENCE.broadcom"),
+             (put("config.txt", PI_CONFIG), "config.txt"), (put("cmdline.txt", a.cmdline + "\n"), "cmdline.txt"),
+             (a.kernel, "kernel8.img"), (initrd, "initramfs8")]
+    files += [(os.path.join(a.dtbs, src), dst) for src, dst in PI_DTBS]
+    # Clusters of 1 KiB, at least 1 MiB of slack; FAT16 needs 4085 clusters.
+    kib = max((sum(-(-os.path.getsize(f) // 1024) for f, _ in files) + 2048) // 1024 * 1024, 8192)
+    slot = os.path.join(tmp, "slot.img")
+    fat_image(slot, "K10S-SLOT", ESP_VOLID, kib, files, env, fat=16, spc=2)
+    signed = os.path.join(tmp, "slot.signed")
+    sign(a, slot, signed)
+    if a.uki:
+        shutil.copyfile(signed, a.uki)
+    boot = os.path.join(tmp, "boot.img")
+    autoboot = "[all]\ntryboot_a_b=1\nboot_partition=2\n[tryboot]\nboot_partition=3\n"
+    fat_image(boot, "K10S-BOOT", ESP_VOLID, PI_BOOT_MIB * 1024,
+              [(put("autoboot.txt", autoboot), "autoboot.txt"), (a.conf or put("k10s.conf", CONF), "k10s.conf")], env, spc=1)
+    data = data_fs(a, tmp, env)
+    at = [MIB]
+    for mib in (PI_BOOT_MIB, PI_SLOT_MIB, PI_SLOT_MIB, a.data_mib):
+        at.append(at[-1] + mib * MIB)
+    line = lambda n, t: f"start={at[n] // 512}, size={(at[n + 1] - at[n]) // 512}, type={t}\n"
+    disk(a.out, f"label: dos\nlabel-id: 0x{ESP_VOLID}\n",
+         [(boot, at[0], line(0, "c")), (signed, at[1], line(1, "e")), (None, at[2], line(2, "e")), (data, at[3], line(3, "83"))],
+         at[4] + MIB)
+    print(f"mkimage: {a.out}: {(at[4] + MIB) >> 20} MiB (slots {PI_SLOT_MIB} MiB, data {a.data_mib} MiB), "
+          f"slot image {os.path.getsize(signed)} bytes", file=sys.stderr)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
@@ -182,6 +298,9 @@ def main():
     ap.add_argument("--initrd", action="append", required=True)
     ap.add_argument("--cmdline", required=True)
     ap.add_argument("--boot", required=True)
+    ap.add_argument("--arch", choices=["x86_64", "aarch64"], default="x86_64")
+    ap.add_argument("--pi", action="store_true")
+    ap.add_argument("--dtbs")
     ap.add_argument("--conf")
     ap.add_argument("--uki")
     ap.add_argument("--version", default="dev")
@@ -191,6 +310,10 @@ def main():
     ap.add_argument("--esp-mib", type=int, default=256)
     ap.add_argument("--data-mib", type=int, default=256)
     a = ap.parse_args()
+    if a.pi and (a.arch != "aarch64" or not a.dtbs):
+        sys.exit("mkimage: --pi needs --arch aarch64 and --dtbs")
+    x86 = a.arch == "x86_64"
+    efi_arch = "x64" if x86 else "aa64"
 
     # mke2fs takes a fake time of 0 for "unset", hence the 1980 floor of EPOCH.
     env = dict(os.environ, MTOOLS_SKIP_CHECK="1", E2FSPROGS_FAKE_TIME=str(EPOCH))
@@ -202,59 +325,48 @@ def main():
             return p
 
         initrd = put("initrd", b"".join(open(p, "rb").read() for p in a.initrd))
+        if a.pi:
+            return pi(a, tmp, env, put, initrd)
         osrel = put("osrel", f'NAME="k10s"\nID=k10s\nVERSION_ID="{a.version}"\nPRETTY_NAME="k10s {a.version}"\n')
-        efi = os.path.join(tmp, "k10s-a.efi")
-        uki(os.path.join(a.boot, "usr/lib/systemd/boot/efi/linuxx64.efi.stub"),
-            [(".osrel", osrel), (".cmdline", put("cmdline", a.cmdline)), (".initrd", initrd), (".linux", a.kernel)], efi)
-        if a.sign:
-            if not (a.k10s and a.profile):
-                sys.exit("mkimage: --sign needs --k10s and --profile")
-            unsigned = efi + ".unsigned"
-            os.rename(efi, unsigned)
-            run(a.k10s, "image", "sign", "--key", a.sign, "--arch", "x86_64", "--profile", a.profile, "--version", a.version,
-                unsigned, efi)
+        unsigned, efi = os.path.join(tmp, "k10s-a.unsigned"), os.path.join(tmp, "k10s-a.efi")
+        uki(os.path.join(a.boot, f"usr/lib/systemd/boot/efi/linux{efi_arch}.efi.stub"),
+            [(".osrel", osrel), (".cmdline", put("cmdline", a.cmdline)), (".initrd", initrd), (".linux", a.kernel)], unsigned)
+        sign(a, unsigned, efi)
         if a.uki:
             shutil.copyfile(efi, a.uki)
 
         esp = os.path.join(tmp, "esp.img")
-        # 2 KiB clusters: GRUB reads files one cluster at a time, and BIOS disk reads are slow.
-        run("mkfs.fat", "-F", "32", "-s", "4", "-n", "K10S-BOOT", "-i", ESP_VOLID, "-C", esp, str(a.esp_mib * 1024), stdout=subprocess.DEVNULL)
         files = [
-            (os.path.join(a.boot, "usr/lib/systemd/boot/efi/systemd-bootx64.efi"), "EFI/BOOT/BOOTX64.EFI"),
+            (os.path.join(a.boot, f"usr/lib/systemd/boot/efi/systemd-boot{efi_arch}.efi"), f"EFI/BOOT/BOOT{efi_arch.upper()}.EFI"),
             (efi, "EFI/Linux/k10s-a.efi"),
             (put("loader.conf", LOADER_CONF), "loader/loader.conf"),
-            (put("grub.cfg", GRUB_CFG), "boot/grub/grub.cfg"),
-            (put("grubenv", grubenv(k10s_slot="a")), "boot/grub/grubenv"),
-            (a.kernel, "k10s/a/vmlinuz"),
-            (initrd, "k10s/a/initrd"),
-            (put("boot.cfg", f"linux /k10s/a/vmlinuz {a.cmdline} k10s.slot=a\ninitrd /k10s/a/initrd\n"), "k10s/a/boot.cfg"),
-            (put("tier", "auto\n"), "k10s/tier"),
             (a.conf or put("k10s.conf", CONF), "k10s.conf"),
         ]
-        dirs = sorted({"/".join(d.split("/")[:n]) for _, d in files for n in range(1, d.count("/") + 1)})
-        run("mmd", "-i", esp, *[f"::/{d}" for d in dirs], env=env)
-        for src, dst in files:
-            run("mcopy", "-i", esp, src, f"::/{dst}", env=env)
-        fat_fix_times(esp, EPOCH)
+        if x86:
+            files += [
+                (put("grub.cfg", GRUB_CFG), "boot/grub/grub.cfg"),
+                (put("grubenv", grubenv(k10s_slot="a")), "boot/grub/grubenv"),
+                (a.kernel, "k10s/a/vmlinuz"),
+                (initrd, "k10s/a/initrd"),
+                (put("boot.cfg", f"linux /k10s/a/vmlinuz {a.cmdline} k10s.slot=a\ninitrd /k10s/a/initrd\n"), "k10s/a/boot.cfg"),
+                (put("tier", "auto\n"), "k10s/tier"),
+            ]
+        # 2 KiB clusters: GRUB reads files one cluster at a time, and BIOS disk reads are slow.
+        fat_image(esp, "K10S-BOOT", ESP_VOLID, a.esp_mib * 1024, files, env)
+        data = data_fs(a, tmp, env)
 
-        data = os.path.join(tmp, "data.img")
-        run("mkfs.ext4", "-q", "-F", "-L", "K10S-DATA", "-U", DATA_UUID, "-E", f"hash_seed={DATA_SEED},root_owner=0:0",
-            "-b", "4096", "-T", "default", "-J", "size=64", data, f"{a.data_mib}M", env=env, stdout=subprocess.DEVNULL)
-
-        esp_start, data_start = 2 * MIB, (2 + a.esp_mib) * MIB
-        total = data_start + (a.data_mib + 1) * MIB
-        if os.path.exists(a.out):
-            os.remove(a.out)
-        with open(a.out, "wb") as f:
-            f.truncate(total)
-        layout = [f"label: gpt\nlabel-id: {DISK_GUID}\n"]
-        for (name, ptype, uuid), (start, size) in zip(PARTS, [(MIB, MIB), (esp_start, a.esp_mib * MIB), (data_start, a.data_mib * MIB)]):
-            layout.append(f'start={start // 512}, size={size // 512}, type={ptype}, name="{name}", uuid={uuid}\n')
-        run("sfdisk", "-q", a.out, input="".join(layout).encode())
-        copy_sparse(esp, a.out, esp_start)
-        copy_sparse(data, a.out, data_start)
-        grub_bios(a.boot, a.out, tmp)
-        print(f"mkimage: {a.out}: {total >> 20} MiB (ESP {a.esp_mib} MiB, data {a.data_mib} MiB), "
+        parts = PARTS if x86 else PARTS[1:]
+        sizes = [MIB, a.esp_mib * MIB, a.data_mib * MIB][-len(parts):]
+        at = [MIB if x86 else 2 * MIB]
+        for size in sizes:
+            at.append(at[-1] + size)
+        lines = [f'start={at[i] // 512}, size={size // 512}, type={ptype}, name="{name}", uuid={uuid}\n'
+                 for i, ((name, ptype, uuid), size) in enumerate(zip(parts, sizes))]
+        images = ([None] if x86 else []) + [esp, data]
+        disk(a.out, f"label: gpt\nlabel-id: {DISK_GUID}\n", [(img, at[i], lines[i]) for i, img in enumerate(images)], at[-1] + MIB)
+        if x86:
+            grub_bios(a.boot, a.out, tmp)
+        print(f"mkimage: {a.out}: {(at[-1] + MIB) >> 20} MiB (ESP {a.esp_mib} MiB, data {a.data_mib} MiB), "
               f"UKI {os.path.getsize(efi)} bytes", file=sys.stderr)
 
 

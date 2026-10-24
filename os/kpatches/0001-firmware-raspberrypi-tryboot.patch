@@ -1,0 +1,73 @@
+--- a/include/soc/bcm2835/raspberrypi-firmware.h
++++ b/include/soc/bcm2835/raspberrypi-firmware.h
+@@ -75,11 +75,13 @@
+ 	RPI_FIRMWARE_GET_THROTTLED =                          0x00030046,
+ 	RPI_FIRMWARE_GET_CLOCK_MEASURED =                     0x00030047,
+ 	RPI_FIRMWARE_NOTIFY_REBOOT =                          0x00030048,
++	RPI_FIRMWARE_GET_REBOOT_FLAGS =                       0x00030064,
+ 	RPI_FIRMWARE_SET_CLOCK_STATE =                        0x00038001,
+ 	RPI_FIRMWARE_SET_CLOCK_RATE =                         0x00038002,
+ 	RPI_FIRMWARE_SET_VOLTAGE =                            0x00038003,
+ 	RPI_FIRMWARE_SET_TURBO =                              0x00038009,
+ 	RPI_FIRMWARE_SET_CUSTOMER_OTP =                       0x00038021,
++	RPI_FIRMWARE_SET_REBOOT_FLAGS =                       0x00038064,
+ 	RPI_FIRMWARE_SET_DOMAIN_STATE =                       0x00038030,
+ 	RPI_FIRMWARE_GET_GPIO_STATE =                         0x00030041,
+ 	RPI_FIRMWARE_SET_GPIO_STATE =                         0x00038041,
+--- a/drivers/firmware/raspberrypi.c
++++ b/drivers/firmware/raspberrypi.c
+@@ -14,6 +14,7 @@
+ #include <linux/of.h>
+ #include <linux/of_platform.h>
+ #include <linux/platform_device.h>
++#include <linux/reboot.h>
+ #include <linux/slab.h>
+ #include <soc/bcm2835/raspberrypi-firmware.h>
+ 
+@@ -32,6 +33,7 @@
+ 	u32 enabled;
+ 
+ 	struct kref consumers;
++	struct notifier_block reboot_nb;
+ };
+ 
+ static DEFINE_MUTEX(transaction_lock);
+@@ -273,6 +275,20 @@
+ 	rpi_firmware_put(fw);
+ }
+ 
++/*
++ * reboot(LINUX_REBOOT_CMD_RESTART2, "0 tryboot") sets the firmware's one-shot tryboot flag: the next boot uses the
++ * [tryboot] sections of autoboot.txt and config.txt (A/B updates), as with the Raspberry Pi kernel.
++ */
++static int rpi_firmware_notify_reboot(struct notifier_block *nb, unsigned long action, void *data)
++{
++	struct rpi_firmware *fw = container_of(nb, struct rpi_firmware, reboot_nb);
++	u32 flags = 1;
++
++	if (action == SYS_RESTART && data && strstr(data, "tryboot"))
++		rpi_firmware_property(fw, RPI_FIRMWARE_SET_REBOOT_FLAGS, &flags, sizeof(flags));
++	return NOTIFY_DONE;
++}
++
+ static int rpi_firmware_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+@@ -302,6 +318,9 @@
+ 
+ 	platform_set_drvdata(pdev, fw);
+ 
++	fw->reboot_nb.notifier_call = rpi_firmware_notify_reboot;
++	register_reboot_notifier(&fw->reboot_nb);
++
+ 	rpi_firmware_print_firmware_revision(fw);
+ 	rpi_register_hwmon_driver(dev, fw);
+ 	rpi_register_clk_driver(dev);
+@@ -323,6 +342,7 @@
+ {
+ 	struct rpi_firmware *fw = platform_get_drvdata(pdev);
+ 
++	unregister_reboot_notifier(&fw->reboot_nb);
+ 	platform_device_unregister(rpi_hwmon);
+ 	rpi_hwmon = NULL;
+ 	platform_device_unregister(rpi_clk);

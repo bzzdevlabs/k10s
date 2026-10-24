@@ -12,6 +12,14 @@
 //! rejoined the cluster and serves its placement; a trial that crashes, hangs (watchdog) or does not get there within
 //! `os_trial` seconds falls back, and init records the image as failed. Every step is a complete file written to a
 //! temporary name, synced and renamed, so a power cut at any point leaves a bootable good image.
+//!
+//! The Raspberry Pi firmware boots a whole FAT partition instead: partition 2 (slot A) or 3 (slot B), as
+//! `autoboot.txt` on K10S-BOOT (partition 1) says. A Pi image's slot is a signed FAT image (firmware, devicetrees,
+//! kernel, initramfs, `config.txt`) written raw to its partition. An update writes the other partition, records the
+//! trial in `k10s/trying` (image and tries left) and reboots with the firmware's one-shot tryboot flag, which boots
+//! the `[tryboot]` partition once; any later boot goes back to the committed one. A commit rewrites `autoboot.txt`; a
+//! committed boot that finds `k10s/trying` reboots into the trial again until its tries are used up, then records the
+//! image as failed.
 
 use super::say;
 use k10_mesh::osimage;
@@ -45,10 +53,30 @@ pub fn release_keys() -> Vec<[u8; 32]> {
     parse_keys(RELEASE_KEYS)
 }
 
+/// The image's A/B boot record on a Pi (K10S-BOOT): `[all]` is the committed partition, `[tryboot]` the other.
+const AUTOBOOT: &str = "autoboot.txt";
+/// A Pi trial in progress: `IMAGE TRIES_LEFT`.
+const TRYING: &str = "k10s/trying";
+
+/// Init reboots with `LINUX_REBOOT_CMD_RESTART2 "0 tryboot"` (a Pi trial boot) instead of a plain reboot.
+pub static TRYBOOT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Firmware {
     Uefi,
     Bios,
+    /// Raspberry Pi firmware: A/B partitions picked by `autoboot.txt`, trials by its tryboot flag.
+    Pi,
+}
+
+/// What the Pi firmware tells about this boot, and the slot partitions.
+pub struct PiBoot {
+    /// Block devices of slots A and B (partitions 2 and 3 of the boot disk).
+    pub parts: [PathBuf; 2],
+    /// `/chosen/bootloader/partition` of the firmware's devicetree.
+    pub partition: Option<u32>,
+    /// `/chosen/bootloader/tryboot`.
+    pub tryboot: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -79,6 +107,81 @@ impl Slot {
             _ => None,
         }
     }
+
+    /// The Pi partition holding the slot.
+    fn partition(self) -> u32 {
+        match self {
+            Slot::A => 2,
+            Slot::B => 3,
+        }
+    }
+
+    fn of_partition(n: u32) -> Option<Slot> {
+        [Slot::A, Slot::B].into_iter().find(|s| s.partition() == n)
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// `autoboot.txt` with `committed` as the default partition and the other one for tryboot.
+fn autoboot(committed: Slot) -> String {
+    format!("[all]\ntryboot_a_b=1\nboot_partition={}\n[tryboot]\nboot_partition={}\n", committed.partition(), committed.other().partition())
+}
+
+/// The `[all]` partition of `autoboot.txt`.
+fn autoboot_committed(text: &str) -> Option<Slot> {
+    let mut all = false;
+    for l in text.lines().map(str::trim) {
+        if l.starts_with('[') {
+            all = l == "[all]";
+        } else if let Some(n) = l.strip_prefix("boot_partition=").filter(|_| all) {
+            return n.trim().parse().ok().and_then(Slot::of_partition);
+        }
+    }
+    None
+}
+
+/// The signed image in a Pi slot partition: a FAT filesystem (its size from the boot sector) followed by the
+/// signature trailer.
+fn read_slot(dev: &Path) -> Option<Vec<u8>> {
+    use std::os::unix::fs::FileExt;
+    let f = fs::File::open(dev).ok()?;
+    let mut bs = [0u8; 512];
+    f.read_exact_at(&mut bs, 0).ok()?;
+    let sectors = match u16::from_le_bytes([bs[19], bs[20]]) {
+        0 => u32::from_le_bytes([bs[32], bs[33], bs[34], bs[35]]) as usize,
+        n => n as usize,
+    };
+    let payload = u16::from_le_bytes([bs[11], bs[12]]) as usize * sectors;
+    if bs[510..512] != [0x55, 0xAA] || payload == 0 || payload >= osimage::MAX_IMAGE_BYTES {
+        return None;
+    }
+    let mut tail = [0u8; 1024];
+    let n = f.read_at(&mut tail, payload as u64).ok()?;
+    // The trailer ends with its length (header and signature) and "K10S-END".
+    let end = (12..=n).find(|&e| &tail[e - 8..e] == b"K10S-END" && u32::from_le_bytes(tail[e - 12..e - 8].try_into().unwrap()) as usize == e - 12)?;
+    let mut blob = vec![0u8; payload + end];
+    f.read_exact_at(&mut blob, 0).ok()?;
+    osimage::meta(&blob).ok().map(|_| blob)
+}
+
+/// Writes `blob` to a Pi slot partition and reads it back from the device (the page cache dropped).
+fn write_slot(dev: &Path, blob: &[u8]) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::FileExt;
+    let f = fs::OpenOptions::new().read(true).write(true).open(dev)?;
+    f.write_all_at(blob, 0)?;
+    f.sync_all()?;
+    // SAFETY: advice on our own descriptor.
+    unsafe { libc::posix_fadvise(f.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
+    let mut back = vec![0u8; blob.len()];
+    f.read_exact_at(&mut back, 0)?;
+    if sha256(&back) != sha256(blob) {
+        return Err(io::Error::other("the slot reads back different data"));
+    }
+    Ok(())
 }
 
 /// The ESP's files, written only through these operations. Tests cut the power after any of them.
@@ -275,6 +378,10 @@ pub struct Slots {
     pub image: Option<[u8; 32]>,
     pub platform: Option<String>,
     pub failed: Vec<[u8; 32]>,
+    /// Pi: the slot partitions.
+    pi: Option<[PathBuf; 2]>,
+    /// Pi: a trial was interrupted (power cut, crash); this boot reboots into it again.
+    pub retry: bool,
 }
 
 impl Slots {
@@ -297,8 +404,9 @@ impl Slots {
                 let t = esp.grubenv("k10s_try");
                 (slot, slot.is_some_and(|s| t.is_some_and(|t| t.starts_with(s.letter()))))
             }
+            Firmware::Pi => (None, false),
         };
-        let mut s = Slots { esp, firmware, booted, trial, image: None, platform: None, failed };
+        let mut s = Slots { esp, firmware, booted, trial, image: None, platform: None, failed, pi: None, retry: false };
         if let Some(name) = booted.and_then(|b| s.esp.uki(b)) {
             if let Some(blob) = s.esp.read(&format!("EFI/Linux/{name}")) {
                 s.image = Some(sha256(&blob));
@@ -312,6 +420,53 @@ impl Slots {
                 }
                 s.esp.end();
             }
+        }
+        s
+    }
+
+    /// Reads the boot state on a Pi. A committed boot that finds an interrupted trial reboots into it again while it
+    /// has tries left, else records its image as failed; `autoboot.txt` is made to point at the booted slot.
+    pub fn open_pi(esp: Esp, pi: PiBoot) -> Slots {
+        let mut s = Slots::open(esp, Firmware::Pi, None, None);
+        let committed = s.esp.read(AUTOBOOT).and_then(|b| autoboot_committed(&String::from_utf8_lossy(&b)));
+        s.booted = pi.partition.and_then(Slot::of_partition);
+        s.trial = pi.tryboot && s.booted.is_some() && s.booted != committed;
+        if let Some(blob) = s.booted.and_then(|b| read_slot(&pi.parts[b.index()])) {
+            s.image = Some(sha256(&blob));
+            s.platform = osimage::meta(&blob).ok().map(|i| format!("{}-{}", i.meta.arch, i.meta.profile));
+        }
+        s.pi = Some(pi.parts);
+        let Some(b) = s.booted.filter(|_| !s.trial) else { return s };
+        let trying = s.esp.read(TRYING).map(|t| String::from_utf8_lossy(&t).into_owned());
+        let trying = trying.as_deref().and_then(|t| t.split_once(' ')).and_then(|(h, n)| Some((parse_hex32(h)?, n.trim().parse::<u32>().ok()?)));
+        if trying.is_none() && committed == Some(b) {
+            return s;
+        }
+        let r = s.esp.begin().and_then(|()| {
+            match trying {
+                Some((h, _)) if s.image == Some(h) => {}
+                Some((h, left)) if left > 0 => {
+                    say!("update: the trial of slot {} ({}) was interrupted; booting it again", b.other().letter(), short(&h));
+                    s.esp.write(TRYING, format!("{} {}\n", to_hex(&h), left - 1).as_bytes())?;
+                    s.retry = true;
+                }
+                Some((h, _)) => {
+                    say!("update: slot {} ({}) did not come up in {TRIES} boots; back on slot {}", b.other().letter(), short(&h), b.letter());
+                    s.record_failed(h)?;
+                }
+                None => {}
+            }
+            if !s.retry {
+                s.esp.remove(TRYING)?;
+            }
+            if committed != Some(b) {
+                s.esp.write(AUTOBOOT, autoboot(b).as_bytes())?;
+            }
+            Ok(())
+        });
+        s.esp.end();
+        if let Err(e) = r {
+            say!("update: K10S-BOOT: {e}");
         }
         s
     }
@@ -332,6 +487,7 @@ impl Slots {
         let tried_out = match self.firmware {
             Firmware::Uefi => self.esp.uki(t).is_some_and(|n| tries_left(&n) == Some(0)),
             Firmware::Bios => self.esp.grubenv("k10s_try").is_some_and(|v| v == format!("{}0", t.letter())),
+            Firmware::Pi => false,
         };
         if tried_out {
             if let Some(h) = self.esp.uki(t).and_then(|n| self.esp.read(&format!("EFI/Linux/{n}"))).map(|blob| sha256(&blob)) {
@@ -380,7 +536,7 @@ impl Slots {
     /// Whether a request for `h` is acceptable now at all (refusals here say nothing about the image).
     pub fn can_install(&self, h: &[u8; 32]) -> Result<Slot, String> {
         let b = self.booted.ok_or("not booted from a slot")?;
-        if self.trial {
+        if self.trial || self.retry {
             return Err("this boot is a trial: it commits or falls back first".into());
         }
         if self.image == Some(*h) {
@@ -412,17 +568,38 @@ impl Slots {
         if Some(&platform) != self.platform.as_ref() {
             return Err(format!("image for {platform}, this node runs {}", self.platform.as_deref().unwrap_or("?")));
         }
-        let (kernel, initrd, cmdline) = uki_sections(&blob[..info.payload_len])?;
         let t = b.other();
+        if let Some(parts) = &self.pi {
+            say!("update: verified {} ({platform} {}, signed by {}); writing slot {}", short(h), info.meta.version, short(&info.key), t.letter());
+            self.esp.begin().map_err(|e| format!("remounting K10S-BOOT: {e}"))?;
+            let r = (|| -> io::Result<()> {
+                // The firmware boots the other partition only through tryboot, so a partial write is never booted.
+                self.esp.step()?;
+                write_slot(&parts[t.index()], blob)?;
+                say!("update: slot {} written; arming its trial boot", t.letter());
+                self.esp.write(TRYING, format!("{} {}\n", to_hex(h), TRIES - 1).as_bytes())?;
+                if self.esp.read(AUTOBOOT).as_deref() != Some(autoboot(b).as_bytes()) {
+                    self.esp.write(AUTOBOOT, autoboot(b).as_bytes())?;
+                }
+                Ok(())
+            })();
+            self.esp.end();
+            r.map_err(|e| format!("writing slot {}: {e}", t.letter()))?;
+            return Ok(t);
+        }
+        let (kernel, initrd, cmdline) = uki_sections(&blob[..info.payload_len])?;
         say!("update: verified {} ({platform} {}, signed by {}); writing slot {}", short(h), info.meta.version, short(&info.key), t.letter());
         self.esp.begin().map_err(|e| format!("remounting K10S-BOOT: {e}"))?;
         let r = (|| -> io::Result<()> {
             self.clear(t)?;
-            let d = format!("k10s/{}", t.letter());
-            self.esp.write(&format!("{d}/vmlinuz"), kernel)?;
-            self.esp.write(&format!("{d}/initrd"), initrd)?;
-            let cfg = format!("linux /{d}/vmlinuz {cmdline} k10s.slot={}\ninitrd /{d}/initrd\n", t.letter());
-            self.esp.write(&format!("{d}/boot.cfg"), cfg.as_bytes())?;
+            // GRUB's copy for BIOS boots (x86 only).
+            if cfg!(target_arch = "x86_64") {
+                let d = format!("k10s/{}", t.letter());
+                self.esp.write(&format!("{d}/vmlinuz"), kernel)?;
+                self.esp.write(&format!("{d}/initrd"), initrd)?;
+                let cfg = format!("linux /{d}/vmlinuz {cmdline} k10s.slot={}\ninitrd /{d}/initrd\n", t.letter());
+                self.esp.write(&format!("{d}/boot.cfg"), cfg.as_bytes())?;
+            }
             let name = format!("k10s-{}", t.letter());
             self.esp.write(&format!("EFI/Linux/{name}.new"), blob)?;
             self.esp.rename(&format!("EFI/Linux/{name}.new"), &format!("EFI/Linux/{name}+{TRIES}.efi"))?;
@@ -440,6 +617,10 @@ impl Slots {
         let (Some(b), true) = (self.booted, self.trial) else { return Ok(()) };
         self.esp.begin()?;
         let r = (|| -> io::Result<()> {
+            if self.pi.is_some() {
+                self.esp.write(AUTOBOOT, autoboot(b).as_bytes())?;
+                return self.esp.remove(TRYING);
+            }
             let l = b.letter();
             self.esp.write_grubenv(&[("k10s_slot", &l.to_string())])?;
             // While the counted file is renamed, `k10s-X*` matches it under either name.
@@ -465,6 +646,9 @@ impl Slots {
             if let Some(h) = self.image {
                 self.record_failed(h)?;
             }
+            if self.pi.is_some() {
+                return self.esp.remove(TRYING);
+            }
             self.esp.write_grubenv(&[("k10s_slot", &s.letter().to_string())])?;
             self.esp.set_default(&format!("k10s-{}.efi", s.letter()))
         })();
@@ -487,11 +671,15 @@ impl Agent {
     pub fn spawn(mut slots: Slots, trusted: Vec<[u8; 32]>, data: PathBuf, trial: Duration) -> Agent {
         let (tx, rx) = mpsc::channel::<UnixStream>();
         let deadline = slots.trial.then(|| Instant::now() + trial);
+        let tryboot = slots.firmware == Firmware::Pi;
         if let (Some(b), true) = (slots.booted, slots.trial) {
             say!("update: trial boot of slot {}; it commits once the node rejoined and serves (within {} s)", b.letter(), trial.as_secs());
         }
         let _ = std::thread::Builder::new().name("update".into()).spawn(move || {
             let mut conn: Option<(UnixStream, Vec<u8>)> = None;
+            if slots.retry {
+                request_reboot(true);
+            }
             loop {
                 while let Ok(s) = rx.try_recv() {
                     conn = Some((s, Vec::new()));
@@ -502,7 +690,7 @@ impl Agent {
                     if let Err(e) = slots.abandon() {
                         say!("update: {e}");
                     }
-                    request_reboot();
+                    request_reboot(false);
                 }
                 let Some((s, buf)) = conn.as_mut() else {
                     // The node waits for its first status line: hand it over as soon as the node starts.
@@ -539,7 +727,7 @@ impl Agent {
                                 match r {
                                     Ok(t) => {
                                         say!("update: slot {} armed; rebooting into it", t.letter());
-                                        request_reboot();
+                                        request_reboot(tryboot);
                                     }
                                     Err(e) => {
                                         say!("update: refusing {}: {e}", short(&h));
@@ -589,8 +777,10 @@ fn send_status(conn: &mut Option<(UnixStream, Vec<u8>)>, slots: &Slots) {
     }
 }
 
-/// SIGUSR1 to init: its main loop stops the node (it leaves the cluster) and reboots. The agent then parks.
-fn request_reboot() -> ! {
+/// SIGUSR1 to init: its main loop stops the node (it leaves the cluster) and reboots, with the Pi's tryboot flag when
+/// `tryboot`. The agent then parks.
+fn request_reboot(tryboot: bool) -> ! {
+    TRYBOOT.store(tryboot, std::sync::atomic::Ordering::SeqCst);
     // SAFETY: a process-directed signal to ourselves; every thread blocks it and the main loop waits for it.
     unsafe { libc::kill(libc::getpid(), libc::SIGUSR1) };
     loop {
@@ -736,9 +926,13 @@ mod tests {
                 assert!(dir.join(format!("k10s/{c}/boot.cfg")).exists() || c == 'a', "GRUB boots a slot that has files");
                 Slots::open(esp, fw, None, Some(&c.to_string()))
             }
+            Firmware::Pi => unreachable!("pi_boot"),
         };
         s
     }
+
+    /// The loaders of the UEFI/BIOS images (BIOS: x86 only).
+    const LOADERS: &[Firmware] = if cfg!(target_arch = "x86_64") { &[Firmware::Uefi, Firmware::Bios] } else { &[Firmware::Uefi] };
 
     fn trusted() -> Vec<[u8; 32]> {
         vec![ed25519::public_key(&SEED)]
@@ -766,7 +960,7 @@ mod tests {
     fn power_cut_at_every_step() {
         let (a, ha) = image("v1");
         let (b, hb) = image("v2");
-        for fw in [Firmware::Uefi, Firmware::Bios] {
+        for &fw in LOADERS {
             for cut in 0.. {
                 let dir = tmp(&format!("cut-{fw:?}-{cut}"));
                 fresh(&dir, &a);
@@ -810,7 +1004,7 @@ mod tests {
         let (a, ha) = image("v1");
         let (bad, hbad) = image("bad");
         let (c, hc) = image("v3");
-        for fw in [Firmware::Uefi, Firmware::Bios] {
+        for &fw in LOADERS {
             let dir = tmp(&format!("bad-{fw:?}"));
             fresh(&dir, &a);
             let mut s = boot(&dir, fw);
@@ -820,6 +1014,7 @@ mod tests {
                 match fw {
                     Firmware::Uefi => assert!(uefi_boot(&dir).unwrap().starts_with("k10s-b+")),
                     Firmware::Bios => assert_eq!(bios_boot(&Esp::new(&dir, false)), 'b'),
+                    Firmware::Pi => unreachable!(),
                 }
             }
             let mut s = boot(&dir, fw);
@@ -855,6 +1050,128 @@ mod tests {
         // Booted without the image's loader: identified, but not updatable.
         let s = Slots::open(Esp::new(&dir, false), Firmware::Uefi, None, None);
         assert!(s.status().is_none() && s.booted.is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A Pi slot image: a FAT boot sector giving its size, signed for aarch64-pi.
+    fn pi_image(tag: &str) -> (Vec<u8>, [u8; 32]) {
+        let mut fat = vec![0u8; 64 * 512];
+        fat[11..13].copy_from_slice(&512u16.to_le_bytes());
+        fat[19..21].copy_from_slice(&64u16.to_le_bytes());
+        fat[510..512].copy_from_slice(&[0x55, 0xAA]);
+        fat[512..512 + tag.len()].copy_from_slice(tag.as_bytes());
+        let meta = osimage::ImageMeta { arch: "aarch64".into(), profile: "pi".into(), version: tag.into() };
+        let blob = osimage::sign(&fat, &meta, &SEED).unwrap();
+        let h = sha256(&blob);
+        (blob, h)
+    }
+
+    /// A Pi disk as os/mkimage.py writes it: K10S-BOOT (a directory here) with autoboot.txt on slot A, the slot
+    /// partitions as files (A holds `a` and whatever followed it, B is blank).
+    fn pi_fresh(dir: &Path, a: &[u8]) {
+        let _ = fs::remove_dir_all(dir);
+        let esp = Esp::new(dir, false);
+        esp.write(AUTOBOOT, autoboot(Slot::A).as_bytes()).unwrap();
+        fs::write(dir.join("p2"), [a, &[0x5a; 4096]].concat()).unwrap();
+        fs::write(dir.join("p3"), vec![0u8; 128 << 10]).unwrap();
+    }
+
+    /// One Pi boot: the firmware takes autoboot.txt's [tryboot] partition when the one-shot flag is set, else [all].
+    fn pi_boot(dir: &Path, tryboot: bool) -> Slots {
+        let text = fs::read_to_string(dir.join(AUTOBOOT)).unwrap();
+        let section = if tryboot { "[tryboot]" } else { "[all]" };
+        let part = text.split(section).nth(1).unwrap().lines().find_map(|l| l.strip_prefix("boot_partition=")).unwrap().parse().unwrap();
+        Slots::open_pi(Esp::new(dir, false), PiBoot { parts: [dir.join("p2"), dir.join("p3")], partition: Some(part), tryboot })
+    }
+
+    #[test]
+    fn autoboot_files() {
+        assert_eq!(autoboot_committed(&autoboot(Slot::B)), Some(Slot::B));
+        assert_eq!(autoboot_committed("[tryboot]\nboot_partition=2\n[all]\nboot_partition=3\n"), Some(Slot::B));
+        assert_eq!(autoboot_committed("[all]\nboot_partition=7\n"), None);
+        assert_eq!(autoboot_committed(""), None);
+    }
+
+    /// Pi: install into slot B, tryboot it, commit; then cut the power after every durable step of the update and
+    /// of its commit: every boot comes up on a good image, an interrupted trial is retried, and it ends committed.
+    #[test]
+    fn pi_update_and_power_cuts() {
+        let (a, ha) = pi_image("v1");
+        let (b, hb) = pi_image("v2");
+        for cut in 0.. {
+            let dir = tmp(&format!("pi-cut-{cut}"));
+            pi_fresh(&dir, &a);
+            let mut s = pi_boot(&dir, false);
+            assert_eq!((s.booted, s.trial, s.image, s.platform.as_deref()), (Some(Slot::A), false, Some(ha), Some("aarch64-pi")));
+            s.esp.budget.set(Some(cut));
+            let installed = s.install(&hb, &b, &trusted()).is_ok();
+            // A complete install reboots with tryboot; a power cut loses the flag.
+            let mut s = pi_boot(&dir, installed);
+            if !installed {
+                assert_eq!((s.image, s.trial), (Some(ha), false), "cut {cut}");
+                if s.retry {
+                    s = pi_boot(&dir, true);
+                } else {
+                    s.install(&hb, &b, &trusted()).unwrap();
+                    s = pi_boot(&dir, true);
+                }
+            }
+            assert_eq!((s.booted, s.image, s.trial), (Some(Slot::B), Some(hb), true), "cut {cut}");
+            assert!(s.can_install(&ha).is_err());
+            s.esp.budget.set(Some(cut));
+            let committed = s.commit().is_ok();
+            let mut s = pi_boot(&dir, false);
+            if s.image == Some(ha) {
+                assert!(!committed && s.retry, "cut {cut}: an interrupted commit retries the trial");
+                s = pi_boot(&dir, true);
+                assert!(s.trial);
+                s.commit().unwrap();
+                s = pi_boot(&dir, false);
+            }
+            assert_eq!((s.booted, s.image, s.trial, s.retry), (Some(Slot::B), Some(hb), false, false), "cut {cut}");
+            assert!(s.failed.is_empty() && !dir.join(TRYING).exists());
+            assert_eq!(fs::read_to_string(dir.join(AUTOBOOT)).unwrap(), autoboot(Slot::B));
+            let _ = fs::remove_dir_all(&dir);
+            if installed && committed {
+                break;
+            }
+        }
+    }
+
+    /// Pi: an image that never reaches init is tried TRIES times (one tryboot per committed boot), then recorded;
+    /// one that never commits is abandoned by init. Both are refused afterwards.
+    #[test]
+    fn pi_bad_images_fall_back() {
+        let (a, ha) = pi_image("v1");
+        let (bad, hbad) = pi_image("bad");
+        let (c, hc) = pi_image("v3");
+        let dir = tmp("pi-bad");
+        pi_fresh(&dir, &a);
+        let mut s = pi_boot(&dir, false);
+        s.install(&hbad, &bad, &trusted()).unwrap();
+        let mut tries = 1;
+        loop {
+            // The trial crashes before init: the next boot is the committed slot.
+            let s = pi_boot(&dir, false);
+            assert_eq!(s.image, Some(ha));
+            if !s.retry {
+                break;
+            }
+            tries += 1;
+        }
+        assert_eq!(tries, TRIES);
+        let mut s = pi_boot(&dir, false);
+        assert_eq!((s.image, s.retry, s.failed.clone()), (Some(ha), false, vec![hbad]));
+        assert!(s.install(&hbad, &bad, &trusted()).unwrap_err().contains("failed here before"));
+        s.install(&hc, &c, &trusted()).unwrap();
+        let mut s = pi_boot(&dir, true);
+        assert_eq!((s.image, s.trial), (Some(hc), true));
+        s.abandon().unwrap();
+        let s = pi_boot(&dir, false);
+        assert_eq!((s.image, s.trial, s.retry, s.failed.clone()), (Some(ha), false, false, vec![hbad, hc]));
+        let x86 = image("x").0;
+        let mut s = s;
+        assert!(s.install(&sha256(&x86), &x86, &trusted()).unwrap_err().contains("x86_64-vm"));
         let _ = fs::remove_dir_all(&dir);
     }
 }

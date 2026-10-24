@@ -2,6 +2,7 @@
 //! code through `VmCtx.stack_limit`, CPU budgets, stack overflow with host calls and preemption near the stack
 //! limit, host traps through `trap_request`, calls between JIT services, and the lifetime of executable code across
 //! applies.
+#![cfg(target_arch = "x86_64")]
 
 mod common;
 use common::*;

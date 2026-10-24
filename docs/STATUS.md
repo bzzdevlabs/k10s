@@ -53,6 +53,20 @@ the release key (verified against the key built into k10s), `SHA256SUMS`).
   node is back in the cluster and serves (`--os-commit-grace`), abandons after `os_trial`, records failed images.
   `os/test.sh` adds update-bios/update-uefi (power cut at every step, a panicking image, a never-committing one) and
   rollout (20 BIOS VMs: a bad image stops after the first wave, a good one goes through waves 1, 2, 4, 8, 5).
+- arm64 and the Raspberry Pi (U3, docs/OS.md): the hosted runtime builds for aarch64 (AAPCS64 `coro.rs` switch with
+  d8–d15, aarch64 seccomp filter, `BackendKind::native()` = interpreter off x86-64, the JIT module and its tests
+  x86-64 only); `scripts/ci-test.sh arm64` runs every suite but the JIT's on a GitHub arm64 runner (gnu and musl).
+  `os/kbuild.sh arm64`: one kernel for QEMU virt/arm64 guests (UEFI+ACPI or DT) and the Pi 4/5 (RP1, GENET/GEM,
+  `bcm2835_wdt`), plus `os/kpatches/` (the Pi firmware's tryboot reboot flag, from the Raspberry Pi kernel).
+  `os/images.sh --arch aarch64`: `k10s-os-V-aarch64-vm.img.xz` (GPT, systemd-boot, UKI; 3.9 MB) and
+  `k10s-os-V-aarch64-pi.img.xz` (MBR: K10S-BOOT with `autoboot.txt`, slots A/B as raw signed FAT16 images with the
+  Pi 4 firmware, mainline DTBs and Image.gz, K10S-DATA; 5.2 MB) with `.efi`/`.fat` update files; UKIs are now written
+  by `os/mkimage.py` itself (objcopy corrupted arm64 PE headers). PID 1 finds partitions by FAT/ext4 label on MBR,
+  grows MBR partitions, and updates a Pi through tryboot (one-shot trial, `k10s/trying` retried 3 times, commit =
+  `autoboot.txt` rewrite). `os/test.sh --arch aarch64` (CI suite `os-arm64`, release gate, TCG on an x86-64 runner):
+  boot-arm64, image-arm64, update-arm64, pi (a model of the Pi firmware on QEMU virt: power cut at every step, a
+  panicking image, a never-committing one), mixed (a Pi joins an x86-64 host node's cluster). The dist build adds
+  `k10s-V-aarch64-unknown-linux-musl.tar.gz` (cross-linked with rust-lld).
 - Releases: SemVer; tag `vX.Y.Z` on main → stable release, every push to main → `vX.Y.Z-dev.N` pre-release.
 - Performance vs 08f2921 (`bench/k10s/ab.py --same`, 4 interleaved rounds, host load ≈ 7 from the benchmark itself;
   medians): single node within ±2.5 %; local ingress −4 %; forwarded requests −5 % at c=1 (CPU per request +7 %) and
@@ -70,9 +84,12 @@ seek privileges on this machine.
 12. **Tier 1 universal image** (docs/TASK-universal-os.md, plan in docs/research/universal-os.md §9, decisions in
     docs/REPORT.md §9; the prototype branches no longer exist on the remote): milestones U0 → U1 → U2 → U3 → U4
     (= Tier 2 M6) → U5 → U6, one session each. U0 (PID 1 mode), U1 (x86-64 images) and U2 (signed A/B updates, rollout
-    waves) done. Needs real hardware (user): U1's Realtek or Intel mini-PC serving after a cold boot from the `metal`
-    image; for U2, power cuts that reach a real disk's write cache and GRUB `save_env`/systemd-boot renames on real
-    firmware. Next U3 (arm64 + Pi 4/5, interpreter; the multi-arch `coro.rs`/JIT gating).
+    waves) and U3 (arm64, Pi 4/5 on the interpreter) done. Needs real hardware (user): U1's Realtek or Intel mini-PC
+    serving after a cold boot from the `metal` image; for U2, power cuts that reach a real disk's write cache and GRUB
+    `save_env`/systemd-boot renames on real firmware; for U3 (its exit criteria), a Pi 4 and a Pi 5 joining an x86
+    cluster from the Pi image, surviving power cuts and updating A/B: the real firmware honouring `autoboot.txt` and
+    the tryboot flag set by the patched kernel, the mainline DTBs under the Pi firmware, GENET/RP1 Ethernet, SD/NVMe,
+    `bcm2835_wdt`. Next U4 (= Tier 2 M6: the arm64 JIT).
 13. **Tier 2 native hardware** (docs/TASK-native-hardware.md, plan in docs/research/native-hardware.md §9, decisions
     in docs/REPORT.md §9; prototypes on branch `research/native-hardware`): milestones M1 → M2 → M3 → M4 → M5 → M6 →
     M7 (x86 first), one session each.
@@ -92,7 +109,7 @@ seek privileges on this machine.
 | x86-64 JIT (single pass, SFI masking, safepoints, speculation hardening) | `crates/k10-jit` | differential soak, red-team, objdump |
 | Node runtime, sandbox, CLI | `crates/k10-node`, `crates/k10s` | unit, cluster, chaos, soak, abuse, auth |
 | Bare-metal node (PVH, virtio-net, smoltcp, JIT, SMP, cluster member) | `metal/` | `test.sh`, `cluster-test.sh` |
-| PID 1 mode (Tier 1), A/B updates, k10s kernels (`vm`, `metal`), initramfs, firmware and disk image builders | `crates/k10s/src/pid1`, `os/` | unit + `os/test.sh` (QEMU) |
+| PID 1 mode (Tier 1), A/B updates, k10s kernels (`vm`, `metal`, `arm64`), initramfs, firmware and disk image builders (x86-64, arm64, Raspberry Pi) | `crates/k10s/src/pid1`, `os/` | unit + `os/test.sh [--arch aarch64]` (QEMU) |
 | Baselines (Kubernetes, bare processes), loadgen, k10s harness, A/B driver | `bench/` | — |
 | Editor extension, documentation site | `editors/vscode`, `website/` | — |
 | CI and releases | `.github/`, `scripts/` | — |
@@ -114,10 +131,11 @@ seek privileges on this machine.
 - Metal has no per-service memory reservations (it shares placement, not the accounting), and its peer links have no
   unsent-byte cap or per-iteration budget (a key holder that stops reading grows the write buffer): port the hosted
   ones (`LINK_BUDGET`, `LINK_SOFT_CAP`, `LINK_HARD_CAP` in `crates/k10-node/src/cluster/mesh.rs`).
-- The hosted node builds for Linux x86-64 only (seccomp filter, `coro.rs`); Tier 1 needs portable versions
-  (docs/TASK-universal-os.md, U3).
-- PID 1 mode, the images and updates are tested under QEMU only (SeaBIOS, OVMF, NVMe, e1000e, Intel TCO; power
-  cuts are QEMU kills, which lose only what the guest had not written). Needs real hardware: the U1 mini-PC cold boot,
+- arm64 nodes run on the interpreter (U4 adds the arm64 JIT); i686/armv7/riscv64 builds (U5) need their `coro.rs`
+  switch and seccomp arch, and 32-bit targets a k10-jit-free build.
+- PID 1 mode, the images and updates are tested under QEMU only (SeaBIOS, OVMF, AAVMF, NVMe, e1000e, Intel TCO; the
+  Pi through a model of its firmware on QEMU virt; power cuts are QEMU kills, which lose only what the guest had not
+  written). The Pi's tryboot flag needs the patched kernel's mailbox call, untested on a real Pi. Needs real hardware: the U1 mini-PC cold boot,
   power cuts during an update on real disks, GRUB `save_env` and systemd-boot boot counting on real firmware (Realtek RTL8111/8125 with `rtl_nic` firmware, or Intel igc/e1000e), NICs and
   USB Ethernet outside QEMU's models, AHCI/eMMC boot disks, the screen console, BIOS/UEFI firmware quirks, slow USB
   storage (`bootwait`), AMD and SMBus-attached Intel watchdogs, RTC chips, real DHCP servers, switches and NTP pools.

@@ -17,9 +17,10 @@ cargo test
 K10S_BACKEND=interp cargo test   # the same suites on the reference interpreter
 ```
 
-CI runs `scripts/ci-test.sh unit musl metal-selftest metal os dist` on every pull request (`metal` non-blocking;
-`os` boots PID 1 mode and the disk images under QEMU, including A/B updates with power cuts and a 20-node rollout),
-and
+CI runs `scripts/ci-test.sh unit musl metal-selftest metal os os-arm64 dist`, and `arm64` on an arm64 runner, on
+every pull request (`metal` non-blocking; `os` boots PID 1 mode and the x86-64 disk images under QEMU, including A/B
+updates with power cuts and a 20-node rollout; `os-arm64` the arm64 and Raspberry Pi images, the Pi behind a model
+of its firmware; `arm64` runs the test suites on an arm64 host), and
 the non-blocking chaos and soak `campaign` on pull requests and `main`.
 
 ## Rules of thumb

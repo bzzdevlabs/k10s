@@ -113,13 +113,14 @@ and never overwritten.
 
 ```bash
 k10s image pubkey KEY
-k10s image sign --key KEY --arch ARCH --profile PROFILE --version V IN.efi OUT.efi
+k10s image sign --key KEY --arch ARCH --profile PROFILE --version V IN OUT
 k10s image verify FILE [--trust PUBKEY,…]
 ```
 
 OS images for [updates of k10s disk images](/k10s/guides/bare-metal/#updating-the-image): `pubkey` prints the
 public key of a signing key (pin it on machines with `os_key=` in `k10s.conf`), `sign` appends an Ed25519 signature
-and the image's platform (`ARCH-PROFILE`, e.g. `x86_64-metal`) and version to a UKI, `verify` checks an image
+and the image's platform (`ARCH-PROFILE`, e.g. `x86_64-metal`, `aarch64-pi`) and version to a UKI or a Raspberry Pi
+boot slot image, `verify` checks an image
 against the k10s release key and the `--trust` keys and prints its platform, version, signer and SHA-256.
 
 ## k10s version

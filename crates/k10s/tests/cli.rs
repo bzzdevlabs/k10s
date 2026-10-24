@@ -156,7 +156,8 @@ fn run_ten() {
     let bin = common::k10s_bin();
     let ex = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
     let dir = tmpdir("run");
-    for backend in ["jit", "interp"] {
+    let backends: &[&str] = if cfg!(target_arch = "x86_64") { &["jit", "interp"] } else { &["interp"] };
+    for &backend in backends {
         let run = |args: &[&str]| {
             let out = Command::new(bin).arg("run").args(args).args(["--backend", backend]).output().unwrap();
             (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())

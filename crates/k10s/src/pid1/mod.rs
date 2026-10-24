@@ -133,16 +133,16 @@ pub fn main() -> ! {
             None => say!("modules: none shipped (drivers built in)"),
         }
     }
-    // Boot partition (GPT name K10S-BOOT, FAT): read-only, root-only; holds k10s.conf and the operator's key files.
+    // Boot partition (K10S-BOOT, FAT): read-only, root-only; holds k10s.conf and the operator's key files.
     let bootwait = Duration::from_millis(cfg.get("bootwait").and_then(|v| v.parse().ok()).unwrap_or(0));
-    let mut boot_mounted = false;
+    let mut boot_mounted = None;
     if let Some(dev) = find_partition("K10S-BOOT", bootwait) {
         modules::load_by_name(&["vfat", "nls_cp437", "nls_iso8859_1"]);
         let ro = libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
         // Explicit charsets: kernels differ in their defaults and may lack the default's module.
         match mount(&dev, "/boot", "vfat", ro, "uid=0,gid=0,fmask=0177,dmask=0077,codepage=437,iocharset=iso8859-1") {
             Ok(()) => {
-                boot_mounted = true;
+                boot_mounted = Some(dev.clone());
                 match fs::read_to_string("/boot/k10s.conf") {
                     Ok(text) => {
                         cfg.merge(&text);
@@ -155,10 +155,10 @@ pub fn main() -> ! {
         }
     }
     // Reading the slots hashes the booted image: alongside the network setup.
-    let slots = boot_mounted.then(|| {
+    let slots = boot_mounted.map(|dev| {
         let keys = |k: &str| cfg.get(k).map(str::to_string);
         let (slot, os_key, os_trial) = (keys("slot"), keys("os_key"), keys("os_trial"));
-        std::thread::spawn(move || open_slots(slot.as_deref(), os_key.as_deref(), os_trial.as_deref()))
+        std::thread::spawn(move || open_slots(&dev, slot.as_deref(), os_key.as_deref(), os_trial.as_deref()))
     });
     let lease = Arc::new(dhcp::Shared::default());
     let iface = network(&cfg, &lease);
@@ -184,8 +184,11 @@ pub fn main() -> ! {
 }
 
 /// The image's A/B slots on K10S-BOOT ([`update`]); `None` when this boot did not come from one (no updates).
-fn open_slots(slot: Option<&str>, os_key: Option<&str>, os_trial: Option<&str>) -> Option<update::Agent> {
-    let firmware = if Path::new("/sys/firmware/efi").exists() {
+fn open_slots(boot_dev: &str, slot: Option<&str>, os_key: Option<&str>, os_trial: Option<&str>) -> Option<update::Agent> {
+    let pi_fw = Path::new("/proc/device-tree/chosen/bootloader");
+    let firmware = if pi_fw.exists() {
+        update::Firmware::Pi
+    } else if Path::new("/sys/firmware/efi").exists() {
         let flags = libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
         if let Err(e) = mount("efivarfs", "/sys/firmware/efi/efivars", "efivarfs", flags, "") {
             say!("update: efivarfs: {e}");
@@ -194,8 +197,14 @@ fn open_slots(slot: Option<&str>, os_key: Option<&str>, os_trial: Option<&str>) 
     } else {
         update::Firmware::Bios
     };
-    let entry = update::efi_selected_entry();
-    let slots = update::Slots::open(update::Esp::new("/boot", true), firmware, entry.as_deref(), slot);
+    let esp = update::Esp::new("/boot", true);
+    let slots = if firmware == update::Firmware::Pi {
+        let dt = |name: &str| fs::read(pi_fw.join(name)).ok().and_then(|b| Some(u32::from_be_bytes(b.get(..4)?.try_into().ok()?)));
+        let part = |n: u32| sibling_partition(boot_dev, n).map(std::path::PathBuf::from).unwrap_or_default();
+        update::Slots::open_pi(esp, update::PiBoot { parts: [part(2), part(3)], partition: dt("partition"), tryboot: dt("tryboot") == Some(1) })
+    } else {
+        update::Slots::open(esp, firmware, update::efi_selected_entry().as_deref(), slot)
+    };
     let (Some(st), Some(b)) = (slots.status(), slots.booted) else {
         say!("update: not booted from a slot of this image's loaders; updates are off");
         return None;
@@ -307,15 +316,21 @@ fn set_hostname(cfg: &Config, iface: Option<&str>) {
     }
 }
 
-/// `/dev/NAME` of the partition whose GPT name is `label`, waiting up to `wait` for it to appear.
+/// `/dev/NAME` of the partition whose GPT name is `label` (on an MBR disk: whose FAT or ext4 label is), waiting up to
+/// `wait` for it to appear.
 fn find_partition(label: &str, wait: Duration) -> Option<String> {
     let t = Instant::now();
     let want = format!("PARTNAME={label}");
     loop {
         for e in fs::read_dir("/sys/class/block").into_iter().flatten().flatten() {
             let ue = fs::read_to_string(e.path().join("uevent")).unwrap_or_default();
+            let dev = || ue.lines().find_map(|l| l.strip_prefix("DEVNAME=")).map(|n| format!("/dev/{n}"));
             if ue.lines().any(|l| l == want) {
-                return ue.lines().find_map(|l| l.strip_prefix("DEVNAME=")).map(|n| format!("/dev/{n}"));
+                return dev();
+            }
+            let mbr = ue.lines().any(|l| l.starts_with("PARTN=")) && !ue.lines().any(|l| l.starts_with("PARTNAME="));
+            if let Some(d) = dev().filter(|d| mbr && fs_label(d).as_deref() == Some(label)) {
+                return Some(d);
             }
         }
         if t.elapsed() >= wait {
@@ -325,7 +340,34 @@ fn find_partition(label: &str, wait: Duration) -> Option<String> {
     }
 }
 
-/// The data partition (`data=/dev/X[:FSTYPE]`, else GPT name K10S-DATA, ext4) on /data; without one the node's
+/// `/dev/NAME` of partition `n` on the disk of partition `dev`.
+fn sibling_partition(dev: &str, n: u32) -> Option<String> {
+    let disk = fs::canonicalize(format!("/sys/class/block/{}", dev.trim_start_matches("/dev/"))).ok()?.parent()?.to_path_buf();
+    fs::read_dir(&disk).ok()?.flatten().find_map(|e| {
+        let p = fs::read_to_string(e.path().join("partition")).ok()?;
+        (p.trim().parse() == Ok(n)).then(|| format!("/dev/{}", e.file_name().to_string_lossy()))
+    })
+}
+
+/// The volume label of a FAT or ext4 filesystem.
+fn fs_label(dev: &str) -> Option<String> {
+    use std::os::unix::fs::FileExt;
+    let mut b = [0u8; 2048];
+    fs::File::open(dev).ok()?.read_exact_at(&mut b, 0).ok()?;
+    let raw = if b[1080..1082] == [0x53, 0xEF] {
+        &b[1144..1160]
+    } else if b[510..512] == [0x55, 0xAA] && &b[82..87] == b"FAT32" {
+        &b[71..82]
+    } else if b[510..512] == [0x55, 0xAA] && b[38] == 0x29 && b[54..57] == *b"FAT" {
+        &b[43..54]
+    } else {
+        return None;
+    };
+    let s = String::from_utf8_lossy(raw);
+    Some(s.trim_end_matches(['\0', ' ']).to_string())
+}
+
+/// The data partition (`data=/dev/X[:FSTYPE]`, else the partition K10S-DATA, ext4) on /data; without one the node's
 /// state lives in RAM. K10S-DATA grows to the end of its disk unless `grow=0`.
 fn mount_data(cfg: &Config) {
     let (spec, grow) = match cfg.get("data") {
@@ -674,9 +716,15 @@ fn shutdown(how: Halt) -> ! {
     if let Some(mut f) = WATCHDOG.lock().unwrap_or_else(|e| e.into_inner()).take() {
         let _ = f.write_all(b"V");
     }
-    say!("{}", if how == Halt::Reboot { "rebooting" } else { "powering off" });
-    // SAFETY: reboot(2) as PID 1.
-    unsafe { libc::reboot(if how == Halt::Reboot { libc::RB_AUTOBOOT } else { libc::RB_POWER_OFF }) };
+    let tryboot = how == Halt::Reboot && update::TRYBOOT.load(Ordering::SeqCst);
+    say!("{}", if tryboot { "rebooting (tryboot)" } else if how == Halt::Reboot { "rebooting" } else { "powering off" });
+    // SAFETY: reboot(2) as PID 1; the tryboot argument is a C string that outlives the call.
+    unsafe {
+        if tryboot {
+            libc::syscall(libc::SYS_reboot, libc::LINUX_REBOOT_MAGIC1, libc::LINUX_REBOOT_MAGIC2, libc::LINUX_REBOOT_CMD_RESTART2, c"0 tryboot".as_ptr());
+        }
+        libc::reboot(if how == Halt::Reboot { libc::RB_AUTOBOOT } else { libc::RB_POWER_OFF });
+    }
     // reboot(2) failed: exiting PID 1 panics the kernel, which reboots with `panic=N`.
     std::process::exit(1)
 }

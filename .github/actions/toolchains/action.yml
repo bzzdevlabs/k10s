@@ -1,6 +1,7 @@
-# Toolchain pins for every workflow: Rust (+musl, +x86_64-unknown-none), GNU binutils, optional Go and QEMU/KVM.
+# Toolchain pins for every workflow: Rust (+musl for x86-64 and aarch64, +x86_64-unknown-none), GNU binutils, optional
+# Go, QEMU/KVM and arm64 tools.
 name: k10s toolchains
-description: Pinned Rust toolchain with the musl and x86_64-unknown-none targets; optional Go and QEMU/KVM
+description: Pinned Rust toolchain with the musl and x86_64-unknown-none targets; optional Go, QEMU/KVM and arm64 tools
 inputs:
   rust:
     description: Rust toolchain
@@ -17,6 +18,12 @@ inputs:
   qemu:
     description: Install qemu-system-x86 and make /dev/kvm usable ("true" / "false")
     default: "false"
+  cross-arm64:
+    description: On x86-64, the aarch64 cross gcc and binutils and qemu-user (arm64 kernel, strip, version checks)
+    default: "false"
+  qemu-arm64:
+    description: Install qemu-system-arm, AAVMF and dtc (arm64 guests)
+    default: "false"
 runs:
   using: composite
   steps:
@@ -26,7 +33,7 @@ runs:
         RUST: ${{ inputs.rust }}
       run: |
         rustup toolchain install "$RUST" --profile minimal --no-self-update
-        rustup target add --toolchain "$RUST" x86_64-unknown-linux-musl x86_64-unknown-none
+        rustup target add --toolchain "$RUST" x86_64-unknown-linux-musl x86_64-unknown-none aarch64-unknown-linux-musl
         rustup default "$RUST"
         rustc -Vv
     - name: binutils ${{ inputs.binutils }}
@@ -56,3 +63,17 @@ runs:
         sudo udevadm trigger --name-match=kvm
         ls -l /dev/kvm
         qemu-system-x86_64 --version
+    - name: arm64 cross tools
+      if: inputs.cross-arm64 == 'true'
+      shell: bash
+      run: |
+        sudo apt-get update -q
+        sudo apt-get install -y -q --no-install-recommends gcc-aarch64-linux-gnu qemu-user
+        aarch64-linux-gnu-gcc --version | head -1
+    - name: QEMU for arm64 guests
+      if: inputs.qemu-arm64 == 'true'
+      shell: bash
+      run: |
+        sudo apt-get update -q
+        sudo apt-get install -y -q --no-install-recommends qemu-system-arm qemu-efi-aarch64 device-tree-compiler
+        qemu-system-aarch64 --version

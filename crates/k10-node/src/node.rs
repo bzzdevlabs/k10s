@@ -1,6 +1,7 @@
 //! Node startup/shutdown, shared state, `apply` and persistence of the applied bundle.
 
 use crate::exec::{Backend, InterpBackend};
+#[cfg(target_arch = "x86_64")]
 use crate::jit::JitBackend;
 use crate::http::{self, Limits};
 use crate::kv::{KvConfig, KvStore};
@@ -56,10 +57,19 @@ impl BackendKind {
         }
     }
 
-    /// The default backend: `K10S_BACKEND` (`jit` | `interp`) if set and valid, else [`BackendKind::Jit`]. The test
-    /// suites run against both backends through this variable (`K10S_BACKEND=interp cargo test`).
+    /// This CPU's default: the JIT on x86-64, the interpreter elsewhere (the JIT emits x86-64 code only).
+    pub fn native() -> BackendKind {
+        if cfg!(target_arch = "x86_64") {
+            BackendKind::Jit
+        } else {
+            BackendKind::Interp
+        }
+    }
+
+    /// The default backend: `K10S_BACKEND` (`jit` | `interp`) if set and valid, else [`BackendKind::native`]. The
+    /// test suites run against both backends through this variable (`K10S_BACKEND=interp cargo test`).
     pub fn from_env() -> BackendKind {
-        std::env::var("K10S_BACKEND").ok().and_then(|v| BackendKind::parse(v.trim())).unwrap_or(BackendKind::Jit)
+        std::env::var("K10S_BACKEND").ok().and_then(|v| BackendKind::parse(v.trim())).unwrap_or_else(BackendKind::native)
     }
 }
 
@@ -75,7 +85,7 @@ pub struct NodeConfig {
     /// Persistent state (KV logs, last applied bundle). `None` = memory only.
     pub data_dir: Option<PathBuf>,
     pub shards: usize,
-    /// Default: [`BackendKind::from_env`] (JIT unless `K10S_BACKEND=interp`).
+    /// Default: [`BackendKind::from_env`] (the JIT on x86-64 unless `K10S_BACKEND=interp`).
     pub backend: BackendKind,
     /// Cap on the address space handed to instance slots (sum of `S + 4096` over live instances).
     pub mem_limit: u64,
@@ -601,6 +611,14 @@ impl Bound {
         sys::ignore_sigpipe();
         let shards_n = cfg.shards.max(1);
         let backend: Arc<dyn Backend> = match cfg.backend {
+            #[cfg(not(target_arch = "x86_64"))]
+            BackendKind::Jit => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!("the JIT backend generates x86-64 code; this node is {}: use the interpreter", std::env::consts::ARCH),
+                ));
+            }
+            #[cfg(target_arch = "x86_64")]
             BackendKind::Jit => {
                 if cfg.stack_size < 2 * crate::jit::HOST_RESERVE {
                     return Err(io::Error::new(

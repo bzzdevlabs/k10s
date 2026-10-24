@@ -51,11 +51,14 @@ cat <<EOF
 |---|---|
 | \`k10s-$v-x86_64-unknown-linux-musl.tar.gz\` | \`k10s\` CLI + node daemon, static (any x86-64 Linux) |
 | \`k10s-$v-x86_64-unknown-linux-gnu.tar.gz\` | \`k10s\` linked against glibc (>= 2.34) |
+| \`k10s-$v-aarch64-unknown-linux-musl.tar.gz\` | \`k10s\` for arm64 Linux, static (services on the interpreter) |
 | \`k10s-examples-$v.tar.gz\` | example services: Ten sources, compiled \`.k10\` modules, \`app.k10s\` |
 | \`k10s-metal-$v-x86_64.tar.gz\` | bare-metal kernel (\`k10-metal.elf\`, \`k10-metal-embedded.elf\`), \`bundle.k10b\`, \`mkbundle\` |
 | \`k10s-os-$v-x86_64-vm.img.xz\` | disk image, BIOS + UEFI: \`k10s\` as PID 1 of a Linux kernel, for VMs and clouds |
 | \`k10s-os-$v-x86_64-metal.img.xz\` | the same for PCs and servers: signed driver modules, NIC firmware (own licences) |
 | \`k10s-os-$v-x86_64-{vm,metal}.efi\` | the UKIs of these images, signed by the k10s release key: OS updates (\`os\` in \`k10s apply\`), PXE, other UEFI loaders |
+| \`k10s-os-$v-aarch64-vm.img.xz\`, \`.efi\` | arm64 disk image (UEFI) for VMs and clouds, and its signed UKI |
+| \`k10s-os-$v-aarch64-pi.img.xz\`, \`.fat\` | Raspberry Pi 4/5 disk image (Pi firmware under its own licence), and its signed boot slot for OS updates |
 | \`k10s-bench-$v-linux-amd64.tar.gz\` | benchmark workloads and \`loadgen\` (static Go) |
 | \`k10s-$v-src.tar.gz\` | sources of this commit, version-stamped |
 

@@ -20,8 +20,8 @@ fn echo_over_http() {
     assert_eq!(r.status, 404);
     let st = get(&node, "/_k10s/status");
     assert_eq!(st.status, 200);
-    // The suites run on the backend named by K10S_BACKEND (default: jit).
-    let want = std::env::var("K10S_BACKEND").unwrap_or_else(|_| "jit".into());
+    // The suites run on the backend named by K10S_BACKEND (default: this CPU's).
+    let want = std::env::var("K10S_BACKEND").unwrap_or_else(|_| k10_node::BackendKind::native().name().into());
     assert!(st.text().contains(&format!("\"backend\":\"{want}\"")), "{}", st.text());
     node.shutdown();
 }

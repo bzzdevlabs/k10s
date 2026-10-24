@@ -362,7 +362,7 @@ fn run_soak(tag: &str, cluster_nodes: usize, duration: Duration) -> Vec<String> 
     let mut summary = String::new();
     use std::fmt::Write;
     let _ = writeln!(summary, "# k10s soak: {tag} ({} nodes), {:.0}s, load ok={ok} err={err}", cluster_nodes, duration.as_secs_f64());
-    let _ = writeln!(summary, "# backend: {}", std::env::var("K10S_BACKEND").unwrap_or_else(|_| "jit".into()));
+    let _ = writeln!(summary, "# backend: {}", std::env::var("K10S_BACKEND").unwrap_or_else(|_| k10_node::BackendKind::native().name().into()));
     if !breakdown.is_empty() {
         let _ = writeln!(summary, "# load errors by kind: {}", breakdown.iter().take(8).map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(", "));
     }

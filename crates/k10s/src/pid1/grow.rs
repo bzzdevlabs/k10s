@@ -1,7 +1,8 @@
 //! First boot on a larger disk: `K10S-DATA` grows to the end of its disk. Images carry a small data partition; when it
-//! is the last partition of a GPT disk with free space behind it, init moves the backup GPT to the disk's end, extends
-//! the partition (1 MiB aligned), tells the kernel (`BLKPG_RESIZE_PARTITION`) and, once mounted, grows the ext4
-//! filesystem online (`EXT4_IOC_RESIZE_FS`). Other partitions are never touched.
+//! is the last partition of the disk with free space behind it, init extends the partition (1 MiB aligned; on GPT
+//! after moving the backup GPT to the disk's end, on an MBR disk up to 2^32 sectors), tells the kernel
+//! (`BLKPG_RESIZE_PARTITION`) and, once mounted, grows the ext4 filesystem online (`EXT4_IOC_RESIZE_FS`). Other
+//! partitions are never touched.
 
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -137,6 +138,36 @@ fn plan(header: &[u8], entries: &[u8], lbs: u64, total: u64, pno: u32) -> Result
     Ok(Some(Plan { primary: h, backup: b, entries: e, backup_entries_lba, backup_lba, start, end: new_end }))
 }
 
+/// The MBR rewrite that grows primary partition `pno` (1-4) to the end of a disk of `total` logical blocks: the new
+/// sector 0 and the partition's start and end, or `Ok(None)` when it cannot grow.
+fn mbr_plan(mbr: &[u8], lbs: u64, total: u64, pno: u32) -> Result<Option<(Vec<u8>, u64, u64)>, String> {
+    if mbr.len() < 512 || mbr[510..512] != [0x55, 0xAA] {
+        return Err("no partition table".into());
+    }
+    let idx = pno.checked_sub(1).filter(|&i| i < 4).ok_or("not a primary MBR partition")? as usize;
+    let ent = |i: usize| &mbr[0x1BE + 16 * i..0x1BE + 16 * (i + 1)];
+    let bounds = |i: usize| (u32_at(ent(i), 8) as u64, u32_at(ent(i), 12) as u64);
+    if ent(0)[4] == 0xEE {
+        return Err("protective MBR without a GPT".into());
+    }
+    let (start, len) = bounds(idx);
+    if ent(idx)[4] == 0 || len == 0 {
+        return Err(format!("partition {pno} is not in the MBR"));
+    }
+    let end = start + len - 1;
+    if (0..4).any(|i| i != idx && ent(i)[4] != 0 && bounds(i).1 != 0 && bounds(i).0 + bounds(i).1 - 1 > end) {
+        return Ok(None);
+    }
+    let align = (ALIGN / lbs).max(1);
+    let new_end = (total / align * align).min(u32::MAX as u64 + 1).saturating_sub(1).max(end);
+    if new_end == end {
+        return Ok(None);
+    }
+    let mut m = mbr[..512].to_vec();
+    put_u32(&mut m, 0x1BE + 16 * idx + 12, (new_end - start + 1) as u32);
+    Ok(Some((m, start, new_end)))
+}
+
 fn sysfs_u64(path: &str) -> io::Result<u64> {
     fs::read_to_string(path)?.trim().parse().map_err(|_| io::Error::new(io::ErrorKind::InvalidData, path.to_string()))
 }
@@ -157,7 +188,12 @@ pub fn partition(dev: &str) -> io::Result<Option<u64>> {
     };
     let header = read(1, lbs as usize)?;
     if &header[..8] != b"EFI PART" {
-        return Ok(None);
+        let Some((mbr, start, end)) = mbr_plan(&read(0, 512)?, lbs, total, pno).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))? else {
+            return Ok(None);
+        };
+        f.write_all_at(&mbr, 0)?;
+        f.sync_all()?;
+        return resize(&f, pno, start, end, lbs).map(Some);
     }
     let array = u32_at(&header, 80) as u64 * u32_at(&header, 84) as u64;
     if array > 4096 * 512 {
@@ -187,14 +223,19 @@ pub fn partition(dev: &str) -> io::Result<Option<u64>> {
         f.write_all_at(&mbr, 0)?;
     }
     f.sync_all()?;
-    let bytes = (p.end - p.start + 1) * lbs;
-    let mut part = BlkpgPartition { start: (p.start * lbs) as i64, length: bytes as i64, pno: pno as libc::c_int, devname: [0; 64], volname: [0; 64] };
+    resize(&f, pno, p.start, p.end, lbs).map(Some)
+}
+
+/// Tells the kernel the new bounds of partition `pno` of the disk `f`; returns its size in bytes.
+fn resize(f: &File, pno: u32, start: u64, end: u64, lbs: u64) -> io::Result<u64> {
+    let bytes = (end - start + 1) * lbs;
+    let mut part = BlkpgPartition { start: (start * lbs) as i64, length: bytes as i64, pno: pno as libc::c_int, devname: [0; 64], volname: [0; 64] };
     let mut arg = BlkpgIoctlArg { op: BLKPG_RESIZE_PARTITION, flags: 0, datalen: std::mem::size_of::<BlkpgPartition>() as libc::c_int, data: &mut part };
     // SAFETY: valid descriptor and argument structures that outlive the call.
     if unsafe { libc::ioctl(f.as_raw_fd(), BLKPG as _, &mut arg) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(Some(bytes))
+    Ok(bytes)
 }
 
 /// Grows the ext4 filesystem of `dev`, mounted on `mountpoint`, to fill the partition; returns the new size in bytes
@@ -303,6 +344,42 @@ mod tests {
         assert!(plan(&h, &bad, 512, total, 1).is_err());
         h[60] ^= 1;
         assert!(plan(&h, &e, 512, total, 1).is_err());
+    }
+
+    /// An MBR with primary partitions (type, start, sectors).
+    fn mbr(parts: &[(u8, u32, u32)]) -> Vec<u8> {
+        let mut m = vec![0u8; 512];
+        for (i, &(t, start, len)) in parts.iter().enumerate() {
+            m[0x1BE + 16 * i + 4] = t;
+            put_u32(&mut m, 0x1BE + 16 * i + 8, start);
+            put_u32(&mut m, 0x1BE + 16 * i + 12, len);
+        }
+        m[510..512].copy_from_slice(&[0x55, 0xAA]);
+        m
+    }
+
+    #[test]
+    fn grows_the_last_mbr_partition() {
+        // The Pi layout: K10S-BOOT, slots A and B, K10S-DATA last.
+        let m = mbr(&[(0x0c, 2048, 65536), (0x0e, 67584, 262144), (0x0e, 329728, 262144), (0x83, 591872, 524288)]);
+        let total = 32 << 21; // 32 GiB
+        let (new, start, end) = mbr_plan(&m, 512, total, 4).unwrap().unwrap();
+        assert_eq!((start, end), (591872, total - 1));
+        assert_eq!(u32_at(&new, 0x1BE + 48 + 12) as u64, total - 591872);
+        assert_eq!(new[..0x1BE + 48], m[..0x1BE + 48], "other entries unchanged");
+        assert_eq!(mbr_plan(&new, 512, total, 4), Ok(None));
+        assert_eq!(mbr_plan(&m, 512, total, 2), Ok(None), "not the last partition");
+        // Unaligned disk end: stops at the last 1 MiB boundary; past 2 TiB: at 2^32 sectors.
+        assert_eq!(mbr_plan(&m, 512, total + 100, 4).unwrap().unwrap().2, total - 1);
+        assert_eq!(mbr_plan(&m, 512, 8 << 31, 4).unwrap().unwrap().2, u32::MAX as u64);
+    }
+
+    #[test]
+    fn rejects_foreign_mbrs() {
+        assert!(mbr_plan(&[0u8; 512], 512, 1 << 21, 1).is_err(), "no signature");
+        assert!(mbr_plan(&mbr(&[(0xEE, 1, u32::MAX)]), 512, 1 << 21, 1).is_err(), "protective MBR");
+        assert!(mbr_plan(&mbr(&[(0x83, 2048, 2048)]), 512, 1 << 21, 2).is_err(), "empty entry");
+        assert!(mbr_plan(&mbr(&[(0x83, 2048, 2048)]), 512, 1 << 21, 5).is_err(), "logical partition");
     }
 
     #[test]

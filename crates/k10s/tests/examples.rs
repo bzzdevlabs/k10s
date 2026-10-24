@@ -76,7 +76,7 @@ fn examples_on_a_node() {
     assert!(out.status.success(), "{txt} {}", String::from_utf8_lossy(&out.stderr));
     assert!(txt.contains("\"added\":[\"chain\",\"compute\",\"counter\",\"echo\",\"hello\",\"nbody\",\"sort\",\"todo\"]"), "{txt}");
     let st = support::admin_req(&addr, "GET", "/_k10s/status", b"", Duration::from_secs(5)).unwrap().text();
-    let backend = std::env::var("K10S_BACKEND").unwrap_or_else(|_| "jit".into());
+    let backend = std::env::var("K10S_BACKEND").unwrap_or_else(|_| k10_node::BackendKind::native().name().into());
     assert!(st.contains(&format!("\"backend\":\"{backend}\"")), "{st}");
     assert!(st.contains("\"code\":{\"modules\":8,"), "{st}");
 
