@@ -1182,7 +1182,11 @@ class TierDisks:
         return d
 
     def set_tier(self, d, tier, cmdline=""):
-        mtools("mcopy", d, boot_offset(d), "-o", tier_file(os.path.join(self.work, "tier"), tier, cmdline), "::/k10s/tier")
+        # As an editor writes it: with the current time (mtools stamps files with SOURCE_DATE_EPOCH when set; k10boot's
+        # boot counter tells a rewritten tier file by its modification time).
+        env = {k: v for k, v in os.environ.items() if k != "SOURCE_DATE_EPOCH"}
+        subprocess.run([tool("mcopy"), "-i", f"{d}@@{boot_offset(d)}", "-o", tier_file(os.path.join(self.work, "tier"), tier, cmdline),
+                        "::/k10s/tier"], check=True, env=dict(env, MTOOLS_SKIP_CHECK="1"))
 
     def power_on(self, name, d, machine="pc", nic="virtio-net-pci,disable-modern=on", fwd="", fw=None, port=None, extra=()):
         """UEFI (OVMF, Secure Boot off) unless `fw` says otherwise ([] for SeaBIOS); HTTP forwarded from `port`."""
