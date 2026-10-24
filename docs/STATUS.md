@@ -5,11 +5,12 @@ PROJECT STATE: HARDENING
 Last updated: 2026-10-24. This file is the single place to learn where the project stands and what comes next.
 
 ## State of `main`
-`main` is pushed; every push publishes a dev pre-release (v0.1.0-dev.139 = 18cceb5, step 12 U3: ci, release, pages
-workflows green, the `os`, `os-arm64` QEMU suites and the arm64-runner `arm64` suite gating the release; glibc
-(≥ 2.34), musl (x86-64 and aarch64), metal, bench, examples and source archives, the x86-64 `vm`/`metal`, `aarch64-vm`
-and `aarch64-pi` disk images with their UKIs signed by the release key (verified against the key built into k10s),
-`SHA256SUMS`; dev.139 lacks the Pi's `.fat` update file, which the publish step now uploads).
+`main` is pushed; every push publishes a dev pre-release (v0.1.0-dev.147 = 44da5b5, step 12 U4–U6: ci, release, pages
+workflows green; the `unit`, `musl`, `i686`, `arm64` (JIT and interpreter), `armv7`, `dist`, `os`, `os-arm64` and
+`os-legacy` suites gate the release; glibc, musl (x86-64, aarch64, i686, armv7), metal, bench, examples and source
+archives; disk images x86-64 `vm` 4.4 MB and `metal` 6.8 MB, `i686-metal` 5.7 MB, `armv7-vm` 3.5 MB, `aarch64-vm`
+4.0 MB, `aarch64-pi` 5.3 MB (xz) with their update files (`.efi`, the Pi's `.fat`) signed by the release key and
+verified against the key built into k10s; `SHA256SUMS`).
 `main` contains:
 - Isolation: SFI-masked JIT and interpreter, validator, red-team and differential suites, objdump encoder fuzzing and
   SFI verifier tests.
@@ -36,7 +37,7 @@ and `aarch64-pi` disk images with their UKIs signed by the release key (verified
   renew test (and the cluster node's restart on a new address). Non-key seeds use `GRND_INSECURE`.
 - Tier 1 x86-64 images (U1, docs/OS.md): `os/images.sh` builds `k10s-os-V-x86_64-{vm,metal}.img.xz` (GPT, BIOS via
   GRUB patched into the MBR, UEFI via systemd-boot and a UKI; the §8.4 ESP layout with slot A, `/k10s/tier`; ext4
-  `K10S-DATA` grown to the disk on first boot by PID 1) and their UKIs, reproducibly; `vm` 4.3 MB, `metal` 6.7 MB.
+  `K10S-DATA` grown to the disk on first boot by PID 1) and their UKIs, reproducibly; `vm` 4.4 MB, `metal` 6.8 MB.
   `metal` kernel profile: platform, storage, USB and consoles built in, 63 signed modules (per-build key deleted after
   `modules_install`, `MODULE_SIG_FORCE`, lockdown=integrity on both profiles), linux-firmware 20261019 subset with
   licences. PID 1 waits for carrier before DHCP. `os/test.sh` adds image tests on SeaBIOS, OVMF and q35/NVMe/e1000e,
@@ -59,9 +60,9 @@ and `aarch64-pi` disk images with their UKIs signed by the release key (verified
   musl, the node and CLI suites on the JIT and the interpreter).
   `os/kbuild.sh arm64`: one kernel for QEMU virt/arm64 guests (UEFI+ACPI or DT) and the Pi 4/5 (RP1, GENET/GEM,
   `bcm2835_wdt`), plus `os/kpatches/` (the Pi firmware's tryboot reboot flag, from the Raspberry Pi kernel).
-  `os/images.sh --arch aarch64`: `k10s-os-V-aarch64-vm.img.xz` (GPT, systemd-boot, UKI; 3.9 MB) and
+  `os/images.sh --arch aarch64`: `k10s-os-V-aarch64-vm.img.xz` (GPT, systemd-boot, UKI; 4.0 MB) and
   `k10s-os-V-aarch64-pi.img.xz` (MBR: K10S-BOOT with `autoboot.txt`, slots A/B as raw signed FAT16 images with the
-  Pi 4 firmware, mainline DTBs and Image.gz, K10S-DATA; 5.2 MB) with `.efi`/`.fat` update files; UKIs are now written
+  Pi 4 firmware, mainline DTBs and Image.gz, K10S-DATA; 5.3 MB) with `.efi`/`.fat` update files; UKIs are now written
   by `os/mkimage.py` itself (objcopy corrupted arm64 PE headers). PID 1 finds partitions by FAT/ext4 label on MBR,
   grows MBR partitions, and updates a Pi through tryboot (one-shot trial, `k10s/trying` retried 3 times, commit =
   `autoboot.txt` rewrite). `os/test.sh --arch aarch64` (CI suite `os-arm64`, release gate, TCG on an x86-64 runner):
