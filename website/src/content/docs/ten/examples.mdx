@@ -71,4 +71,4 @@ instance updates with compare-and-swap loops, so concurrent requests never lose 
 </details>
 
 Ten's SHA-256 takes about 2.5× as long as Go's hand-written assembly, and 1.1–1.6× as long as portable Go: the
-baseline JIT keeps at most six locals in registers and every memory access pays the mask.
+baseline JIT keeps at most six locals in registers (ten on arm64) and every memory access pays the mask.

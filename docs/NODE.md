@@ -103,10 +103,11 @@ placement and peer links on top of it.
   requests fail fast.
 - **Executors** (`exec.rs`): `Backend::prepare(module, info, imports) -> Arc<dyn Code>` (once per module, shared by
   every instance on every shard); `Code::invoke(scratch, mem, mem_log2, host_ctx, func)` runs on the current
-  (fiber) stack. Two backends: the JIT (`k10-jit` machine code, the default; see "JIT backend" below) and the
-  reference interpreter (`k10_ir::Interp`, `safepoint_interval = 16`, `max_call_depth` 10 000, 1 Mi value slots).
-  `NodeConfig::backend` / `k10s node --backend jit|interp` select one; the default is `K10S_BACKEND` if set, else jit
-  (the test suites run against both: `K10S_BACKEND=interp cargo test`). `/_k10s/status` reports `"backend"` and
+  (fiber) stack. Two backends: the JIT (`k10-jit` machine code for x86-64 and AArch64, the default there; see "JIT
+  backend" below) and the reference interpreter (`k10_ir::Interp`, `safepoint_interval = 16`, `max_call_depth`
+  10 000, 1 Mi value slots; the default on other architectures). `NodeConfig::backend` / `k10s node --backend
+  jit|interp` select one; the default is `K10S_BACKEND` if set, else the architecture's (the test suites run against
+  both: `K10S_BACKEND=interp cargo test`). `/_k10s/status` reports `"backend"` and
   `"code"` (prepared modules alive, code bytes, executable bytes mapped, modules prepared and time spent).
 
 ## Host API
@@ -259,7 +260,8 @@ status ≥ 0, −1 unknown service, −2 unavailable (crash backoff with nothing
   seccomp action cache without running the filter. Argument checks only on rare calls: `mmap` (no `PROT_EXEC`),
   `mprotect` (not W+X), `clone` (threads only, no namespaces; `clone3` → `ENOSYS` so glibc falls back to `clone`),
   `socket` (IPv4/IPv6 stream/datagram), `prctl`, `ioctl`, `tgkill` (own pid), `tkill` (`SIGABRT`), `prlimit64` (read
-  only), `sched_setaffinity` (self).
+  only), `sched_setaffinity` (self), and on AArch64 `membarrier` (`PRIVATE_EXPEDITED_SYNC_CORE` and its registration
+  only: the JIT's context synchronization of every thread after mapping new code).
 - Library users (`Node::start` in tests, `k10s run`, benchmarks) get no sandbox.
 - Cost (i7-7820HQ, Linux 6.1 with IBRS: a bare syscall ≈ 600 ns; shared machine, load 10–35, so medians of 8
   interleaved runs): `getpid` best-of-20 +0–30 ns with the filter, +80 ns when the action cache is defeated
@@ -297,9 +299,11 @@ scale|create|density MODE N|idle N`, and `examples/demo_modules` + `k10s node` +
 
 ## JIT backend
 `jit.rs` implements `exec::Backend`/`exec::Code` with `k10_jit` (docs/JIT-ABI.md).
-- **Prepare** (apply thread): `k10_jit::compile(module)` → `CompiledModule` (W^X mapping, `Send + Sync`) shared by
-  every instance and shard through `Arc<dyn Code>`, plus the module's host-function table: one `extern "C"` adapter
-  per resolved import (19 monomorphic adapters, one per host function). Unchanged modules are reused by code hash
+- **Prepare** (apply thread): `k10_jit::compile(module)` → `CompiledModule` (W^X mapping in whole pages of the
+  kernel's page size, `Send + Sync`; on AArch64 the instruction caches are synchronized and every thread of the
+  process context-synchronized with `membarrier` before the module is published) shared by every instance and shard
+  through `Arc<dyn Code>`, plus the module's host-function table: one `extern "C"` adapter per resolved import
+  (19 monomorphic adapters, one per host function). Unchanged modules are reused by code hash
   across applies; a replaced module is unmapped when the last `Arc` drops, i.e. once the retired version's in-flight
   and queued requests are done and its instances destroyed (tests check the anonymous executable mappings in
   `/proc/self/maps` against the `"code"` counters).
@@ -326,11 +330,14 @@ scale|create|density MODE N|idle N`, and `examples/demo_modules` + `k10s node` +
   (`Interrupted`) and yield as the interpreter path. A store that lands just after a restore costs one spurious
   yield; one lost to a re-initialization is re-sent at the next tick.
 - JIT assumptions the runtime honours: `S ≥ 2^max(12, min_mem_log2)` (checked at apply, re-checked by `invoke`),
-  `trap_request = 0` at entry, MXCSR/x87 control and the direction flag at their SysV defaults (nothing on fibers
-  changes them; coroutine switches do not touch them). Code is compiled for the node's own CPU (`CpuFeatures::detect`),
-  so every cluster member compiles the blobs it fetches itself.
+  `trap_request = 0` at entry, MXCSR/x87 control and the direction flag at their SysV defaults, FPCR at its AAPCS64
+  default (nothing on fibers changes them; coroutine switches do not touch them); JIT code keeps no FP/SIMD value
+  across host calls or safepoints (AArch64 pinned float locals in `d24`–`d31` are written back around calls and
+  saved by the safepoint thunk), so `coro.rs` switches need not preserve them. Code is compiled for the node's own
+  CPU (`CpuFeatures::detect`), so every cluster member compiles the blobs it fetches itself.
 - **Spectre v2 hardening** (opt-in): `--jit-indirect lfence|retpoline` (`NodeConfig::jit_indirect`) compiles every
-  indirect branch of generated code through `lfence` or a retpoline (docs/JIT-ABI.md, "Speculation hardening").
+  indirect branch of generated code behind a speculation barrier (`lfence`; AArch64 `sb`, or `dsb nsh; isb`) or
+  through a retpoline (docs/JIT-ABI.md, "Speculation hardening").
 
 ### JIT measurements (release, i7-7820HQ 4C/8T, 8 shards; other agents running: load 3–8, numbers are noisy)
 loadgen (bench/bin/loadgen, closed loop, 10 s after 2 s warm-up) against `k10s node --backend jit|interp` with the
@@ -356,6 +363,20 @@ hand-written assembly, Ten's is portable code on 64-bit words (the JIT is 18× t
 | recursion depth of a one-line recursive function, 1 MiB fiber stacks | 20–30k frames (interpreter: 10 000) |
 Reproduce: `K10S_BACKEND=jit|interp cargo run --release -p k10-node --example measure -- create|invoke`, and loadgen
 against `k10s node --backend …` with the examples applied.
+
+### JIT measurements on arm64 (release, Apple Silicon, Linux VM in Docker Desktop, 8 vCPUs; load 2–6)
+`k10s run examples/X.ten --path … --backend jit|interp` (one request, wall time; 15 interleaved rounds, median, min
+in parentheses):
+
+| workload | JIT | interp | JIT speed-up |
+|---|---|---|---|
+| compute (SHA-256) `?n=1000` | 0.82 ms (0.79) | 11.5 ms (11.5) | 14.0× (14.5×) |
+| nbody `?n=1000` | 0.17 ms (0.16) | 1.67 ms (1.61) | 9.8× (10.4×) |
+| sort `?n=20000` | 1.88 ms (1.81) | 18.0 ms (17.9) | 9.6× (9.9×) |
+
+`cargo bench -p k10-jit`: trivial invoke 6.3 ns (interpreter 11.5), host call 0.6 ns, codegen 42–55 MB/s of TIR,
+2.4 bytes of A64 per TIR byte. Short runs on this machine sometimes land on efficiency cores (bimodal times): compare
+medians of interleaved rounds, or minimums.
 
 ## Cluster mode
 No control plane: membership and failure detection are SWIM gossip (`k10_mesh::Gossip`, UDP), the desired state (a

@@ -18,8 +18,8 @@ request costs about one `read`, one `writev` and a quarter of an `epoll_wait`, w
 ingress and the service.
 
 It is slower on CPU-bound code: Ten's SHA-256 takes 2.5× as long as Go's hand-written assembly, and 1.1–1.6× as
-long as portable Go. The baseline JIT keeps at most six locals in registers and every memory access pays the mask;
-register allocation is on the [roadmap](/k10s/project/roadmap/).
+long as portable Go. The baseline JIT keeps at most six locals in registers (ten on arm64) and every memory access
+pays the mask; register allocation is on the [roadmap](/k10s/project/roadmap/).
 
 ## Bare metal
 

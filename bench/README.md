@@ -97,3 +97,10 @@ after `LOAD_WAIT_MAX`, 2 h), runs it with the extensions above, and regenerates 
   dispatch ~5, ~8 and ~16 ns.
 - Host-function clamps: within noise (±3 ns). `now_ns`/`time_ms` compute a division and a SipHash once per clock
   interval per shard (cached): nothing measurable per call.
+
+arm64 (Apple Silicon, Linux VM in Docker Desktop, `cargo bench -p k10-jit`, best of N):
+- `br_table` dispatch, predictable index: compare trees 1.6–4 ns per iteration; clamped jump tables ~14 ns, of which
+  ~12 ns is the `csdb` after the `csel` clamp (this core implements it as a full speculation barrier; it is the
+  barrier Arm specifies for the clamp). Random index: trees win up to 8–16 runs, tables beyond.
+- Host call: 0.6 ns with `jump`, ~15 ns with `lfence` (`sb` before `blr`), ~8 ns with `retpoline`; jump-table
+  dispatch ~14, ~28 and ~22 ns.

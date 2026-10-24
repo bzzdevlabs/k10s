@@ -1,6 +1,8 @@
 //! SFI verifier (tests/xdis/sfi.rs) on JIT output in every `IndirectBranch` mode and `br_table` lowering: random
 //! modules, br_table modules, Ten examples, and violations it must reject (red-team modules: redteam.rs).
 //! `K10_SFI_MODULES` (default 1500); `K10_FUZZ_LONG=1`: 50 000.
+//! x86-64 only (AArch64: sfi_a64.rs).
+#![cfg(target_arch = "x86_64")]
 
 mod common;
 #[path = "xdis/sfi.rs"]

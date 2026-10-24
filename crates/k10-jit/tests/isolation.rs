@@ -6,7 +6,7 @@ mod common;
 use common::*;
 use k10_ir::gen::Rng;
 use k10_ir::{new_memory, FuncBuilder, Host, Interp, Module, ModuleBuilder, Op, Trap};
-use k10_jit::{compile_with, CompileOptions, CpuFeatures, IndirectBranch};
+use k10_jit::{CompileOptions, CpuFeatures, IndirectBranch};
 
 struct NoHost;
 impl Host for NoHost {
@@ -179,7 +179,7 @@ fn run_adversarial(seeds: std::ops::Range<u64>) -> (u64, u64) {
         let it = Interp::new(&m).unwrap();
         let opts = CompileOptions {
             features: det,
-            max_pinned: [0, 3, 6][seed as usize % 3],
+            max_pinned: [0, 3, k10_jit::MAX_PINNED][seed as usize % 3],
             indirect: [IndirectBranch::Jump, IndirectBranch::Lfence, IndirectBranch::Retpoline][(seed / 3) as usize % 3],
             br_tree_max: [0, k10_jit::DEFAULT_BR_TREE_MAX][(seed / 9) as usize % 2],
         };
@@ -251,7 +251,7 @@ fn straddling_accesses_stay_in_tail() {
         }
         let m = mb.build();
         let it = Interp::new(&m).unwrap();
-        let jit = k10_jit::compile(&m).unwrap();
+        let jit = compile(&m).unwrap();
         for e in &m.exports {
             for a in [0i64, s, -s, s << 20] {
                 let mut im = new_memory(&m, k);
@@ -277,7 +277,7 @@ fn folded_constants_require_min_memory() {
         f.ops(&[Const(60_000), Const(-1), Store64(0), Const(1)]);
     });
     let m = mb.build();
-    let jit = k10_jit::compile(&m).unwrap();
+    let jit = compile(&m).unwrap();
     let mut gm = GuardedMem::new(12);
     let (r, _) = run_jit(&jit, &m, &mut gm, &mut NoHost, f, &[], RunOpts::default());
     assert_eq!(r, Err(Trap::MemOutOfBounds));

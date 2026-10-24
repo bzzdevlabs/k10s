@@ -9,12 +9,14 @@
 //! result/trap and the full memory. Any escape or divergence fails the test.
 
 mod common;
+#[cfg(target_arch = "x86_64")]
 #[path = "xdis/sfi.rs"]
 mod sfi;
+#[cfg(target_arch = "x86_64")]
 mod xdis;
 use common::*;
 use k10_ir::{new_memory, FuncBuilder, Host, Interp, Module, ModuleBuilder, Op, Trap};
-use k10_jit::{compile_with, CompileOptions, CpuFeatures, IndirectBranch};
+use k10_jit::{CompileOptions, CpuFeatures, IndirectBranch};
 use Op::*;
 
 struct NoHost;
@@ -27,22 +29,30 @@ impl Host for NoHost {
 fn configs() -> Vec<CompileOptions> {
     let det = CpuFeatures::detect();
     vec![
-        CompileOptions { features: det, max_pinned: 6, ..CompileOptions::default() },
+        CompileOptions { features: det, max_pinned: k10_jit::MAX_PINNED, ..CompileOptions::default() },
         CompileOptions { features: CpuFeatures::BASELINE, max_pinned: 6, indirect: IndirectBranch::Retpoline, br_tree_max: 0 },
         CompileOptions { features: det, max_pinned: 0, indirect: IndirectBranch::Lfence, br_tree_max: 0 },
         CompileOptions { features: CpuFeatures::BASELINE, max_pinned: 2, indirect: IndirectBranch::Jump, br_tree_max: 0 },
-        CompileOptions { features: det, max_pinned: 6, indirect: IndirectBranch::Retpoline, br_tree_max: u16::MAX },
+        CompileOptions {
+            features: det,
+            max_pinned: k10_jit::MAX_PINNED,
+            indirect: IndirectBranch::Retpoline,
+            br_tree_max: u16::MAX,
+        },
     ]
 }
 
+#[cfg(target_arch = "x86_64")]
 type SfiQueue = (std::collections::HashSet<(Vec<u8>, String)>, Vec<(Module, CompileOptions)>);
 
+#[cfg(target_arch = "x86_64")]
 thread_local! {
     /// Modules the running test compiled, deduplicated, verified in one batch by [`sfi_verify`].
     static SFI: std::cell::RefCell<SfiQueue> = Default::default();
 }
 
 /// Queues `m` compiled with `opts` for the objdump-based SFI verifier (tests/xdis/sfi.rs).
+#[cfg(target_arch = "x86_64")]
 fn sfi_add(m: &Module, opts: &CompileOptions) {
     SFI.with_borrow_mut(|(seen, all)| {
         if seen.insert((k10_ir::encode(m), format!("{opts:?}"))) {
@@ -52,6 +62,7 @@ fn sfi_add(m: &Module, opts: &CompileOptions) {
 }
 
 /// Verifies everything the test queued in one objdump batch.
+#[cfg(target_arch = "x86_64")]
 fn sfi_verify() {
     let all = SFI.with_borrow_mut(|(seen, all)| {
         seen.clear();
@@ -62,6 +73,13 @@ fn sfi_verify() {
     let refs: Vec<_> = all.iter().zip(&blobs).map(|((m, o), b)| (m, b, o.indirect)).collect();
     sfi::verify_compiled(&od, &refs).unwrap_or_else(|e| panic!("SFI verifier: {e}"));
 }
+
+/// AArch64: `compile_with` (tests/common) runs the SFI verifier on every module it compiles.
+#[cfg(not(target_arch = "x86_64"))]
+fn sfi_add(_: &Module, _: &CompileOptions) {}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn sfi_verify() {}
 
 /// Compiles `m` under every config, runs `func(args)` with the JIT (canary-guarded, memory size `2^k`) and the
 /// interpreter, and asserts containment + agreement (result/trap and full memory, canaries intact).

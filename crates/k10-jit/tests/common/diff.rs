@@ -4,13 +4,13 @@
 use super::*;
 use k10_ir::gen::{gen_args, gen_module, DiffHost, GenConfig, GenImport, Rng};
 use k10_ir::{new_memory, Interp, Module};
-use k10_jit::{compile_with, CompileOptions, CpuFeatures, IndirectBranch};
+use k10_jit::{CompileOptions, CpuFeatures, IndirectBranch};
 
 /// Options rotated over seeds: CPU features × pinned registers × indirect-branch mode × `br_table` lowering.
 pub fn opts_for(seed: u64) -> CompileOptions {
     let det = CpuFeatures::detect();
     let (features, max_pinned) = match seed % 5 {
-        0 | 4 => (det, 6),
+        0 | 4 => (det, k10_jit::MAX_PINNED),
         1 => (CpuFeatures::BASELINE, 6),
         2 => (det, 0),
         _ => (CpuFeatures::BASELINE, 2),

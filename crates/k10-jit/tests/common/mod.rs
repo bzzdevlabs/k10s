@@ -1,16 +1,42 @@
 //! Test harness: runs JIT code against a `k10_ir::Host` with canary-guarded instance memory.
 #![allow(dead_code)]
 
+#[cfg(target_arch = "aarch64")]
+pub mod a64dec;
+#[cfg(target_arch = "aarch64")]
+pub mod a64sfi;
 pub mod diff;
 
 use k10_ir::{Host, Module, Trap, TAIL_BYTES};
-use k10_jit::{CompiledModule, HostFn, VmCtx};
+use k10_jit::{CodeBlob, CompileError, CompileOptions, CompiledModule, HostFn, VmCtx};
 use std::ffi::c_void;
 use std::sync::atomic::Ordering;
 
-/// The retpoline thunk of docs/JIT-ABI.md: `call 1f; 2: pause; lfence; jmp 2b; 1: mov [rsp], r11; ret`.
+/// The x86-64 retpoline thunk of docs/JIT-ABI.md: `call 1f; 2: pause; lfence; jmp 2b; 1: mov [rsp], r11; ret`.
 pub const RETPOLINE_THUNK: [u8; 17] =
     [0xE8, 7, 0, 0, 0, 0xF3, 0x90, 0x0F, 0xAE, 0xE8, 0xEB, 0xF9, 0x4C, 0x89, 0x1C, 0x24, 0xC3];
+
+/// [`k10_jit::compile_with`], then on AArch64 the SFI verifier (a64sfi.rs) over the loaded code, so that every
+/// module the suites compile is verified (x86-64: objdump-based, tests/xdis_sfi.rs and the red-team suite).
+pub fn compile_with(m: &Module, opts: &CompileOptions) -> Result<CompiledModule, CompileError> {
+    let jit = k10_jit::compile_with(m, opts)?;
+    #[cfg(target_arch = "aarch64")]
+    a64sfi::verify_loaded(m, &jit, opts.indirect).unwrap_or_else(|e| panic!("SFI verifier ({opts:?}): {e}"));
+    Ok(jit)
+}
+
+/// [`compile_with`] with the default options.
+pub fn compile(m: &Module) -> Result<CompiledModule, CompileError> {
+    compile_with(m, &CompileOptions::default())
+}
+
+/// [`k10_jit::compile_blob`], verified like [`compile_with`].
+pub fn compile_blob(m: &Module, opts: &CompileOptions) -> Result<CodeBlob, CompileError> {
+    let blob = k10_jit::compile_blob(m, opts)?;
+    #[cfg(target_arch = "aarch64")]
+    a64sfi::verify_blob(m, &blob, opts.indirect).unwrap_or_else(|e| panic!("SFI verifier ({opts:?}): {e}"));
+    Ok(blob)
+}
 
 /// Canary bytes placed before and after the instance region `[base, base + S + 8)`.
 pub const CANARY_LEN: usize = 4096;
@@ -86,17 +112,26 @@ pub struct Dispatch<'a> {
     pub preempt_on_call: bool,
 }
 
-/// Asserts that the stack is 16-byte aligned (SysV) inside a non-leaf extern "C" function body: a misaligned
-/// entry rsp would leave the body's rsp misaligned by 8.
+/// Asserts that the stack is 16-byte aligned (SysV, AAPCS64) inside a non-leaf extern "C" function body: a
+/// misaligned entry stack pointer would leave the body's misaligned too.
 #[inline(always)]
 pub fn assert_stack_aligned() {
-    let rsp: usize;
-    // SAFETY: reads rsp only.
-    unsafe { std::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags)) };
-    assert_eq!(rsp % 16, 0, "host function entered with a misaligned stack");
+    let sp: usize;
+    // SAFETY: reads the stack pointer only.
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        std::arch::asm!("mov {}, rsp", out(reg) sp, options(nomem, nostack, preserves_flags))
+    };
+    // SAFETY: as above.
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        std::arch::asm!("mov {}, sp", out(reg) sp, options(nomem, nostack, preserves_flags))
+    };
+    assert_eq!(sp % 16, 0, "host function entered with a misaligned stack");
 }
 
-/// Overwrites every SysV volatile register (GPRs and xmm0-15): JIT code must not rely on them across calls.
+/// Overwrites every caller-saved register (GPRs and vector registers): JIT code must not rely on them across calls.
+#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 pub fn clobber_volatile() {
     // SAFETY: only writes registers declared as clobbered.
@@ -111,6 +146,29 @@ pub fn clobber_volatile() {
             out("r8") _, out("r9") _, out("r10") _, out("r11") _,
             out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _, out("xmm4") _, out("xmm5") _,
             out("xmm6") _, out("xmm7") _, out("xmm8") _, out("xmm15") _,
+            options(nomem, nostack)
+        )
+    };
+}
+
+/// Overwrites every AAPCS64 caller-saved register JIT code may use (x0-x17, v0-v7, v16-v31).
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub fn clobber_volatile() {
+    // SAFETY: only writes registers declared as clobbered.
+    unsafe {
+        std::arch::asm!(
+            "mov x0, #-1", "mov x1, #-1", "mov x2, #-1", "mov x3, #-1", "mov x4, #-1", "mov x5, #-1",
+            "mov x6, #-1", "mov x7, #-1", "mov x8, #-1", "mov x9, #-1", "mov x10, #-1", "mov x11, #-1",
+            "mov x12, #-1", "mov x13, #-1", "mov x14, #-1", "mov x15, #-1", "mov x16, #-1", "mov x17, #-1",
+            "movi v0.2d, #-1", "movi v1.2d, #-1", "movi v2.2d, #-1", "movi v3.2d, #-1",
+            "movi v4.2d, #-1", "movi v5.2d, #-1", "movi v6.2d, #-1", "movi v7.2d, #-1",
+            "movi v16.2d, #-1", "movi v17.2d, #-1", "movi v31.2d, #-1",
+            out("x0") _, out("x1") _, out("x2") _, out("x3") _, out("x4") _, out("x5") _,
+            out("x6") _, out("x7") _, out("x8") _, out("x9") _, out("x10") _, out("x11") _,
+            out("x12") _, out("x13") _, out("x14") _, out("x15") _, out("x16") _, out("x17") _,
+            out("v0") _, out("v1") _, out("v2") _, out("v3") _, out("v4") _, out("v5") _, out("v6") _,
+            out("v7") _, out("v16") _, out("v17") _, out("v31") _,
             options(nomem, nostack)
         )
     };

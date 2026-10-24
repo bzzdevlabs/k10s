@@ -25,7 +25,7 @@ Benchmarks: see `bench/README.md`.
 | `crates/k10-nospec` | branch-free clamps for host code indexed by guest values (Spectre v1) |
 | `crates/k10-host` | the host API, shared by the hosted node and the bare-metal kernel |
 | `crates/k10-lang` | Ten compiler and prelude |
-| `crates/k10-jit` | TIR → x86-64 compiler |
+| `crates/k10-jit` | TIR → x86-64 and AArch64 compiler |
 | `crates/k10-mesh` | gossip, manifests, bundles, placement, wire protocol |
 | `crates/k10-node`, `crates/k10s` | node runtime and the `k10s` binary |
 | `metal/` | the node as a bare-metal kernel |
@@ -40,12 +40,12 @@ Benchmarks: see `bench/README.md`.
   os-arm64 os-legacy`, `scripts/ci-test.sh arm64 armv7` on an arm64 runner, `scripts/dist.sh` then
   `scripts/ci-test.sh dist`; the same commands work locally. `unit` = all crates in release mode on the JIT, the node
   and CLI also on the interpreter, `#[ignore]`d long tests excluded; `musl` = the same for the static binary's target;
-  `arm64` = all crates but the x86-64 JIT on an arm64 host (gnu and musl, interpreter); `i686` and `armv7` = the same
-  for the 32-bit musl targets (armv7 natively when the arm64 CPU runs AArch32 code, else the in-process suites under
-  qemu-arm); `os` = PID 1 mode and the x86-64 images under QEMU (os/test.sh, docs/OS.md); `os-arm64` = the arm64
-  kernel and the arm64 and Raspberry Pi images under QEMU (`os/test.sh --arch aarch64`); `os-legacy` = the i386 and
-  armv7 kernels and images (`os/test.sh --arch i686`, `--arch armv7`); `dist` = the k10s integration tests against
-  the archived static binary (`K10S_BIN`).
+  `arm64` = the same on an arm64 host (the AArch64 JIT, gnu and musl); `i686` and `armv7` = all crates but the JIT
+  for the 32-bit musl targets (interpreter; armv7 natively when the arm64 CPU runs AArch32 code, else the in-process
+  suites under qemu-arm); `os` = PID 1 mode and the x86-64 images under QEMU (os/test.sh, docs/OS.md); `os-arm64` =
+  the arm64 kernel and the arm64 and Raspberry Pi images under QEMU (`os/test.sh --arch aarch64`); `os-legacy` = the
+  i386 and armv7 kernels and images (`os/test.sh --arch i686`, `--arch armv7`); `dist` = the k10s integration tests
+  against the archived static binary (`K10S_BIN`).
   Non-blocking: `metal` (metal/test.sh, latency-bound) and the chaos/soak `campaign` (~7 min). Toolchains are pinned
   in `.github/actions/toolchains/action.yml` (Rust 1.98.1, Go 1.25.1); change them there.
 - **Releases** (`.github/workflows/release.yml`): a push to `main` publishes the pre-release `vX.Y.Z-dev.N` (only

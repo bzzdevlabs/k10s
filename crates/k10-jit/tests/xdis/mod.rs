@@ -1,4 +1,6 @@
-//! External disassembler for the assurance tests: GNU objdump (Intel syntax), sharing no code with the JIT.
+//! External disassembler for the assurance tests: GNU objdump (Intel syntax for x86-64; AArch64 as well),
+//! sharing no code with the JIT.
+#![allow(dead_code)]
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -91,6 +93,57 @@ pub fn disassemble_many(objdump: &std::path::Path, blobs: &[&[u8]]) -> Vec<Vec<I
     }
     let _ = std::fs::remove_dir(&dir);
     out
+}
+
+/// AArch64 disassembly of every blob by objdump (one run per 400 blobs): `(offset, word, text)` per instruction,
+/// the text as `mnemonic op1, op2, …` without comments (`//`) and symbol annotations.
+pub fn disassemble_a64(objdump: &std::path::Path, blobs: &[&[u8]]) -> Vec<Vec<(u64, u32, String)>> {
+    let dir =
+        std::env::temp_dir().join(format!("k10-xdis-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut out = Vec::with_capacity(blobs.len());
+    for (chunk_i, chunk) in blobs.chunks(400).enumerate() {
+        let mut files = Vec::new();
+        for (i, b) in chunk.iter().enumerate() {
+            let p = dir.join(format!("b{chunk_i}_{i}.bin"));
+            std::fs::File::create(&p).unwrap().write_all(b).unwrap();
+            files.push(p);
+        }
+        let res = Command::new(objdump)
+            .args(["-D", "-b", "binary", "-m", "aarch64", "-z"])
+            .args(&files)
+            .output()
+            .expect("running objdump");
+        assert!(res.status.success(), "objdump failed: {}", String::from_utf8_lossy(&res.stderr));
+        let mut per_file: Vec<Vec<(u64, u32, String)>> = vec![Vec::new(); chunk.len()];
+        let mut cur: Option<usize> = None;
+        for line in String::from_utf8(res.stdout).unwrap().lines() {
+            if let Some(name) = line.strip_suffix(":     file format binary") {
+                cur = Some(files.iter().position(|f| f.to_str() == Some(name)).expect("unknown objdump file header"));
+            } else if let (Some(i), Some(insn)) = (cur, parse_line_a64(line)) {
+                per_file[i].push(insn);
+            }
+        }
+        for f in &files {
+            let _ = std::fs::remove_file(f);
+        }
+        out.extend(per_file);
+    }
+    let _ = std::fs::remove_dir(&dir);
+    out
+}
+
+/// `   1c:\t91004020 \tadd\tx0, x1, #0x10  // comment` → `(0x1c, 0x91004020, "add x0, x1, #0x10")`.
+fn parse_line_a64(line: &str) -> Option<(u64, u32, String)> {
+    let mut parts = line.splitn(3, '\t');
+    let addr = u64::from_str_radix(parts.next()?.trim().strip_suffix(':')?, 16).ok()?;
+    let word = u32::from_str_radix(parts.next()?.trim(), 16).ok()?;
+    let rest = parts.next().unwrap_or("");
+    let rest = rest.split("//").next().unwrap_or("");
+    let rest = strip_symbols(rest.trim());
+    let (m, ops) = rest.split_once(char::is_whitespace).unwrap_or((rest.as_str(), ""));
+    let ops = ops.split(',').map(str::trim).collect::<Vec<_>>().join(", ");
+    Some((addr, word, if ops.is_empty() { m.to_string() } else { format!("{m} {ops}") }))
 }
 
 /// `   1c:\t66 48 0f 6e c0      \tmovq   xmm0,rax` → Insn.

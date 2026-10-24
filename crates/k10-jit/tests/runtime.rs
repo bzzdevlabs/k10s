@@ -4,7 +4,7 @@
 mod common;
 use common::*;
 use k10_ir::{FuncBuilder, Host, Interp, Module, ModuleBuilder, Op, Trap};
-use k10_jit::{compile, CompiledModule, HostFn, VmCtx};
+use k10_jit::{CompiledModule, HostFn, VmCtx};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;

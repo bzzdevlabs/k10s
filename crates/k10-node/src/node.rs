@@ -1,7 +1,7 @@
 //! Node startup/shutdown, shared state, `apply` and persistence of the applied bundle.
 
 use crate::exec::{Backend, InterpBackend};
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::jit::JitBackend;
 use crate::http::{self, Limits};
 use crate::kv::{KvConfig, KvStore};
@@ -57,9 +57,10 @@ impl BackendKind {
         }
     }
 
-    /// This CPU's default: the JIT on x86-64, the interpreter elsewhere (the JIT emits x86-64 code only).
+    /// This CPU's default: the JIT on x86-64 and AArch64, the interpreter elsewhere (the JIT emits code for
+    /// those two only).
     pub fn native() -> BackendKind {
-        if cfg!(target_arch = "x86_64") {
+        if cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
             BackendKind::Jit
         } else {
             BackendKind::Interp
@@ -85,7 +86,7 @@ pub struct NodeConfig {
     /// Persistent state (KV logs, last applied bundle). `None` = memory only.
     pub data_dir: Option<PathBuf>,
     pub shards: usize,
-    /// Default: [`BackendKind::from_env`] (the JIT on x86-64 unless `K10S_BACKEND=interp`).
+    /// Default: [`BackendKind::from_env`] (the JIT on x86-64 and AArch64 unless `K10S_BACKEND=interp`).
     pub backend: BackendKind,
     /// Cap on the address space handed to instance slots (sum of `S + 4096` over live instances).
     pub mem_limit: u64,
@@ -623,14 +624,17 @@ impl Bound {
         sys::ignore_sigpipe();
         let shards_n = cfg.shards.max(1);
         let backend: Arc<dyn Backend> = match cfg.backend {
-            #[cfg(not(target_arch = "x86_64"))]
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
             BackendKind::Jit => {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
-                    format!("the JIT backend generates x86-64 code; this node is {}: use the interpreter", std::env::consts::ARCH),
+                    format!(
+                        "the JIT backend generates x86-64 and AArch64 code; this node is {}: use the interpreter",
+                        std::env::consts::ARCH
+                    ),
                 ));
             }
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             BackendKind::Jit => {
                 if cfg.stack_size < 2 * crate::jit::HOST_RESERVE {
                     return Err(io::Error::new(

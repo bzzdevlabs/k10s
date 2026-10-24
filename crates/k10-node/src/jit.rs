@@ -22,8 +22,9 @@
 //!   adapter, which restores `stack_limit` and runs [`HostCtx::interrupt`]: the same CPU-budget check and yield as
 //!   the interpreter path (the yield switches coroutines with JIT frames on the suspended stack, which the ABI allows).
 //! * JIT assumptions honoured by the runtime: memory `S ≥ 2^max(12, min_mem_log2)` (checked at apply; `invoke`
-//!   re-checks), `trap_request = 0` at entry, MXCSR/x87 control and the direction flag at their SysV defaults
-//!   (nothing on fibers changes them; coroutine switches do not touch them).
+//!   re-checks), `trap_request = 0` at entry, MXCSR/x87 control and the direction flag at their SysV defaults, FPCR
+//!   at its AAPCS64 default (nothing on fibers changes them; coroutine switches do not touch them). JIT code keeps
+//!   no value in `d8`–`d15` (AArch64) or any vector register across host calls and safepoints.
 
 use crate::exec::{Backend, Code, CodeCounters, CodeStats, CodeTicket, Scratch};
 use crate::host::{HostCtx, HostFn, HOST_FNS, TRAP_INTERNAL};
@@ -66,11 +67,6 @@ struct JitCode {
     _ticket: CodeTicket,
 }
 
-/// Executable bytes `CompiledModule` maps for `code_bytes` of code (whole pages).
-fn page_round(n: usize) -> usize {
-    n.max(1).div_ceil(crate::sys::PAGE) * crate::sys::PAGE
-}
-
 impl Backend for JitBackend {
     fn name(&self) -> &'static str {
         "jit"
@@ -81,8 +77,8 @@ impl Backend for JitBackend {
         let opts = k10_jit::CompileOptions { indirect: self.indirect, ..k10_jit::CompileOptions::default() };
         let module = k10_jit::compile_with(m, &opts).map_err(|e| format!("jit: {e}"))?;
         let host_fns: Box<[k10_jit::HostFn]> = imports.iter().map(|&f| ADAPTERS[f as usize]).collect();
-        let code = module.code_bytes();
-        let ticket = self.counters.register(code as u64, page_round(code) as u64, crate::sys::mono_ns() - t0);
+        let (code, mapped) = (module.code_bytes() as u64, module.mapped_bytes() as u64);
+        let ticket = self.counters.register(code, mapped, crate::sys::mono_ns() - t0);
         Ok(Arc::new(JitCode { module, host_fns, _ticket: ticket }))
     }
 
@@ -203,8 +199,8 @@ unsafe fn request_trap(ctx: *mut VmCtx, t: Trap) {
     unsafe { addr_of_mut!((*ctx).trap_request).write(t.code()) };
 }
 
-/// Host-function adapter for `HOST_FNS[F]`: `rdi = ctx`, arguments in `rsi, rdx, rcx, r8, r9` (unused ones are
-/// don't-care: `dispatch` reads only the function's declared parameters).
+/// Host-function adapter for `HOST_FNS[F]`: `rdi = ctx`, arguments in `rsi, rdx, rcx, r8, r9` (AArch64: `x0`,
+/// `x1`–`x5`; unused ones are don't-care: `dispatch` reads only the function's declared parameters).
 unsafe extern "C" fn host_adapter<const F: usize>(ctx: *mut VmCtx, a0: i64, a1: i64, a2: i64, a3: i64, a4: i64) -> i64 {
     // SAFETY: JIT code passes the context of the running invocation, whose `user` is that invocation's
     // `Invocation` (set by `JitCode::invoke`, alive until it returns).

@@ -87,14 +87,14 @@ Nodes built before `calls` cannot decode format-2 manifests: upgrade every node 
 
 Prebuilt artifacts: [GitHub Releases](https://github.com/bzzdevlabs/k10s/releases). *Latest* is the last stable
 release; every push to `main` also publishes a development pre-release. Binaries are for x86-64 Linux, plus static
-arm64, i686 and armv7 `k10s` builds (services on the interpreter there; i686 and armv7 are best effort). `V` below is the release's version (e.g. `0.1.0`, or
-`0.1.1-dev.45`).
+arm64, i686 and armv7 `k10s` builds (i686 and armv7 run services on the interpreter and are best effort). `V` below
+is the release's version (e.g. `0.1.0`, or `0.1.1-dev.45`).
 
 | Archive | Contents |
 |---|---|
 | `k10s-V-x86_64-unknown-linux-musl.tar.gz` | `k10s` (CLI, node daemon, Ten compiler, JIT), static: runs on any x86-64 Linux; LICENSE, NOTICE, README.md, SECURITY.md |
 | `k10s-V-x86_64-unknown-linux-gnu.tar.gz` | the same, linked against glibc ≥ 2.34 (Debian 12, Ubuntu 22.04, RHEL 9 and later) |
-| `k10s-V-aarch64-unknown-linux-musl.tar.gz` | `k10s` for arm64 Linux, static (no JIT: services run on the interpreter) |
+| `k10s-V-aarch64-unknown-linux-musl.tar.gz` | `k10s` for arm64 Linux (CLI, node daemon, Ten compiler, AArch64 JIT), static |
 | `k10s-V-i686-unknown-linux-musl.tar.gz`, `k10s-V-armv7-unknown-linux-musleabihf.tar.gz` | `k10s` for 32-bit x86 (SSE2) and 32-bit ARM (hard-float) Linux, static, interpreter only; best effort (instances up to 256 MiB) |
 | `k10s-examples-V.tar.gz` | [examples/](examples/): Ten sources, the compiled `.k10` modules, `app.k10s` (`k10s apply app.k10s`) |
 | `k10s-metal-V-x86_64.tar.gz` | the bare-metal kernel ([metal/](metal/)): `k10-metal.elf`, `k10-metal-embedded.elf` (test bundle baked in), `bundle.k10b` (19 test services), `mkbundle` (static; pass `--ten-dir examples` or `--no-ten`), `examples/*.ten`, metal README |
@@ -146,7 +146,7 @@ Then set the next version (`scripts/set-version.sh X.Y.(Z+1)`, or a minor or maj
 | [crates/k10-nospec](crates/k10-nospec) | branch-free clamps for host code indexed by guest values (Spectre v1) |
 | [crates/k10-host](crates/k10-host) | the host API, shared by the hosted node and the bare-metal kernel |
 | [crates/k10-lang](crates/k10-lang) | Ten compiler and prelude |
-| [crates/k10-jit](crates/k10-jit) | single-pass TIR → x86-64 compiler (the isolation boundary) |
+| [crates/k10-jit](crates/k10-jit) | single-pass TIR → x86-64 and AArch64 compiler (the isolation boundary) |
 | [crates/k10-mesh](crates/k10-mesh) | gossip membership, manifests, bundles, placement, wire protocol |
 | [crates/k10-node](crates/k10-node), [crates/k10s](crates/k10s) | node runtime and the `k10s` binary (also PID 1 of a Linux image) |
 | [metal/](metal/) | the node as a bare-metal kernel (PVH, virtio-net, SMP, JIT, cluster member) |
@@ -158,15 +158,17 @@ Then set the next version (`scripts/set-version.sh X.Y.(Z+1)`, or a minor or maj
 
 ## How it is tested
 - Differential testing of the JIT against the reference interpreter on randomly generated programs (1 M modules,
-  zero mismatches), with canary regions proving no write ever leaves an instance's slot; a red-team suite.
+  zero mismatches, on x86-64 and AArch64), with canary regions proving no write ever leaves an instance's slot; a
+  red-team suite; independent machine-code SFI verifiers for both architectures (objdump-based on x86-64; on AArch64
+  a decoder cross-checked against objdump, run on every module the tests compile).
 - Unit, integration and multi-process cluster tests (node kill, graceful leave, re-apply under load, restart).
 - Chaos, soak and abuse campaigns (see [docs/STATUS.md](docs/STATUS.md)).
 
 ## Status and limits
 Research prototype. Not yet: per-node identity and signed bundles (one shared cluster key today), TLS, replicated
 storage (KV is node-local), consensus for singletons, hostile multi-tenancy on one node (Spectre-class side channels
-are only partly mitigated), architectures other than x86-64 for the JIT (others run on the interpreter). See
-[docs/STATUS.md](docs/STATUS.md) and [SECURITY.md](SECURITY.md).
+are only partly mitigated), architectures other than x86-64 and AArch64 for the JIT (others run on the interpreter).
+See [docs/STATUS.md](docs/STATUS.md) and [SECURITY.md](SECURITY.md).
 
 ## License
 Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Contributions welcome: [CONTRIBUTING.md](CONTRIBUTING.md),

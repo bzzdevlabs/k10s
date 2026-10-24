@@ -105,6 +105,8 @@ mod nr {
     pub const SYS_ppoll_time64: libc::c_long = if cfg!(target_pointer_width = "32") { 414 } else { super::NONE };
     pub const SYS_rt_sigtimedwait_time64: libc::c_long = if cfg!(target_pointer_width = "32") { 421 } else { super::NONE };
     pub const SYS_futex_time64: libc::c_long = if cfg!(target_pointer_width = "32") { 422 } else { super::NONE };
+    // The AArch64 JIT's context synchronization of every thread (x86-64 keeps instruction fetch coherent).
+    nrs!(target_arch = "aarch64": SYS_membarrier);
     // musl on i386 makes every socket call through socketcall (arguments in memory); the node creates its sockets
     // with the direct socket call, which the filter can inspect.
     #[cfg(target_arch = "x86")]
@@ -130,6 +132,9 @@ const SOCKETCALLS: &[u32] = &[
     17, // recvmsg
     18, // accept4
 ];
+
+/// `MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE` and its registration.
+const MEMBARRIER_SYNC_CORE: [u32; 2] = [1 << 5, 1 << 6];
 
 /// Syscalls of a running node; anything else kills the process.
 pub const SYSCALLS: &[Sys] = &[
@@ -175,6 +180,8 @@ pub const SYSCALLS: &[Sys] = &[
     allow(libc::SYS_brk),
     allow(libc::SYS_mincore), // snapshot capture: resident pages
     allow(libc::SYS_memfd_create),
+    // AArch64 JIT: every thread context-synchronizes before running newly mapped code; nothing else.
+    sys(nr::SYS_membarrier, Rule::OneOf { arg: 0, vals: &MEMBARRIER_SYNC_CORE, deny: Deny::Errno(EPERM) }),
     allow(nr::SYS_ftruncate),
     allow(nr::SYS_ftruncate64),
     // Threads only: no fork, no new namespace.
@@ -693,6 +700,12 @@ mod tests {
             assert_eq!(r(libc::SYS_tgkill, [1, 1, 9, 0, 0, 0]), deny);
             assert_eq!(r(libc::SYS_tkill, [77, libc::SIGABRT as u64, 0, 0, 0, 0]), RET_ALLOW);
             assert_eq!(r(libc::SYS_tkill, [77, libc::SIGKILL as u64, 0, 0, 0, 0]), deny);
+            #[cfg(target_arch = "aarch64")]
+            for (cmd, want) in [(1u64 << 5, RET_ALLOW), (1 << 6, RET_ALLOW), (1 << 3, eperm), (1, eperm)] {
+                assert_eq!(r(libc::SYS_membarrier, [cmd, 0, 0, 0, 0, 0]), want, "membarrier {cmd:#x}");
+            }
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!(r(libc::SYS_membarrier, [1 << 5, 0, 0, 0, 0, 0]), deny);
         }
     }
 

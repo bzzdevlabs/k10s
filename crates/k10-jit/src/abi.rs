@@ -1,14 +1,16 @@
-//! The JIT ⇄ runtime ABI (docs/JIT-ABI.md, x86-64, v1).
+//! The JIT ⇄ runtime ABI (docs/JIT-ABI.md, x86-64 and AArch64, v1).
 //!
 //! [`VmCtx`] field offsets are part of the ABI: generated code addresses the fields through the `OFF_*`
 //! constants below, and compile-time assertions tie those constants to the Rust layout.
 //!
-//! Registers inside JIT code: `r15` = memory base, `r14` = `*mut VmCtx`, `r13` = memory mask `S - 1`.
+//! Registers inside JIT code: `r15` = memory base, `r14` = `*mut VmCtx`, `r13` = memory mask `S - 1` (AArch64:
+//! `x27`, `x26`, `x28`).
 //!
-//! `jit_private` (owned by the JIT): `jit_private[0]` holds the `rsp` of the innermost active `invoke` frame (the
-//! trap-unwind target). Each `invoke` saves the previous value on its own stack and restores it on exit (normal or
-//! trap), so nested invocations that share one `VmCtx` (a host function calling `invoke` again) are supported.
-//! The other words are reserved.
+//! `jit_private` (owned by the JIT): `jit_private[0]` holds the stack pointer of the innermost active `invoke`
+//! frame (the trap-unwind target). Each `invoke` saves the previous value on its own stack and restores it on exit
+//! (normal or trap), so nested invocations that share one `VmCtx` (a host function calling `invoke` again) are
+//! supported. On AArch64 `jit_private[1..=NUM_HELPERS]` hold the helper addresses (stored by every `invoke`). The
+//! other words are reserved.
 //!
 //! Runtime-side assumptions (beyond docs/JIT-ABI.md):
 //! * `mem_base` / `mem_mask` are read once when `invoke` starts (into `r15` / `r13`); changing them during an
@@ -18,9 +20,11 @@
 //! * Trap codes from the interrupt hook or `trap_request` that are not a valid `Trap::code()` surface as
 //!   `Trap::Interrupted`.
 //! * Floating point follows the current MXCSR (the SysV default: round-to-nearest, no FTZ/DAZ, exceptions
-//!   masked); the direction flag must be clear (SysV).
-//! * The entry trampoline uses up to `72 + 8 * (nargs + 1)` bytes of stack above the first JIT frame, which is not
-//!   counted by the safepoint check; the caller of `invoke` must have that much stack.
+//!   masked) or FPCR (AArch64: round-to-nearest, no flush-to-zero, no default NaN, exceptions untrapped); the
+//!   direction flag must be clear (SysV).
+//! * The entry trampoline uses up to `72 + 8 * (nargs + 1)` bytes of stack above the first JIT frame (AArch64:
+//!   `128 + 8 * nargs` rounded up to 16), which is not counted by the safepoint check; the caller of `invoke` must
+//!   have that much stack.
 
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -32,7 +36,7 @@ pub struct VmCtx {
     pub mem_base: *mut u8,
     /// +8: `S - 1`.
     pub mem_mask: u64,
-    /// +16: safepoint check: trap/interrupt if `rsp` (after the frame) `<` this. Any thread may store
+    /// +16: safepoint check: trap/interrupt if the stack pointer (after the frame) `<` this. Any thread may store
     /// `usize::MAX` here (Relaxed) to request an interrupt at the next safepoint.
     pub stack_limit: AtomicUsize,
     /// +24: the real stack limit; distinguishes stack overflow from an interrupt request.
@@ -48,11 +52,12 @@ pub struct VmCtx {
     pub _pad: u32,
     /// +56: owned by the runtime (current invocation, instance, …).
     pub user: *mut c_void,
-    /// +64: owned by the JIT (saved `rsp` for trap unwinding).
+    /// +64: owned by the JIT (saved stack pointer for trap unwinding, AArch64 helper addresses).
     pub jit_private: [u64; 8],
 }
 
-/// A host function: `rdi = ctx`, arguments in `rsi, rdx, rcx, r8, r9` (unused ones are don't-care).
+/// A host function: `rdi = ctx`, arguments in `rsi, rdx, rcx, r8, r9` (AArch64: `x0`, then `x1`–`x5`; unused ones
+/// are don't-care).
 pub type HostFn = unsafe extern "C" fn(ctx: *mut VmCtx, a0: i64, a1: i64, a2: i64, a3: i64, a4: i64) -> i64;
 /// Interrupt hook: 0 = continue, else a trap code.
 pub type InterruptFn = unsafe extern "C" fn(ctx: *mut VmCtx) -> u32;
@@ -66,7 +71,7 @@ pub const OFF_INTERRUPT: i32 = 40;
 pub const OFF_TRAP_REQUEST: i32 = 48;
 pub const OFF_USER: i32 = 56;
 pub const OFF_JIT_PRIVATE: i32 = 64;
-/// `jit_private[0]`: `rsp` of the innermost active `invoke` frame.
+/// `jit_private[0]`: stack pointer of the innermost active `invoke` frame.
 pub const OFF_SAVED_RSP: i32 = OFF_JIT_PRIVATE;
 
 const _: () = {

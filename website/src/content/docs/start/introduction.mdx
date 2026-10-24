@@ -50,7 +50,7 @@ k10s is a research prototype with honest limits:
   per-node identity and bundles are not signed yet.
 - **Storage:** the key-value store is durable but node-local. No replication, no consensus for singletons.
 - **Workloads:** written in Ten or compiled to TIR. No Wasm or LLVM front end yet, and no existing containers.
-- **Platforms:** the JIT targets x86-64; other architectures run on the interpreter.
+- **Platforms:** the JIT targets x86-64 and arm64 (AArch64); other architectures run on the interpreter.
 
 <Aside type="tip" title="Read further">
 	The full design rationale is in [docs/DESIGN.md](https://github.com/bzzdevlabs/k10s/blob/main/docs/DESIGN.md),

@@ -1,6 +1,6 @@
 //! Position-independent code blobs (no_std + alloc).
 //!
-//! A [`CodeBlob`] is the complete output of the compiler for one module:
+//! A [`CodeBlob`] is the complete output of the compiler for one module. x86-64:
 //!
 //! ```text
 //! offset 0        entry trampoline (invoke), trap stubs, safepoint thunk     — shared by all functions
@@ -8,9 +8,13 @@
 //! helper_table    NUM_HELPERS × u64 absolute helper addresses (8-aligned)     — patched at load time
 //! ```
 //!
+//! AArch64: the helper table at offset 0, then the prelude and the functions.
+//!
 //! All code references are PC-relative; the only absolute addresses are the helper table entries, which code
-//! reaches with `call [rip + disp32]`. Loading = copy the bytes anywhere, patch the table
-//! ([`CodeBlob::write_to`] does both), make the memory executable, then call [`BlobMeta::invoke`].
+//! reaches with `call [rip + disp32]` (AArch64: the entry trampoline copies them into `VmCtx::jit_private`).
+//! Loading = copy the bytes anywhere, patch the table ([`CodeBlob::write_to`] does both), make the memory
+//! executable (AArch64: and visible to instruction fetch, [`crate::cache::sync_icache`]), then call
+//! [`BlobMeta::invoke`].
 
 use crate::abi::VmCtx;
 use crate::cpu::CpuFeatures;
@@ -19,9 +23,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use k10_ir::{Trap, MAX_MEM_LOG2, MIN_MEM_LOG2};
 
-/// Entry trampoline signature (generated code at `BlobMeta::entry`):
-/// `rdi = ctx, rsi = target function address, rdx = args, rcx = nargs, r8 = result out-pointer`;
-/// returns 0 on success or a trap code.
+/// Entry trampoline signature (generated code at `BlobMeta::entry`): ctx, target function address, args, nargs,
+/// result out-pointer (`rdi, rsi, rdx, rcx, r8`; AArch64: `x0`–`x4`); returns 0 on success or a trap code.
 pub(crate) type EntryFn =
     unsafe extern "C" fn(ctx: *mut VmCtx, target: *const u8, args: *const i64, nargs: usize, out: *mut i64) -> u32;
 
@@ -78,8 +81,9 @@ impl CodeBlob {
     }
 
     /// Copies the blob into `dst` (at least [`CodeBlob::len`] bytes, any alignment ≥ 8 for the table) and patches
-    /// the helper address table with this binary's helper addresses. Bytes after the blob are filled with `int3`.
-    /// The caller then makes `dst` executable (and non-writable) and invokes through [`BlobMeta::invoke`] with
+    /// the helper address table with this binary's helper addresses. Bytes after the blob are filled with `int3`
+    /// (AArch64: `udf #0`). The caller then makes `dst` executable (and non-writable; on AArch64 also visible to
+    /// instruction fetch on every CPU that will run it) and invokes through [`BlobMeta::invoke`] with
     /// `dst.as_ptr()`.
     ///
     /// Returns `false` (writing nothing) if `dst` is too small.
@@ -89,7 +93,7 @@ impl CodeBlob {
         }
         let (head, tail) = dst.split_at_mut(self.code.len());
         head.copy_from_slice(&self.code);
-        tail.fill(0xCC);
+        tail.fill(if cfg!(target_arch = "aarch64") { 0 } else { 0xCC });
         let t = self.meta.helper_table as usize;
         for (i, a) in helper_addresses().iter().enumerate() {
             head[t + 8 * i..t + 8 * i + 8].copy_from_slice(&a.to_le_bytes());
@@ -160,8 +164,9 @@ impl BlobMeta {
     /// hook or stored in `trap_request` that is not a valid [`Trap::code`] is reported as `Trap::Interrupted`.
     ///
     /// # Safety
-    /// * `code` points to this blob loaded with [`CodeBlob::write_to`] into memory that is now executable, and
-    ///   stays valid for the duration of the call; the CPU supports [`BlobMeta::features`].
+    /// * `code` points to this blob loaded with [`CodeBlob::write_to`] into memory that is now executable (on
+    ///   AArch64: and visible to this CPU's instruction fetch), and stays valid for the duration of the call; the
+    ///   CPU supports [`BlobMeta::features`].
     /// * `ctx` is valid for reads and writes for the whole call and not accessed concurrently except through
     ///   `stack_limit`; `ctx.mem_base` is valid for reads and writes of `mem_mask + 1 + 8` bytes (`S + TAIL`),
     ///   which no Rust reference aliases during the call; `host_fns` has an entry for every import of the module

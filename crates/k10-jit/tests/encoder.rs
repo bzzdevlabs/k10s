@@ -1,6 +1,8 @@
 //! Semantic tests of the x86-64 encoder: each instruction form is executed with every relevant register
 //! combination (all 15 GPRs, REX-sensitive byte registers, r12/r13/rbp/rsp addressing special cases, xmm0-15)
 //! and the resulting register file / memory is compared with Rust's semantics.
+//! x86-64 only (AArch64: encoder_a64.rs).
+#![cfg(target_arch = "x86_64")]
 
 use k10_jit::x64::*;
 use k10_jit::CpuFeatures;

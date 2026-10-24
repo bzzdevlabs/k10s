@@ -23,6 +23,14 @@ and  rax, r13           ; the mask
 mov  rcx, [r15 + rax]   ; the access
 ```
 
+and on arm64 (`x27` = slot base, `x28` = `S - 1`):
+
+```asm
+add  x9, x0, #24        ; address + immediate offset, wrapping
+and  x9, x9, x28        ; the mask
+ldr  x10, [x27, x9]     ; the access
+```
+
 <SlotDiagram />
 
 - There are no out-of-bounds traps on loads and stores: masking makes every address valid, inside the slot.
@@ -61,17 +69,18 @@ request (`cpu_ms` budget, then trap `Interrupted`) or yields the slice. Infinite
 
 ## How the claim is tested
 
-The trusted base is the validator, the code generator, the x86-64 encoder, the bulk-memory helpers, the host API
-and the runtime's `unsafe` code. It is attacked from several sides:
+The trusted base is the validator, the code generators and encoders (x86-64, arm64), the bulk-memory helpers, the
+host API and the runtime's `unsafe` code. It is attacked from several sides:
 
 - **Differential testing** of the JIT against the reference interpreter on 1,000,000 random modules and
-  2 M invocations: zero mismatches, with canary regions around every instance proving no write leaves its slot.
+  2 M invocations, on x86-64 and on arm64: zero mismatches, with canary regions around every instance proving no
+  write leaves its slot.
 - **800,000 adversarial memory programs** and a **red-team suite** of 14 attack classes (offsets, wrap-around,
   straddling, bulk operations, `br_table` bounds, stack clash, register state across calls, host-argument
   shuffles…). Every attack is a regression test.
-- **A machine-code verifier**, independent of the code generator (in the spirit of VeriWasm), decodes every
-  generated function and re-checks the invariants: guest accesses only through `[r15 + (x & r13)]`, `r13`–`r15`
-  never written, stack checks before frames grow, calls only to functions, host functions and helpers, no
+- **A machine-code verifier** per architecture, independent of the code generator (in the spirit of VeriWasm),
+  decodes every generated function and re-checks the invariants: guest accesses only through `[r15 + (x & r13)]`
+  (arm64: `[x27, x & x28]`), the pinned registers never written, stack checks before frames grow, calls only to functions, host functions and helpers, no
   `syscall`, `int`, `rdtsc`, `cpuid` or privileged instruction.
 - **Encoder fuzzing** against GNU objdump on random instruction forms.
 

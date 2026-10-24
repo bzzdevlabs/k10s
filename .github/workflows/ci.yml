@@ -43,7 +43,7 @@ jobs:
           SUITE: ${{ matrix.suite }}
 
   arm64:
-    name: Tests on arm64 (interpreter, gnu and musl)
+    name: Tests on arm64 (JIT and interpreter, gnu and musl)
     if: github.event_name != 'push'
     runs-on: ubuntu-24.04-arm
     steps:

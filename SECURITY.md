@@ -20,8 +20,9 @@ In scope — please report:
 - Memory-safety bugs in the node runtime, the mesh, or the bare-metal kernel.
 
 ## Defense in depth
-SFI is the isolation boundary; its trusted base is the validator, the code generator, the x86-64 encoder, the
-bulk-memory helpers, the host API and the runtime's `unsafe` code. Two further layers bound the damage of a bug there.
+SFI is the isolation boundary; its trusted base is the validator, the code generators and encoders (x86-64,
+AArch64), the AArch64 instruction-cache synchronization, the bulk-memory helpers, the host API and the runtime's
+`unsafe` code. Two further layers bound the damage of a bug there.
 
 **1. Machine-code assurance (tests, `crates/k10-jit/tests/xdis*`; need GNU objdump, `$K10_OBJDUMP` else
 `/usr/bin/objdump`: skipped without it, failed under `CI` or `K10_REQUIRE_OBJDUMP`).**
@@ -41,6 +42,17 @@ bulk-memory helpers, the host API and the runtime's `unsafe` code. Two further l
   hand-made violations and mutated real code. The full rule list is at the top of `tests/xdis/sfi.rs`. It could
   become a load-time check (decode with an in-tree length decoder, verify, then seal the code) at the cost of a
   disassembler in the TCB-adjacent path.
+- AArch64: `encoder_a64` executes every encoder form against Rust's semantics; `xdis_encoder_a64` checks that each
+  random encoder instruction decodes to exactly its fields in the verifier's own decoder (`tests/common/a64dec.rs`,
+  written from the Arm ARM encoding tables, sharing no code with the encoder) and that this decoder reads every
+  encoder word, and every random or bit-flipped word it accepts, exactly as objdump does. The verifier
+  (`tests/common/a64sfi.rs`, rules at its top) applies the same invariants to A64: guest accesses only
+  `[x27, Xm]` with `Xm` from `and Xm, Xn, x28` or a constant below `2^min_mem_log2`, single registers without
+  writeback; frame accesses inside the checked frame, never the saved return address; x26-x28, x29, x18, `sp` and
+  `x30` written only as the ABI allows, `v8`-`v15` never; jump tables only behind `cmp` + `csel` + `csdb`; calls and
+  indirect branches in the mode's exact form. It runs on every module the k10-jit suites compile (differential
+  soak, ops, robust, isolation, red-team, spectre, runtime) and in `sfi_a64` over random modules, `br_table` modules
+  and the Ten examples in every mode, barrier form and lowering, and rejects violations patched into real code.
 
 **2. Process sandbox of `k10s node` (Linux x86-64, AArch64, i686 and armv7, `--sandbox on|seccomp-only|log|off`, default `on`, or
 `$K10S_SANDBOX`).**
@@ -53,8 +65,9 @@ bulk-memory helpers, the host API and the runtime's `unsafe` code. Two further l
   `/proc/sys` entries and the binary; `/proc/self` is not reachable (its statistics files are opened before);
   nothing can be executed. With ABI ≥ 6 (Linux 6.12) signals and abstract UNIX sockets are scoped to the node.
 - seccomp-bpf on the single thread, inherited by every thread created afterwards: an allowlist of 98 syscalls on
-  x86-64, 88 on AArch64, which has only their `*at`/`p*` forms, 106 on i686 and armv7, whose musl also uses the
-  64-bit-offset, 32-bit-id and time64 forms next to the time32 ones (`SYSCALLS` in
+  x86-64, 89 on AArch64, which has only their `*at`/`p*` forms and needs `membarrier` (two commands) for the JIT,
+  106 on i686 and armv7, whose musl also uses the 64-bit-offset, 32-bit-id and time64 forms next to the time32 ones
+  (`SYSCALLS` in
   `crates/k10-node/src/sandbox/seccomp.rs`); anything else kills the process (`SIGSYS`). Notably
   denied: `execve`, `fork`/non-thread `clone`, namespaces, `ptrace`, `process_vm_*`, `mount`, `bpf`,
   `perf_event_open`, `io_uring`, `keyctl`, modules, `personality`, `bind`/`listen` (no new ports), sockets other
@@ -150,8 +163,9 @@ bench/README.md):
 - **Guest memory accesses** (Spectre v1): every address is masked by data flow (`base + ((addr + off) & (S - 1))`),
   not by a bounds-check branch, so a mispredicted branch cannot steer a guest load outside its slot.
 - **`br_table`** (Spectre v1): small tables (≤ 8 target runs) compile to compare trees — no table load, no indirect
-  jump; jump tables clamp the index with `cmp` + `cmovae` before the table load, so a mispredicted path can neither
-  read past the table nor jump to a target derived from foreign memory (sequences in docs/JIT-ABI.md).
+  jump; jump tables clamp the index with `cmp` + `cmovae` (AArch64: `cmp` + `csel` + `csdb`) before the table load,
+  so a mispredicted path can neither read past the table nor jump to a target derived from foreign memory (sequences
+  in docs/JIT-ABI.md).
 - **Host functions, bulk-memory helpers, the interpreter** (Spectre v1), hosted node and k10-metal alike (one
   implementation, `k10_host`): every guest `(ptr, len)` goes through `k10_nospec::span`, whose length is zeroed by
   a branch-free mask behind a mispredicted check; offsets and lengths into host buffers (request body, path, config,
@@ -176,8 +190,11 @@ Opt-in:
   trampoline) through a retpoline; `lfence` serializes before each of them instead (cheaper, narrows the window
   rather than closing it). Caveats: retpolines do not stop return-stack attacks on AMD Zen 1/2 (Branch Type
   Confusion, Retbleed) or Zen 3/4 (SRSO, "Inception"); AMD-SB-1036 found `lfence; jmp` insufficient on some AMD
-  cores; a retpoline's `ret` to a non-call site is incompatible with user-space CET shadow stacks. Sequences in
-  docs/JIT-ABI.md.
+  cores; a retpoline's `ret` to a non-call site is incompatible with user-space CET shadow stacks. On AArch64
+  `lfence` mode puts Arm's speculation barrier before each indirect branch (`sb` with FEAT_SB, else
+  `dsb nsh; isb`) and `retpoline` mode uses the same thunk shape (`bl` to fill the return stack, a barrier loop as the
+  speculation trap, `ret x16`); Arm specifies the barriers, not the return-stack prediction the thunk relies on.
+  Sequences in docs/JIT-ABI.md.
 
 Not mitigated (known gaps):
 - **Spectre v2 and branch history injection in the runtime itself**: the node and the metal kernel are ordinary Rust

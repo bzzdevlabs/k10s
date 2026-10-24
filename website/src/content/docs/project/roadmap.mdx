@@ -12,9 +12,9 @@ import { Aside } from '@astrojs/starlight/components';
 
 ## What is tested
 
-- **Isolation:** the JIT against the reference interpreter on 1,000,000 random modules, zero mismatches;
-  800,000 adversarial memory programs; a red-team suite of 14 attack classes; an independent machine-code
-  verifier.
+- **Isolation:** the JIT against the reference interpreter on 1,000,000 random modules, zero mismatches, on
+  x86-64 and arm64; 800,000 adversarial memory programs; a red-team suite of 14 attack classes; an independent
+  machine-code verifier per architecture.
 - **Runtime:** unit, integration and multi-process cluster tests on both backends: node kill, graceful leave,
   restart with the same data, concurrent applies, re-apply under load with 0 failed requests.
 - **Chaos:** 20 minutes on 5 nodes, 2,585 fault rounds (SIGKILL, SIGSTOP, leave and join, re-applies): 0
@@ -43,15 +43,15 @@ import { Aside } from '@astrojs/starlight/components';
 | storage | key-value store durable but node-local; no replication, no consensus for singletons |
 | compute | 1.1–1.6× slower than portable Go on CPU-bound code |
 | ecosystem | Ten or TIR only; no Wasm or LLVM front end |
-| platforms | JIT on x86-64; arm64 and other architectures on the interpreter (i686 and armv7 best effort, instances up to 256 MiB); native kernel on VM guests only; disk images for x86-64, arm64 VMs, the Raspberry Pi 3/4/5, old PCs (i686, BIOS) and 32-bit ARM VMs (signed A/B updates rolled out by the cluster), tested under QEMU, not yet on a physical machine |
+| platforms | JIT on x86-64 and arm64; other architectures on the interpreter (i686 and armv7 best effort, instances up to 256 MiB); native kernel on VM guests only; disk images for x86-64, arm64 VMs, the Raspberry Pi 3/4/5, old PCs (i686, BIOS) and 32-bit ARM VMs (signed A/B updates rolled out by the cluster), tested under QEMU, not yet on a physical machine |
 
 ## Roadmap
 
 1. **Cluster security:** per-node identity and signed bundles, on top of today's authenticated and encrypted gossip
    and peer links.
 2. **Replicated state:** a replicated key-value store per service (Raft per shard group) and leases for singletons.
-3. **arm64:** a JIT backend shared by hosted and bare-metal nodes (the arm64 and Raspberry Pi 3/4/5 images exist, on
-   the interpreter, as do the best-effort i686 and armv7 images; 32-bit stays on the interpreter).
+3. **arm64:** the JIT runs on arm64 hosts and in the arm64 and Raspberry Pi 3/4/5 images; the native kernel's arm64
+   port will reuse it. 32-bit (i686, armv7) stays on the interpreter.
 4. **Native bare metal:** UEFI, ACPI, modern virtio, NVMe and a durable key-value log; then cloud NICs.
 5. **Performance:** register allocation in the JIT, 32-bit TIR operations, cheaper cross-node forwarding.
 6. **Ecosystem:** a Wasm → TIR translator, so Rust, C, Go and Zig can target k10s.

@@ -80,7 +80,7 @@ channels.
 | `br_table` as compare trees or clamped tables | <Badge text="default" variant="success" /> |
 | branch-free clamps of every guest pointer, length and offset in host code | <Badge text="default" variant="success" /> |
 | coarse guest clock: 100 µs steps with randomized edges (`--timer-res-us`) | <Badge text="default" variant="success" /> |
-| retpolines or `lfence` on JIT indirect branches (`--jit-indirect`) | <Badge text="opt-in" variant="caution" /> |
+| retpolines or speculation barriers (`lfence`; arm64 `sb`) on JIT indirect branches (`--jit-indirect`) | <Badge text="opt-in" variant="caution" /> |
 | the runtime's own indirect branches, return-stack speculation, Spectre v4, shared caches, SMT | <Badge text="not mitigated" variant="danger" /> |
 
 ## Denial of service

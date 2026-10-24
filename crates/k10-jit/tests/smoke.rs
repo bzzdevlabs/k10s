@@ -18,7 +18,7 @@ fn add_two() {
     });
     mb.export("add", f);
     let m = mb.build();
-    let jit = k10_jit::compile(&m).unwrap();
+    let jit = compile(&m).unwrap();
     let mut mem = GuardedMem::for_module(&m, 12);
     let (r, _) = run_jit(&jit, &m, &mut mem, &mut NoHost, f, &[40, 2], RunOpts::default());
     assert_eq!(r, Ok(Some(42)));
@@ -50,7 +50,7 @@ fn fib() {
     });
     mb.export("fib", f);
     let m = mb.build();
-    let jit = k10_jit::compile(&m).unwrap();
+    let jit = compile(&m).unwrap();
     let it = Interp::new(&m).unwrap();
     for n in [0, 1, 2, 10, 20] {
         let mut mem = GuardedMem::for_module(&m, 12);
@@ -63,7 +63,7 @@ fn fib() {
 /// The no_std path: compile to a blob, load it into caller-provided memory, invoke through `BlobMeta`.
 #[test]
 fn blob_in_caller_memory() {
-    use k10_jit::{compile_blob, CompileOptions, VmCtx};
+    use k10_jit::{CompileOptions, VmCtx};
     let m = k10_ir::gen::gen_module(11, &k10_ir::gen::GenConfig { imports: vec![], ..Default::default() });
     let blob = compile_blob(&m, &CompileOptions::default()).unwrap();
     let len = blob.len().div_ceil(4096) * 4096 + 4096;

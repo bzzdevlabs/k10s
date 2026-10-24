@@ -81,7 +81,7 @@ Every release publishes these files. `V` is the version (`0.1.0`, or `0.1.1-dev.
 |---|---|
 | `k10s-V-x86_64-unknown-linux-musl.tar.gz` | `k10s`, statically linked: runs on any x86-64 Linux |
 | `k10s-V-x86_64-unknown-linux-gnu.tar.gz` | the same, linked against glibc |
-| `k10s-V-aarch64-unknown-linux-musl.tar.gz` | `k10s` for arm64 Linux, statically linked (services run on the interpreter) |
+| `k10s-V-aarch64-unknown-linux-musl.tar.gz` | `k10s` for arm64 Linux, statically linked |
 | `k10s-V-i686-unknown-linux-musl.tar.gz`, `k10s-V-armv7-unknown-linux-musleabihf.tar.gz` | `k10s` for 32-bit x86 (SSE2) and 32-bit ARM (hard-float) Linux, statically linked, interpreter only (best effort) |
 | `k10s-examples-V.tar.gz` | Ten sources, compiled `.k10` modules and `app.k10s` |
 | `k10s-metal-V-x86_64.tar.gz` | the [bare-metal kernel](/k10s/guides/bare-metal/) and its bundle tool |
@@ -101,9 +101,9 @@ Every release publishes these files. `V` is the version (`0.1.0`, or `0.1.1-dev.
 
 ## Requirements
 
-- **x86-64 Linux** for the JIT. On arm64 (and any other architecture) services run on the reference interpreter,
-  the default there; an arm64 JIT is planned. The 32-bit builds (i686, armv7) always run the interpreter and cap an
-  instance's memory at 256 MiB.
+- **x86-64 or arm64 Linux** for the JIT. On any other architecture services run on the reference interpreter, the
+  default there; the 32-bit builds (i686, armv7) always run it and cap an instance's memory at 256 MiB. On arm64 the
+  JIT needs the `membarrier` system call (enabled in every distribution kernel and in the k10s images).
 - **Process sandbox:** `k10s node` confines itself with Landlock (Linux 5.13+, `landlock` in the kernel's LSM list)
   and seccomp, and logs what it applied at start-up; on a kernel without Landlock, run it with
   `--sandbox seccomp-only`. See [Production setup](/k10s/guides/production/).

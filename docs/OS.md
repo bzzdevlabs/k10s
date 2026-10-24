@@ -4,12 +4,12 @@ The static `k10s` binary is the only userspace program of a Linux image: the ker
 shell, udev, systemd, DHCP daemon or SSH. This is Tier 1 of the platform plan (docs/REPORT.md §9,
 docs/research/universal-os.md §8–9); Tier 2 is the native kernel in `metal/`.
 
-What exists today (milestones U0 to U3, U5 and U6): PID 1 mode in `crates/k10s/src/pid1/`, the k10s kernels (`vm` and
+What exists today (milestones U0 to U6): PID 1 mode in `crates/k10s/src/pid1/`, the k10s kernels (`vm` and
 `metal` profiles for x86-64, one `arm64` kernel, and the best-effort `i386` and `armv7` kernels, `os/`), x86-64 disk
 images that boot on BIOS and UEFI, an arm64 UEFI image, a Raspberry Pi 3/4/5 image, an i686 BIOS image for old PCs and
 an armv7 UEFI image, signed A/B updates of every image rolled out by the cluster in waves, Secure Boot with your own
-keys or a MOK (U6), and QEMU tests of all of them. On arm64 the node runs on the interpreter (the arm64 JIT is U4); on
-i686 and armv7 it always does (no 32-bit JIT).
+keys or a MOK (U6), and QEMU tests of all of them. The node runs services on the JIT on x86-64 and arm64 (U4), and
+on the interpreter on i686 and armv7 (no 32-bit JIT).
 
 ## Boot sequence
 
@@ -297,8 +297,9 @@ overrides), seccomp, Landlock, the hardware RNG drivers. The 32-bit kernels keep
   Raspberry Pi 3, 4 and 5 (firmware mailbox and clocks, pin control, PCIe with the Pi 5's RP1 south bridge, SD/eMMC
   (the Pi 3's SDHOST with its DMA controller), NVMe, USB host (dwc2, xHCI) and storage, GENET and the RP1's Cadence
   GEM Ethernet with their Broadcom PHY, USB Ethernet (the Pi 3's smsc95xx and lan78xx), `bcm2835_wdt`, the mini UART,
-  the Cortex-A53 erratum 843419), every driver built in. `os/kbuild.sh arm64` cross-compiles it with
-  `aarch64-linux-gnu-` on other hosts and also builds the Pi devicetrees.
+  the Cortex-A53 erratum 843419), every driver built in, and `membarrier` (the JIT context-synchronizes every thread
+  after mapping new code). `os/kbuild.sh arm64` cross-compiles it with `aarch64-linux-gnu-` on other hosts and also
+  builds the Pi devicetrees.
 - **`i386`** (3.1 MB, best effort): old PCs. i686 (Pentium Pro instruction set, generic tuning) with PAE (NX),
   HIGHMEM up to 4 GiB, up to 8 CPUs. Built in like `metal`: ACPI, PCI, IDE/PATA and SATA of the common chipsets (Intel
   PIIX/ICH, AMD, VIA, SiS, ATI, nVidia, JMicron, Marvell, Silicon Image, Promise, ALi, ServerWorks) and AHCI, USB host
@@ -530,8 +531,9 @@ kernels and images with the release's i686 and armv7 musl k10s.
   before the signed applies, and with no power button every run ends in a power cut (the KV state survives each).
   QEMU's model resets the machine as soon as the watchdog is armed (it models the reset register, not the countdown),
   so this test runs without `watchdog=1`.
-- **mixed**: a Pi (as above) joins a cluster whose first member is an x86-64 k10s on the host (the x86-64 musl binary;
-  JIT); both see each other's OS report and serve the example services placed on either node.
+- **mixed**: a Pi (as above) joins a cluster whose first member is an x86-64 k10s on the host (the x86-64 musl binary);
+  both see each other's OS report and serve the example services placed on either node, each on its JIT (the Pi's
+  AArch64 code under QEMU's TCG).
 - **boot-i686**, **boot-armv7**: as boot-k10s with the i386 kernel (signed virtio-net and i6300esb modules) on QEMU `pc`
   with an Atom N270 (32-bit only, SSE2, PAE, NX), and with the armv7 kernel on QEMU `virt` without highmem (a
   Cortex-A15; devicetree: PL031 RTC from 2001, the `gpio-keys` power key, i6300esb).
@@ -553,11 +555,12 @@ kernels and images with the release's i686 and armv7 musl k10s.
   failed and the rollout stops.
 
 `scripts/ci-test.sh arm64` (CI and release gate, on a GitHub arm64 runner) runs every crate's unit and integration
-tests but the x86-64 JIT's natively on arm64, for the gnu and musl targets, on the interpreter. `scripts/ci-test.sh
-i686` (on an x86-64 runner) does the same for i686-unknown-linux-musl, natively; `scripts/ci-test.sh armv7` (on the
-arm64 runner) for armv7-unknown-linux-musleabihf, natively when the CPU runs AArch32 code, else the in-process suites
-under qemu-arm without the seccomp tests (qemu-user has no seccomp; the armv7 node runs under its filter in
-`os-legacy`) and the timing bounds.
+tests natively on arm64, for the gnu and musl targets: the AArch64 JIT's suites, then the node and CLI suites on the
+JIT and on the interpreter. `scripts/ci-test.sh i686` (on an x86-64 runner) does the same for
+i686-unknown-linux-musl, natively and without a JIT; `scripts/ci-test.sh armv7` (on the arm64 runner) for
+armv7-unknown-linux-musleabihf, natively when the CPU runs AArch32 code, else the in-process suites under qemu-arm
+without the seccomp tests (qemu-user has no seccomp; the armv7 node runs under its filter in `os-legacy`) and the
+timing bounds.
 
 Unit tests cover the configuration precedence, module tree parsing and modalias matching, the DHCP state machine
 against a fake server, SNTP sample checks and the GPT rewrite that grows `K10S-DATA` (512-byte and 4 KiB sectors,
@@ -599,8 +602,8 @@ and firmware that rejects RSA-4096 keys ("Secure Boot").
 - The images are not signed for Secure Boot: turn it off, or sign them with your own keys or a MOK ("Secure Boot").
 - The image uses 512-byte logical sectors; disks with 4 KiB logical sectors (rare outside servers) need a rebuilt
   image.
-- arm64 nodes run on the interpreter (the arm64 JIT is U4). The arm64 image has the virtio drivers of VMs and the Pi's;
-  arm64 servers need their NIC drivers added. The Pi image has no screen console (serial only).
+- The arm64 image has the virtio drivers of VMs and the Pi's; arm64 servers need their NIC drivers added. The Pi
+  image has no screen console (serial only).
 - i686 and armv7 are best effort and interpreter only (no 32-bit JIT): instance memory is at most 256 MiB (slots of
   2^28 bytes in a 3-4 GiB address space: a 32-bit node refuses a desired state that places a larger service on it, so
   a cluster with 32-bit members keeps its services at that size), fiber stacks are 256 KiB, and the

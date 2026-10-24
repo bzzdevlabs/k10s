@@ -126,7 +126,7 @@ assembly; the hand-written assembly is reserved for the few places where it matt
  │ mesh: gossip membership · manifest · blob store · place(manifest, members) → local replicas                     │
  │ net:  HTTP ingress · peer links (framed, multiplexed) · (metal: virtio queues, polled)                          │
  │ exec: per-core shard ─ run queue ─ pooled stacks ─ safepoint preemption ─ trap unwinding                        │
- │ code: TIR → x86-64 (single pass, cached by hash, shared by all instances)                                      │
+ │ code: TIR → x86-64 or AArch64 (single pass, cached by hash, shared by all instances)                           │
  │ mem:  one address space: [slot][slot][slot]… power-of-two slots, lazily committed, CoW snapshots after init    │
  │ host API: input/output, call(service), kv, log, time, random, config — the only way out of a slot              │
  └─────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -137,7 +137,8 @@ Crates:
 - `k10-nospec` — branch-free clamps for host code indexed by guest values (Spectre v1).
 - `k10-host` — the host API (function table, limits, semantics), shared by the hosted node and `k10-metal` (no_std).
 - `k10-lang` — Ten compiler (source → TIR) and its standard prelude.
-- `k10-jit` — TIR → x86-64 single-pass compiler and invocation trampolines (codegen no_std; exec needs a platform).
+- `k10-jit` — TIR → x86-64 / AArch64 single-pass compiler and invocation trampolines (codegen no_std; exec needs a
+  platform).
 - `k10-mesh` — sans-IO membership gossip, manifests, placement, wire codecs (no_std + alloc), plus a std driver.
 - `k10-node` — the hosted node runtime: shards, scheduler, stacks, instance pool, host API, ingress, KV, peers.
 - `k10s` — the single CLI/daemon binary.

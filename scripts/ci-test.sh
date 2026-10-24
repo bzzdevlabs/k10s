@@ -2,8 +2,8 @@
 # Test suites of CI and the release gate, same locally. usage: ci-test.sh SUITE...
 #   unit            all crates, release mode, JIT then interpreter (node, CLI); no #[ignore]d tests, no campaigns
 #   musl            the same on x86_64-unknown-linux-musl (the static release binary)
-#   arm64           on an arm64 host: all crates but the x86-64 JIT, on the interpreter (the native backend there),
-#                   for the host's gnu target and aarch64-unknown-linux-musl
+#   arm64           on an arm64 host: the same (the AArch64 JIT, its encoder and SFI verifier tests included) for
+#                   the host's gnu target and aarch64-unknown-linux-musl
 #   i686            on an x86-64 host: all crates but the JIT for i686-unknown-linux-musl, run natively (interpreter;
 #                   linked by rust-lld)
 #   armv7           on an arm64 host: the same for armv7-unknown-linux-musleabihf, natively when the CPU runs AArch32
@@ -27,7 +27,6 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CRATES=(-p k10-nospec -p k10-ir -p k10-host -p k10-mesh -p k10-lang -p k10-jit -p k10-node -p k10s)
-ARM_CRATES=(-p k10-nospec -p k10-ir -p k10-host -p k10-mesh -p k10-lang -p k10-node -p k10s)
 # The 32-bit targets: no JIT; under qemu-user the crates whose tests run in-process.
 I32_CRATES=(-p k10-nospec -p k10-ir -p k10-host -p k10-mesh -p k10-lang -p k10-node -p k10s)
 EMU_CRATES=(-p k10-nospec -p k10-ir -p k10-host -p k10-mesh -p k10-lang -p k10-node)
@@ -49,8 +48,8 @@ unit() { # [--target TRIPLE]
 
 arm64() {
     [[ $(uname -m) == aarch64 ]] || { echo "ci-test.sh: arm64 runs on an arm64 host" >&2; return 1; }
-    run cargo test --release --locked "${EXTRA[@]}" "${ARM_CRATES[@]}" -- "${SKIP[@]}"
-    run cargo test --release --locked --target aarch64-unknown-linux-musl "${EXTRA[@]}" "${ARM_CRATES[@]}" -- "${SKIP[@]}"
+    unit
+    unit --target aarch64-unknown-linux-musl
 }
 
 i686() {

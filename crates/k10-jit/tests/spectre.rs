@@ -4,24 +4,17 @@
 mod common;
 use common::*;
 use k10_ir::{new_memory, FuncBuilder, Host, Interp, Module, ModuleBuilder, Op, Trap};
-use k10_jit::x64::{Alu, Asm, Cond, Mem, Reg, Size, RM};
-use k10_jit::{compile_blob, compile_with, CompileOptions, IndirectBranch};
+use k10_jit::{CompileOptions, IndirectBranch};
+#[cfg(target_arch = "aarch64")]
+use a64::jump_tables;
 use Op::*;
-use Reg::*;
+#[cfg(target_arch = "x86_64")]
+use x64::jump_tables;
 
 const MODES: [IndirectBranch; 3] = [IndirectBranch::Jump, IndirectBranch::Lfence, IndirectBranch::Retpoline];
-/// Allocatable registers (never r11, rsp, r13-r15).
-const ALLOCATABLE: [Reg; 11] = [Rsi, Rdi, R8, R9, R10, Rbx, Rbp, R12, Rax, Rcx, Rdx];
-use common::RETPOLINE_THUNK as THUNK;
 
 fn opts(indirect: IndirectBranch, br_tree_max: u16) -> CompileOptions {
     CompileOptions { indirect, br_tree_max, ..CompileOptions::default() }
-}
-
-fn asm(f: impl FnOnce(&mut Asm)) -> Vec<u8> {
-    let mut a = Asm::new();
-    f(&mut a);
-    a.finish().unwrap()
 }
 
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
@@ -56,118 +49,6 @@ fn switch_module(n: usize) -> (Module, u32) {
     (mb.build(), f)
 }
 
-/// Jump-table sequence of docs/JIT-ABI.md in every mode: clamp, table load, the mode's jump, `n + 1` entries.
-#[test]
-fn jump_table_sequence() {
-    for n in [5usize, 16, 300] {
-        let (m, _) = switch_module(n);
-        for mode in MODES {
-            let blob = compile_blob(&m, &opts(mode, 0)).unwrap();
-            let code = blob.code();
-            let (r, at) = ALLOCATABLE
-                .iter()
-                .find_map(|&r| {
-                    let clamp = asm(|a| {
-                        a.mov_ri(R11, n as i64);
-                        a.alu(Alu::Cmp, r, RM::R(R11));
-                        a.cmov(Cond::Ae, r, RM::R(R11));
-                    });
-                    find(code, &clamp).map(|p| (r, p + clamp.len()))
-                })
-                .unwrap_or_else(|| panic!("n={n} {mode:?}: no branch-free clamp"));
-            assert_eq!(&code[at..at + 3], &[0x4C, 0x8D, 0x1D], "lea r11, [rip + table]");
-            let table = (at + 7) as i64 + i32::from_le_bytes(code[at + 3..at + 7].try_into().unwrap()) as i64;
-            let load = asm(|a| a.movsxd(r, RM::M(Mem::bi(R11, r, 2, 0))));
-            let at = at + 7;
-            assert_eq!(&code[at..at + load.len()], &load[..], "movsxd r, [r11 + 4r]");
-            let at = at + load.len();
-            let jump = match mode {
-                IndirectBranch::Jump => asm(|a| {
-                    a.alu(Alu::Add, r, RM::R(R11));
-                    a.jmp_rm(RM::R(r));
-                }),
-                IndirectBranch::Lfence => asm(|a| {
-                    a.alu(Alu::Add, R11, RM::R(r));
-                    a.lfence();
-                    a.jmp_rm(RM::R(R11));
-                }),
-                IndirectBranch::Retpoline => asm(|a| a.alu(Alu::Add, R11, RM::R(r))),
-            };
-            assert_eq!(&code[at..at + jump.len()], &jump[..], "n={n} {mode:?}: jump");
-            let mut end = at + jump.len();
-            if mode == IndirectBranch::Retpoline {
-                let thunk = find(code, &THUNK).expect("retpoline thunk") as i64;
-                let target = match code[end] {
-                    0xEB => end as i64 + 2 + code[end + 1] as i8 as i64,
-                    0xE9 => end as i64 + 5 + i32::from_le_bytes(code[end + 1..end + 5].try_into().unwrap()) as i64,
-                    b => panic!("expected jmp to the thunk, found {b:#x}"),
-                };
-                assert_eq!(target, thunk, "br_table jumps through the retpoline thunk");
-                end += if code[end] == 0xEB { 2 } else { 5 };
-            }
-            // Then the 4-aligned table: n + 1 entries, all targets in this function.
-            assert_eq!(table as usize, end.next_multiple_of(4));
-            for k in 0..=n {
-                let e = table as usize + 4 * k;
-                let t = table + i32::from_le_bytes(code[e..e + 4].try_into().unwrap()) as i64;
-                assert!(t > table + 4 * n as i64 && (t as usize) < code.len(), "entry {k} -> {t:#x}");
-            }
-        }
-    }
-}
-
-/// One thunk in retpoline mode only; small tables become compare trees (no table `lea`).
-#[test]
-fn thunk_and_trees() {
-    let (m, _) = switch_module(16);
-    for mode in MODES {
-        let code = compile_blob(&m, &opts(mode, 0)).unwrap().code().to_vec();
-        assert_eq!(count(&code, &THUNK), (mode == IndirectBranch::Retpoline) as usize, "{mode:?}");
-    }
-    for n in [1usize, 2, 3, 4, 7] {
-        let (m, _) = switch_module(n);
-        let code = compile_blob(&m, &opts(IndirectBranch::Jump, k10_jit::DEFAULT_BR_TREE_MAX)).unwrap().code().to_vec();
-        assert_eq!(count(&code, &[0x4C, 0x8D, 0x1D]), 0, "n={n}: compare tree expected, found a table load");
-        let code = compile_blob(&m, &opts(IndirectBranch::Jump, 0)).unwrap().code().to_vec();
-        assert_eq!(count(&code, &[0x4C, 0x8D, 0x1D]), 1, "n={n}: br_tree_max 0 forces a jump table");
-    }
-}
-
-/// Host-call sequence per mode (docs/JIT-ABI.md).
-#[test]
-fn host_call_sequences() {
-    let mut mb = ModuleBuilder::new();
-    let _h0 = mb.import("h0", 1, 1);
-    let h1 = mb.import("h1", 1, 1);
-    let f = mb.func(1, 1, |f| {
-        f.ops(&[LocalGet(0), Call(h1)]);
-    });
-    mb.export("f", f);
-    let m = mb.build();
-    for mode in MODES {
-        let code = compile_blob(&m, &opts(mode, 0)).unwrap().code().to_vec();
-        let seq = asm(|a| {
-            a.load(Size::S64, Rax, Mem::b(R14, k10_jit::abi::OFF_HOST_FNS));
-            match mode {
-                IndirectBranch::Jump => a.call_rm(RM::M(Mem::b(Rax, 8))),
-                IndirectBranch::Lfence => {
-                    a.load(Size::S64, R11, Mem::b(Rax, 8));
-                    a.lfence();
-                    a.call_rm(RM::R(R11));
-                }
-                IndirectBranch::Retpoline => a.load(Size::S64, R11, Mem::b(Rax, 8)),
-            }
-        });
-        let p = find(&code, &seq).unwrap_or_else(|| panic!("{mode:?}: host call sequence not found"));
-        if mode == IndirectBranch::Retpoline {
-            let at = p + seq.len();
-            assert_eq!(code[at], 0xE8, "call thunk");
-            let target = at as i64 + 5 + i32::from_le_bytes(code[at + 1..at + 5].try_into().unwrap()) as i64;
-            assert_eq!(target, find(&code, &THUNK).unwrap() as i64);
-        }
-    }
-}
-
 /// Compare tree over non-adjacent duplicate targets with the default in the middle (8 runs), against the
 /// interpreter and the jump-table lowering, on boundary, negative and huge indices.
 #[test]
@@ -185,7 +66,7 @@ fn compare_tree_runs() {
     let m = mb.build();
     let it = Interp::new(&m).unwrap();
     let tree = compile_blob(&m, &opts(IndirectBranch::Jump, 8)).unwrap().code().to_vec();
-    assert_eq!(count(&tree, &[0x4C, 0x8D, 0x1D]), 0, "8 runs: compare tree");
+    assert_eq!(jump_tables(&tree), 0, "8 runs: compare tree");
     for tree_max in [8, 0] {
         let jit = compile_with(&m, &opts(IndirectBranch::Jump, tree_max)).unwrap();
         for x in [-2i64, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 1 << 32, i64::MAX, i64::MIN] {
@@ -267,6 +148,323 @@ fn all_modes_run_like_the_interpreter() {
                     assert_eq!(gm.mem(), &im[..gm.mem().len()], "{mode:?}: memory");
                     gm.check_canaries();
                     assert_eq!(interrupts > 0, preempt_on_call, "{mode:?}: interrupt hook calls");
+                }
+            }
+        }
+    }
+}
+
+/// The x86-64 sequences.
+#[cfg(target_arch = "x86_64")]
+mod x64 {
+    use super::*;
+    use common::RETPOLINE_THUNK as THUNK;
+    use k10_jit::x64::{Alu, Asm, Cond, Mem, Reg, Size, RM};
+    use Reg::*;
+
+    /// Allocatable registers (never r11, rsp, r13-r15).
+    const ALLOCATABLE: [Reg; 11] = [Rsi, Rdi, R8, R9, R10, Rbx, Rbp, R12, Rax, Rcx, Rdx];
+
+    fn asm(f: impl FnOnce(&mut Asm)) -> Vec<u8> {
+        let mut a = Asm::new();
+        f(&mut a);
+        a.finish().unwrap()
+    }
+
+    /// Jump-table loads (`lea r11, [rip + table]`) in `code`.
+    pub fn jump_tables(code: &[u8]) -> usize {
+        count(code, &[0x4C, 0x8D, 0x1D])
+    }
+
+    /// Jump-table sequence of docs/JIT-ABI.md in every mode: clamp, table load, the mode's jump, `n + 1` entries.
+    #[test]
+    fn jump_table_sequence() {
+        for n in [5usize, 16, 300] {
+            let (m, _) = switch_module(n);
+            for mode in MODES {
+                let blob = compile_blob(&m, &opts(mode, 0)).unwrap();
+                let code = blob.code();
+                let (r, at) = ALLOCATABLE
+                    .iter()
+                    .find_map(|&r| {
+                        let clamp = asm(|a| {
+                            a.mov_ri(R11, n as i64);
+                            a.alu(Alu::Cmp, r, RM::R(R11));
+                            a.cmov(Cond::Ae, r, RM::R(R11));
+                        });
+                        find(code, &clamp).map(|p| (r, p + clamp.len()))
+                    })
+                    .unwrap_or_else(|| panic!("n={n} {mode:?}: no branch-free clamp"));
+                assert_eq!(&code[at..at + 3], &[0x4C, 0x8D, 0x1D], "lea r11, [rip + table]");
+                let table = (at + 7) as i64 + i32::from_le_bytes(code[at + 3..at + 7].try_into().unwrap()) as i64;
+                let load = asm(|a| a.movsxd(r, RM::M(Mem::bi(R11, r, 2, 0))));
+                let at = at + 7;
+                assert_eq!(&code[at..at + load.len()], &load[..], "movsxd r, [r11 + 4r]");
+                let at = at + load.len();
+                let jump = match mode {
+                    IndirectBranch::Jump => asm(|a| {
+                        a.alu(Alu::Add, r, RM::R(R11));
+                        a.jmp_rm(RM::R(r));
+                    }),
+                    IndirectBranch::Lfence => asm(|a| {
+                        a.alu(Alu::Add, R11, RM::R(r));
+                        a.lfence();
+                        a.jmp_rm(RM::R(R11));
+                    }),
+                    IndirectBranch::Retpoline => asm(|a| a.alu(Alu::Add, R11, RM::R(r))),
+                };
+                assert_eq!(&code[at..at + jump.len()], &jump[..], "n={n} {mode:?}: jump");
+                let mut end = at + jump.len();
+                if mode == IndirectBranch::Retpoline {
+                    let thunk = find(code, &THUNK).expect("retpoline thunk") as i64;
+                    let target = match code[end] {
+                        0xEB => end as i64 + 2 + code[end + 1] as i8 as i64,
+                        0xE9 => end as i64 + 5 + i32::from_le_bytes(code[end + 1..end + 5].try_into().unwrap()) as i64,
+                        b => panic!("expected jmp to the thunk, found {b:#x}"),
+                    };
+                    assert_eq!(target, thunk, "br_table jumps through the retpoline thunk");
+                    end += if code[end] == 0xEB { 2 } else { 5 };
+                }
+                // Then the 4-aligned table: n + 1 entries, all targets in this function.
+                assert_eq!(table as usize, end.next_multiple_of(4));
+                for k in 0..=n {
+                    let e = table as usize + 4 * k;
+                    let t = table + i32::from_le_bytes(code[e..e + 4].try_into().unwrap()) as i64;
+                    assert!(t > table + 4 * n as i64 && (t as usize) < code.len(), "entry {k} -> {t:#x}");
+                }
+            }
+        }
+    }
+
+    /// One thunk in retpoline mode only; small tables become compare trees (no table `lea`).
+    #[test]
+    fn thunk_and_trees() {
+        let (m, _) = switch_module(16);
+        for mode in MODES {
+            let code = compile_blob(&m, &opts(mode, 0)).unwrap().code().to_vec();
+            assert_eq!(count(&code, &THUNK), (mode == IndirectBranch::Retpoline) as usize, "{mode:?}");
+        }
+        for n in [1usize, 2, 3, 4, 7] {
+            let (m, _) = switch_module(n);
+            let code = compile_blob(&m, &opts(IndirectBranch::Jump, k10_jit::DEFAULT_BR_TREE_MAX)).unwrap().code().to_vec();
+            assert_eq!(jump_tables(&code), 0, "n={n}: compare tree expected, found a table load");
+            let code = compile_blob(&m, &opts(IndirectBranch::Jump, 0)).unwrap().code().to_vec();
+            assert_eq!(jump_tables(&code), 1, "n={n}: br_tree_max 0 forces a jump table");
+        }
+    }
+
+    /// Host-call sequence per mode (docs/JIT-ABI.md).
+    #[test]
+    fn host_call_sequences() {
+        let mut mb = ModuleBuilder::new();
+        let _h0 = mb.import("h0", 1, 1);
+        let h1 = mb.import("h1", 1, 1);
+        let f = mb.func(1, 1, |f| {
+            f.ops(&[LocalGet(0), Call(h1)]);
+        });
+        mb.export("f", f);
+        let m = mb.build();
+        for mode in MODES {
+            let code = compile_blob(&m, &opts(mode, 0)).unwrap().code().to_vec();
+            let seq = asm(|a| {
+                a.load(Size::S64, Rax, Mem::b(R14, k10_jit::abi::OFF_HOST_FNS));
+                match mode {
+                    IndirectBranch::Jump => a.call_rm(RM::M(Mem::b(Rax, 8))),
+                    IndirectBranch::Lfence => {
+                        a.load(Size::S64, R11, Mem::b(Rax, 8));
+                        a.lfence();
+                        a.call_rm(RM::R(R11));
+                    }
+                    IndirectBranch::Retpoline => a.load(Size::S64, R11, Mem::b(Rax, 8)),
+                }
+            });
+            let p = find(&code, &seq).unwrap_or_else(|| panic!("{mode:?}: host call sequence not found"));
+            if mode == IndirectBranch::Retpoline {
+                let at = p + seq.len();
+                assert_eq!(code[at], 0xE8, "call thunk");
+                let target = at as i64 + 5 + i32::from_le_bytes(code[at + 1..at + 5].try_into().unwrap()) as i64;
+                assert_eq!(target, find(&code, &THUNK).unwrap() as i64);
+            }
+        }
+    }
+}
+
+/// The AArch64 sequences.
+#[cfg(target_arch = "aarch64")]
+mod a64 {
+    use super::*;
+    use k10_jit::a64::{Alu, Asm, Cond, Domain, LdSt, Reg};
+    use k10_jit::CpuFeatures;
+    use Reg::*;
+
+    /// Scratch registers of the code generator (never x16/x17, x18, x26-x30).
+    const ALLOCATABLE: [Reg; 23] =
+        [X9, X10, X11, X12, X13, X14, X15, X8, X19, X20, X21, X22, X23, X24, X25, X7, X6, X5, X4, X3, X2, X1, X0];
+
+    fn asm(f: impl FnOnce(&mut Asm)) -> Vec<u8> {
+        let mut a = Asm::new();
+        f(&mut a);
+        a.finish().unwrap()
+    }
+
+    fn word(code: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes(code[at..at + 4].try_into().unwrap())
+    }
+
+    /// Jump-table address computations (`adr x16, table`) in `code`.
+    pub fn jump_tables(code: &[u8]) -> usize {
+        (0..code.len() / 4).filter(|&k| word(code, 4 * k) & 0x9F00_001F == 0x1000_0010).count()
+    }
+
+    /// The speculation barrier of the hardened modes: `sb` with FEAT_SB, else `dsb nsh; isb`.
+    fn barrier(a: &mut Asm, sb: bool) {
+        if sb {
+            a.sb();
+        } else {
+            a.dsb(Domain::Nsh);
+            a.isb();
+        }
+    }
+
+    /// The retpoline thunk of docs/JIT-ABI.md: `mov x17, x30; bl 1f; 2: <barrier>; b 2b; 1: mov x30, x17; ret x16`.
+    fn thunk(sb: bool) -> Vec<u8> {
+        asm(|a| {
+            let (set, spin) = (a.new_label(), a.new_label());
+            a.mov(X17, X30);
+            a.bl(set);
+            a.bind(spin);
+            barrier(a, sb);
+            a.b(spin);
+            a.bind(set);
+            a.mov(X30, X17);
+            a.ret(X16);
+        })
+    }
+
+    /// Target of the `b`/`bl` word at `at`.
+    fn branch_target(code: &[u8], at: usize) -> usize {
+        let w = word(code, at);
+        assert_eq!(w & 0x7C00_0000, 0x1400_0000, "b/bl expected at {at:#x}, found {w:#010x}");
+        (at as i64 + 4 * (((w << 6) as i32) >> 6) as i64) as usize
+    }
+
+    fn feature_sets() -> [CpuFeatures; 2] {
+        [CpuFeatures::BASELINE, CpuFeatures { sb: true, ..CpuFeatures::BASELINE }]
+    }
+
+    /// Jump-table sequence of docs/JIT-ABI.md in every mode and barrier form: clamp (`csel` + `csdb`), table
+    /// address and load, the mode's jump, then the `n + 1` entries.
+    #[test]
+    fn jump_table_sequence() {
+        for n in [5usize, 16, 300] {
+            let (m, _) = switch_module(n);
+            for mode in MODES {
+                for features in feature_sets() {
+                    let blob = compile_blob(&m, &CompileOptions { features, ..opts(mode, 0) }).unwrap();
+                    let code = blob.code();
+                    let (r, at) = ALLOCATABLE
+                        .iter()
+                        .find_map(|&r| {
+                            let clamp = asm(|a| {
+                                a.mov_imm(X16, n as i64);
+                                a.cmp(r, X16);
+                                a.csel(r, r, X16, Cond::Lo);
+                                a.csdb();
+                            });
+                            find(code, &clamp).map(|p| (r, p + clamp.len()))
+                        })
+                        .unwrap_or_else(|| panic!("n={n} {mode:?}: no csel + csdb clamp"));
+                    let w = word(code, at);
+                    assert_eq!(w & 0x9F00_001F, 0x1000_0010, "adr x16, table");
+                    let off = ((((w >> 5) & 0x7_FFFF) << 2) | ((w >> 29) & 3)) as i64;
+                    let table = at as i64 + ((off << 43) >> 43);
+                    let rest = asm(|a| {
+                        a.ldst_reg(LdSt::Ldrsw, r, X16, r, true);
+                        a.alu(Alu::Add, X16, X16, r);
+                        if mode == IndirectBranch::Lfence {
+                            barrier(a, features.sb);
+                        }
+                        if mode != IndirectBranch::Retpoline {
+                            a.br(X16);
+                        }
+                    });
+                    let at = at + 4;
+                    assert_eq!(&code[at..at + rest.len()], &rest[..], "n={n} {mode:?}: load and jump");
+                    let mut end = at + rest.len();
+                    if mode == IndirectBranch::Retpoline {
+                        let t = find(code, &thunk(features.sb)).expect("retpoline thunk");
+                        assert_eq!(branch_target(code, end), t, "br_table jumps through the retpoline thunk");
+                        assert_eq!(word(code, end) >> 26, 0b000101, "b, not bl");
+                        end += 4;
+                    }
+                    // Then the table: n + 1 entries, all targets in this function, after the table.
+                    assert_eq!(table as usize, end);
+                    for k in 0..=n {
+                        let e = table as usize + 4 * k;
+                        let t = table + i32::from_le_bytes(code[e..e + 4].try_into().unwrap()) as i64;
+                        assert!(t > table + 4 * n as i64 && (t as usize) < code.len(), "entry {k} -> {t:#x}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// One 16-byte aligned thunk in retpoline mode only, with the CPU's barrier form; small tables become compare
+    /// trees (no table address).
+    #[test]
+    fn thunk_and_trees() {
+        let (m, _) = switch_module(16);
+        for mode in MODES {
+            for features in feature_sets() {
+                let code = compile_blob(&m, &CompileOptions { features, ..opts(mode, 0) }).unwrap().code().to_vec();
+                let want = (mode == IndirectBranch::Retpoline) as usize;
+                assert_eq!(count(&code, &thunk(features.sb)), want, "{mode:?} {features:?}");
+                assert_eq!(count(&code, &thunk(!features.sb)), 0, "{mode:?} {features:?}: other barrier form");
+                if let Some(t) = find(&code, &thunk(features.sb)) {
+                    assert_eq!(t % 16, 0, "thunk alignment");
+                }
+            }
+        }
+        for n in [1usize, 2, 3, 4, 7] {
+            let (m, _) = switch_module(n);
+            let code = compile_blob(&m, &opts(IndirectBranch::Jump, k10_jit::DEFAULT_BR_TREE_MAX)).unwrap().code().to_vec();
+            assert_eq!(jump_tables(&code), 0, "n={n}: compare tree expected, found a table load");
+            let code = compile_blob(&m, &opts(IndirectBranch::Jump, 0)).unwrap().code().to_vec();
+            assert_eq!(jump_tables(&code), 1, "n={n}: br_tree_max 0 forces a jump table");
+        }
+    }
+
+    /// Host-call sequence per mode and barrier form (docs/JIT-ABI.md).
+    #[test]
+    fn host_call_sequences() {
+        let mut mb = ModuleBuilder::new();
+        let _h0 = mb.import("h0", 1, 1);
+        let h1 = mb.import("h1", 1, 1);
+        let f = mb.func(1, 1, |f| {
+            f.ops(&[LocalGet(0), Call(h1)]);
+        });
+        mb.export("f", f);
+        let m = mb.build();
+        for mode in MODES {
+            for features in feature_sets() {
+                let code = compile_blob(&m, &CompileOptions { features, ..opts(mode, 0) }).unwrap().code().to_vec();
+                let seq = asm(|a| {
+                    a.ldst_imm(LdSt::LdrX, X16, X26, k10_jit::abi::OFF_HOST_FNS as u32);
+                    a.ldst_imm(LdSt::LdrX, X16, X16, 8);
+                    match mode {
+                        IndirectBranch::Jump => a.blr(X16),
+                        IndirectBranch::Lfence => {
+                            barrier(a, features.sb);
+                            a.blr(X16);
+                        }
+                        IndirectBranch::Retpoline => {}
+                    }
+                });
+                let p = find(&code, &seq).unwrap_or_else(|| panic!("{mode:?}: host call sequence not found"));
+                if mode == IndirectBranch::Retpoline {
+                    let at = p + seq.len();
+                    assert_eq!(word(&code, at) >> 26, 0b100101, "bl thunk");
+                    assert_eq!(branch_target(&code, at), find(&code, &thunk(features.sb)).unwrap());
                 }
             }
         }

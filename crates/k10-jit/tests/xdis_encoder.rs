@@ -2,6 +2,8 @@
 //! to exactly the expected length and Intel text (all GPRs incl. spl/bpl/sil/dil and r8-r15, xmm0-15, rsp/r12 SIB
 //! and rbp/r13 disp8 cases, disp8/disp32 and imm sign-extension boundaries, jump and RIP-relative targets).
 //! `K10_FUZZ_SEED`, `K10_FUZZ_ITERS` (default 30 000); `K10_FUZZ_LONG=1`: 2 000 000.
+//! x86-64 only (AArch64: xdis_encoder_a64.rs).
+#![cfg(target_arch = "x86_64")]
 
 mod xdis;
 

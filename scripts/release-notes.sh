@@ -51,7 +51,7 @@ cat <<EOF
 |---|---|
 | \`k10s-$v-x86_64-unknown-linux-musl.tar.gz\` | \`k10s\` CLI + node daemon, static (any x86-64 Linux) |
 | \`k10s-$v-x86_64-unknown-linux-gnu.tar.gz\` | \`k10s\` linked against glibc (>= 2.34) |
-| \`k10s-$v-aarch64-unknown-linux-musl.tar.gz\` | \`k10s\` for arm64 Linux, static (services on the interpreter) |
+| \`k10s-$v-aarch64-unknown-linux-musl.tar.gz\` | \`k10s\` for arm64 Linux, static (AArch64 JIT) |
 | \`k10s-$v-i686-unknown-linux-musl.tar.gz\`, \`k10s-$v-armv7-unknown-linux-musleabihf.tar.gz\` | \`k10s\` for 32-bit x86 and ARM Linux, static, interpreter only (best effort) |
 | \`k10s-examples-$v.tar.gz\` | example services: Ten sources, compiled \`.k10\` modules, \`app.k10s\` |
 | \`k10s-metal-$v-x86_64.tar.gz\` | bare-metal kernel (\`k10-metal.elf\`, \`k10-metal-embedded.elf\`), \`bundle.k10b\`, \`mkbundle\` |

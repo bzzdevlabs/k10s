@@ -10,7 +10,7 @@ use common::diff::{cfg_for, opts_for};
 use common::*;
 use k10_ir::gen::{gen_module, DiffHost, Rng};
 use k10_ir::{new_memory, validate, Interp, Module, Op, Trap};
-use k10_jit::{compile_blob, compile_with, VmCtx};
+use k10_jit::VmCtx;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 

@@ -487,7 +487,7 @@ fn main() {
         );
         println!("  compile() incl. mmap/mprotect/munmap: {:.2} µs/module", t_full.as_secs_f64() * 1e6 / count as f64);
         println!(
-            "  code size: {:.2} bytes of x86-64 per TIR byte ({:.2} excluding the {prelude}-byte shared prelude)\n",
+            "  code size: {:.2} bytes of code per TIR byte ({:.2} excluding the {prelude}-byte shared prelude)\n",
             code as f64 / tir as f64,
             (code - prelude * count as usize) as f64 / tir as f64
         );

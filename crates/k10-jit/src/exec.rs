@@ -1,4 +1,9 @@
 //! Executable memory (W^X) and the `CompiledModule` API (std).
+//!
+//! The mapping is page-aligned with the kernel's page size (`sysconf`: 4 KiB, or 16/64 KiB on some AArch64
+//! kernels). On AArch64 sealing also makes the code visible to instruction fetch: cache maintenance over the code
+//! ([`crate::cache::sync_icache`]), then `membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE)` so that every
+//! thread of the process context-synchronizes before it can run the new code (Arm ARM B2.2.5).
 
 use crate::abi::VmCtx;
 use crate::blob::{BlobMeta, CodeBlob};
@@ -55,8 +60,31 @@ impl ExecMem {
         if unsafe { libc::mprotect(p, len, libc::PROT_READ | libc::PROT_EXEC) } != 0 {
             return Err(CompileError::Memory(os_error())); // Drop unmaps
         }
+        #[cfg(target_arch = "aarch64")]
+        {
+            // SAFETY: the mapping is readable.
+            unsafe { crate::cache::sync_icache(mem.ptr, blob.len()) };
+            sync_cores().map_err(CompileError::Memory)?;
+        }
         Ok(mem)
     }
+}
+
+/// Context-synchronizes every thread of the process (`membarrier` SYNC_CORE, registered on first use).
+#[cfg(target_arch = "aarch64")]
+fn sync_cores() -> Result<(), i32> {
+    const MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE: libc::c_long = 1 << 5;
+    const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE: libc::c_long = 1 << 6;
+    fn membarrier(cmd: libc::c_long) -> Result<(), i32> {
+        // SAFETY: membarrier takes no pointers.
+        match unsafe { libc::syscall(libc::SYS_membarrier, cmd, 0, 0) } {
+            0 => Ok(()),
+            _ => Err(os_error()),
+        }
+    }
+    static REGISTERED: OnceLock<Result<(), i32>> = OnceLock::new();
+    (*REGISTERED.get_or_init(|| membarrier(MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE)))?;
+    membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE)
 }
 
 impl Drop for ExecMem {
@@ -131,6 +159,11 @@ impl CompiledModule {
         self.meta.code_len()
     }
 
+    /// Size of the executable mapping holding it (whole pages of the kernel's page size).
+    pub fn mapped_bytes(&self) -> usize {
+        self.mem.len
+    }
+
     /// Start of the executable code.
     pub fn code_ptr(&self) -> *const u8 {
         self.mem.ptr
@@ -147,7 +180,8 @@ fn dump_dir() -> Option<&'static std::path::Path> {
 }
 
 /// `K10_JIT_DUMP=dir`: writes `k10jit-<pid>-<n>.bin` (raw code, disassemble with
-/// `objdump -D -b binary -mi386:x86-64 file.bin`) and a `.txt` map of function offsets. Best effort.
+/// `objdump -D -b binary -mi386:x86-64 file.bin`, or `-maarch64` on AArch64) and a `.txt` map of function offsets.
+/// Best effort.
 fn dump(dir: &std::path::Path, blob: &CodeBlob) {
     use std::fmt::Write as _;
     static N: AtomicU64 = AtomicU64::new(0);

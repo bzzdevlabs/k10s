@@ -62,7 +62,7 @@ decision and everything that follows from it:
 | etcd + apiserver + scheduler + controllers | Gossip (SWIM) + a **pure placement function** every node computes itself | no leader, no consensus on placement, nothing to watch |
 | Liveness/readiness probes | The runtime runs the code: traps, timeouts and CPU overruns are facts | no polling |
 | Guest Linux in every VM | Optional: the same runtime boots as its own kernel (`metal/`) | 3 MiB RAM, ~3 ms to ready after kernel entry |
-| Language runtimes, GC, libc per workload | **Ten** (small C-like language, no GC, no runtime) → **TIR** (single value type, structured stack IR) → single-pass x86-64 JIT | no per-workload runtime; any language can target TIR later |
+| Language runtimes, GC, libc per workload | **Ten** (small C-like language, no GC, no runtime) → **TIR** (single value type, structured stack IR) → single-pass x86-64 / AArch64 JIT | no per-workload runtime; any language can target TIR later |
 
 Design rationale: [DESIGN.md](DESIGN.md); literature evidence: [research.md](research.md).
 
@@ -72,7 +72,7 @@ Design rationale: [DESIGN.md](DESIGN.md); literature evidence: [research.md](res
 |---|---|---|---|
 | TIR: codec, validator, reference interpreter, random program generator | `crates/k10-ir` | 4.3k / 2.7k | done, `no_std` |
 | Ten compiler + prelude + 8 example services | `crates/k10-lang`, `examples/` | 6.6k / 3.0k | done |
-| Single-pass TIR → x86-64 JIT (the isolation boundary) | `crates/k10-jit` | 3.8k / 7.1k | done, `no_std` codegen |
+| Single-pass TIR → x86-64 and AArch64 JIT (the isolation boundary) | `crates/k10-jit` | 7.8k / 10.7k | done, `no_std` codegen |
 | Gossip membership, manifests, bundles, placement, wire protocol, simulator | `crates/k10-mesh` | 7.8k / 0.7k | done, sans-IO, `no_std` |
 | Host API shared by the node and the bare-metal kernel; speculation-safe bounds | `crates/k10-host`, `crates/k10-nospec` | 0.9k (+ unit tests) | done, `no_std` |
 | Node runtime (shards, fibers, slots, CoW snapshots, host API, KV, ingress, admin, cluster, JIT backend) | `crates/k10-node` | 13.3k / 1.6k (+ unit tests) | done |
@@ -171,7 +171,7 @@ the caveats. Highlights beyond §0:
    links, signed admin requests).
 2. **Replicated state:** per-service replicated KV (Raft per shard group) and leases for singletons.
 3. **Tier 1 images** (U0–U2, done): PID-1 mode in main, x86 images, signed A/B updates spread over gossip.
-4. **arm64:** interpreter everywhere now; arm64 JIT backend (shared by both tiers).
+4. **arm64:** the hosted node runs the AArch64 JIT (U4); the native kernel's arm64 port (Tier 2 M5, M6) will reuse it.
 5. **Tier 2 M1–M2:** UEFI + BIOS + ACPI + modern virtio + NVMe + durable KV log on the native kernel; then clouds
    (ENA, VMBus, gVNIC) and curated x86 bare metal before the Pi.
 6. **Performance:** register allocation in the JIT, 32-bit TIR ops, cheaper cross-node forwarding (fewer hand-offs).
