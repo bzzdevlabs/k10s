@@ -321,10 +321,11 @@ class PiNode:
             if self.done.is_set():
                 break
             time.sleep(0.05)
+        stopped = self.done.is_set()
         self.kill()
         with open(self.log, "w") as f:
             f.write(self.text())
-        fail(f"{'the Pi stopped' if self.done.is_set() else 'timeout'} waiting for: {what or pattern}", self.log)
+        fail(f"{'the Pi stopped' if stopped else 'timeout'} waiting for: {what or pattern}", self.log)
 
     def power_button(self):
         self.boots[-1].power_button()
@@ -862,7 +863,10 @@ def update_test(a, work, pi=False, pi3=False):
             fail(f"booted an unknown image {m.group(2)}", g.log)
         g.wait_for(r"ready: the node answers", "node ready", m.end())
         if pi3:
-            g.wait_for(r"time: stepped by \+\d+\.\d+ s from 10\.0\.2\.2", "SNTP step", m.end())
+            # Init reports the slot once it has hashed the image, alongside the network and SNTP: the step may come
+            # first, so it is looked for from the start of this boot.
+            boot = g.text().rfind(" as PID 1 on Linux ", 0, m.start())
+            g.wait_for(r"time: stepped by \+\d+\.\d+ s from 10\.0\.2\.2", "SNTP step", max(boot, since))
         # A cluster node restores its services from the persisted desired state once it is up.
         end = time.time() + 30
         while True:
