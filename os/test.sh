@@ -97,7 +97,7 @@ if has boot-i686 image-i686 update-i686; then
     [[ -f $image_key ]] || "$host" keygen -o "$image_key"
     # The image with the console on serial last (the release image ends with the screen), slot A signed by the test key.
     python3 os/mkimage.py "$out/i686-serial.img" --arch i686 --kernel "$i386/arch/x86/boot/bzImage" \
-        --initrd "$out/initrd-i686.cpio.zst" --initrd "$(os/firmware.sh)" --cmdline "console=tty0 console=ttyS0,115200 quiet panic=5" \
+        --initrd "$out/initrd-i686.cpio.zst" --initrd "$(os/firmware.sh)" --cmdline "console=tty0 console=ttyS0,115200 quiet panic=5 k10s.bootwait=30000" \
         --boot "$(os/bootfiles.sh i686)" --sign "$image_key" --k10s "$host" --profile metal --uki "$out/i686-serial.efi"
 fi
 if has boot-armv7 image-armv7 update-armv7; then
@@ -138,7 +138,7 @@ if has secureboot secureboot-arm64; then
 fi
 if has image-metal; then
     python3 os/mkimage.py "$out/metal-serial.img" --kernel "$metal/arch/x86/boot/bzImage" --initrd "$out/initrd-metal.cpio.zst" \
-        --initrd "$(os/firmware.sh)" --cmdline "console=tty0 console=ttyS0,115200 quiet panic=5" --boot "$(os/bootfiles.sh)"
+        --initrd "$(os/firmware.sh)" --cmdline "console=tty0 console=ttyS0,115200 quiet panic=5 k10s.bootwait=30000" --boot "$(os/bootfiles.sh)"
 fi
 
 for t in "${tests[@]}"; do

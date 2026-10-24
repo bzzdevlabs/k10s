@@ -76,7 +76,7 @@ prefix). Init consumes these keys:
 | `ntp` | `HOST[:PORT],…`, or `none` | the lease's, else `pool.ntp.org` |
 | `modules` | `none` to skip module loading | load by modalias |
 | `data` | `/dev/X[:FSTYPE]`, or `none` | partition `K10S-DATA`, ext4 |
-| `bootwait` | milliseconds to wait for `K10S-BOOT` to appear | 0 |
+| `bootwait` | milliseconds to wait for `K10S-BOOT` to appear | 0; 30000 on the `metal` and Pi images (USB disks and SD cards appear after init starts) |
 | `grow` | `0` to keep the size of `K10S-DATA` | grow to the end of the disk |
 | `watchdog` | `1` to arm `/dev/watchdog` | off |
 | `prune_modules` | `1` to free unused module files from the RAM initramfs after boot | off |
@@ -144,7 +144,8 @@ UEFI firmware starts systemd-boot, which starts the UKI; BIOS starts GRUB from t
 the ESP of the boot disk; GRUB shows nothing unless it fails, and then prints to the screen and the first serial
 port. Slot B (`k10s-b.efi`, `/k10s/b/`) appears with the first update. The kernel command line is fixed in both
 (`console=ttyS0,115200 quiet panic=5` for `vm`; `metal` adds `console=tty0` last, so init's lines appear on the
-screen); everything else is configured in `k10s.conf`. Images are reproducible: fixed GUIDs, volume ids, ext4 hash seed, and every timestamp from
+screen, and `k10s.bootwait=30000`, since a USB disk appears only after init has started); everything else is
+configured in `k10s.conf`. Images are reproducible: fixed GUIDs, volume ids, ext4 hash seed, and every timestamp from
 `SOURCE_DATE_EPOCH` (the commit time). On the ESP, `BOOTX64.EFI` becomes the Tier 2 loader (`k10boot`, which reads
 `/k10s/tier`) with milestone M1.
 
@@ -173,7 +174,7 @@ p2   slot A      128 MiB  the signed slot image: a FAT16 filesystem followed by 
        start_cd.elf, fixup_cd.dat   Pi 3 firmware, and start4cd.elf, fixup4cd.dat, the Pi 4's (cut-down: no GPU
                                     features; the Pi 5 has its firmware in EEPROM)
        config.txt, tryboot.txt      arm_64bit, kernel8.img + initramfs8, enable_uart, gpu_mem=16 (the same file twice)
-       cmdline.txt                  console=ttyS1,115200 console=ttyAMA10,115200 quiet panic=5
+       cmdline.txt                  console=ttyS1,115200 console=ttyAMA10,115200 quiet panic=5 k10s.bootwait=30000
        kernel8.img, initramfs8      the arm64 kernel (gzip) and k10s
        bcm2710-rpi-3-b.dtb, bcm2710-rpi-3-b-plus.dtb, bcm2711-rpi-4-b.dtb, bcm2711-rpi-400.dtb,
        bcm2711-rpi-cm4-io.dtb, bcm2712-rpi-5-b.dtb, bcm2712d0-rpi-5-b.dtb

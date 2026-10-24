@@ -39,10 +39,12 @@ esac
 out=${1:-target/os/images}
 cache=${K10S_OS_CACHE:-target/os}
 VM_CMDLINE="console=ttyS0,115200 quiet panic=5"
-METAL_CMDLINE="console=ttyS0,115200 console=tty0 quiet panic=5"
+# Machines that boot from USB disks or SD cards, which appear after init has started: init waits up to 30 s for
+# K10S-BOOT.
+METAL_CMDLINE="console=ttyS0,115200 console=tty0 quiet panic=5 k10s.bootwait=30000"
 ARM_VM_CMDLINE="console=ttyAMA0,115200 quiet panic=5"
-# Pi 4: the mini UART on GPIO 14/15 (ttyS1); Pi 5: the debug UART connector (ttyAMA10).
-PI_CMDLINE="console=ttyS1,115200 console=ttyAMA10,115200 quiet panic=5"
+# Pi 3 and 4: the mini UART on GPIO 14/15 (ttyS1); Pi 5: the debug UART connector (ttyAMA10).
+PI_CMDLINE="console=ttyS1,115200 console=ttyAMA10,115200 quiet panic=5 k10s.bootwait=30000"
 export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct)}
 mkdir -p "$cache"
 if [[ -z ${K10S_BIN:-} ]]; then
