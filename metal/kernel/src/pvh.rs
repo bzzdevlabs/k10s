@@ -162,6 +162,10 @@ pub unsafe fn parse(paddr: u64) -> BootInfo {
         let m: ModEntry = read_unaligned((si.modlist_paddr as *const ModEntry).add(i));
         let mut module = Module { paddr: m.paddr, size: m.size, ..Module::EMPTY };
         module.name_len = copy_cstr(m.cmdline_paddr, &mut module.name);
+        // A name is printable ASCII: qboot leaves module command lines undefined (their upper half is garbage).
+        if !module.name[..module.name_len].iter().all(|c| c.is_ascii_graphic()) {
+            module.name_len = 0;
+        }
         bi.modules[i] = module;
     }
     bi.modules_len = n;
@@ -181,8 +185,9 @@ pub unsafe fn parse(paddr: u64) -> BootInfo {
 }
 
 /// Copies the NUL-terminated string at `paddr` (0: none) into `out`; returns its length (cut at `out`'s size).
+/// Only the first 4 GiB are mapped this early: a pointer beyond is no string.
 unsafe fn copy_cstr(paddr: u64, out: &mut [u8]) -> usize {
-    if paddr == 0 {
+    if paddr == 0 || paddr >= (1 << 32) - out.len() as u64 {
         return 0;
     }
     let p = paddr as *const u8;
