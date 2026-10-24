@@ -30,7 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [unit, musl]
+        suite: [unit, musl, i686]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -54,6 +54,21 @@ jobs:
       - uses: ./.github/actions/toolchains
       - name: scripts/ci-test.sh arm64
         run: scripts/ci-test.sh arm64
+
+  armv7:
+    name: Tests of armv7 on arm64 (interpreter, musl)
+    if: github.event_name != 'push'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/toolchains
+        with:
+          cross-armv7: "true"
+      - name: scripts/ci-test.sh armv7
+        run: scripts/ci-test.sh armv7
 
   metal:
     name: Bare-metal kernel self tests (QEMU/KVM)
@@ -135,6 +150,39 @@ jobs:
       - name: scripts/ci-test.sh os-arm64
         run: scripts/ci-test.sh os-arm64
 
+  os-legacy:
+    name: i386 and armv7 kernels and images under QEMU (os/test.sh --arch i686, --arch armv7)
+    if: github.event_name != 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/toolchains
+        with:
+          qemu: "true"
+          cross-armv7: "true"
+          qemu-armv7: "true"
+      - name: Kernel build and image tools
+        run: >-
+          sudo apt-get install -y -q --no-install-recommends flex bison bc libelf-dev libssl-dev dosfstools mtools fdisk
+          zstd xz-utils libdevmapper1.02.1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/os/linux-*.tar.xz
+            target/os/*.deb
+            target/os/firmware-*
+            target/os/kernel-i686/arch/x86/boot/bzImage
+            target/os/kernel-i686/modroot
+            target/os/kernel-i686/.k10s-stamp
+            target/os/kernel-armv7/arch/arm/boot/zImage
+            target/os/kernel-armv7/.k10s-stamp
+          key: os-legacy-${{ hashFiles('os/kbuild.sh', 'os/bootfiles.sh', 'os/firmware.sh', 'os/firmware.list', 'os/kpatches/*', 'os/kconfig/*') }}
+      - name: scripts/ci-test.sh os-legacy
+        run: scripts/ci-test.sh os-legacy
+
   metal-e2e:
     name: Bare-metal kernel end-to-end (metal/test.sh, non-blocking)
     if: github.event_name != 'push'
@@ -166,6 +214,7 @@ jobs:
         with:
           go: "true"
           cross-arm64: "true"
+          cross-armv7: "true"
       - name: scripts/dist.sh
         run: scripts/dist.sh --dev
       - name: scripts/ci-test.sh dist

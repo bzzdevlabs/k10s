@@ -1,6 +1,7 @@
 //! A/B OS updates (docs/OS.md, "Updates"). Each slot of K10S-BOOT holds one signed image: the UKI itself
 //! (`/EFI/Linux/k10s-X.efi`, booted by systemd-boot on UEFI) and its kernel, initramfs and command line extracted for
-//! GRUB (`/k10s/X/`, BIOS). An update writes the other slot completely, then arms a trial boot of it in both loaders:
+//! GRUB (`/k10s/X/`, BIOS). An update writes the other slot completely, then arms a trial boot of it in both loaders
+//! (only GRUB's on the BIOS-only i686 image, which has no `loader.conf`):
 //!
 //! * UEFI: the file is named `k10s-X+3.efi` and `loader.conf` says `preferred k10s-X.efi` and
 //!   `default k10s-X+[1-9]*`. systemd-boot counts the tries down in the name (`k10s-X+2-1.efi`, …). The images'
@@ -289,15 +290,22 @@ impl Esp {
         t.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix('=').map(str::to_string)).filter(|v| !v.is_empty())
     }
 
+    /// Replaces systemd-boot's `loader.conf`, on images that have one (the i686 image is BIOS-only).
+    fn write_loader_conf(&self, conf: &str) -> io::Result<()> {
+        if !self.path("loader/loader.conf").exists() {
+            return Ok(());
+        }
+        self.write("loader/loader.conf", conf.as_bytes())
+    }
+
     fn set_default(&self, pattern: &str) -> io::Result<()> {
-        self.write("loader/loader.conf", LOADER_CONF.replace("{}", pattern).as_bytes())
+        self.write_loader_conf(&LOADER_CONF.replace("{}", pattern))
     }
 
     /// Arms the trial of `t` (module docs).
     fn set_trial(&self, t: Slot) -> io::Result<()> {
         let l = t.letter();
-        let conf = LOADER_CONF.replace("{}", &format!("k10s-{l}+[1-9]*")) + &format!("preferred k10s-{l}.efi\n");
-        self.write("loader/loader.conf", conf.as_bytes())
+        self.write_loader_conf(&(LOADER_CONF.replace("{}", &format!("k10s-{l}+[1-9]*")) + &format!("preferred k10s-{l}.efi\n")))
     }
 
     /// The UKI file name of `slot` in `EFI/Linux`, with its boot counter if it has one.
@@ -605,7 +613,7 @@ impl Slots {
         let r = (|| -> io::Result<()> {
             self.clear(t)?;
             // GRUB's copy for BIOS boots (x86 only).
-            if cfg!(target_arch = "x86_64") {
+            if cfg!(any(target_arch = "x86_64", target_arch = "x86")) {
                 let d = format!("k10s/{}", t.letter());
                 self.esp.write(&format!("{d}/vmlinuz"), kernel)?;
                 self.esp.write(&format!("{d}/initrd"), initrd)?;
@@ -874,12 +882,15 @@ mod tests {
         (blob, h)
     }
 
-    /// A fresh ESP as os/mkimage.py writes it: slot A committed.
-    fn fresh(dir: &Path, a: &[u8]) -> Esp {
+    /// A fresh ESP as os/mkimage.py writes it for `l`: slot A committed (systemd-boot's `loader.conf` on all but the
+    /// BIOS-only i686 image).
+    fn fresh(dir: &Path, a: &[u8], l: Loader) -> Esp {
         let _ = fs::remove_dir_all(dir);
         let esp = Esp::new(dir, false);
         esp.write("EFI/Linux/k10s-a.efi", a).unwrap();
-        esp.set_default("k10s-a.efi").unwrap();
+        if !matches!(l, Loader::GrubOnly) {
+            esp.write("loader/loader.conf", LOADER_CONF.replace("{}", "k10s-a.efi").as_bytes()).unwrap();
+        }
         esp.write_grubenv(&[("k10s_slot", "a")]).unwrap();
         esp
     }
@@ -943,17 +954,21 @@ mod tests {
     }
 
     /// The loaders of the UEFI/BIOS images: systemd-boot as the images ship it, the 252 of machines installed before
-    /// U6, GRUB.
+    /// U6, GRUB, and GRUB on the BIOS-only i686 image (no systemd-boot files).
     #[derive(Clone, Copy, Debug)]
     enum Loader {
         SystemdBoot,
         SystemdBoot252,
         Grub,
+        GrubOnly,
     }
 
     /// GRUB: x86 only.
-    const LOADERS: &[Loader] =
-        if cfg!(target_arch = "x86_64") { &[Loader::SystemdBoot, Loader::SystemdBoot252, Loader::Grub] } else { &[Loader::SystemdBoot, Loader::SystemdBoot252] };
+    const LOADERS: &[Loader] = if cfg!(any(target_arch = "x86_64", target_arch = "x86")) {
+        &[Loader::SystemdBoot, Loader::SystemdBoot252, Loader::Grub, Loader::GrubOnly]
+    } else {
+        &[Loader::SystemdBoot, Loader::SystemdBoot252]
+    };
 
     /// One boot through `l` up to init's slot inspection.
     fn boot(dir: &Path, l: Loader) -> Slots {
@@ -963,7 +978,7 @@ mod tests {
                 let id = uefi_boot(dir, matches!(l, Loader::SystemdBoot)).expect("UEFI finds an entry");
                 Slots::open(esp, Firmware::Uefi, Some(&id), None)
             }
-            Loader::Grub => {
+            Loader::Grub | Loader::GrubOnly => {
                 let c = bios_boot(&esp);
                 assert!(dir.join(format!("k10s/{c}/boot.cfg")).exists() || c == 'a', "GRUB boots a slot that has files");
                 Slots::open(esp, Firmware::Bios, None, Some(&c.to_string()))
@@ -1000,7 +1015,7 @@ mod tests {
         for &fw in LOADERS {
             for cut in 0.. {
                 let dir = tmp(&format!("cut-{fw:?}-{cut}"));
-                fresh(&dir, &a);
+                fresh(&dir, &a, fw);
                 let mut s = boot(&dir, fw);
                 assert_eq!((s.booted, s.trial, s.image), (Some(Slot::A), false, Some(ha)));
                 s.esp.budget.set(Some(cut));
@@ -1026,6 +1041,7 @@ mod tests {
                     s = boot(&dir, fw);
                 }
                 assert_eq!((s.image, s.trial, s.booted), (Some(hb), false, Some(Slot::B)));
+                assert_eq!(dir.join("loader/loader.conf").exists(), !matches!(fw, Loader::GrubOnly));
                 let _ = fs::remove_dir_all(&dir);
                 if installed && committed {
                     break;
@@ -1040,7 +1056,7 @@ mod tests {
         let images: Vec<_> = ["v1", "v2", "v3", "v4"].iter().map(|v| image(v)).collect();
         for &fw in LOADERS {
             let dir = tmp(&format!("alternate-{fw:?}"));
-            fresh(&dir, &images[0].0);
+            fresh(&dir, &images[0].0, fw);
             let mut s = boot(&dir, fw);
             for (i, (blob, h)) in images.iter().enumerate().skip(1) {
                 let t = s.install(h, blob, &trusted()).unwrap();
@@ -1063,7 +1079,7 @@ mod tests {
         let (c, hc) = image("v3");
         for &fw in LOADERS {
             let dir = tmp(&format!("bad-{fw:?}"));
-            fresh(&dir, &a);
+            fresh(&dir, &a, fw);
             let mut s = boot(&dir, fw);
             s.install(&hbad, &bad, &trusted()).unwrap();
             // The bad image crashes before init: the loader just boots again.
@@ -1071,7 +1087,7 @@ mod tests {
                 match fw {
                     Loader::SystemdBoot => assert_eq!(uefi_boot(&dir, true).as_deref(), Some("k10s-b.efi")),
                     Loader::SystemdBoot252 => assert!(uefi_boot(&dir, false).unwrap().starts_with("k10s-b+")),
-                    Loader::Grub => assert_eq!(bios_boot(&Esp::new(&dir, false)), 'b'),
+                    Loader::Grub | Loader::GrubOnly => assert_eq!(bios_boot(&Esp::new(&dir, false)), 'b'),
                 }
             }
             let mut s = boot(&dir, fw);
@@ -1095,7 +1111,7 @@ mod tests {
     fn refusals() {
         let (a, _) = image("v1");
         let dir = tmp("refuse");
-        fresh(&dir, &a);
+        fresh(&dir, &a, Loader::SystemdBoot);
         let mut s = boot(&dir, Loader::SystemdBoot);
         let (b, hb) = image("v2");
         assert!(s.install(&hb, &b, &[[1; 32]]).unwrap_err().contains("untrusted"));

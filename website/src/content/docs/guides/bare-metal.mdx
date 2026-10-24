@@ -154,15 +154,18 @@ exits. The power button drains the node and powers off.
 [docs/OS.md](https://github.com/bzzdevlabs/k10s/blob/main/docs/OS.md) has the boot sequence, the image layout and
 every key.
 
-Each release publishes four disk images. The x86-64 ones boot on BIOS and on UEFI (with Secure Boot on, see
-[Secure Boot](#secure-boot)); on arm64 the node runs on the interpreter (no arm64 JIT yet):
+Each release publishes six disk images. The x86-64 ones boot on BIOS and on UEFI (with Secure Boot on, see
+[Secure Boot](#secure-boot)); on arm64 the node runs on the interpreter (no arm64 JIT yet), and on the best-effort
+32-bit images it always does:
 
 | Image | For | Kernel | Size |
 |---|---|---|---|
 | `k10s-os-V-x86_64-vm.img.xz` | QEMU/KVM guests and clouds | every driver built in, console on serial | 4.3 MB |
 | `k10s-os-V-x86_64-metal.img.xz` | PCs, mini-PCs, servers | signed driver modules (Intel, Realtek, Broadcom, Aquantia, USB Ethernet…), NIC firmware, console on the screen | 6.7 MB |
 | `k10s-os-V-aarch64-vm.img.xz` | QEMU virt (UEFI) and arm64 cloud guests | every driver built in, console on serial | 3.9 MB |
-| `k10s-os-V-aarch64-pi.img.xz` | Raspberry Pi 4 B, 400, CM4 and Pi 5 (SD card, USB or NVMe) | one arm64 kernel with mainline devicetrees, console on the serial pins (Pi 4) or debug UART (Pi 5) | 5.2 MB |
+| `k10s-os-V-aarch64-pi.img.xz` | Raspberry Pi 3 B and 3 B+, 4 B, 400, CM4 and Pi 5 (SD card, USB or NVMe) | one arm64 kernel with mainline devicetrees, console on the serial pins (Pi 3, Pi 4) or debug UART (Pi 5) | 5.3 MB |
+| `k10s-os-V-i686-metal.img.xz` | old PCs, BIOS only: a CPU with PAE and SSE2 (Pentium 4, Pentium M, Core, Atom, Athlon 64 and later); best effort | 32-bit kernel, IDE/SATA built in, signed NIC modules (Realtek, Intel, Broadcom, VIA, SiS, nForce, 3Com…), NIC firmware, console on the screen | 5.7 MB |
+| `k10s-os-V-armv7-vm.img.xz` | QEMU virt and other 32-bit ARM UEFI machines with virtio; best effort | every driver built in, console on serial | 3.5 MB |
 
 <Steps>
 
@@ -195,7 +198,10 @@ Each release publishes four disk images. The x86-64 ones boot on BIOS and on UEF
 
 On a Raspberry Pi, write `k10s-os-V-aarch64-pi.img.xz` to the SD card (or a USB or NVMe drive the Pi boots from),
 then do steps 2 and 3: `K10S-BOOT` is its first partition. A Pi 4 needs a bootloader EEPROM from 2021 or later
-(any Pi 4 updated since; the Pi 5 always has one) for the image's A/B boot (`autoboot.txt`).
+(any Pi 4 updated since; the Pi 5 always has one) for the image's A/B boot (`autoboot.txt`); a Pi 3 boots it with
+the `bootcode.bin` on `K10S-BOOT`, its Ethernet (USB, behind the SoC's USB controller) coming up a few seconds after
+the kernel. An old PC boots `k10s-os-V-i686-metal.img.xz` from its BIOS like any disk: write it to an IDE/SATA disk or
+a USB stick the BIOS boots from.
 
 The `vm` image runs the same way in QEMU, on BIOS or with OVMF for UEFI:
 
@@ -216,6 +222,9 @@ qemu-system-aarch64 -M virt -cpu max -m 512M -nodefaults -display none -serial s
   -drive file=k10s.img,if=virtio,format=raw -device virtio-rng-pci \
   -netdev user,id=n0,hostfwd=tcp:127.0.0.1:8080-:80 -device virtio-net-pci,netdev=n0
 ```
+
+and the armv7 one with AAVMF32 (Debian's `qemu-efi-arm`): `qemu-system-arm -M virt,highmem=off -cpu cortex-a15`, the
+same disk and network, and `/usr/share/AAVMF/AAVMF32_CODE.fd` and `AAVMF32_VARS.fd`.
 
 `k10s.conf` holds `KEY=VALUE` lines: init's keys (`ip=10.0.0.5/24,10.0.0.1`, `watchdog=1`, `grow=0`) and every
 `k10s node` flag (`join=10.0.0.2`, `cluster-key-file=/boot/cluster.key`).
@@ -255,8 +264,8 @@ with its modules in the initramfs: `os/debian-kernel.sh` and `os/test.sh` show h
 
 ### Secure Boot
 
-The images are not signed for Secure Boot, so firmware with Secure Boot on refuses them. BIOS boots and the Raspberry
-Pi are not concerned. Turn Secure Boot off in the firmware setup, or make the machine trust a key of yours:
+The images are not signed for Secure Boot, so firmware with Secure Boot on refuses them. BIOS boots (the i686 image)
+and the Raspberry Pi are not concerned. Turn Secure Boot off in the firmware setup, or make the machine trust a key of yours:
 
 - **Own keys** ([sbctl](https://github.com/Foxboron/sbctl)): `sbctl create-keys`, then from a live Linux system on the
   machine, with the firmware in setup mode (Secure Boot keys cleared in its setup), `sbctl enroll-keys --microsoft`
@@ -283,8 +292,10 @@ after each refusal) and the rollout stops on it.
 layout and what to expect from real firmware (Microsoft's 2011 and 2023 CAs, SBAT revocations).
 
 <Aside type="caution" title="PID 1 mode limits">
-	Secure Boot needs your own keys or a MOK (above). arm64 nodes run on the interpreter. The Pi image is tested under
-	QEMU behind a model of the Pi firmware (A/B through `autoboot.txt` and tryboot, power cuts during updates, a Pi in
-	a cluster with an x86-64 node), the x86-64 images under QEMU (SeaBIOS, OVMF, NVMe, e1000e, Intel TCO watchdog,
-	power cuts during updates, a 20-node rollout, Secure Boot with Microsoft's keys); none yet on a physical machine.
+	Secure Boot needs your own keys or a MOK (above). arm64 nodes run on the interpreter, i686 and armv7 nodes always
+	(instances up to 256 MiB there). The Pi image is tested under QEMU behind a model of the Pi firmware (A/B through
+	`autoboot.txt` and tryboot, power cuts during updates, a Pi in a cluster with an x86-64 node; the Pi 3 on QEMU's
+	`raspi3b` with a USB NIC), the x86-64 images under QEMU (SeaBIOS, OVMF, NVMe, e1000e, Intel TCO watchdog, power
+	cuts during updates, a 20-node rollout, Secure Boot with Microsoft's keys), the i686 image on SeaBIOS with an Atom
+	N270, an IDE disk and an RTL8139, the armv7 one on AAVMF32; none yet on a physical machine.
 </Aside>

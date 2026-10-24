@@ -457,8 +457,13 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
         cfg.timer_res = Duration::from_micros(s.parse().map_err(|_| "invalid --timer-res-us")?);
     }
     if let Some(s) = a.get("jit-indirect") {
-        cfg.jit_indirect =
-            k10_node::IndirectBranch::parse(s).ok_or_else(|| format!("invalid --jit-indirect `{s}` (jump|lfence|retpoline)"))?;
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            cfg.jit_indirect =
+                k10_node::IndirectBranch::parse(s).ok_or_else(|| format!("invalid --jit-indirect `{s}` (jump|lfence|retpoline)"))?;
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        return Err(format!("--jit-indirect {s}: there is no JIT on {}", std::env::consts::ARCH));
     }
     let mut cluster_cfg = cluster_config(&a)?;
     // Tier 1 (docs/OS.md, "Updates"): init's update channel and the running image, in the gossip record from the start.

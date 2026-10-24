@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
 # Builds all release archives into dist/ (locally and in CI), versioned once by scripts/version.sh.
-# usage: dist.sh [--dev|--stable] [--only k10s,musl,arm64,examples,metal,bench,src]
+# usage: dist.sh [--dev|--stable] [--only k10s,musl,arm64,i686,armv7,examples,metal,bench,src]
 # env: DIST, K10S_BUILD_VERSION/_COMMIT, GLIBC_MAX (highest glibc symbol version the gnu k10s may need, 2.34)
-# Needs cargo (targets x86_64-unknown-linux-musl, x86_64-unknown-none, aarch64-unknown-linux-musl), go, git, binutils,
-# GNU tar; on other hosts than arm64, aarch64-linux-gnu-strip and qemu-aarch64 for the arm64 build (linked by rust-lld).
+# Needs cargo (targets x86_64-unknown-linux-musl, x86_64-unknown-none, aarch64-unknown-linux-musl,
+# i686-unknown-linux-musl, armv7-unknown-linux-musleabihf), go, git, binutils, GNU tar; on other hosts than arm64,
+# aarch64-linux-gnu-strip and qemu-aarch64 for the arm64 build, arm-linux-gnueabihf-strip and qemu-arm for armv7 (both
+# linked by rust-lld; i686 too, which an x86-64 host runs).
 # Output (V = version without +build): k10s-V-x86_64-unknown-linux-{gnu,musl}.tar.gz,
-#   k10s-V-aarch64-unknown-linux-musl.tar.gz, k10s-examples-V.tar.gz, k10s-metal-V-x86_64.tar.gz,
+#   k10s-V-aarch64-unknown-linux-musl.tar.gz, k10s-V-i686-unknown-linux-musl.tar.gz,
+#   k10s-V-armv7-unknown-linux-musleabihf.tar.gz, k10s-examples-V.tar.gz, k10s-metal-V-x86_64.tar.gz,
 #   k10s-bench-V-linux-amd64.tar.gz, k10s-V-src.tar.gz, SHA256SUMS (see README.md).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
 
 mode=()
-parts=(k10s musl arm64 examples metal bench src)
+parts=(k10s musl arm64 i686 armv7 examples metal bench src)
 while (($#)); do
     case $1 in
     --dev | --stable) mode=("$1") ;;
@@ -67,11 +70,18 @@ GLIBC_MAX=${GLIBC_MAX:-2.34}
 build_k10s() {
     local triple=$1 name="k10s-$V-$1" strip=strip emu=()
     echo "== k10s ($triple)"
+    # Cross builds: rust-lld links the target's self-contained musl; QEMU runs the version check.
     if [[ $triple == aarch64-* && $(uname -m) != aarch64 ]]; then
-        # Cross build: rust-lld links the target's self-contained musl; QEMU runs the version check.
         export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld
         strip=aarch64-linux-gnu-strip
         emu=(qemu-aarch64)
+    elif [[ $triple == i686-* ]]; then
+        export CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER=rust-lld
+        [[ $(uname -m) == x86_64 ]] || { strip=i686-linux-gnu-strip; emu=(qemu-i386); }
+    elif [[ $triple == armv7-* ]]; then
+        export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=rust-lld
+        strip=arm-linux-gnueabihf-strip
+        emu=(qemu-arm)
     fi
     cargo build --release --locked -p k10s --target "$triple"
     mkdir -p "$STAGE/$name"
@@ -103,6 +113,14 @@ fi
 if want arm64; then
     build_k10s aarch64-unknown-linux-musl
     static aarch64-unknown-linux-musl
+fi
+if want i686; then
+    build_k10s i686-unknown-linux-musl
+    static i686-unknown-linux-musl
+fi
+if want armv7; then
+    build_k10s armv7-unknown-linux-musleabihf
+    static armv7-unknown-linux-musleabihf
 fi
 
 if want examples; then

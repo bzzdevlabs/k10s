@@ -36,19 +36,22 @@ Benchmarks: see `bench/README.md`.
 | `.github/` | workflows (`ci.yml`, `release.yml`, `pages.yml`, `vscode.yml`) and the pinned toolchains (`actions/toolchains`) |
 
 ## CI, versions and releases
-- **CI** (`.github/workflows/ci.yml`, every pull request) runs `scripts/ci-test.sh unit musl metal-selftest os
-  os-arm64`, `scripts/ci-test.sh arm64` on an arm64 runner, `scripts/dist.sh` then `scripts/ci-test.sh dist`; the
-  same commands work locally. `unit` = all crates in release mode on the JIT, the node and CLI also on the
-  interpreter, `#[ignore]`d long tests excluded; `musl` = the same for the static binary's target; `arm64` = all
-  crates but the x86-64 JIT on an arm64 host (gnu and musl, interpreter); `os` = PID 1 mode and the x86-64 images
-  under QEMU (os/test.sh, docs/OS.md); `os-arm64` = the arm64 kernel and the arm64 and Raspberry Pi images under
-  QEMU (`os/test.sh --arch aarch64`); `dist` = the k10s integration tests against the archived static binary
-  (`K10S_BIN`).
+- **CI** (`.github/workflows/ci.yml`, every pull request) runs `scripts/ci-test.sh unit musl i686 metal-selftest os
+  os-arm64 os-legacy`, `scripts/ci-test.sh arm64 armv7` on an arm64 runner, `scripts/dist.sh` then
+  `scripts/ci-test.sh dist`; the same commands work locally. `unit` = all crates in release mode on the JIT, the node
+  and CLI also on the interpreter, `#[ignore]`d long tests excluded; `musl` = the same for the static binary's target;
+  `arm64` = all crates but the x86-64 JIT on an arm64 host (gnu and musl, interpreter); `i686` and `armv7` = the same
+  for the 32-bit musl targets (armv7 natively when the arm64 CPU runs AArch32 code, else the in-process suites under
+  qemu-arm); `os` = PID 1 mode and the x86-64 images under QEMU (os/test.sh, docs/OS.md); `os-arm64` = the arm64
+  kernel and the arm64 and Raspberry Pi images under QEMU (`os/test.sh --arch aarch64`); `os-legacy` = the i386 and
+  armv7 kernels and images (`os/test.sh --arch i686`, `--arch armv7`); `dist` = the k10s integration tests against
+  the archived static binary (`K10S_BIN`).
   Non-blocking: `metal` (metal/test.sh, latency-bound) and the chaos/soak `campaign` (~7 min). Toolchains are pinned
   in `.github/actions/toolchains/action.yml` (Rust 1.98.1, Go 1.25.1); change them there.
 - **Releases** (`.github/workflows/release.yml`): a push to `main` publishes the pre-release `vX.Y.Z-dev.N` (only
   for the current head of `main`, and not for a commit that carries the stable tag), a pushed tag `vX.Y.Z` the stable
-  release, once `unit`, `musl`, `arm64`, `dist`, `metal-selftest`, `os` and `os-arm64` pass. Artifacts and images get build-provenance
+  release, once `unit`, `musl`, `i686`, `arm64`, `armv7`, `dist`, `metal-selftest`, `os`, `os-arm64` and `os-legacy`
+  pass. Artifacts and images get build-provenance
   attestations; the newest 10 dev pre-releases and dev images are kept. See README.md, "Releases and versions".
 - **Repository settings** (to apply once, by an admin): stable tags immutable and admin-only, `main` without force
   pushes or deletion (the build number is the commit count). The workflow creates and prunes dev tags itself, so

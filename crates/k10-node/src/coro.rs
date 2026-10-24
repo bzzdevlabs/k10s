@@ -1,5 +1,5 @@
 //! Stackful coroutines: pooled stacks with guard pages and a hand-written context switch (x86-64 SysV, AArch64
-//! AAPCS64).
+//! AAPCS64, i686 SysV, armv7 AAPCS-VFP).
 //!
 //! A [`Coro`] owns a [`Stack`] and two saved stack pointers: its own (`sp`, valid while suspended) and the
 //! scheduler's (`back`, valid while the coroutine runs). [`Coro::resume`] switches scheduler -> coroutine,
@@ -10,10 +10,12 @@
 //! |---|---|---|
 //! | x86_64 | rbx rbp r12-r15 (+ return address); no xmm register is callee-saved | 56 B |
 //! | aarch64 | x19-x28, x29 (fp), x30 (lr), d8-d15 (low halves of v8-v15) | 160 B |
+//! | x86 (i686) | ebx esi edi ebp (+ return address); no x87/xmm register is callee-saved | 20 B |
+//! | arm (armv7, hard-float) | r4-r11, r12 (8-byte alignment padding), lr, d8-d15 | 104 B |
 //!
-//! Invariant: the floating-point control state (MXCSR and the x87 control word, FPCR) is *not* switched. Nothing
-//! that runs on fibers changes it (TIR has no instruction for it, host functions are plain Rust, JIT code must not
-//! either), so it always holds the process defaults.
+//! Invariant: the floating-point control state (MXCSR and the x87 control word, FPCR, FPSCR) is *not* switched.
+//! Nothing that runs on fibers changes it (TIR has no instruction for it, host functions are plain Rust, JIT code
+//! must not either), so it always holds the process defaults.
 //!
 //! The coroutine's entry function (`extern "C" fn(*mut c_void) -> !`) must never return and must not let a panic
 //! escape (there is no unwind information above it); the runtime's fiber loop catches panics per job.
@@ -86,7 +88,7 @@ impl Drop for Stack {
     }
 }
 
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "x86", target_arch = "arm")))]
 compile_error!("coroutines: no context switch for this architecture");
 
 #[cfg(target_arch = "x86_64")]
@@ -190,6 +192,90 @@ mod arch {
     }
 }
 
+#[cfg(target_arch = "x86")]
+mod arch {
+    /// Switches stacks: saves the callee-saved state on the current stack, stores `esp` into `*save`, loads `to`
+    /// and restores the state found there (cdecl: both arguments on the stack).
+    ///
+    /// # Safety
+    /// `to` must be a stack pointer previously stored by this function (or prepared by [`frame`]) whose stack is
+    /// still alive and not running.
+    #[unsafe(naked)]
+    pub unsafe extern "C" fn ctx_switch(save: *mut *mut u8, to: *mut u8) {
+        core::arch::naked_asm!(
+            "mov eax, [esp + 4]",
+            "mov ecx, [esp + 8]",
+            "push ebp",
+            "push ebx",
+            "push esi",
+            "push edi",
+            "mov [eax], esp",
+            "mov esp, ecx",
+            "pop edi",
+            "pop esi",
+            "pop ebx",
+            "pop ebp",
+            "ret",
+        )
+    }
+
+    /// First code a new coroutine runs (reached by `ret` from [`ctx_switch`] with `esp` 16-byte aligned): `esi` =
+    /// argument, `edi` = entry function, called with `esp` 16-byte aligned at the `call` as the i386 Linux ABI wants.
+    #[unsafe(naked)]
+    unsafe extern "C" fn ctx_start() {
+        core::arch::naked_asm!("sub esp, 12", "push esi", "call edi", "ud2")
+    }
+
+    /// The initial frame below the 16-aligned `top` that [`ctx_switch`] pops: edi (entry), esi (argument), ebx,
+    /// ebp, ret (`ctx_start`). After `ret`, esp = top.
+    pub fn frame(top: usize, entry: usize, arg: usize) -> (usize, [usize; 5]) {
+        (top - 20, [entry, arg, 0, 0, ctx_start as *const () as usize])
+    }
+}
+
+#[cfg(all(target_arch = "arm", not(target_abi = "eabihf")))]
+compile_error!("coroutines: 32-bit ARM needs the hard-float ABI (VFP registers d8-d15)");
+
+#[cfg(target_arch = "arm")]
+mod arch {
+    /// Switches stacks: saves the callee-saved state on the current stack, stores `sp` into `*save`, loads `to`
+    /// and restores the state found there. r12 is pushed only to keep the frame a multiple of 8 bytes.
+    ///
+    /// # Safety
+    /// `to` must be a stack pointer previously stored by this function (or prepared by [`frame`]) whose stack is
+    /// still alive and not running.
+    #[unsafe(naked)]
+    pub unsafe extern "C" fn ctx_switch(save: *mut *mut u8, to: *mut u8) {
+        core::arch::naked_asm!(
+            "push {{r4-r12, lr}}",
+            "vpush {{d8-d15}}",
+            "mov r2, sp",
+            "str r2, [r0]",
+            "mov sp, r1",
+            "vpop {{d8-d15}}",
+            "pop {{r4-r12, lr}}",
+            "bx lr",
+        )
+    }
+
+    /// First code a new coroutine runs (reached by `bx lr` from [`ctx_switch`]): `r4` = argument, `r5` = entry
+    /// function; r7 and r11 (the Thumb and ARM frame pointers) are 0, which ends the frame chain.
+    #[unsafe(naked)]
+    unsafe extern "C" fn ctx_start() {
+        core::arch::naked_asm!("mov r0, r4", "blx r5", "udf #0")
+    }
+
+    /// The initial frame below the 16-aligned `top` that [`ctx_switch`] pops: d8-d15 (16 words), r4 (argument),
+    /// r5 (entry), r6-r12, lr (`ctx_start`). After the pop, sp = top.
+    pub fn frame(top: usize, entry: usize, arg: usize) -> (usize, [usize; 26]) {
+        let mut f = [0; 26];
+        f[16] = arg;
+        f[17] = entry;
+        f[25] = ctx_start as *const () as usize;
+        (top - 104, f)
+    }
+}
+
 use arch::ctx_switch;
 
 pub type Entry = extern "C" fn(*mut c_void) -> !;
@@ -211,7 +297,7 @@ impl Coro {
     pub fn new(stack: Stack, entry: Entry, arg: *mut c_void) -> Coro {
         let top = stack.top() as usize & !15;
         let (sp, frame) = arch::frame(top, entry as *const () as usize, arg as usize);
-        debug_assert_eq!(sp + 8 * frame.len(), top);
+        debug_assert_eq!(sp + size_of::<usize>() * frame.len(), top);
         // SAFETY: [sp, top) lies within the stack's usable range (one frame below its 16-aligned top).
         unsafe { ptr::copy_nonoverlapping(frame.as_ptr(), sp as *mut usize, frame.len()) };
         Coro { stack, sp: sp as *mut u8, back: ptr::null_mut() }
@@ -410,6 +496,54 @@ mod tests {
                 o = in(reg) out.as_mut_ptr(),
                 f = in(reg) resume as extern "C" fn(*mut Coro),
                 in("x0") coro,
+                out("d8") _, out("d9") _, out("d10") _, out("d11") _, out("d12") _, out("d13") _, out("d14") _, out("d15") _,
+                clobber_abi("C"),
+            );
+        }
+        assert_eq!(out, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        unsafe { drop(Box::from_raw(coro)) };
+    }
+
+    /// d8-d15 are callee-saved on 32-bit ARM (AAPCS-VFP): the scheduler's values survive a coroutine that overwrites
+    /// them.
+    #[cfg(target_arch = "arm")]
+    #[test]
+    fn fp_callee_saved_registers_survive() {
+        use core::arch::asm;
+        struct C {
+            coro: *mut Coro,
+        }
+        extern "C" fn entry(arg: *mut c_void) -> ! {
+            let c = arg as *const C;
+            loop {
+                // SAFETY: plain register writes, declared as clobbered.
+                unsafe {
+                    asm!("vmov.f64 d8, #-1.0", "vmov.f64 d9, #-1.0", "vmov.f64 d10, #-1.0", "vmov.f64 d11, #-1.0",
+                        "vmov.f64 d12, #-1.0", "vmov.f64 d13, #-1.0", "vmov.f64 d14, #-1.0", "vmov.f64 d15, #-1.0",
+                        out("d8") _, out("d9") _, out("d10") _, out("d11") _, out("d12") _, out("d13") _, out("d14") _, out("d15") _);
+                    Coro::suspend((*c).coro);
+                }
+            }
+        }
+        extern "C" fn resume(c: *mut Coro) {
+            unsafe { Coro::resume(c) }
+        }
+        let mut c = Box::new(C { coro: ptr::null_mut() });
+        let cp: *mut C = &mut *c;
+        let coro = Box::into_raw(Box::new(Coro::new(Stack::new(64 * 1024).unwrap(), entry, cp as *mut c_void)));
+        c.coro = coro;
+        let mut out = [0f64; 8];
+        // SAFETY: d8-d15 are set, kept across a call that must preserve them and stored to `out`, whose address is
+        // in r5 (callee-saved).
+        unsafe {
+            asm!(
+                "vmov.f64 d8, #1.0", "vmov.f64 d9, #2.0", "vmov.f64 d10, #3.0", "vmov.f64 d11, #4.0",
+                "vmov.f64 d12, #5.0", "vmov.f64 d13, #6.0", "vmov.f64 d14, #7.0", "vmov.f64 d15, #8.0",
+                "blx {f}",
+                "vstmia r5, {{d8-d15}}",
+                f = in(reg) resume as extern "C" fn(*mut Coro),
+                in("r0") coro,
+                in("r5") out.as_mut_ptr(),
                 out("d8") _, out("d9") _, out("d10") _, out("d11") _, out("d12") _, out("d13") _, out("d14") _, out("d15") _,
                 clobber_abi("C"),
             );

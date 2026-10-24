@@ -115,6 +115,7 @@ jobs:
         with:
           go: "true"
           cross-arm64: "true"
+          cross-armv7: "true"
       - name: scripts/dist.sh
         run: scripts/dist.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -155,7 +156,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [unit, musl] # chaos/soak campaigns: ci.yml, non-blocking
+        suite: [unit, musl, i686] # chaos/soak campaigns: ci.yml, non-blocking
     env:
       K10S_BUILD_VERSION: ${{ needs.version.outputs.version }}
       K10S_BUILD_COMMIT: ${{ needs.version.outputs.build }}
@@ -186,6 +187,27 @@ jobs:
       - uses: ./.github/actions/toolchains
       - name: scripts/ci-test.sh arm64
         run: scripts/ci-test.sh arm64
+
+  armv7:
+    name: Tests of armv7 on arm64 (interpreter, musl)
+    needs: version
+    if: needs.version.outputs.released == 'false'
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    env:
+      K10S_BUILD_VERSION: ${{ needs.version.outputs.version }}
+      K10S_BUILD_COMMIT: ${{ needs.version.outputs.build }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/toolchains
+        with:
+          cross-armv7: "true"
+      - name: scripts/ci-test.sh armv7
+        run: scripts/ci-test.sh armv7
+
   metal:
     name: Bare-metal kernel self tests (QEMU/KVM)
     needs: version
@@ -344,6 +366,78 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  os-legacy:
+    name: i386 and armv7 kernels and images under QEMU (os/test.sh --arch i686, --arch armv7)
+    needs: [version, build]
+    if: needs.version.outputs.released == 'false'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      K10S_BUILD_VERSION: ${{ needs.version.outputs.version }}
+      K10S_BUILD_COMMIT: ${{ needs.version.outputs.build }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/toolchains
+        with:
+          qemu: "true"
+          cross-armv7: "true"
+          qemu-armv7: "true"
+      - name: Kernel build and image tools
+        run: >-
+          sudo apt-get install -y -q --no-install-recommends flex bison bc libelf-dev libssl-dev dosfstools mtools fdisk
+          zstd xz-utils libdevmapper1.02.1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/os/linux-*.tar.xz
+            target/os/*.deb
+            target/os/firmware-*
+            target/os/kernel-i686/arch/x86/boot/bzImage
+            target/os/kernel-i686/modroot
+            target/os/kernel-i686/.k10s-stamp
+            target/os/kernel-armv7/arch/arm/boot/zImage
+            target/os/kernel-armv7/.k10s-stamp
+          key: os-legacy-${{ hashFiles('os/kbuild.sh', 'os/bootfiles.sh', 'os/firmware.sh', 'os/firmware.list', 'os/kpatches/*', 'os/kconfig/*') }}
+      # The images ship the k10s of the release's i686 and armv7 musl archives; the host runs the x86-64 one.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+      - name: The release's k10s
+        run: |
+          for t in x86_64-unknown-linux-musl i686-unknown-linux-musl armv7-unknown-linux-musleabihf; do
+            tar -xzf dist/k10s-*-$t.tar.gz -C "$RUNNER_TEMP"
+          done
+          echo "K10S_HOST_BIN=$(echo "$RUNNER_TEMP"/k10s-*-x86_64-unknown-linux-musl/k10s)" >> "$GITHUB_ENV"
+          echo "K10S_BIN_I686=$(echo "$RUNNER_TEMP"/k10s-*-i686-unknown-linux-musl/k10s)" >> "$GITHUB_ENV"
+          echo "K10S_BIN_ARMV7=$(echo "$RUNNER_TEMP"/k10s-*-armv7-unknown-linux-musleabihf/k10s)" >> "$GITHUB_ENV"
+      - name: The OS image signing key
+        env:
+          IMAGE_KEY: ${{ secrets.K10S_IMAGE_KEY }}
+        run: |
+          if [[ -z $IMAGE_KEY ]]; then
+            echo "::error::the repository secret K10S_IMAGE_KEY (the OS image signing key) is not set"
+            exit 1
+          fi
+          (umask 077 && printf '%s\n' "$IMAGE_KEY" >"$RUNNER_TEMP/image.key")
+          echo "K10S_IMAGE_KEY=$RUNNER_TEMP/image.key" >>"$GITHUB_ENV"
+      - name: scripts/ci-test.sh os-legacy
+        run: scripts/ci-test.sh os-legacy
+      - name: The images verify against the release key built into k10s
+        run: for f in target/os/images/*-i686-metal.efi target/os/images/*-armv7-vm.efi; do "$K10S_HOST_BIN" image verify "$f"; done
+      - name: Remove the signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/image.key"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: os-images-legacy
+          path: target/os/images/
+          if-no-files-found: error
+          retention-days: 14
+
   metal-e2e:
     name: Bare-metal kernel end-to-end (metal/test.sh, non-blocking)
     needs: version
@@ -369,7 +463,7 @@ jobs:
 
   publish:
     name: Publish ${{ needs.version.outputs.tag }}
-    needs: [version, build, dist-test, test, arm64, metal, os, os-arm64]
+    needs: [version, build, dist-test, test, arm64, armv7, metal, os, os-arm64, os-legacy]
     if: needs.version.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
@@ -398,6 +492,10 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: os-images-arm64
+          path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: os-images-legacy
           path: dist
       - name: Verify the artifacts
         working-directory: dist

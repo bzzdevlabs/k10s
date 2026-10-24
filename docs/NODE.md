@@ -23,7 +23,8 @@ placement and peer links on top of it.
 ## Memory
 - **Slots**: instance memory = `S = 2^k` + a 4096-byte tail page (TIR needs 8 tail bytes), carved out of 1 GiB
   `MAP_NORESERVE` regions per size class (per shard). Allocation pops a LIFO free list or bumps the newest region:
-  no syscall. Freed slots are `madvise(MADV_DONTNEED)`-ed (they read back as zeros) and reused.
+  no syscall. On 32-bit targets (i686, armv7: a 3-4 GiB address space) regions are 64 MiB and slots at most 2^28
+  bytes; `apply` refuses a larger `memory` for a service placed on the node. Freed slots are `madvise(MADV_DONTNEED)`-ed (they read back as zeros) and reused.
   Regions are `MADV_NOHUGEPAGE`: with THP `always`, one touch would commit 2 MiB, i.e. ~30 neighbouring 64 KiB
   slots (measured: 70 KB RSS per instance instead of 4.4 KB). Physical memory = pages actually touched.
   `--mem SIZE` caps the address space handed to live instances (sum of `S + 4 KiB`; default: physical RAM), with
@@ -67,9 +68,11 @@ placement and peer links on top of it.
     snapshots for `fresh` services only, map only large snapshots.
 
 ## Execution
-- **Fibers**: an invocation runs on a pooled coroutine (1 MiB `MAP_NORESERVE` stack + guard page; idle instances
-  own no stack). The context switch is a naked function: push rbx/rbp/r12–r15, swap `rsp`, pop (21 ns resume+suspend
-  round trip). MXCSR/x87 control words are not switched (nothing running on fibers changes them). A fiber runs jobs
+- **Fibers**: an invocation runs on a pooled coroutine (1 MiB `MAP_NORESERVE` stack + guard page, 256 KiB on 32-bit
+  targets; idle instances own no stack). The context switch is a naked function: push rbx/rbp/r12–r15, swap `rsp`,
+  pop (21 ns resume+suspend round trip); on aarch64 x19–x30 and d8–d15, on i686 ebx/esi/edi/ebp, on armv7 r4–r11 and
+  d8–d15 (`coro.rs`). The floating-point control state (MXCSR/x87, FPCR, FPSCR) is not switched (nothing running on
+  fibers changes it). A fiber runs jobs
   in a loop; it suspends with a *syscall*: `Done`, `Yield` (preempted) or `Call`. Panics in host code are caught per
   job and reported as an internal trap. Free fibers beyond 64 per shard get their stacks released (250 ms timer).
   At most `max_fibers` (1024) invocations run per shard; callee jobs may use up to 2× that; more wait in a backlog.

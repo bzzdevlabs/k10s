@@ -1031,3 +1031,17 @@ fn reservations_added_while_the_pool_is_full_take_effect_at_once() {
     assert_eq!(get(&node, "/hog").text(), "done");
     node.shutdown();
 }
+
+/// 32-bit address space: a service larger than the largest slot (2^28) is refused at apply instead of wrapping its
+/// size; the largest slot serves.
+#[cfg(target_pointer_width = "32")]
+#[test]
+fn memory_beyond_the_largest_slot_is_refused() {
+    let node = start(config(1));
+    let max = k10_node::slot::MAX_SLOT_LOG2;
+    let e = node.apply(bundle(vec![svc("big", &demo::echo()).mem(max + 1)])).unwrap_err();
+    assert!(e.contains("larger than the largest slot"), "{e}");
+    node.apply(bundle(vec![svc("big", &demo::echo()).mem(max)])).unwrap();
+    assert_eq!(get(&node, "/big").status, 200);
+    node.shutdown();
+}

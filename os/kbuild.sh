@@ -1,22 +1,26 @@
 #!/usr/bin/env bash
 # Builds a k10s Linux kernel (Tier 1 driver layer) without root: tinyconfig + os/kconfig fragments, on the pinned
 # kernel.org source with the patches of os/kpatches.
-#   os/kbuild.sh [vm|metal|arm64] [OUT_DIR]   prints OUT_DIR (default: target/os/kernel-x86_64-PROFILE, or
-#   target/os/kernel-aarch64 for arm64), which holds arch/x86/boot/bzImage and, for metal, the signed module tree in
-#   modroot/lib/modules/VERSION (with depmod output); for arm64 arch/arm64/boot/{Image,Image.gz} and the Raspberry Pi
-#   devicetrees in arch/arm64/boot/dts/broadcom.
+#   os/kbuild.sh [vm|metal|arm64|i386|armv7] [OUT_DIR]   prints OUT_DIR (default: target/os/kernel-x86_64-PROFILE,
+#   target/os/kernel-aarch64, target/os/kernel-i686 or target/os/kernel-armv7), which holds arch/x86/boot/bzImage
+#   (x86-64, i386) and, for metal and i386, the signed module tree in modroot/lib/modules/VERSION (with depmod
+#   output); for arm64 arch/arm64/boot/{Image,Image.gz} and the Raspberry Pi devicetrees in
+#   arch/arm64/boot/dts/broadcom; for armv7 arch/arm/boot/zImage.
 # vm: QEMU/KVM guests, every driver built in. metal: real machines, NIC/USB-network/watchdog drivers as modules signed
 # with a per-build RSA key that is deleted after `modules_install` (K10S_MODULE_KEY=PEM signs with a kept key+cert
-# instead, which makes the build reproducible). arm64: QEMU virt, arm64 cloud guests and the Raspberry Pi 4/5, every
-# driver built in (cross-compiled with aarch64-linux-gnu- on other hosts). Needs make, gcc, flex, bison, bc, openssl,
-# zstd, depmod, patch and the libelf and libssl headers. The tarball is downloaded once and checked against its
-# SHA-256; a build whose version, patches and fragments are unchanged is reused.
+# instead, which makes the build reproducible). arm64: QEMU virt, arm64 cloud guests and the Raspberry Pi 3/4/5,
+# every driver built in. i386: old PCs (i686 with PAE), modules like metal. armv7: QEMU virt and other 32-bit ARM
+# UEFI machines, every driver built in. Kernels of another architecture than the host's are cross-compiled
+# (aarch64-linux-gnu-, i686-linux-gnu-, arm-linux-gnueabihf-, x86_64-linux-gnu-). Needs make, gcc, flex, bison, bc,
+# openssl, zstd, depmod, patch and the libelf and libssl headers. The tarball is downloaded once and checked against
+# its SHA-256; a build whose version, patches and fragments are unchanged is reused.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 VERSION=6.18.57
 SHA256=5bd9acdc82ec5efc3790ae840e5aaa40dfde7efff261cf6dde902dc570acf98c
 profile=${1:-vm}
 cache=${K10S_OS_CACHE:-$here/../target/os}
+host=$(uname -m)
 case $profile in
 vm | metal)
     arch=x86_64
@@ -24,6 +28,7 @@ vm | metal)
     frags=("$here/kconfig/common.config" "$here/kconfig/x86-$profile.config" "$here/kconfig/x86_64.config")
     image=$out/arch/x86/boot/bzImage
     targets=(bzImage)
+    [[ $host == x86_64 ]] || export CROSS_COMPILE=${CROSS_COMPILE:-x86_64-linux-gnu-}
     ;;
 arm64)
     arch=arm64
@@ -31,7 +36,23 @@ arm64)
     frags=("$here/kconfig/common.config" "$here/kconfig/arm64.config")
     image=$out/arch/arm64/boot/Image.gz
     targets=(Image Image.gz dtbs)
-    [[ $(uname -m) == aarch64 ]] || export CROSS_COMPILE=${CROSS_COMPILE:-aarch64-linux-gnu-}
+    [[ $host == aarch64 ]] || export CROSS_COMPILE=${CROSS_COMPILE:-aarch64-linux-gnu-}
+    ;;
+i386)
+    arch=i386
+    out=${2:-$cache/kernel-i686}
+    frags=("$here/kconfig/common.config" "$here/kconfig/i386.config")
+    image=$out/arch/x86/boot/bzImage
+    targets=(bzImage)
+    [[ $host == x86_64 || $host == i?86 ]] || export CROSS_COMPILE=${CROSS_COMPILE:-i686-linux-gnu-}
+    ;;
+armv7)
+    arch=arm
+    out=${2:-$cache/kernel-armv7}
+    frags=("$here/kconfig/common.config" "$here/kconfig/armv7.config")
+    image=$out/arch/arm/boot/zImage
+    targets=(zImage)
+    [[ $host == armv7* ]] || export CROSS_COMPILE=${CROSS_COMPILE:-arm-linux-gnueabihf-}
     ;;
 *)
     echo "kbuild: unknown profile $profile" >&2
@@ -67,7 +88,11 @@ mk() { make -C "$src" O="$out" ARCH=$arch "$@"; }
 rm -f "$out/.k10s-stamp"
 mkdir -p "$out"
 extra=()
-if [[ $profile == metal ]]; then
+modular=0
+if [[ $profile == metal || $profile == i386 ]]; then
+    modular=1
+fi
+if ((modular)); then
     key=${K10S_MODULE_KEY:-}
     if [[ -z $key ]]; then
         rm -rf "$out/signing" && (umask 077 && mkdir "$out/signing")
@@ -112,7 +137,7 @@ for f in "${frags[@]}"; do
     done < <(grep -E '^CONFIG_' "$f")
 done
 [[ $bad == 0 ]] || exit 1
-if [[ $profile == metal ]]; then
+if ((modular)); then
     mk -s -j"$(nproc)" "${targets[@]}" modules >&2
     rm -rf "$out/modroot"
     mk -s INSTALL_MOD_PATH="$out/modroot" INSTALL_MOD_STRIP=1 modules_install >&2

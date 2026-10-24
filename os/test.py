@@ -12,7 +12,8 @@ and, for the DHCP test, a host-side DHCP server on a QEMU socket netdev. os/test
   test.py image --image IMG --k10s HOST_K10S --examples DIR (--bios | --uefi) [--metal] [--work DIR]
       A disk image (os/mkimage.py) on a 4 GiB disk, configured like an operator would: k10s.conf and the admin key
       copied to K10S-BOOT. Boot 1 grows K10S-DATA and its ext4 to the end of the disk, applies and serves; boot 2 keeps
-      the state and grows nothing. --metal: q35, NVMe, e1000e and the Intel TCO watchdog (signed modules).
+      the state and grows nothing. --metal: q35, NVMe, e1000e and the Intel TCO watchdog (signed modules). On i686:
+      the MBR image on SeaBIOS, an Atom N270, an IDE disk and an RTL8139 (8139too, a signed module).
   test.py unsigned --kernel K --kmods DIR --k10s K10S --work DIR
       The metal kernel refuses e1000e once its signature is stripped (no network).
   test.py boottime --image IMG [--runs N]
@@ -21,14 +22,20 @@ and, for the DHCP test, a host-side DHCP server on a QEMU socket netdev. os/test
       A/B update of a single-node cluster to a re-signed image, with the power cut at every step (verified, slot
       written, armed, trial boot, commit request, committed): each boot serves on a good image and the KV state
       survives. Then an image that panics (the loaders fall back after 3 boots) and one that never commits (init
-      falls back after os_trial); both are recorded as failed.
+      falls back after os_trial); both are recorded as failed. On i686 (BIOS): an IDE disk and an e1000 (a signed
+      module).
   test.py rollout --image IMG --uki EFI --image-key KEY --boot DIR --k10s K10S --examples DIR [--nodes 20]
       A cluster of BIOS VMs: an image that panics stops after the first wave (one node), then a good image rolls
       through every node in waves of 1, 2, 4, … with each wave committed before the next starts.
   test.py pi --image IMG --uki FAT --image-key KEY --k10s K10S --examples DIR
-      The Raspberry Pi image on QEMU virt behind a model of the Pi firmware (PiFirmware): K10S-BOOT and K10S-DATA
-      found by label on the MBR disk, A/B update through autoboot.txt and tryboot with the power cut at every step,
-      an image that panics (tried 3 times), one that never commits.
+      The Raspberry Pi image on QEMU virt behind a model of the Pi firmware (PiNode): K10S-BOOT and K10S-DATA found
+      by label on the MBR disk, A/B update through autoboot.txt and tryboot with the power cut at every step, an image
+      that panics (tried 3 times), one that never commits.
+  test.py pi3 --image IMG --uki FAT --image-key KEY --k10s K10S --examples DIR
+      The same on QEMU raspi3b (a Raspberry Pi 3: BCM2837, its devicetree from the slot, the SD card on SDHOST, no
+      RTC: the clock comes from a host-side SNTP server), with QEMU's USB CDC NIC standing in for the LAN9514: it
+      appears on the dwc2 bus after boot. The Pi 3 has no power button: each run ends in a power cut. No watchdog:
+      QEMU's raspi3b resets as soon as it is armed.
   test.py mixed --image IMG --k10s K10S --host-k10s X86_K10S --examples DIR
       A Pi (the Pi image, as above) joins a cluster whose first member is an x86-64 k10s on the host; both serve
       services placed on either node.
@@ -37,8 +44,9 @@ and, for the DHCP test, a host-side DHCP server on a QEMU socket netdev. os/test
       disk and variable store per case: the released image is refused; it serves with Secure Boot off, with a MOK under
       Debian's shim (--shim: os/bootfiles.sh shim-ARCH) and with own keys; under own keys an update re-signed for
       Secure Boot commits, and one signed by k10s only is refused by the firmware 3 times and rolled back.
---arch aarch64 runs boot, image, update and secureboot on qemu-system-aarch64 (virt; UEFI: AAVMF); pi and mixed are
-aarch64 only.
+--arch aarch64 runs boot, image, update and secureboot on qemu-system-aarch64 (virt; UEFI: AAVMF); pi, pi3 and mixed
+are aarch64 only. --arch armv7 runs boot, image and update on qemu-system-arm (virt without highmem, Cortex-A15; UEFI:
+AAVMF32), --arch i686 on qemu-system-i386 (pc, an Atom N270; BIOS: SeaBIOS).
 """
 import argparse
 import hashlib
@@ -86,9 +94,17 @@ KVM = os.access("/dev/kvm", os.R_OK | os.W_OK)
 OVMF = {"x86_64": [("/usr/share/OVMF/OVMF_CODE_4M.fd", "/usr/share/OVMF/OVMF_VARS_4M.fd"),
                    ("/usr/share/OVMF/OVMF_CODE.fd", "/usr/share/OVMF/OVMF_VARS.fd"),
                    ("/usr/share/edk2/ovmf/OVMF_CODE.fd", "/usr/share/edk2/ovmf/OVMF_VARS.fd")],
-        "aarch64": [("/usr/share/AAVMF/AAVMF_CODE.fd", "/usr/share/AAVMF/AAVMF_VARS.fd")]}
-# The serial console and the QEMU machine of the arch (aarch64: virt with a PL011, PL031 RTC and gpio-keys).
-CONSOLE = {"x86_64": "ttyS0", "aarch64": "ttyAMA0"}
+        "aarch64": [("/usr/share/AAVMF/AAVMF_CODE.fd", "/usr/share/AAVMF/AAVMF_VARS.fd")],
+        "armv7": [("/usr/share/AAVMF/AAVMF32_CODE.fd", "/usr/share/AAVMF/AAVMF32_VARS.fd")]}
+QEMU = {"x86_64": "qemu-system-x86_64", "aarch64": "qemu-system-aarch64", "i686": "qemu-system-i386", "armv7": "qemu-system-arm"}
+# The serial console and the QEMU machine of the arch (aarch64 and armv7: virt with a PL011, PL031 RTC and gpio-keys;
+# armv7 without highmem, which its kernel (no LPAE) cannot reach).
+CONSOLE = {"x86_64": "ttyS0", "aarch64": "ttyAMA0", "i686": "ttyS0", "armv7": "ttyAMA0"}
+MACHINE = {"aarch64": "virt", "armv7": "virt,highmem=off"}
+# A fixed old CPU on i686 (32-bit only, SSE2, PAE and NX), a Cortex-A15 on armv7.
+CPU = {"i686": "n270", "armv7": "cortex-a15"}
+# The UKI stub name of the arch (systemd-boot's EFI architecture names).
+EFI_ARCH = {"x86_64": "x64", "aarch64": "aa64", "i686": "ia32", "armv7": "arm"}
 
 
 def uefi_firmware(work):
@@ -98,7 +114,7 @@ def uefi_firmware(work):
             mine = os.path.join(work, "OVMF_VARS.fd")
             shutil.copyfile(vars_, mine)
             return ["-drive", f"if=pflash,format=raw,readonly=on,file={code}", "-drive", f"if=pflash,format=raw,file={mine}"]
-    sys.exit("test.py: UEFI firmware not found (package ovmf or qemu-efi-aarch64)")
+    sys.exit("test.py: UEFI firmware not found (package ovmf, qemu-efi-aarch64 or qemu-efi-arm)")
 
 
 class Guest:
@@ -113,14 +129,17 @@ class Guest:
         boot = ["-kernel", kernel, "-initrd", initrd, "-append", f"console={CONSOLE[ARCH]} panic=-1 " + append] if kernel else []
         # The firmware's debug port (SeaBIOS): what happened before the kernel, should a disk boot fail silently.
         self.fwlog = os.path.join(work, f"{name}.fw.log")
-        if not kernel and ARCH == "x86_64":
+        if not kernel and ARCH in ("x86_64", "i686"):
             boot = ["-chardev", f"file,id=fw,path={self.fwlog}", "-device", "isa-debugcon,iobase=0x402,chardev=fw"]
-        machine = ["-M", "virt"] if ARCH == "aarch64" and "-M" not in extra else []
-        cmd = [tool(f"qemu-system-{ARCH}"), "-nodefaults", "-no-user-config", "-display", "none",
+        machine = ["-M", MACHINE[ARCH]] if ARCH in MACHINE and "-M" not in extra else []
+        # The Pi 3 has its own CPU model and RNG, and no PCI bus.
+        pi3 = "raspi3b" in extra
+        cpu = [] if pi3 else ["-cpu", CPU.get(ARCH, "host" if KVM else "max")]
+        rng = [] if pi3 else ["-device", "virtio-rng-pci"]
+        cmd = [tool(QEMU[ARCH]), "-nodefaults", "-no-user-config", "-display", "none",
                *([] if reboot else ["-no-reboot"]), *machine,
-               "-m", mem, "-smp", str(smp), "-accel", "kvm" if KVM else "tcg", "-cpu", "host" if KVM else "max",
-               *boot, "-serial", f"file:{self.log}", "-qmp", f"unix:{self.qmp},server=on,wait=off",
-               "-device", "virtio-rng-pci"] + extra
+               "-m", mem, "-smp", str(smp), "-accel", "kvm" if KVM else "tcg", *cpu,
+               *boot, "-serial", f"file:{self.log}", "-qmp", f"unix:{self.qmp},server=on,wait=off", *rng] + extra
         self.timeout = 90 if KVM else 300
         self.cmd = cmd
         self.proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
@@ -207,25 +226,46 @@ def mtools(cmd, disk, offset, *args, **kw):
     return subprocess.run([tool(cmd), "-i", f"{disk}@@{offset}", *args], check=True, env=dict(os.environ, MTOOLS_SKIP_CHECK="1"), **kw)
 
 
+def boot_offset(disk):
+    """Byte offset of K10S-BOOT: the GPT partition of that name, else partition 1 of an MBR disk (i686, Pi)."""
+    with open(disk, "rb") as f:
+        f.seek(512)
+        h = f.read(92)
+        if h[:8] == b"EFI PART":
+            ents_lba, n, esz = struct.unpack_from("<QII", h, 72)
+            f.seek(ents_lba * 512)
+            ents = f.read(n * esz)
+            for i in range(n):
+                e = ents[i * esz:(i + 1) * esz]
+                if e[56:74].decode("utf-16-le") == "K10S-BOOT":
+                    return struct.unpack_from("<Q", e, 32)[0] * 512
+            fail(f"{disk}: no K10S-BOOT partition")
+    return mbr_parts(disk)[0][0]
+
+
 class PiNode:
-    """A Raspberry Pi on QEMU virt behind a model of its boot firmware, as far as k10s relies on it: each boot reads
+    """A Raspberry Pi on QEMU behind a model of its boot firmware, as far as k10s relies on it: each boot reads
     autoboot.txt from partition 1 of the MBR disk and boots the partition of its [all] section, or once of its
     [tryboot] section when the previous boot ended in `reboot "0 tryboot"` (the kernel logs the command); it loads
     kernel8.img, initramfs8 and cmdline.txt from that FAT partition and passes the partition and the tryboot flag in
     /chosen/bootloader of the devicetree. A reboot of the guest starts the next boot; a power cut (`cut`, kill) or a
-    power-off ends the run. Has the interface of Guest; its console is that of every boot so far."""
+    power-off ends the run. Has the interface of Guest; its console is that of every boot so far. On QEMU virt (the
+    Pi 4/5 model, whose SoCs QEMU 10 has no Ethernet for) the devicetree is virt's; with `pi3` the machine is raspi3b
+    and the devicetree the slot's bcm2710-rpi-3-b.dtb, as the firmware loads it."""
 
-    def __init__(self, work, name, disk, extra, cut=None, mem="512M", smp=2):
-        self.work, self.name, self.disk, self.extra, self.cutpat, self.mem, self.smp = work, name, disk, extra, cut, mem, smp
+    def __init__(self, work, name, disk, extra, cut=None, mem="512M", smp=2, pi3=False):
+        self.work, self.name, self.disk, self.extra, self.cutpat, self.pi3 = work, name, disk, extra, cut, pi3
+        self.mem, self.smp = ("1G", 4) if pi3 else (mem, smp)
         self.log = os.path.join(work, f"{name}.log")
         self.boots, self.tryboot, self.stopped = [], False, False
         self.cut, self.done = threading.Event(), threading.Event()
-        self.timeout = 300
-        dtb = os.path.join(work, f"{name}.virt.dtb")
-        subprocess.run([tool("qemu-system-aarch64"), "-M", f"virt,dumpdtb={dtb}", "-m", mem, "-smp", str(smp), "-accel",
-                        "kvm" if KVM else "tcg", "-cpu", "host" if KVM else "max", "-nodefaults", "-display", "none"],
-                       check=True, capture_output=True)
-        self.dts = subprocess.run([tool("dtc"), "-q", "-I", "dtb", "-O", "dts", dtb], check=True, capture_output=True, text=True).stdout
+        self.timeout = 600 if pi3 else 300
+        if not pi3:
+            dtb = os.path.join(work, f"{name}.virt.dtb")
+            subprocess.run([tool("qemu-system-aarch64"), "-M", f"virt,dumpdtb={dtb}", "-m", mem, "-smp", str(smp), "-accel",
+                            "kvm" if KVM else "tcg", "-cpu", "host" if KVM else "max", "-nodefaults", "-display", "none"],
+                           check=True, capture_output=True)
+            self.dts = subprocess.run([tool("dtc"), "-q", "-I", "dtb", "-O", "dts", dtb], check=True, capture_output=True, text=True).stdout
         self.boot()
         threading.Thread(target=self.run, daemon=True).start()
 
@@ -237,15 +277,19 @@ class PiNode:
         part = int(re.search(r"boot_partition=(\d+)", section).group(1))
         d = os.path.join(self.work, f"{self.name}.{n}")
         os.makedirs(d, exist_ok=True)
-        for f in ("kernel8.img", "initramfs8", "cmdline.txt"):
+        files = ("kernel8.img", "initramfs8", "cmdline.txt") + (("bcm2710-rpi-3-b.dtb",) if self.pi3 else ())
+        for f in files:
             mtools("mcopy", self.disk, parts[part - 1][0], f"::/{f}", os.path.join(d, f), "-o")
+        dts = self.dts if not self.pi3 else subprocess.run(
+            [tool("dtc"), "-q", "-I", "dtb", "-O", "dts", os.path.join(d, "bcm2710-rpi-3-b.dtb")], check=True, capture_output=True, text=True).stdout
         dtb = os.path.join(d, "pi.dtb")
         subprocess.run([tool("dtc"), "-q", "-I", "dts", "-O", "dtb", "-o", dtb, "-"], check=True, text=True,
-                       input=self.dts + f"/ {{ chosen {{ bootloader {{ partition = <{part}>; tryboot = <{int(self.tryboot)}>; }}; }}; }};\n")
+                       input=dts + f"/ {{ chosen {{ bootloader {{ partition = <{part}>; tryboot = <{int(self.tryboot)}>; }}; }}; }};\n")
         self.tryboot = False
         cmdline = open(os.path.join(d, "cmdline.txt")).read().strip()
+        machine = ["-M", "raspi3b"] if self.pi3 else []
         g = Guest(self.work, f"{self.name}.{n}", os.path.join(d, "kernel8.img"), os.path.join(d, "initramfs8"),
-                  f"{cmdline} console=ttyAMA0", ["-dtb", dtb] + self.extra, mem=self.mem, smp=self.smp, cut=self.cutpat)
+                  f"{cmdline} console=ttyAMA0", machine + ["-dtb", dtb] + self.extra, mem=self.mem, smp=self.smp, cut=self.cutpat)
         self.boots.append(g)
 
     def run(self):
@@ -493,12 +537,19 @@ def dhcp_test(a, work):
 
 def data_partition_check(disk):
     """After the first boot: both GPT headers valid, the backup in the last sector, K10S-DATA ending at the last
-    1 MiB boundary before it, and ext4 filling K10S-DATA. Returns an error or None."""
+    1 MiB boundary before it (MBR: partition 2 ending at the last 1 MiB boundary of the disk), and ext4 filling
+    K10S-DATA. Returns an error or None."""
     total = os.path.getsize(disk) // 512
     with open(disk, "rb") as f:
         def read(lba, n=512):
             f.seek(lba * 512)
             return f.read(n)
+
+        if read(1, 8) != b"EFI PART":
+            start, size = (x // 512 for x in mbr_parts(disk)[1])
+            if start + size != total // 2048 * 2048:
+                return f"K10S-DATA ends at LBA {start + size} of {total}"
+            return ext4_fills(read, start, start + size - 1)
 
         for lba, other in ((1, total - 1), (total - 1, 1)):
             h = read(lba, 92)
@@ -519,11 +570,16 @@ def data_partition_check(disk):
             return "no K10S-DATA partition"
         if end != (total - 33) // 2048 * 2048 - 1:
             return f"K10S-DATA ends at LBA {end} of {total}"
-        sb = read(start + 2, 1024)
-        hi = struct.unpack_from("<I", sb, 0x150)[0] if struct.unpack_from("<I", sb, 0x60)[0] & 0x80 else 0
-        blocks = hi << 32 | struct.unpack_from("<I", sb, 4)[0]
-        if blocks * (1024 << struct.unpack_from("<I", sb, 0x18)[0]) != (end - start + 1) * 512:
-            return f"ext4 has {blocks} blocks"
+        return ext4_fills(read, start, end)
+
+
+def ext4_fills(read, start, end):
+    """None if the ext4 at LBA `start` fills the partition up to LBA `end`, else an error."""
+    sb = read(start + 2, 1024)
+    hi = struct.unpack_from("<I", sb, 0x150)[0] if struct.unpack_from("<I", sb, 0x60)[0] & 0x80 else 0
+    blocks = hi << 32 | struct.unpack_from("<I", sb, 4)[0]
+    if blocks * (1024 << struct.unpack_from("<I", sb, 0x18)[0]) != (end - start + 1) * 512:
+        return f"ext4 has {blocks} blocks"
     return None
 
 
@@ -539,16 +595,21 @@ def image_test(a, work):
     conf = os.path.join(work, "k10s.conf")
     with open(conf, "w") as f:
         f.write(f"# image test node\nadmin-token-file=/boot/admin.key\nwatchdog=1\nntp=10.0.2.2:{ntp}\n")
-    subprocess.run([tool("mcopy"), "-o", "-i", f"{disk}@@{2 << 20}", conf, key, "::/"], check=True,
-                   env=dict(os.environ, MTOOLS_SKIP_CHECK="1"))
+    mtools("mcopy", disk, boot_offset(disk), "-o", conf, key, "::/")
     if a.metal:
         dev, nic = "nvme0n1p", "e1000e"
         hw = ["-M", "q35", "-drive", f"file={disk},if=none,id=d0,format=raw", "-device", "nvme,drive=d0,serial=k10s"]
+    elif ARCH == "i686":
+        # An old PC: IDE disk (ata_piix), RTL8139 (8139too, a signed module).
+        dev, nic = "sda", "rtl8139"
+        hw = ["-drive", f"file={disk},if=ide,format=raw", "-device", "i6300esb"]
     else:
         dev, nic = "vda", "virtio-net-pci"
         hw = ["-drive", f"file={disk},if=virtio,format=raw", "-device", "i6300esb"]
     # x86-64: p1 is GRUB's BIOS boot partition.
     pboot, pdata = (2, 3) if ARCH == "x86_64" else (1, 2)
+    # K10S-DATA grown to the end of the 4 GiB disk: GPT keeps its backup header in the last MiB, MBR does not.
+    grown = 3839 if ARCH == "i686" else 3837
     fw = uefi_firmware(work) if a.uefi else []
     for run in (1, 2):
         port = free_port()
@@ -556,16 +617,17 @@ def image_test(a, work):
                   fw + hw + ["-rtc", "base=2001-01-01T00:00:00", "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:80",
                              "-device", f"{nic},netdev=n0"])
         g.wait_for(r"k10s-init\[ *[\d.]+\]: k10s \S+ as PID 1", "init banner")
-        if a.metal:
-            # The only NIC (e1000e) and watchdog (iTCO_wdt behind lpc_ich) are modules: the lease and "armed" below.
+        if a.metal or ARCH == "i686":
+            # The only NIC (e1000e, 8139too) and the watchdog (iTCO_wdt behind lpc_ich, i6300esb) are modules: the lease
+            # and "armed" below.
             g.wait_for(r"modules: [3-9] loaded by modalias", "signed modules")
         g.wait_for(rf"config: /dev/{dev}{pboot} \(K10S-BOOT\): k10s.conf merged", "k10s.conf from K10S-BOOT")
         g.wait_for(r"net: eth0 DHCP 10\.0\.2\.15/24 gateway 10\.0\.2\.2", "DHCP lease")
         if run == 1:
-            g.wait_for(rf"data: /dev/{dev}{pdata} grown to 3837 MiB \(end of disk\)", "K10S-DATA grown")
+            g.wait_for(rf"data: /dev/{dev}{pdata} grown to {grown} MiB \(end of disk\)", "K10S-DATA grown")
         g.wait_for(rf"data: /dev/{dev}{pdata} \(ext4\) on /data", "data partition")
         if run == 1:
-            g.wait_for(r"data: ext4 grown to 3837 MiB", "ext4 grown")
+            g.wait_for(rf"data: ext4 grown to {grown} MiB", "ext4 grown")
         g.wait_for(r"watchdog: armed", "watchdog")
         g.wait_for(r"sandbox mode=on user=65532\(65532:65532\) caps=none landlock=abi\d+ seccomp=kill", "node sandbox")
         g.wait_for(r"ready: the node answers", "node ready")
@@ -681,6 +743,9 @@ class Images:
         self.a = a.uki
         self.ids = {"a": hashlib.sha256(blob).hexdigest()}
         payload = unsigned_payload(blob)
+        # The signed header after the payload: "K10S-IMG", format, then the arch and profile, each with its length.
+        h = blob[len(payload) + 9:]
+        self.profile = h[h[0] + 2:h[0] + 2 + h[h[0] + 1]].decode()
         self.files = {}
         if pi:
             # The slot image is a FAT filesystem: the variants change its cmdline.txt.
@@ -691,11 +756,11 @@ class Images:
                     cmdline = mtools("mtype", fat, 0, "::/cmdline.txt", capture_output=True, text=True).stdout.strip()
                     open(os.path.join(work, "cmdline.txt"), "w").write(cmdline + extra + "\n")
                     mtools("mcopy", fat, 0, "-o", os.path.join(work, "cmdline.txt"), "::/cmdline.txt")
-                self.sign(a, fat, name, "pi")
+                self.sign(a, fat, name, self.profile)
             return
         secs = pe_sections(payload)
         cmdline = secs[".cmdline"].rstrip(b"\0").decode().strip()
-        stub = os.path.join(a.boot, f"usr/lib/systemd/boot/efi/linux{'x64' if ARCH == 'x86_64' else 'aa64'}.efi.stub")
+        stub = os.path.join(a.boot, f"usr/lib/systemd/boot/efi/linux{EFI_ARCH[ARCH]}.efi.stub")
         for name, extra in (("b", None), ("bad", " rdinit=/missing"), ("slow", " k10s.os-commit-grace=100000")):
             uki = os.path.join(work, f"{name}.unsigned.efi")
             if extra is None:
@@ -707,7 +772,7 @@ class Images:
                     parts.append((sec, os.path.join(work, f"{name}{sec}")))
                     open(parts[-1][1], "wb").write(data)
                 mkimage.uki(stub, parts, uki)
-            self.sign(a, uki, name, "vm")
+            self.sign(a, uki, name, self.profile)
 
     def sign(self, a, payload, name, profile):
         out = os.path.join(os.path.dirname(payload), f"{name}.img")
@@ -726,14 +791,13 @@ class Images:
         return p
 
 
-def configure(disk, work, k10s, conf_lines, name="node", pi=False):
+def configure(disk, work, k10s, conf_lines, name="node"):
     """k10s.conf, the admin key and the cluster key on K10S-BOOT of a disk image, like an operator does."""
     d = os.path.join(work, name)
     os.makedirs(d, exist_ok=True)
     conf = os.path.join(d, "k10s.conf")
     open(conf, "w").write("".join(f"{l}\n" for l in conf_lines))
-    mtools("mcopy", disk, mbr_parts(disk)[0][0] if pi else 2 << 20, "-o", conf, os.path.join(work, "admin.key"),
-           os.path.join(work, "cluster.key"), "::/")
+    mtools("mcopy", disk, boot_offset(disk), "-o", conf, os.path.join(work, "admin.key"), os.path.join(work, "cluster.key"), "::/")
 
 
 def keys(work, k10s):
@@ -751,28 +815,41 @@ def apply(a, key, port, manifest):
 BOOTED = r"update: (?:Uefi|Bios|Pi) boot of slot ([ab]) \(\w+-\w+, ([0-9a-f]{8})(, trial)?\)"
 
 
-def update_test(a, work, pi=False):
+def update_test(a, work, pi=False, pi3=False):
     im = Images(a, work, pi)
     key = keys(work, a.k10s)
     disk = os.path.join(work, "disk.img")
     fw_args = uefi_firmware(work) if a.uefi else []
     runs = [0]
+    # The Pi 3 has no RTC: its clock (and with it the signed admin requests) waits for SNTP. QEMU's raspi3b resets as soon
+    # as the watchdog is armed (it models the reset configuration, not the countdown): no watchdog there.
+    ntp, watchdog = "ntp=none", "watchdog=1"
+    if pi3:
+        port = free_port(socket.SOCK_DGRAM)
+        sntp_server(port)
+        ntp, watchdog = f"ntp=10.0.2.2:{port}", "watchdog=0"
 
     def fresh_disk():
         subprocess.run(["cp", "--sparse=always", a.image, disk], check=True)
         with open(disk, "r+b") as f:
             f.truncate(2 << 30)
         configure(disk, work, a.k10s, ["admin-token-file=/boot/admin.key", "cluster-key-file=/boot/cluster.key",
-                                       "gossip=0.0.0.0:7946", "ntp=none", "watchdog=1", f"os_key={im.pub}", "os_trial=40",
-                                       "os-commit-grace=3"], pi=pi)
+                                       "gossip=0.0.0.0:7946", ntp, watchdog, f"os_key={im.pub}", "os_trial=40",
+                                       "os-commit-grace=3"])
 
     def power_on(cut=None):
         runs[0] += 1
         port = free_port()
-        hw = ["-drive", f"file={disk},if=virtio,format=raw", "-device", "i6300esb",
-              "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:80", "-device", "virtio-net-pci,netdev=n0"]
+        net = ["-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:80"]
+        if pi3:
+            # The SD card, and QEMU's USB CDC NIC on the dwc2 bus in place of the LAN9514.
+            hw = ["-drive", f"file={disk},if=sd,format=raw"] + net + ["-device", "usb-net,netdev=n0"]
+        elif ARCH == "i686":
+            hw = ["-drive", f"file={disk},if=ide,format=raw", "-device", "i6300esb"] + net + ["-device", "e1000,netdev=n0"]
+        else:
+            hw = ["-drive", f"file={disk},if=virtio,format=raw", "-device", "i6300esb"] + net + ["-device", "virtio-net-pci,netdev=n0"]
         if pi:
-            g = PiNode(work, f"update{runs[0]}", disk, hw, cut=cut)
+            g = PiNode(work, f"update{runs[0]}", disk, hw, cut=cut, pi3=pi3)
         else:
             g = Guest(work, f"update{runs[0]}", None, None, None, fw_args + hw, reboot=True, cut=cut)
         g.port = port
@@ -784,6 +861,8 @@ def update_test(a, work, pi=False):
         if m.group(2) not in (im.ids["a"][:8], im.ids["b"][:8]):
             fail(f"booted an unknown image {m.group(2)}", g.log)
         g.wait_for(r"ready: the node answers", "node ready", m.end())
+        if pi3:
+            g.wait_for(r"time: stepped by \+\d+\.\d+ s from 10\.0\.2\.2", "SNTP step", m.end())
         # A cluster node restores its services from the persisted desired state once it is up.
         end = time.time() + 30
         while True:
@@ -859,14 +938,21 @@ def update_test(a, work, pi=False):
     if (m.group(1), m.group(3)) != ("b", None):
         fail(f"after the slow image: {m.group(0)}", g.log)
     print("test.py: update: an image that never commits is abandoned after os_trial: ok", file=sys.stderr)
-    g.power_button()
-    g.wait_for(r"powering off", "power off")
-    g.wait_exit()
-    print(f"test.py: update ({'pi' if pi else 'uefi' if a.uefi else 'bios'}): ok", file=sys.stderr)
+    if pi3:
+        g.kill()
+    else:
+        g.power_button()
+        g.wait_for(r"powering off", "power off")
+        g.wait_exit()
+    print(f"test.py: update ({'pi3' if pi3 else 'pi' if pi else 'uefi' if a.uefi else 'bios'}): ok", file=sys.stderr)
 
 
 def pi_test(a, work):
     update_test(a, work, pi=True)
+
+
+def pi3_test(a, work):
+    update_test(a, work, pi=True, pi3=True)
 
 
 def mixed_test(a, work):
@@ -891,7 +977,7 @@ def mixed_test(a, work):
             f.truncate(2 << 30)
         configure(disk, work, a.k10s, ["admin-token-file=/boot/admin.key", "cluster-key-file=/boot/cluster.key",
                                        f"gossip=0.0.0.0:{vgp}", f"rpc=0.0.0.0:{vrp}", "advertise=127.0.0.1",
-                                       f"join=10.0.2.2:{gp}", "ntp=none", "name=pi"], pi=True)
+                                       f"join=10.0.2.2:{gp}", "ntp=none", "name=pi"])
         fwd = f"hostfwd=udp:127.0.0.1:{vgp}-:{vgp},hostfwd=tcp:127.0.0.1:{vrp}-:{vrp},hostfwd=tcp:127.0.0.1:{vhp}-:80"
         g = PiNode(work, "mixed", disk, ["-drive", f"file={disk},if=virtio,format=raw", "-netdev", f"user,id=n0,{fwd}",
                                           "-device", "virtio-net-pci,netdev=n0"])
@@ -1221,9 +1307,10 @@ def secureboot_test(a, work):
 def main():
     ap = argparse.ArgumentParser()
     tests = {"boot": boot_test, "dhcp": dhcp_test, "image": image_test, "unsigned": unsigned_test, "boottime": boottime_test,
-             "update": update_test, "rollout": rollout_test, "pi": pi_test, "mixed": mixed_test, "secureboot": secureboot_test}
+             "update": update_test, "rollout": rollout_test, "pi": pi_test, "pi3": pi3_test, "mixed": mixed_test,
+             "secureboot": secureboot_test}
     ap.add_argument("test", choices=tests)
-    ap.add_argument("--arch", choices=["x86_64", "aarch64"], default="x86_64")
+    ap.add_argument("--arch", choices=["x86_64", "aarch64", "i686", "armv7"], default="x86_64")
     ap.add_argument("--host-k10s")
     ap.add_argument("--kernel")
     ap.add_argument("--initrd")
@@ -1244,8 +1331,9 @@ def main():
     ap.add_argument("--work")
     a = ap.parse_args()
     global ARCH, KVM
-    ARCH = "aarch64" if a.test in ("pi", "mixed") else a.arch
-    KVM = os.access("/dev/kvm", os.R_OK | os.W_OK) and ARCH == os.uname().machine
+    ARCH = "aarch64" if a.test in ("pi", "pi3", "mixed") else a.arch
+    host = os.uname().machine
+    KVM = os.access("/dev/kvm", os.R_OK | os.W_OK) and (ARCH == host or (ARCH, host) == ("i686", "x86_64"))
     work = a.work or tempfile.mkdtemp(prefix="k10s-os-test.")
     os.makedirs(work, exist_ok=True)
     tests[a.test](a, work)

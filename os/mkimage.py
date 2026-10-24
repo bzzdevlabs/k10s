@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Rootless, reproducible disk image builder for k10s as PID 1 of a Linux image (docs/OS.md): one GPT disk that
-boots on BIOS and on UEFI (x86-64), a GPT disk for UEFI (arm64), or an MBR disk for the Raspberry Pi 4 and 5.
+boots on BIOS and on UEFI (x86-64), a GPT disk for UEFI (arm64, armv7), an MBR disk for BIOS (i686), or an MBR disk
+for the Raspberry Pi 3, 4 and 5.
 
   mkimage.py OUT.img --kernel KERNEL --initrd CPIO [--initrd CPIO ...] --cmdline "..." --boot DIR
-      [--arch x86_64|aarch64] [--pi --dtbs DIR] [--conf FILE] [--uki OUT] [--version V]
+      [--arch x86_64|aarch64|i686|armv7] [--pi --dtbs DIR] [--conf FILE] [--uki OUT] [--version V]
       [--sign KEY --k10s K10S --profile P] [--esp-mib 256] [--data-mib 256]
 
 --boot is the output of os/bootfiles.sh for the arch; initramfs archives are concatenated in order. --sign signs the
 UKI (the Pi: the slot image) with `K10S image sign` (an OS image for updates, docs/OS.md); unsigned images boot but
 cannot update; --uki keeps a copy of it. x86-64 layout (the shared ESP of docs/research/universal-os.md §8.4, with the
-A/B slots of crates/k10s/src/pid1/update.rs); arm64 has the same without the BIOS parts (p1 K10S-BOOT, p2 K10S-DATA,
-BOOTAA64.EFI):
+A/B slots of crates/k10s/src/pid1/update.rs); arm64 and armv7 have the same without the BIOS parts (p1 K10S-BOOT, p2
+K10S-DATA, BOOTAA64.EFI or BOOTARM.EFI); i686 has its BIOS parts only, on an MBR disk (old BIOSes may not boot GPT):
+GRUB's core.img in the sectors before p1, p1 K10S-BOOT (FAT32, active: grub.cfg, grubenv, k10s/a/, the slot's
+signed UKI as EFI/Linux/k10s-a.efi, the image's record of the slot), p2 K10S-DATA:
 
   MBR  GRUB boot.img (first 440 bytes) in front of the protective MBR
   p1   BIOS boot, 1 MiB: GRUB core.img
@@ -28,10 +31,13 @@ BOOTAA64.EFI):
 --pi (KERNEL is the arm64 Image.gz, --dtbs the kernel's arch/arm64/boot/dts/broadcom):
 
   MBR (the Pi firmware reads FAT partitions by number)
-  p1   K10S-BOOT (FAT32): autoboot.txt (slot A, tryboot: slot B), k10s.conf
+  p1   K10S-BOOT (FAT32): autoboot.txt (slot A, tryboot: slot B), k10s.conf, bootcode.bin (the Pi 3's second stage,
+       which must be on partition 1) and an empty start.elf (bootcode.bin reads autoboot.txt only from a partition
+       that has one)
   p2   slot A: the signed slot image, a FAT16 filesystem followed by its signature:
-         start4cd.elf, fixup4cd.dat (Pi 4 firmware; the Pi 5 has it in EEPROM), config.txt, cmdline.txt,
-         kernel8.img, initramfs8, the Pi 4 and Pi 5 devicetrees, LICENCE.broadcom
+         start_cd.elf, fixup_cd.dat (Pi 3 firmware), start4cd.elf, fixup4cd.dat (Pi 4; the Pi 5 has it in EEPROM),
+         config.txt and tryboot.txt (the same: a Pi 3 whose bootcode.bin ignores tryboot_a_b reads tryboot.txt in a
+         trial), cmdline.txt, kernel8.img, initramfs8, the Pi 3, 4 and 5 devicetrees, LICENCE.broadcom
   p3   slot B (empty until an update)
   p4   K10S-DATA (ext4); init grows it to the end of the disk on first boot
 
@@ -62,16 +68,21 @@ DATA_SEED = "6b10c5a0-0000-4000-8000-0000000000db"
 # Pi slot (MiB): room for any signed image (MAX_IMAGE_BYTES is 64 MiB).
 PI_SLOT_MIB = 128
 PI_BOOT_MIB = 64
-PI_DTBS = [("bcm2711-rpi-4-b.dtb",) * 2, ("bcm2711-rpi-400.dtb",) * 2, ("bcm2711-rpi-cm4-io.dtb",) * 2,
+PI_DTBS = [("bcm2837-rpi-3-b.dtb", "bcm2710-rpi-3-b.dtb"), ("bcm2837-rpi-3-b-plus.dtb", "bcm2710-rpi-3-b-plus.dtb"),
+           ("bcm2711-rpi-4-b.dtb",) * 2, ("bcm2711-rpi-400.dtb",) * 2, ("bcm2711-rpi-cm4-io.dtb",) * 2,
            ("bcm2712-rpi-5-b.dtb",) * 2, ("bcm2712-d-rpi-5-b.dtb", "bcm2712d0-rpi-5-b.dtb")]
-# The firmware's own name for the D0 stepping is bcm2712d0-rpi-5-b.dtb (mainline: bcm2712-d-rpi-5-b.dtb).
-PI_CONFIG = """# k10s (docs/OS.md): one arm64 kernel and initramfs for the Raspberry Pi 4 and 5, mainline devicetrees.
+# The firmware's own names: bcm2710-* for the Pi 3 with a 64-bit kernel (mainline: bcm2837-*), bcm2712d0-rpi-5-b.dtb
+# for the D0 stepping of the Pi 5 (mainline: bcm2712-d-rpi-5-b.dtb).
+PI_CONFIG = """# k10s (docs/OS.md): one arm64 kernel and initramfs for the Raspberry Pi 3, 4 and 5, mainline devicetrees.
 arm_64bit=1
 kernel=kernel8.img
 initramfs initramfs8 followkernel
 enable_uart=1
 gpu_mem=16
 disable_splash=1
+[pi3]
+start_file=start_cd.elf
+fixup_file=fixup_cd.dat
 [pi4]
 start_file=start4cd.elf
 fixup_file=fixup4cd.dat
@@ -109,8 +120,9 @@ def uki(stub, sections, out):
     pe = struct.unpack_from("<I", b, 0x3C)[0]
     nsec, optsz = struct.unpack_from("<H", b, pe + 6)[0], struct.unpack_from("<H", b, pe + 20)[0]
     opt = pe + 24
-    if struct.unpack_from("<H", b, opt)[0] != 0x20B:
-        sys.exit("mkimage: the stub is not PE32+")
+    # PE32+ (64-bit) or PE32 (ia32, arm): the fields used below are at the same offsets in both.
+    if struct.unpack_from("<H", b, opt)[0] not in (0x20B, 0x10B):
+        sys.exit("mkimage: the stub is not a PE32 or PE32+ image")
     salign, falign = struct.unpack_from("<II", b, opt + 32)
     table, room = opt + optsz, struct.unpack_from("<I", b, opt + 60)[0]
     if table + 40 * (nsec + len(sections)) > room:
@@ -210,16 +222,19 @@ def copy_sparse(src, dst, offset):
             pos += len(chunk)
 
 
-def grub_bios(boot, disk, tmp):
-    """GRUB for BIOS without grub-install: core.img in p1 (LBA 2048), boot.img in the MBR, sector numbers patched."""
+def grub_bios(boot, disk, tmp, mbr=False):
+    """GRUB for BIOS without grub-install: core.img in the BIOS boot partition p1 (LBA 2048) of a GPT disk, or right
+    after the MBR (LBA 1, the gap before p1 at 1 MiB) of an MBR disk; boot.img in the MBR, sector numbers patched."""
     mods = os.path.join(boot, "usr/lib/grub/i386-pc")
     core = os.path.join(tmp, "core.img")
-    run(os.path.join(boot, "usr/bin/grub-mkimage"), "-d", mods, "-O", "i386-pc", "-o", core, "-p", "(,gpt2)/boot/grub",
-        "biosdisk", "part_gpt", "fat", "normal", "linux", "configfile", "loadenv", "test", "serial", "terminal")
+    run(os.path.join(boot, "usr/bin/grub-mkimage"), "-d", mods, "-O", "i386-pc", "-o", core, "-p",
+        "(,msdos1)/boot/grub" if mbr else "(,gpt2)/boot/grub", "biosdisk", "part_msdos" if mbr else "part_gpt", "fat",
+        "normal", "linux", "configfile", "loadenv", "test", "serial", "terminal")
     img = bytearray(open(core, "rb").read())
-    if len(img) > MIB:
-        sys.exit("mkimage: core.img does not fit the BIOS boot partition")
-    lba = 2048
+    # The BIOS boot partition (1 MiB), or the sectors between the MBR and p1 at 1 MiB.
+    lba, room = (1, MIB - 512) if mbr else (2048, MIB)
+    if len(img) > room:
+        sys.exit("mkimage: no room for core.img")
     struct.pack_into("<Q", img, 0x200 - 12, lba + 1)  # diskboot.img's blocklist: the rest of core.img
     mbr = bytearray(open(os.path.join(mods, "boot.img"), "rb").read()[:440])
     struct.pack_into("<Q", mbr, 0x5C, lba)  # GRUB_BOOT_MACHINE_KERNEL_SECTOR
@@ -262,10 +277,10 @@ def disk(out, label, parts, total):
 def pi(a, tmp, env, put, initrd):
     """The Raspberry Pi image: MBR, K10S-BOOT, the signed slot A, an empty slot B, K10S-DATA."""
     fw = os.path.join(a.boot, "usr/lib/raspi-firmware")
-    files = [(os.path.join(fw, "start4cd.elf"), "start4cd.elf"), (os.path.join(fw, "fixup4cd.dat"), "fixup4cd.dat"),
-             (os.path.join(a.boot, "usr/share/doc/raspi-firmware/copyright"), "LICENCE.broadcom"),
-             (put("config.txt", PI_CONFIG), "config.txt"), (put("cmdline.txt", a.cmdline + "\n"), "cmdline.txt"),
-             (a.kernel, "kernel8.img"), (initrd, "initramfs8")]
+    files = [(os.path.join(fw, f), f) for f in ("start_cd.elf", "fixup_cd.dat", "start4cd.elf", "fixup4cd.dat")]
+    files += [(os.path.join(a.boot, "usr/share/doc/raspi-firmware/copyright"), "LICENCE.broadcom"),
+              (put("config.txt", PI_CONFIG), "config.txt"), (put("config.txt", PI_CONFIG), "tryboot.txt"),
+              (put("cmdline.txt", a.cmdline + "\n"), "cmdline.txt"), (a.kernel, "kernel8.img"), (initrd, "initramfs8")]
     files += [(os.path.join(a.dtbs, src), dst) for src, dst in PI_DTBS]
     # Clusters of 1 KiB, at least 1 MiB of slack; FAT16 needs 4085 clusters.
     kib = max((sum(-(-os.path.getsize(f) // 1024) for f, _ in files) + 2048) // 1024 * 1024, 8192)
@@ -278,7 +293,8 @@ def pi(a, tmp, env, put, initrd):
     boot = os.path.join(tmp, "boot.img")
     autoboot = "[all]\ntryboot_a_b=1\nboot_partition=2\n[tryboot]\nboot_partition=3\n"
     fat_image(boot, "K10S-BOOT", ESP_VOLID, PI_BOOT_MIB * 1024,
-              [(put("autoboot.txt", autoboot), "autoboot.txt"), (a.conf or put("k10s.conf", CONF), "k10s.conf")], env, spc=1)
+              [(put("autoboot.txt", autoboot), "autoboot.txt"), (a.conf or put("k10s.conf", CONF), "k10s.conf"),
+               (os.path.join(fw, "bootcode.bin"), "bootcode.bin"), (put("start.elf", b""), "start.elf")], env, spc=1)
     data = data_fs(a, tmp, env)
     at = [MIB]
     for mib in (PI_BOOT_MIB, PI_SLOT_MIB, PI_SLOT_MIB, a.data_mib):
@@ -298,7 +314,7 @@ def main():
     ap.add_argument("--initrd", action="append", required=True)
     ap.add_argument("--cmdline", required=True)
     ap.add_argument("--boot", required=True)
-    ap.add_argument("--arch", choices=["x86_64", "aarch64"], default="x86_64")
+    ap.add_argument("--arch", choices=["x86_64", "aarch64", "i686", "armv7"], default="x86_64")
     ap.add_argument("--pi", action="store_true")
     ap.add_argument("--dtbs")
     ap.add_argument("--conf")
@@ -312,8 +328,9 @@ def main():
     a = ap.parse_args()
     if a.pi and (a.arch != "aarch64" or not a.dtbs):
         sys.exit("mkimage: --pi needs --arch aarch64 and --dtbs")
-    x86 = a.arch == "x86_64"
-    efi_arch = "x64" if x86 else "aa64"
+    # GRUB for BIOS (x86); systemd-boot for UEFI (all but the BIOS-only i686 image, an MBR disk).
+    bios, uefi = a.arch in ("x86_64", "i686"), a.arch != "i686"
+    efi_arch = {"x86_64": "x64", "aarch64": "aa64", "i686": "ia32", "armv7": "arm"}[a.arch]
 
     # mke2fs takes a fake time of 0 for "unset", hence the 1980 floor of EPOCH.
     env = dict(os.environ, MTOOLS_SKIP_CHECK="1", E2FSPROGS_FAKE_TIME=str(EPOCH))
@@ -336,37 +353,46 @@ def main():
             shutil.copyfile(efi, a.uki)
 
         esp = os.path.join(tmp, "esp.img")
-        files = [
-            (os.path.join(a.boot, f"usr/lib/systemd/boot/efi/systemd-boot{efi_arch}.efi"), f"EFI/BOOT/BOOT{efi_arch.upper()}.EFI"),
-            (efi, "EFI/Linux/k10s-a.efi"),
-            (put("loader.conf", LOADER_CONF), "loader/loader.conf"),
-            (a.conf or put("k10s.conf", CONF), "k10s.conf"),
-        ]
-        if x86:
+        files = []
+        if uefi:
+            files.append((os.path.join(a.boot, f"usr/lib/systemd/boot/efi/systemd-boot{efi_arch}.efi"), f"EFI/BOOT/BOOT{efi_arch.upper()}.EFI"))
+        files.append((efi, "EFI/Linux/k10s-a.efi"))
+        if uefi:
+            files.append((put("loader.conf", LOADER_CONF), "loader/loader.conf"))
+        files.append((a.conf or put("k10s.conf", CONF), "k10s.conf"))
+        if bios:
             files += [
                 (put("grub.cfg", GRUB_CFG), "boot/grub/grub.cfg"),
                 (put("grubenv", grubenv(k10s_slot="a")), "boot/grub/grubenv"),
                 (a.kernel, "k10s/a/vmlinuz"),
                 (initrd, "k10s/a/initrd"),
                 (put("boot.cfg", f"linux /k10s/a/vmlinuz {a.cmdline} k10s.slot=a\ninitrd /k10s/a/initrd\n"), "k10s/a/boot.cfg"),
-                (put("tier", "auto\n"), "k10s/tier"),
             ]
+        if a.arch == "x86_64":
+            files.append((put("tier", "auto\n"), "k10s/tier"))
         # 2 KiB clusters: GRUB reads files one cluster at a time, and BIOS disk reads are slow.
         fat_image(esp, "K10S-BOOT", ESP_VOLID, a.esp_mib * 1024, files, env)
         data = data_fs(a, tmp, env)
 
-        parts = PARTS if x86 else PARTS[1:]
-        sizes = [MIB, a.esp_mib * MIB, a.data_mib * MIB][-len(parts):]
-        at = [MIB if x86 else 2 * MIB]
-        for size in sizes:
-            at.append(at[-1] + size)
-        lines = [f'start={at[i] // 512}, size={size // 512}, type={ptype}, name="{name}", uuid={uuid}\n'
-                 for i, ((name, ptype, uuid), size) in enumerate(zip(parts, sizes))]
-        images = ([None] if x86 else []) + [esp, data]
-        disk(a.out, f"label: gpt\nlabel-id: {DISK_GUID}\n", [(img, at[i], lines[i]) for i, img in enumerate(images)], at[-1] + MIB)
-        if x86:
-            grub_bios(a.boot, a.out, tmp)
-        print(f"mkimage: {a.out}: {(at[-1] + MIB) >> 20} MiB (ESP {a.esp_mib} MiB, data {a.data_mib} MiB), "
+        if not uefi:
+            at = [MIB, MIB + a.esp_mib * MIB, MIB + (a.esp_mib + a.data_mib) * MIB]
+            disk(a.out, f"label: dos\nlabel-id: 0x{ESP_VOLID}\n",
+                 [(esp, at[0], f"start={at[0] // 512}, size={a.esp_mib * MIB // 512}, type=c, bootable\n"),
+                  (data, at[1], f"start={at[1] // 512}, size={a.data_mib * MIB // 512}, type=83\n")], at[2] + MIB)
+            grub_bios(a.boot, a.out, tmp, mbr=True)
+        else:
+            parts = PARTS if bios else PARTS[1:]
+            sizes = [MIB, a.esp_mib * MIB, a.data_mib * MIB][-len(parts):]
+            at = [MIB if bios else 2 * MIB]
+            for size in sizes:
+                at.append(at[-1] + size)
+            lines = [f'start={at[i] // 512}, size={size // 512}, type={ptype}, name="{name}", uuid={uuid}\n'
+                     for i, ((name, ptype, uuid), size) in enumerate(zip(parts, sizes))]
+            images = ([None] if bios else []) + [esp, data]
+            disk(a.out, f"label: gpt\nlabel-id: {DISK_GUID}\n", [(img, at[i], lines[i]) for i, img in enumerate(images)], at[-1] + MIB)
+            if bios:
+                grub_bios(a.boot, a.out, tmp)
+        print(f"mkimage: {a.out}: {os.path.getsize(a.out) >> 20} MiB (K10S-BOOT {a.esp_mib} MiB, data {a.data_mib} MiB), "
               f"UKI {os.path.getsize(efi)} bytes", file=sys.stderr)
 
 

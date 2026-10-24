@@ -23,8 +23,10 @@ use std::sync::atomic::{AtomicU64, AtomicU8, Ordering::*};
 pub const TAIL: usize = 4096;
 // Placement charges an instance as `2^mem_log2 + INSTANCE_OVERHEAD`: a slot's footprint.
 const _: () = assert!(TAIL as u64 == k10_mesh::placement::INSTANCE_OVERHEAD);
+/// Largest slot, `2^MAX_SLOT_LOG2` bytes: 64 GiB, or 256 MiB in the 3-4 GiB address space of a 32-bit process.
+pub const MAX_SLOT_LOG2: u8 = if cfg!(target_pointer_width = "64") { k10_mesh::manifest::MAX_MEM_LOG2 } else { 28 };
 /// Target size of one reservation.
-const REGION_BYTES: usize = 1 << 30;
+const REGION_BYTES: usize = if cfg!(target_pointer_width = "64") { 1 << 30 } else { 64 << 20 };
 const MAX_REGION_SLOTS: usize = 1 << 16;
 
 /// Node-wide memory accounting (shared by every shard's pools).
@@ -299,7 +301,7 @@ struct SizeClass {
     bump_end: usize,
 }
 
-/// Per-shard slot allocator: one size class per `log2` in 12..=36.
+/// Per-shard slot allocator: one size class per `log2` in 12..=[`MAX_SLOT_LOG2`].
 pub struct SlotPools {
     classes: Vec<Option<SizeClass>>,
     stats: std::sync::Arc<MemStats>,
@@ -310,7 +312,7 @@ unsafe impl Send for SlotPools {}
 
 impl SlotPools {
     pub fn new(stats: std::sync::Arc<MemStats>) -> Self {
-        SlotPools { classes: (0..=36).map(|_| None).collect(), stats }
+        SlotPools { classes: (0..=MAX_SLOT_LOG2).map(|_| None).collect(), stats }
     }
 
     pub fn stats(&self) -> &MemStats {
@@ -319,7 +321,7 @@ impl SlotPools {
 
     /// Allocates a zeroed slot of `2^log2 + TAIL` bytes (the node checks its [`MemBudget`] first).
     pub fn alloc(&mut self, log2: u8) -> io::Result<Slot> {
-        assert!((12..=36).contains(&log2), "slot size class out of range");
+        assert!((12..=MAX_SLOT_LOG2).contains(&log2), "slot size class out of range");
         let stats = self.stats.clone();
         let stride = (1usize << log2) as u64 + TAIL as u64;
         stats.slot_bytes_used.fetch_add(stride, Relaxed);

@@ -45,9 +45,9 @@ pub const MAX_IMAGE_BYTES: usize = crate::bundle::MAX_BLOB_BYTES;
 /// What an image is for; signed with it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImageMeta {
-    /// CPU architecture, as `std::env::consts::ARCH` names it (`x86_64`, `aarch64`).
+    /// CPU architecture, as the first part of the Rust target triple names it (`x86_64`, `aarch64`, `i686`, `armv7`).
     pub arch: String,
-    /// Kernel profile (`vm`, `metal`).
+    /// Image profile (`vm`, `metal`, `pi`).
     pub profile: String,
     /// k10s version of the image.
     pub version: String,

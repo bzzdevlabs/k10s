@@ -483,11 +483,23 @@ fn setsockopt_int(fd: RawFd, level: i32, opt: i32, v: i32) -> io::Result<()> {
     .map(|_| ())
 }
 
+/// A non-blocking TCP socket. On i386 musl's `socket()` goes through `socketcall`, whose arguments the seccomp filter
+/// cannot inspect: the direct call (Linux 4.3+) instead.
+fn tcp_socket(fam: libc::c_int) -> io::Result<Fd> {
+    let ty = libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC;
+    #[cfg(target_arch = "x86")]
+    // SAFETY: plain syscall.
+    let fd = unsafe { libc::syscall(libc::SYS_socket, fam, ty, 0) } as libc::c_int;
+    #[cfg(not(target_arch = "x86"))]
+    // SAFETY: plain syscall.
+    let fd = unsafe { libc::socket(fam, ty, 0) };
+    Ok(Fd(cvt(fd)?))
+}
+
 /// A non-blocking TCP listener with `SO_REUSEADDR` + `SO_REUSEPORT` (one per shard on the same port).
 pub fn tcp_listen_reuseport(addr: &std::net::SocketAddr, backlog: i32) -> io::Result<Fd> {
     let fam = if addr.is_ipv4() { libc::AF_INET } else { libc::AF_INET6 };
-    // SAFETY: plain syscall.
-    let fd = Fd(cvt(unsafe { libc::socket(fam, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0) })?);
+    let fd = tcp_socket(fam)?;
     setsockopt_int(fd.0, libc::SOL_SOCKET, libc::SO_REUSEADDR, 1)?;
     setsockopt_int(fd.0, libc::SOL_SOCKET, libc::SO_REUSEPORT, 1)?;
     let (ss, len) = sockaddr_from(addr);
@@ -501,8 +513,7 @@ pub fn tcp_listen_reuseport(addr: &std::net::SocketAddr, backlog: i32) -> io::Re
 /// A non-blocking TCP listener with `SO_REUSEADDR` only (one owner: the cluster peer listener).
 pub fn tcp_listen(addr: &std::net::SocketAddr, backlog: i32) -> io::Result<Fd> {
     let fam = if addr.is_ipv4() { libc::AF_INET } else { libc::AF_INET6 };
-    // SAFETY: plain syscall.
-    let fd = Fd(cvt(unsafe { libc::socket(fam, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0) })?);
+    let fd = tcp_socket(fam)?;
     setsockopt_int(fd.0, libc::SOL_SOCKET, libc::SO_REUSEADDR, 1)?;
     let (ss, len) = sockaddr_from(addr);
     // SAFETY: ss/len describe a valid socket address.
@@ -516,8 +527,7 @@ pub fn tcp_listen(addr: &std::net::SocketAddr, backlog: i32) -> io::Result<Fd> {
 /// [`socket_error`].
 pub fn tcp_connect(addr: &std::net::SocketAddr) -> io::Result<Fd> {
     let fam = if addr.is_ipv4() { libc::AF_INET } else { libc::AF_INET6 };
-    // SAFETY: plain syscall.
-    let fd = Fd(cvt(unsafe { libc::socket(fam, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0) })?);
+    let fd = tcp_socket(fam)?;
     let _ = setsockopt_int(fd.0, libc::IPPROTO_TCP, libc::TCP_NODELAY, 1);
     let (ss, len) = sockaddr_from(addr);
     // SAFETY: ss/len describe a valid socket address.

@@ -107,8 +107,9 @@ pub struct NodeConfig {
     pub max_calls_per_invocation: u32,
     /// Max concurrently running invocations (coroutines) per shard; more wait in a backlog.
     pub max_fibers: usize,
-    /// Usable coroutine stack size (`MAP_NORESERVE`: only touched pages cost memory). JIT frames live on it: the
-    /// recursion budget of JIT code is `stack_size - jit::HOST_RESERVE` (minus the runtime's own frames).
+    /// Usable coroutine stack size (`MAP_NORESERVE`: only touched pages cost memory; 1 MiB, 256 KiB on 32-bit targets,
+    /// whose address space is small). JIT frames live on it: the recursion budget of JIT code is
+    /// `stack_size - jit::HOST_RESERVE` (minus the runtime's own frames).
     pub stack_size: usize,
     pub snapshots: SnapshotPolicy,
     /// Snapshots at least this large are mapped copy-on-write (shared pages, one `mmap` per instance, 2 VMAs);
@@ -139,6 +140,7 @@ pub struct NodeConfig {
     /// Guest clock resolution (`k10_host::clock`; default 100 µs, `Duration::ZERO` = full).
     pub timer_res: Duration,
     /// JIT indirect-branch form, Spectre v2 hardening (default `Jump`, i.e. none).
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     pub jit_indirect: k10_jit::IndirectBranch,
     /// Version reported by `GET /_k10s/status` (the `k10s` binary sets its build version).
     pub version: String,
@@ -165,7 +167,7 @@ impl Default for NodeConfig {
             max_call_depth: 32,
             max_calls_per_invocation: 10_000,
             max_fibers: 1024,
-            stack_size: 1 << 20,
+            stack_size: if cfg!(target_pointer_width = "64") { 1 << 20 } else { 256 << 10 },
             snapshots: SnapshotPolicy::Fresh,
             snapshot_map_min: 64 << 10,
             kv: KvConfig::default(),
@@ -181,6 +183,7 @@ impl Default for NodeConfig {
             idle_spin: Duration::ZERO,
             reload_bundle: true,
             timer_res: Duration::from_nanos(k10_host::clock::DEFAULT_RES_NS),
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             jit_indirect: k10_jit::IndirectBranch::Jump,
             version: env!("CARGO_PKG_VERSION").into(),
         }
@@ -423,6 +426,15 @@ impl NodeShared {
                 return Err(format!(
                     "service `{}`: memory 2^{} is smaller than the module's minimum 2^{}",
                     spec.name, spec.mem_log2, min_mem
+                ));
+            }
+            if place == Placement::Local && spec.mem_log2 > crate::slot::MAX_SLOT_LOG2 {
+                return Err(format!(
+                    "service `{}`: memory 2^{} is larger than the largest slot of this {}-bit node, 2^{}",
+                    spec.name,
+                    spec.mem_log2,
+                    usize::BITS,
+                    crate::slot::MAX_SLOT_LOG2
                 ));
             }
             let mut svc = ServiceRt::new(

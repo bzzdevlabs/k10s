@@ -29,8 +29,10 @@ import { Aside } from '@astrojs/starlight/components';
   Secure Boot under OVMF and AAVMF with Microsoft's keys: the released image is refused, and boots with Secure Boot
   off, with own keys and with a MOK under Debian's shim; an update the firmware refuses rolls back.
   arm64: the arm64 image on AAVMF and the Raspberry Pi image behind a model of the Pi firmware (A/B through
-  `autoboot.txt` and tryboot, the same power cuts), a Pi in a cluster with an x86-64 node, and every test suite on an
-  arm64 host.
+  `autoboot.txt` and tryboot, the same power cuts; the Pi 3 on QEMU's `raspi3b` with a USB NIC), a Pi in a cluster
+  with an x86-64 node, and every test suite on an arm64 host. 32-bit: the i686 image on SeaBIOS with an old CPU, an
+  IDE disk and an RTL8139, the armv7 image on 32-bit ARM UEFI, the same A/B power cuts, and the test suites on i686 and
+  armv7.
 
 ## Limits
 
@@ -41,15 +43,15 @@ import { Aside } from '@astrojs/starlight/components';
 | storage | key-value store durable but node-local; no replication, no consensus for singletons |
 | compute | 1.1–1.6× slower than portable Go on CPU-bound code |
 | ecosystem | Ten or TIR only; no Wasm or LLVM front end |
-| platforms | JIT on x86-64; arm64 and other architectures on the interpreter; native kernel on VM guests only; disk images for x86-64, arm64 VMs and the Raspberry Pi 4/5 (signed A/B updates rolled out by the cluster), tested under QEMU, not yet on a physical machine |
+| platforms | JIT on x86-64; arm64 and other architectures on the interpreter (i686 and armv7 best effort, instances up to 256 MiB); native kernel on VM guests only; disk images for x86-64, arm64 VMs, the Raspberry Pi 3/4/5, old PCs (i686, BIOS) and 32-bit ARM VMs (signed A/B updates rolled out by the cluster), tested under QEMU, not yet on a physical machine |
 
 ## Roadmap
 
 1. **Cluster security:** per-node identity and signed bundles, on top of today's authenticated and encrypted gossip
    and peer links.
 2. **Replicated state:** a replicated key-value store per service (Raft per shard group) and leases for singletons.
-3. **arm64:** a JIT backend shared by hosted and bare-metal nodes (the arm64 and Raspberry Pi 4/5 images exist,
-   on the interpreter); then the Pi 3, 32-bit ARM and i386 on the interpreter.
+3. **arm64:** a JIT backend shared by hosted and bare-metal nodes (the arm64 and Raspberry Pi 3/4/5 images exist, on
+   the interpreter, as do the best-effort i686 and armv7 images; 32-bit stays on the interpreter).
 4. **Native bare metal:** UEFI, ACPI, modern virtio, NVMe and a durable key-value log; then cloud NICs.
 5. **Performance:** register allocation in the JIT, 32-bit TIR operations, cheaper cross-node forwarding.
 6. **Ecosystem:** a Wasm → TIR translator, so Rust, C, Go and Zig can target k10s.
@@ -59,7 +61,7 @@ import { Aside } from '@astrojs/starlight/components';
 - **Network:** wired Ethernet only (DHCPv4 or a static address); no Wi-Fi.
 - **Boot:** UEFI and legacy BIOS. Images are not signed for Secure Boot: turn it off, or sign the image with your own
   key and enroll it (sbctl, or a MOK under Debian's shim).
-- **Order:** x86-64 first, then arm64 and the Raspberry Pi 4/5; i386 and armv7 are best effort, on the interpreter.
+- **Order:** x86-64 first, then arm64 and the Raspberry Pi; i386 and armv7 are best effort, on the interpreter.
 - **Updates:** OS images are signed by the k10s release key and spread over gossip like code.
 - **One image:** a single installed image boots the Linux-based tier or the native kernel, chosen from the hardware
   found at boot.

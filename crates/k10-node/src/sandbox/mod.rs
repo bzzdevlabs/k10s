@@ -1,6 +1,6 @@
 //! Process sandbox of `k10s node`, entered between binding the sockets and starting the node (SECURITY.md).
-#[cfg(not(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64"))))]
-compile_error!("the k10s node sandbox supports Linux on x86-64 and AArch64 only");
+#[cfg(not(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "x86", target_arch = "arm"))))]
+compile_error!("the k10s node sandbox supports Linux on x86-64, AArch64, i686 and armv7 only");
 
 mod landlock;
 mod seccomp;

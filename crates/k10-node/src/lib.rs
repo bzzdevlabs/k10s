@@ -36,4 +36,5 @@ mod ticker;
 pub use node::{ApplyReport, BackendKind, Bound, Node, NodeConfig, NodeShared, SnapshotPolicy};
 pub use shard::CallResult;
 /// `NodeConfig::jit_indirect` (re-exported for the CLI).
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub use k10_jit::IndirectBranch;

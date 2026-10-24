@@ -7,6 +7,22 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
+/// The id syscalls with 32-bit ids (on i386 and arm the plain ones take 16-bit ids).
+#[cfg(target_pointer_width = "64")]
+mod nr {
+    pub use libc::{
+        SYS_fchown as FCHOWN, SYS_geteuid as GETEUID, SYS_getresgid as GETRESGID, SYS_getresuid as GETRESUID,
+        SYS_setgroups as SETGROUPS, SYS_setresgid as SETRESGID, SYS_setresuid as SETRESUID,
+    };
+}
+#[cfg(target_pointer_width = "32")]
+mod nr {
+    pub use libc::{
+        SYS_fchown32 as FCHOWN, SYS_geteuid32 as GETEUID, SYS_getresgid32 as GETRESGID, SYS_getresuid32 as GETRESUID,
+        SYS_setgroups32 as SETGROUPS, SYS_setresgid32 as SETRESGID, SYS_setresuid32 as SETRESUID,
+    };
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct User {
     pub name: String,
@@ -79,7 +95,7 @@ impl User {
             return Err(format!("{}: {} (a directory, not a symlink)", dir.display(), io::Error::last_os_error()));
         }
         if created {
-            sc(libc::SYS_fchown, [fd.0 as _, self.uid as _, self.gid as _, 0, 0]).map_err(|e| format!("chown {}: {e}", dir.display()))?;
+            sc(nr::FCHOWN, [fd.0 as _, self.uid as _, self.gid as _, 0, 0]).map_err(|e| format!("chown {}: {e}", dir.display()))?;
         }
         // SAFETY: an all-zero stat is a valid out-parameter of fstat on our fd.
         let owner = unsafe {
@@ -96,13 +112,13 @@ impl User {
     pub(super) fn switch(&self) -> Result<(), String> {
         let groups = [self.gid];
         // SAFETY: one valid gid_t.
-        if unsafe { libc::syscall(libc::SYS_setgroups, 1usize, groups.as_ptr()) } != 0 {
+        if unsafe { libc::syscall(nr::SETGROUPS, 1usize, groups.as_ptr()) } != 0 {
             return Err(format!("setgroups: {}", io::Error::last_os_error()));
         }
         let (u, g) = (self.uid as libc::c_long, self.gid as libc::c_long);
-        sc(libc::SYS_setresgid, [g, g, g, 0, 0]).map_err(|e| format!("setresgid({g}): {e}"))?;
-        sc(libc::SYS_setresuid, [u, u, u, 0, 0]).map_err(|e| format!("setresuid({u}): {e}"))?;
-        let (ru, rg) = (resids(libc::SYS_getresuid), resids(libc::SYS_getresgid));
+        sc(nr::SETRESGID, [g, g, g, 0, 0]).map_err(|e| format!("setresgid({g}): {e}"))?;
+        sc(nr::SETRESUID, [u, u, u, 0, 0]).map_err(|e| format!("setresuid({u}): {e}"))?;
+        let (ru, rg) = (resids(nr::GETRESUID), resids(nr::GETRESGID));
         if ru != [self.uid; 3] || rg != [self.gid; 3] {
             return Err(format!("ids are uid {ru:?} gid {rg:?} after the switch"));
         }
@@ -119,7 +135,7 @@ fn resids(nr: libc::c_long) -> [u32; 3] {
 
 /// The effective uid.
 pub(super) fn euid() -> u32 {
-    sc(libc::SYS_geteuid, [0; 5]).map_or(u32::MAX, |v| v as u32)
+    sc(nr::GETEUID, [0; 5]).map_or(u32::MAX, |v| v as u32)
 }
 
 #[repr(C)]
