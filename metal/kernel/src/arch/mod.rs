@@ -1,8 +1,9 @@
 //! Thin wrappers over x86-64 instructions (port I/O, MSRs, CPUID, TSC, control registers, interrupts).
 
+pub mod apic;
 pub mod gdt;
 pub mod idt;
-pub mod apic;
+pub mod ioapic;
 pub mod paging;
 
 use core::arch::asm;
@@ -134,12 +135,14 @@ pub fn has_rdrand() -> bool {
     cpuid(1, 0).2 & (1 << 30) != 0
 }
 
-/// QEMU `isa-debug-exit` device (`-device isa-debug-exit,iobase=0xf4,iosize=0x04`): QEMU exits with status
-/// `(code << 1) | 1`. Without the device the write is ignored.
-pub fn qemu_exit(code: u8) {
-    outl(0xf4, code as u32);
+/// Resets the CPU (and so the machine) by a triple fault: an empty IDT, then an exception.
+pub fn triple_fault() -> ! {
+    #[repr(C, packed)]
+    struct Ptr {
+        limit: u16,
+        base: u64,
+    }
+    let p = Ptr { limit: 0, base: 0 };
+    unsafe { asm!("lidt [{}]", "int3", in(reg) &p, options(nostack)) };
+    halt_forever()
 }
-
-/// Exit codes written to `isa-debug-exit` (QEMU status = code * 2 + 1).
-pub const EXIT_SUCCESS: u8 = 0x10; // → 33
-pub const EXIT_FAILURE: u8 = 0x11; // → 35

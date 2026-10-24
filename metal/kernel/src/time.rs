@@ -1,5 +1,7 @@
 //! Time: the TSC is the clock. Its frequency comes from (in order) KVM's paravirtual clock (exact, no waiting),
-//! CPUID leaf 0x15, or a 10 ms calibration against the PIT. Wall-clock time at boot comes from kvmclock's wall
+//! CPUID leaf 0x15 when it states the crystal frequency, a 20 ms calibration against the HPET or else the ACPI PM
+//! timer (both from the ACPI tables), CPUID 0x15 with leaf 0x16's nominal base frequency, and last a 20 ms
+//! calibration against the PIT (which modern boards may gate off). Wall-clock time at boot comes from kvmclock's wall
 //! clock (no port I/O), else the CMOS RTC; afterwards it advances with the monotonic clock and, with kvmclock, is
 //! re-read from it every [`RESYNC_NS`] ([`resync_wall_if_due`]), so host clock adjustments and drift do not build
 //! up in gossip and admin-request timestamps. Resyncs step the wall clock only: `now_ns` stays monotonic.
@@ -93,19 +95,34 @@ pub fn set_preempt_word(w: *mut AtomicUsize) -> *mut AtomicUsize {
 pub enum Source {
     KvmClock,
     Cpuid15,
+    Hpet,
+    PmTimer,
+    Cpuid16,
     Pit,
 }
 
-/// `tsc_boot` is the TSC value read as early as possible in `kmain` (uptime origin).
+/// `tsc_boot` is the TSC value read as early as possible in `kmain` (uptime origin). Needs the ACPI tables.
 pub fn init(tsc_boot: u64) -> Source {
     TSC_BOOT.store(tsc_boot, Ordering::Relaxed);
+    let tables = crate::acpi::get();
     let (hz, wall, src) = if let Some((hz, wall)) = kvmclock(tsc_boot) {
         (hz, Some(wall), Source::KvmClock)
-    } else if let Some(hz) = cpuid15_hz() {
+    } else if let Some(hz) = cpuid15_hz(false) {
         (hz, None, Source::Cpuid15)
+    } else if let Some(hz) = tables.and_then(|t| t.hpet).and_then(hpet_hz) {
+        (hz, None, Source::Hpet)
+    } else if let Some(hz) = tables.and_then(|t| t.fadt).and_then(pmtimer_hz) {
+        (hz, None, Source::PmTimer)
+    } else if let Some(hz) = cpuid15_hz(true) {
+        (hz, None, Source::Cpuid16)
     } else {
         (pit_calibrate(), None, Source::Pit)
     };
+    // Without an invariant TSC (CPUID 0x8000_0007 EDX bit 8) the clock rate follows P-states on old CPUs.
+    let hypervisor = cpuid(1, 0).2 & (1 << 31) != 0;
+    if !hypervisor && cpuid(0x8000_0000, 0).0 >= 0x8000_0007 && cpuid(0x8000_0007, 0).3 & (1 << 8) == 0 {
+        crate::kprintln!("time: WARNING: the TSC is not invariant; timekeeping may drift");
+    }
     TSC_HZ.store(hz, Ordering::Relaxed);
     NS_PER_TSC_FP32.store(((1_000_000_000u128 << 32) / hz as u128) as u64, Ordering::Relaxed);
     WALL_AT_BOOT_NS.store(wall.unwrap_or_else(|| rtc_unix_seconds() * 1_000_000_000), Ordering::Relaxed);
@@ -368,31 +385,115 @@ fn kvmclock(tsc_boot: u64) -> Option<(u64, u64)> {
     Some((hz, kvm_wall_base_ns() + sys_at_boot))
 }
 
-fn cpuid15_hz() -> Option<u64> {
-    if cpuid(0, 0).0 < 0x15 {
+/// TSC frequency from CPUID 0x15 (TSC/crystal ratio and crystal Hz). When the crystal is not stated, `nominal`
+/// takes leaf 0x16's base frequency (MHz) as the TSC frequency, as Linux does.
+fn cpuid15_hz(nominal: bool) -> Option<u64> {
+    let max = cpuid(0, 0).0;
+    if max < 0x15 {
         return None;
     }
     let (den, num, crystal, _) = cpuid(0x15, 0);
-    if den == 0 || num == 0 || crystal == 0 {
+    if den == 0 || num == 0 {
         return None;
     }
-    Some(crystal as u64 * num as u64 / den as u64)
+    if crystal != 0 {
+        return Some(crystal as u64 * num as u64 / den as u64);
+    }
+    let base_mhz = if nominal && max >= 0x16 { cpuid(0x16, 0).0 & 0xFFFF } else { 0 };
+    (base_mhz != 0).then_some(base_mhz as u64 * 1_000_000)
 }
 
-/// Counts TSC ticks during 10 ms of PIT channel 2 (gate via port 0x61, no interrupt needed).
+/// TSC ticks per second against a counter of `hz` read by `read` (`mask`: its width), over `ms` milliseconds.
+/// Each counter read is bracketed by TSC reads and timed at their midpoint.
+fn calibrate(read: &dyn Fn() -> u64, mask: u64, hz: u64, ms: u64) -> Option<u64> {
+    let sample = || {
+        let a = rdtsc();
+        let c = read();
+        (a / 2 + rdtsc() / 2, c)
+    };
+    let (t0, c0) = sample();
+    let want = hz * ms / 1000;
+    loop {
+        let (t1, c1) = sample();
+        let dc = c1.wrapping_sub(c0) & mask;
+        if dc >= want {
+            return Some(((t1 - t0) as u128 * hz as u128 / dc as u128) as u64);
+        }
+        // A counter that does not move (absent, or disabled by the firmware): give up after 2^31 TSC ticks
+        // (0.2–2 s whatever the TSC's rate).
+        if t1 - t0 > 1 << 31 {
+            return None;
+        }
+    }
+}
+
+/// HPET main counter: period (femtoseconds) in the capabilities register, enabled if the firmware left it off.
+fn hpet_hz(base: u64) -> Option<u64> {
+    if !crate::arch::paging::map_mmio(base, 1024) {
+        return None;
+    }
+    let reg = |o: u64| (base + o) as *mut u64;
+    // SAFETY: the HPET register block (ACPI HPET table), mapped uncached above.
+    let cap = unsafe { core::ptr::read_volatile(reg(0)) };
+    let period_fs = cap >> 32;
+    if period_fs == 0 || period_fs > 100_000_000 {
+        return None;
+    }
+    unsafe {
+        let conf = core::ptr::read_volatile(reg(0x10));
+        if conf & 1 == 0 {
+            core::ptr::write_volatile(reg(0x10), conf | 1);
+        }
+    }
+    let mask = if cap & (1 << 13) != 0 { u64::MAX } else { u32::MAX as u64 };
+    calibrate(&|| unsafe { core::ptr::read_volatile(reg(0xF0)) }, mask, 1_000_000_000_000_000 / period_fs, 20)
+}
+
+/// ACPI PM timer: 3.579545 MHz, 24 bits (32 with TMR_VAL_EXT).
+fn pmtimer_hz(f: crate::acpi::Fadt) -> Option<u64> {
+    if !f.pm_tmr.valid() {
+        return None;
+    }
+    let mask = if f.flags & crate::acpi::FADT_TMR_VAL_EXT != 0 { u32::MAX as u64 } else { 0xFF_FFFF };
+    let tmr = crate::acpi::Gas { bits: 32, access: 3, ..f.pm_tmr };
+    calibrate(&|| tmr.read(), mask, 3_579_545, 20)
+}
+
+/// TSC ticks during 20 ms of the PIT's channel 0 (rate generator, read back with latch commands: no IRQ, no port
+/// 0x61 gate, which microVMs lack). Without a PIT (it never moves) the TSC is assumed to run at 2 GHz, loudly.
 fn pit_calibrate() -> u64 {
     const PIT_HZ: u64 = 1_193_182;
-    const LATCH: u64 = PIT_HZ / 100; // 10 ms
-    outb(0x61, (inb(0x61) & !0x02) | 0x01);
-    outb(0x43, 0b1011_0000); // channel 2, lo/hi byte, mode 0, binary
-    outb(0x42, LATCH as u8);
-    outb(0x42, (LATCH >> 8) as u8);
-    let t0 = rdtsc();
-    while inb(0x61) & 0x20 == 0 {
-        arch::pause();
+    let want = PIT_HZ / 50;
+    outb(0x43, 0b0011_0100); // channel 0, lo/hi byte, mode 2, binary
+    outb(0x40, 0xFF);
+    outb(0x40, 0xFF);
+    let read = || {
+        outb(0x43, 0); // latch channel 0
+        let lo = inb(0x40);
+        u16::from_le_bytes([lo, inb(0x40)]) as u64
+    };
+    // The new count loads on the next PIT clock edge: wait until the counter shows it (it then counts down from
+    // 0xFFFF), so the old mode's value is not taken for elapsed time.
+    let mut last = read();
+    let start = rdtsc();
+    while last < 0xF000 && rdtsc() - start < 1 << 31 {
+        last = read();
     }
-    let t1 = rdtsc();
-    (t1 - t0) * PIT_HZ / LATCH
+    let t0 = rdtsc();
+    let (mut elapsed, mut still) = (0, 0u32);
+    while elapsed < want {
+        let c = read();
+        // Counts down from 0xFFFF and reloads; a wrap is never missed (it takes 55 ms).
+        let d = if c <= last { last - c } else { last + 0xFFFF - c };
+        still = if d == 0 { still + 1 } else { 0 };
+        if still > 1_000_000 {
+            crate::kprintln!("time: WARNING: no HPET, PM timer or PIT to calibrate the TSC against; assuming 2 GHz");
+            return 2_000_000_000;
+        }
+        elapsed += d;
+        last = c;
+    }
+    ((rdtsc() - t0) as u128 * PIT_HZ as u128 / elapsed as u128) as u64
 }
 
 // --- CMOS real-time clock ---------------------------------------------------------------------------------------

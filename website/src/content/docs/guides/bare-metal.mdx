@@ -8,12 +8,14 @@ import Terminal from '~/components/Terminal.astro';
 
 With isolation done by the compiler, a node needs from the OS only memory, a timer, a NIC and a console. So the same
 runtime also boots **as its own kernel**: `k10-metal`. No processes, no system calls, no user/kernel boundary, no
-per-workload page tables: one identity-mapped address space on up to 8 cores, polling virtio queues directly. In a
-cloud, where every node is already a VM, this deletes the guest Linux.
+per-workload page tables: one identity-mapped address space over all of RAM on up to 64 cores, polling virtio queues
+directly. It finds the machine in the ACPI tables (no AML interpreter) and powers off and reboots through ACPI. It
+boots on QEMU (`pc`, `q35`, `microvm`; KVM or TCG), Firecracker and Cloud Hypervisor. In a cloud, where every node
+is already a VM, this deletes the guest Linux.
 
 | | k10-metal | Linux guest, same QEMU setup |
 |---|---|---|
-| image | 694 KB, JIT and cluster layer included | 8.2 MB kernel + 0.9 MB initramfs |
+| image | 1 MB, JIT, cluster layer, ACPI and virtio included | 8.2 MB kernel + 0.9 MB initramfs |
 | kernel entry → ready | about 3 ms | about 1.25 s |
 | QEMU start → first HTTP 200 | median 96 ms | 1,437 ms |
 | smallest `-m` that serves under load | 3 MiB | 88 MiB |
@@ -65,7 +67,17 @@ cloud, where every node is already a VM, this deletes the guest Linux.
 </Steps>
 
 `SMP=4 ./run.sh` boots four CPUs: CPU 0 runs the network, CPU-heavy requests are spread over all four.
-`./test.sh` runs the in-kernel self tests and the end-to-end checks.
+`PLATFORM=q35 ./run.sh` (or `pc-legacy`, `pc-modern`, `microvm`, `microvm-v2`) picks another machine and NIC;
+`DISK=disk.img` adds a virtio-blk disk. `./test.sh` runs the in-kernel self tests and the end-to-end checks on every
+platform, `./vmm-test.sh` the same kernel on Firecracker and Cloud Hypervisor.
+
+A signed `POST /_k10s/power` with the body `off` or `reboot` powers the guest off or reboots it through ACPI, after
+it has left its cluster:
+
+```bash
+curl -H "Authorization: $(tools/admin_auth.py localhost:8090 POST /_k10s/power off)" --data-binary off \
+  localhost:8090/_k10s/power
+```
 
 ## Join a cluster
 
@@ -108,41 +120,56 @@ from it; a failed RDRAND fails the link).
 
 | Option | Meaning |
 |---|---|
-| `k10.verbose` | boot banner, phases, apply log (serial output costs about 15 µs per byte) |
+| `k10.verbose` | boot banner, ACPI summary, phases, apply log (serial output costs about 15 µs per byte) |
+| `k10.ip=A.B.C.D/P[,GATEWAY]` | static IPv4 address (default: DHCPv4, `k10.ip=dhcp`) |
+| `k10.console=com1…com4\|io:0xPORT\|mmio:0xADDR\|mmio32:0xADDR\|none` | console UART (default: the ACPI SPCR table's, else COM1) |
+| `k10.panic=N` | seconds before a fatal error reboots (default 10; 0 = halt) |
+| `k10.apic=xapic` | keep the local APIC in xAPIC mode (unless the firmware handed over in x2APIC mode) |
+| `k10.pci=full` | probe every PCI bus of the ECAM windows under a hypervisor too |
+| `virtio_mmio.device=SIZE@BASE:IRQ` | a virtio-mmio slot (Linux syntax; slots in the ACPI DSDT are found anyway) |
 | `k10.engine=jit\|interp` | execution engine (default `jit`) |
 | `k10.smp=N` | use at most N CPUs |
 | `k10.spin_us=N` | busy-poll window before halting (default 50) |
 | `k10.jit_indirect=jump\|lfence\|retpoline` | Spectre v2 hardening of JIT indirect branches |
 | `k10.timer_res_us=N` | guest clock resolution (default 100; 0 = full; any other value needs RDRAND) |
-| `k10.join=HOST:PORT,…` | cluster seeds; with `k10.gossip=`, `k10.rpc=`, `k10.http=` (advertised addresses). `k10.join`, `k10.gossip` or `k10.cluster` turns cluster mode on |
+| `k10.join=HOST:PORT,…` | cluster seeds; with `k10.gossip=`, `k10.rpc=`, `k10.http=` (advertised addresses, default the interface's address). `k10.join`, `k10.gossip` or `k10.cluster` turns cluster mode on |
 | `k10.insecure_unauthenticated_cluster` | cluster mode without a key (isolated test networks only) |
 | `k10.gossip_max_skew_s=N` | clock skew allowed on gossip, seconds (default 300, at least 1) |
 | `k10.node_id=HEX`, `k10.probe_ms=N`, `k10.suspicion_mult=N`, `k10.mem=BYTES`, `k10.host_alias=IP` | identity and tuning (`k10.host_alias`: the address through which the guest reaches host loopback addresses, default `10.0.2.2`) |
-| `k10.selftest`, `k10.exit_on_ready` | test modes |
+| `k10.selftest`, `k10.exit_on_ready` | test modes (both end in an ACPI power off) |
 
-An invalid `k10.engine`, `k10.smp`, `k10.spin_us`, `k10.jit_indirect`, `k10.timer_res_us` or `k10.gossip_max_skew_s`
-value stops the boot.
+An invalid `k10.engine`, `k10.smp`, `k10.spin_us`, `k10.jit_indirect`, `k10.timer_res_us`, `k10.ip`, `k10.console`,
+`k10.panic` or `k10.gossip_max_skew_s` value stops the boot (and reboots after `k10.panic` seconds).
 
 The bundle comes from QEMU's `-initrd` (or `/k10s/bundle.k10b` on a disk image's boot partition), else from a bundle
 baked in at build time (`EMBED=1`); with neither, the node starts empty and waits for `POST /_k10s/apply`.
 
 ## Inside
 
-- **Boot:** PVH entry (what Firecracker and Cloud Hypervisor boot), identity-mapped 4 GiB, long mode, SSE for JIT
-  code. From the x86-64 disk images: k10boot, its UEFI loader, which verifies the kernel's signature, or GRUB through
-  the kernel's Multiboot2 entry on BIOS ([below](#choosing-the-tier)).
-- **Memory:** a tagged frame allocator shared by the heap and the instance slots; NX everywhere, the kernel and JIT
-  code W^X, page 0 unmapped.
-- **Time:** kvmclock, a tickless one-shot LAPIC timer armed only for the next deadline; an idle node takes no timer
-  interrupts. The wall clock (gossip and admin request time windows) is re-read from kvmclock every 10 s.
-- **NIC:** legacy virtio-net with fixed buffers (nothing allocated per packet), smoltcp for TCP/IP, the same
-  HTTP/1.1 ingress and host API as the hosted node.
+- **Boot:** PVH entry (QEMU `-kernel`, Firecracker, Cloud Hypervisor), long mode, SSE for JIT code. From the x86-64
+  disk images: k10boot, its UEFI loader, which verifies the kernel's signature, or GRUB through the kernel's
+  Multiboot2 entry on BIOS ([below](#choosing-the-tier)).
+- **Platform:** ACPI tables without AML — CPUs, I/O APICs and overrides (MADT), power and reset registers (FADT),
+  `\_S5` and virtio-mmio slots by a DSDT scan, ECAM windows (MCFG), the HPET, the console UART (SPCR); an MP table
+  where there is no ACPI. x2APIC (or xAPIC), CPUs started one by one from the MADT, never by broadcast.
+- **Memory:** every byte of RAM identity-mapped, above 4 GiB too; device ranges uncached; a tagged frame allocator
+  shared by the heap and the instance slots; NX everywhere, the kernel and JIT code W^X, page 0 unmapped.
+- **Time:** kvmclock, else the TSC calibrated against the HPET, the ACPI PM timer or the PIT; a tickless one-shot
+  LAPIC timer armed only for the next deadline; an idle node takes no timer interrupts. The wall clock (gossip and
+  admin request time windows) is re-read from kvmclock every 10 s.
+- **Devices:** PCI through ECAM with 64-bit BARs and MSI-X; virtio-net and virtio-blk over PCI (virtio 1.x and
+  legacy) and MMIO, behind `NetDevice`/`BlockDevice` traits with DMA from slot-like regions; fixed buffers
+  (nothing allocated per packet), smoltcp for TCP/IP with DHCPv4, the same HTTP/1.1 ingress and host API as the
+  hosted node.
+- **Power:** ACPI S5 power off, the FADT reset register (then the 8042, port 0xCF9, a triple fault) for reboots;
+  fatal errors reboot after `k10.panic` seconds.
 
-<Aside type="caution" title="v0 limits">
-	VM guests only (PVH under QEMU, or the x86-64 disk images through UEFI or BIOS; legacy virtio-net, 4 GiB mapped).
-	No storage driver: the key-value store is in memory. No
-	DHCP, IPv4 only, no TLS. There is no OS layer
-	under the kernel, so the independent verification of the JIT's output matters most here. Full list:
+<Aside type="caution" title="Limits">
+	virtio only (physical NICs and disks come next); the disk is not used for storage yet, so the key-value store is
+	in memory. IPv4 only, no TLS. ACPI events (the power button) are not handled and no AML method runs. Tested on
+	QEMU (PVH, and the x86-64 disk images through UEFI or BIOS), Firecracker and Cloud Hypervisor only, not yet on a
+	physical machine. There is no OS layer under the kernel, so the independent
+	verification of the JIT's output matters most here. Full list:
 	[metal/README.md](https://github.com/bzzdevlabs/k10s/blob/main/metal/README.md).
 </Aside>
 

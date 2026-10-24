@@ -20,9 +20,12 @@ paths alike). Its HTTP fast path is unchanged (test.sh's and §8's loadgen runs 
 
 ## Summary
 
+The other figures of this table predate Tier 2's milestone M1 (13a, 13b); §9 measures what M1 changed against the
+same kernel, interleaved on one machine.
+
 | | k10-metal | Linux guest (same QEMU/slirp setup) |
 |---|---|---|
-| Image | **694 KB** ELF incl. JIT, cluster layer and SMP (670 KB in memory incl. .bss; v0: 440 KB) + 12 KB bundle (18 services) | 8.2 MB bzImage + 0.9 MB initramfs |
+| Image | **997 KB** ELF incl. JIT, cluster layer, SMP, ACPI, virtio 1.x/MMIO/blk, DHCP and the Multiboot2 entry (985 KiB in memory incl. .bss; before Tier 2's M1: 694 KB / 670 KB; v0: 440 KB) + 13 KB bundle (19 services) | 8.2 MB bzImage + 0.9 MB initramfs |
 | QEMU start → "ready" (median / p10) | **95 ms / 76 ms** (SeaBIOS); qboot 98 / 66 ms | 1,360 ms (boot only) / 1,435 ms (HTTP) |
 | …of which inside the kernel (entry → ready) | **1.7–2.5 ms** (v0); 2.9 ms with 18 services JIT-compiled at boot (2.1 interpreted) | ≈ 1.25 s |
 | QEMU start → first HTTP 200 | **≈ 2 ms after ready** (median 96 ms) | 1,437 ms |
@@ -294,7 +297,57 @@ n-body, `out/results/smp-run1.json`). "busy" is the guest's own accounting per C
 * test.sh runs its whole JIT suite (functional, spin storm, redeploys, `max_instances = 1` contention, load, 8 MiB
   guest) on 4 CPUs too, and cluster-test.sh passes with a 4-CPU guest (`SMP=4`).
 
-## 9. What was not measured / caveats
+## 9. M1 platform: ACPI, all RAM, x2APIC, virtio 1.x / MMIO / blk, DHCP (before / after)
+
+Step 13b replaced the VM-only assumptions (fw_cfg CPU count, 4 GiB mapped, legacy virtio-net, static IP,
+isa-debug-exit) by ACPI, a full identity map, PCI ECAM, the virtio transports behind device traits, DHCP and ACPI
+power control. Measured on the development machine of that step — Apple Silicon, Docker Linux VM, **QEMU 10.0.13 with
+TCG** (no KVM: x86 emulated; other VMs ran on the same host), so absolute figures are not comparable with §1–§8 — as
+interleaved runs of three kernels on the same QEMU command line (`pc`, SeaBIOS, legacy virtio-net, slirp, 64 MiB):
+before Tier 2 (44da5b5), with 13a (the boot half: k10boot, Multiboot2, named modules; 716899e) and with 13b;
+medians of 10 boots (`k10.exit_on_ready`) and 10 × 5 s loadgen runs (`/hello/`, 64 connections) per case:
+
+| | 44da5b5 | 13a | 13b, static IP | 13b, DHCP | 13b, DHCP, modern virtio-net |
+|---|---|---|---|---|---|
+| QEMU start → ready | 140 ms | 140 ms | 156 ms | 161 ms | 165 ms |
+| kernel entry → ready | 57 ms | 57 ms | 74 ms | 79 ms | 82 ms |
+| memory used at ready (19 services) | 880 KiB | 880 KiB | 892 KiB | 896 KiB | 848 KiB |
+| image in memory | 804 KiB | 892 KiB | 992 KiB | 992 KiB | 992 KiB |
+| `hello`, 64 connections | 28.8k rps | 29.3k rps | 27.9k rps | 28.3k rps | 27.9k rps |
+
+* **Throughput** is 3–5 % below 13a's kernel under TCG, in every interleaved series (three more series with fixes
+  in between gave the same gap). It is not the trait-object dispatch (a build with the NIC statically dispatched
+  measured the same), nor x2APIC (`k10.apic=xapic`: the same), nor the reclaimed low memory (now allocated last). The
+  gap is within what emulation magnifies (every extra instruction on the per-packet path costs tens of nanoseconds
+  under TCG); the KVM figure is CI's (below).
+* **Boot**: under TCG the TSC is calibrated against the HPET (20 ms window, for tens of ppm instead of the old
+  10 ms PIT); with KVM (CI, and every KVM cloud) kvmclock gives the frequency and no calibration runs. The other
+  additions are the ACPI parse (microseconds), the page-table rebuild, a full bus-0 PCI scan instead of stopping at
+  the NIC, and DHCP (a round trip to slirp before the ready line; `k10.ip=` skips it).
+* **Memory**: 13b grew the image by 100 KiB (ACPI, PCI ECAM, virtio modern/MMIO/blk, DHCP, the power code, per-CPU
+  state for 64 CPUs; 13a added 88 KiB, mostly a 128 KiB boot stack), and the kernel now also uses the RAM between
+  64 KiB and 640 KiB, which it left idle before (allocated last: it is mapped with 4 KiB pages). Net effect at the
+  small end (`-m 3M`, 2.5 MiB visible): **1,500 KiB usable instead of 1,116, 15 of the 19 test services placed
+  instead of 9**, `hello` with 16 connections at 23.0k rps instead of 19.2k (TCG).
+
+Platforms covered by `test.sh` (each: self test with a virtio-blk disk, serve, reboot and power off on a signed
+request), and the others:
+
+| machine (QEMU 10, TCG) | firmware | NIC / disk | ACPI | TSC source | result |
+|---|---|---|---|---|---|
+| `pc` | SeaBIOS (PVH) | virtio-net-pci transitional → virtio 1.x, virtio-blk-pci | full, PM1a 0x604 | HPET | pass |
+| `pc`, `disable-modern=on` | SeaBIOS | legacy virtio-pci | full | HPET | pass |
+| `pc`, `disable-legacy=on` | SeaBIOS | modern-only `1af4:1041`/`1af4:1042` | full | HPET | pass |
+| `q35` | SeaBIOS | modern-only behind PCIe root ports, ECAM (MCFG) | full, reset register 0xCF9 | HPET | pass |
+| `microvm` | qboot | virtio-mmio v1 (DSDT `LNRO0005` slots) | hardware-reduced, sleep control register | PIT channel 0 | pass |
+| `microvm`, `force-legacy=false` | qboot | virtio-mmio v2 | hardware-reduced | PIT channel 0 | pass |
+| `microvm,acpi=off` | qboot | virtio-mmio v1 (command line) | none: MP table | PIT | serves; no power off (no ACPI) |
+| `pc`, `hpet=off` | SeaBIOS | | full | ACPI PM timer | pass |
+| `q35`, 16 GiB, 32 vCPUs | SeaBIOS | | full | HPET | 32 CPUs online in 5 ms, 32 ran invocations, power off |
+| `pc` + SPCR table (COM2) | SeaBIOS | | full | | console on COM2 |
+| Firecracker v1.17.0, Cloud Hypervisor v53.0 | PVH | virtio-mmio v2 / virtio-pci modern | | kvmclock | `vmm-test.sh`, CI (KVM) |
+
+## 10. What was not measured / caveats
 
 * **slirp ceiling.** Throughput is capped by slirp (single-threaded, in QEMU's main loop). k10-metal's own
   capacity, extrapolated from its busy time, is well above the 54k rps observed; measuring it needs a tap +

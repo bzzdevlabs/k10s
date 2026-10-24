@@ -860,7 +860,16 @@ pub fn submit(req: Request) {
     let path_end = target.iter().position(|&c| c == b'?').unwrap_or(target.len());
     let path = &target[..path_end];
     if path.starts_with(b"/_k10s/") && !path.starts_with(b"/_k10s/bench/") {
-        let (status, ct, body) = if path == b"/_k10s/apply" && matches!(req.method, Method::Post | Method::Put) {
+        let (status, ct, body) = if path == b"/_k10s/power" && req.method == Method::Post {
+            match &req.body[..] {
+                b"off" | b"reboot" => {
+                    let reboot = req.body == b"reboot";
+                    crate::power::request(reboot);
+                    (202, Some("text/plain"), if reboot { b"rebooting\n".to_vec() } else { b"powering off\n".to_vec() })
+                }
+                _ => (400, Some("text/plain"), b"power: want the body `off` or `reboot`\n".to_vec()),
+            }
+        } else if path == b"/_k10s/apply" && matches!(req.method, Method::Post | Method::Put) {
             if let Some((st, body)) = crate::cluster::operator_apply(&req.body) {
                 (st, Some("application/json"), body.into_bytes())
             } else {
@@ -981,7 +990,7 @@ fn resume(task: &mut Task, long: bool) -> Yield {
     let rx_preempt = long && percpu::id() == 0;
     if rx_preempt {
         crate::net::PREEMPT_ON_RX.store(true, Ordering::Relaxed);
-        crate::virtio_net::set_rx_interrupts(true);
+        crate::dev::set_rx_interrupts(true);
     }
     let now = arch::rdtsc();
     let left = cpu.deadline.get().saturating_sub(cpu.used.get());
@@ -999,7 +1008,7 @@ fn resume(task: &mut Task, long: bool) -> Yield {
     time::set_preempt_at(u64::MAX);
     if rx_preempt {
         crate::net::PREEMPT_ON_RX.store(false, Ordering::Relaxed);
-        crate::virtio_net::set_rx_interrupts(false);
+        crate::dev::set_rx_interrupts(false);
     }
     y
 }
@@ -1375,7 +1384,7 @@ pub fn admin_init(v: Option<AdminVerifier>) {
 /// Access check on a request head, before its body is read. `Ok(Some(h))`: signed, the body must hash to `h`
 /// ([`k10_mesh::admin_auth::check_body`]); `Err`: the status and message to close with. All of `/_k10s` but
 /// `health` and `audience` (what clients sign for) needs a request signed with the admin key: status, logs, apply,
-/// bench.
+/// power, bench.
 pub fn admin_gate(method: &str, target: &[u8], auth: Option<&[u8]>) -> Result<Option<[u8; 32]>, (u16, String)> {
     let path = &target[..target.iter().position(|&c| c == b'?').unwrap_or(target.len())];
     if !(path == b"/_k10s" || path.starts_with(b"/_k10s/")) || path == b"/_k10s/health" {
@@ -1414,7 +1423,7 @@ fn admin(path: &[u8]) -> (u16, Option<&'static str>, Vec<u8>) {
             }
             (200, Some("text/plain"), out.into_bytes())
         }
-        _ => (404, Some("text/plain"), b"unknown admin endpoint (status, health, audience, apply, logs/<service>, bench/<n>/<service>/...)\n".to_vec()),
+        _ => (404, Some("text/plain"), b"unknown admin endpoint (status, health, audience, apply, power, logs/<service>, bench/<n>/<service>/...)\n".to_vec()),
     }
 }
 

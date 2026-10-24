@@ -1,16 +1,19 @@
 //! Application processors (SMP).
 //!
-//! The boot CPU (BSP, CPU 0) copies a small real-mode trampoline to physical page 0x8000, makes that page executable
-//! for the duration, and sends INIT + 2×STARTUP (SDM 8.4.4.1) to all other CPUs at once. Each application processor
-//! (AP) starts in 16-bit real mode at 0x8000, switches to 32-bit protected mode, takes a CPU index with an atomic
-//! increment (paging is still off, so the trampoline's page may stay read-only for it), enables PAE + long mode +
-//! NX, loads the BSP's page tables (one shared address space) and jumps to 64-bit code that picks its stack from
-//! [`AP_STACKS`] and calls [`ap_main`]. There it gets its per-CPU state (GS base), its own GDT + TSS (IST stack),
-//! the shared IDT and its local APIC (TSC-deadline timer), and enters the worker loop (runtime::worker_main).
-//!
-//! The number of CPUs comes from QEMU's firmware configuration interface (fw_cfg key 0x05, `-smp N`); without it
-//! the BSP waits 20 ms and counts. `k10.smp=N` limits the number of CPUs used.
+//! The CPUs come from the ACPI MADT (or an MP table): every enabled local APIC / x2APIC entry, up to [`MAX_CPUS`]
+//! and `k10.smp=N`. Disabled entries and CPUs the firmware did not list are never woken (a broadcast INIT would).
+//! The boot CPU (BSP, CPU 0) copies a small real-mode trampoline to physical page 0x8000, makes that page read+execute
+//! (it stays so: an AP that wakes up after the bring-up finds [`AP_CLOSED`] and halts), and sends each AP an INIT,
+//! then (after 1 ms) a STARTUP, and a second STARTUP to those that are not up 200 µs later (SDM 8.4.4.1), all APs in
+//! parallel. Each application processor starts in 16-bit real mode at 0x8000, loads a known CR0 (caches on),
+//! switches to 32-bit protected mode, takes a CPU index with an atomic increment (paging is still off, so the
+//! trampoline's page may stay read-only for it), enables PAE + long mode (+ NX when the BSP has it), loads the BSP's
+//! page tables (one shared address space) and jumps to 64-bit code that picks its stack from [`AP_STACKS`] and calls
+//! [`ap_main`].
+//! There it gets its per-CPU state (GS base), its own GDT + TSS (IST stack), the shared IDT, the PAT and its local
+//! APIC (in the BSP's mode, xAPIC or x2APIC), and enters the worker loop (runtime::worker_main).
 
+use alloc::vec::Vec;
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -26,6 +29,12 @@ const AP_STACK_SIZE: usize = 64 * 1024;
 /// Next CPU index handed to an AP (the BSP is 0).
 #[no_mangle]
 static AP_NEXT_INDEX: AtomicU32 = AtomicU32::new(1);
+/// EFER bits the APs set: LME, and NXE when the boot CPU enabled NX (the page tables then carry NX bits).
+#[no_mangle]
+static AP_EFER: AtomicU32 = AtomicU32::new(1 << 8);
+/// Set once the bring-up is over: an AP that only wakes up now halts before touching anything.
+#[no_mangle]
+static AP_CLOSED: AtomicU32 = AtomicU32::new(0);
 /// Stack tops by CPU index (0 = none: the AP halts).
 #[no_mangle]
 static AP_STACKS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
@@ -43,8 +52,8 @@ ap_tramp_start:
     xorw %ax, %ax
     movw %ax, %ds
     lgdtl (0x8000 + ap_gdt_ptr - ap_tramp_start)
-    movl %cr0, %eax
-    orl $1, %eax
+    /* CR0 = PE | ET: a known value (INIT keeps CD and NW, which a CPU the firmware never ran may have set). */
+    movl $0x11, %eax
     movl %eax, %cr0
     ljmpl $0x08, $(0x8000 + ap_pm32 - ap_tramp_start)
 .code32
@@ -53,6 +62,8 @@ ap_pm32:
     movw %ax, %ds
     movw %ax, %es
     movw %ax, %ss
+    cmpl $0, AP_CLOSED
+    jne 3f
     /* CPU index (paging is off: plain physical access to the kernel's AP_NEXT_INDEX). */
     movl $1, %eax
     lock xaddl %eax, AP_NEXT_INDEX
@@ -63,17 +74,18 @@ ap_pm32:
     movl %eax, %cr4
     movl $boot_pml4, %eax
     movl %eax, %cr3
-    /* EFER: LME | NXE (the page tables use NX bits) */
+    /* EFER: LME, and NXE if the boot CPU has NX (AP_EFER) */
     movl $0xC0000080, %ecx
     rdmsr
-    orl $((1 << 8) | (1 << 11)), %eax
+    orl AP_EFER, %eax
     wrmsr
-    /* CR0: PG, WP, NE, MP, PE; clear EM and TS */
-    movl %cr0, %eax
-    andl $~((1 << 2) | (1 << 3)), %eax
-    orl $((1 << 31) | (1 << 16) | (1 << 5) | (1 << 1) | 1), %eax
+    /* CR0: PG, WP, NE, ET, MP, PE (caches on, EM and TS clear) */
+    movl $0x80010033, %eax
     movl %eax, %cr0
     ljmpl $0x18, $(0x8000 + ap_lm64 - ap_tramp_start)
+3:  cli
+    hlt
+    jmp 3b
 .code64
 ap_lm64:
     movw $0x10, %ax
@@ -81,7 +93,7 @@ ap_lm64:
     movw %ax, %es
     movw %ax, %ss
     movl %edi, %edi
-    cmpq $8, %rdi
+    cmpq ${max_cpus}, %rdi
     jae 2f
     movq AP_STACKS(,%rdi,8), %rsp
     testq %rsp, %rsp
@@ -106,17 +118,13 @@ ap_gdt_ptr:
 ap_tramp_end:
 .popsection
 "#,
+    max_cpus = const MAX_CPUS,
     options(att_syntax)
 );
 
 extern "C" {
     static ap_tramp_start: u8;
     static ap_tramp_end: u8;
-}
-
-/// Number of CPUs QEMU was started with (`-smp`), from fw_cfg; `None` without fw_cfg.
-fn fw_cfg_cpus() -> Option<usize> {
-    crate::fw_cfg::read_u16(crate::fw_cfg::NB_CPUS).map(usize::from).filter(|&n| n >= 1)
 }
 
 fn delay_us(us: u64) {
@@ -126,40 +134,73 @@ fn delay_us(us: u64) {
     }
 }
 
+fn is_up(apic_id: u32, n: usize) -> bool {
+    (1..n).any(|i| percpu::cpu(i).online.load(Ordering::Acquire) && percpu::cpu(i).apic_id.load(Ordering::Relaxed) == apic_id)
+}
+
 /// Starts the application processors (at most `limit` CPUs in total). Returns the number of CPUs online.
 pub fn start_aps(limit: usize) -> usize {
-    let present = fw_cfg_cpus();
-    let want = present.unwrap_or(MAX_CPUS).min(limit).min(MAX_CPUS);
+    let me = apic::id();
+    let listed: Vec<u32> = crate::acpi::get().map_or(Vec::new(), |t| t.cpus.iter().map(|c| c.apic_id).filter(|&id| id != me).collect());
+    let want = (listed.len() + 1).min(limit).min(MAX_CPUS);
     if want <= 1 {
+        if crate::verbose() {
+            kprintln!("smp: 1 CPU ({} listed by the firmware)", listed.len() + 1);
+        }
         return 1;
     }
-    // Stacks and fault (IST) stacks for the APs we expect.
-    for i in 1..want {
+    // Stacks and fault (IST) stacks for the APs we start.
+    let mut n = 1;
+    while n < want {
         let Some(s) = frames::alloc(AP_STACK_SIZE / FRAME as usize, 1, Tag::Stack) else { break };
-        let Some(f) = frames::alloc(gdt::FAULT_STACK_SIZE / FRAME as usize, 1, Tag::Stack) else { break };
-        AP_STACKS[i].store(s + AP_STACK_SIZE as u64, Ordering::Relaxed);
-        FAULT_STACKS[i].store(f + gdt::FAULT_STACK_SIZE as u64, Ordering::Relaxed);
+        let Some(f) = frames::alloc(gdt::FAULT_STACK_SIZE / FRAME as usize, 1, Tag::Stack) else {
+            frames::free(s, AP_STACK_SIZE / FRAME as usize, Tag::Stack);
+            break;
+        };
+        AP_STACKS[n].store(s + AP_STACK_SIZE as u64, Ordering::Relaxed);
+        FAULT_STACKS[n].store(f + gdt::FAULT_STACK_SIZE as u64, Ordering::Relaxed);
+        n += 1;
     }
+    let targets = &listed[..n - 1];
     // The trampoline: written while the page is writable and non-executable, then made read+execute.
     let (start, end) = (&raw const ap_tramp_start as usize, &raw const ap_tramp_end as usize);
     paging::set_low_page(TRAMPOLINE, false);
     // SAFETY: page 0x8000 is conventional memory below 1 MiB that nothing else uses after boot (the frame
-    // allocator starts at 1 MiB and the PVH boot information has been copied).
+    // allocator starts at 1 MiB, the PVH boot information has been copied, and UEFI loaders reserve the page).
     unsafe { core::ptr::copy_nonoverlapping(start as *const u8, TRAMPOLINE as *mut u8, end - start) };
     paging::set_low_page(TRAMPOLINE, true);
+    AP_EFER.store(1 << 8 | if paging::nx_enabled() { 1 << 11 } else { 0 }, Ordering::Relaxed);
     let t0 = time::now_ns();
-    apic::start_all_aps((TRAMPOLINE >> 12) as u8, &delay_us);
-    // Wait for the APs we expect (or 20 ms when the count is unknown).
-    let deadline = t0 + if present.is_some() { 500_000_000 } else { 20_000_000 };
-    while time::now_ns() < deadline && percpu::online() < want {
+    let vector = (TRAMPOLINE >> 12) as u8;
+    for &id in targets {
+        apic::send_init(id);
+    }
+    delay_us(1000);
+    for &id in targets {
+        apic::send_startup(id, vector);
+    }
+    delay_us(200);
+    for &id in targets {
+        if !is_up(id, n) {
+            apic::send_startup(id, vector);
+        }
+    }
+    let deadline = t0 + 2_000_000_000;
+    while time::now_ns() < deadline && percpu::online() < n {
         core::hint::spin_loop();
     }
-    paging::set_low_page(TRAMPOLINE, false);
-    let n = percpu::online();
-    if crate::verbose() || n < want {
-        kprintln!("smp: {} CPU(s) online of {} (in {} us)", n, present.map_or(0, |p| p), (time::now_ns() - t0) / 1000);
+    // The page stays read+execute: an AP waking up later must find the code that halts it.
+    AP_CLOSED.store(1, Ordering::SeqCst);
+    let up = percpu::online();
+    if crate::verbose() || up < n {
+        kprintln!("smp: {} CPU(s) online of {} started, {} listed (in {} us)", up, n, listed.len() + 1, (time::now_ns() - t0) / 1000);
+        for &id in targets {
+            if !is_up(id, n) {
+                kprintln!("smp: CPU with APIC id {id} did not start");
+            }
+        }
     }
-    n
+    up
 }
 
 /// 64-bit entry of an application processor (from the trampoline), on its own stack.
@@ -169,6 +210,7 @@ extern "C" fn ap_main(index: u64) -> ! {
     percpu::init_cpu(i);
     gdt::init_cpu(i, FAULT_STACKS[i].load(Ordering::Relaxed));
     idt::load();
+    paging::init_pat();
     apic::init_local();
     let me = percpu::this();
     me.apic_id.store(apic::id(), Ordering::Relaxed);

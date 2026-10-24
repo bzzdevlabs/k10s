@@ -104,7 +104,7 @@ verified against the key built into k10s; `SHA256SUMS`).
   `/k10s/tier` (a GRUB environment block: `tier=linux|metal|auto`, `metal_cmdline=`) picks Tier 1 (LoadImage of
   systemd-boot, moved to `EFI/systemd/`) or the native kernel `/k10s/metal.elf`, a k10s image (profile `native`)
   verified against the release key, keys built in (`K10BOOT_KEYS`) and, with Secure Boot off only, `os_key`; `auto`
-  matches PCI (firmware PCI I/O) against `metal/bootproto/src/devices.rs` (legacy virtio-net for now). The kernel
+  matches PCI (firmware PCI I/O) against `metal/bootproto/src/devices.rs` (virtio-net and virtio-blk, transitional and modern). The kernel
   gets a PVH `start_info` (merged E820, command line, RSDP) with named modules: k10s.conf, `/k10s/bundle.k10b`, the
   key files k10s.conf names (they replace fw_cfg on real machines; fw_cfg stays for `-kernel`), the GOP framebuffer
   (for 13c), the runtime services; page 0x8000 reserved, ExitBootServices retried on a stale key. Boot counting: a
@@ -117,6 +117,24 @@ verified against the key built into k10s; `SHA256SUMS`).
   fallback, refused signatures, PVH), mb2 (SeaBIOS → GRUB → Multiboot2) and secureboot (k10boot in front, MOK through
   shim's LoadImage, os_key refused under Secure Boot) gate releases; every other UEFI test boots Tier 1 through
   k10boot.
+- Tier 2 M1 platform and virtio (13b, metal/README.md): the native kernel reads ACPI without AML (MADT CPUs and I/O
+  APICs, FADT, MCFG, HPET, SPCR; `\_S5` and virtio-mmio `LNRO0005` slots by DSDT scan; MP-table fallback), starts each
+  listed CPU with its own INIT/SIPI (`MAX_CPUS` 64; x2APIC under hypervisors, after an x2APIC handover or for APIC
+  ids > 254, xAPIC otherwise on bare metal), maps all RAM (1 GiB pages
+  above 4 GiB) with every device range uncached (PAT reset; 64-bit BARs mapped on use), keeps a sorted, disjoint
+  memory map, reclaims 64–640 KiB, calibrates the TSC against the HPET/PM timer/PIT channel 0 when there is no
+  kvmclock, powers off (S5: PM1 or the hardware-reduced sleep register) and reboots (reset register, 8042, 0xCF9,
+  triple fault) through ACPI — `POST /_k10s/power off|reboot` (signed; leaves the cluster first), fatal errors reboot
+  after `k10.panic` s — with no isa-debug-exit. PCI through ECAM (segments, bridges enabled, 64-bit BARs, MSI-X);
+  `NetDevice`/`BlockDevice` traits with `DmaRegion`s; virtio PCI modern + legacy and MMIO v1 + v2; virtio-net and
+  virtio-blk (async requests, flush); DHCPv4 (renew/rebind/NAK) or `k10.ip=` (k10s.conf `ip`), advertised as the cluster address (a changed lease
+  makes the member leave and reboot onto it, as Tier 1 restarts its node);
+  console from SPCR or `k10.console=`. `metal/test.sh` (KVM or TCG) runs every QEMU platform (pc legacy/transitional/
+  modern-only, q35 behind a root port, microvm mmio v1/v2): selftest with a disk, serve, reboot, power off; SPCR on
+  COM2, static IP, no-HPET clock, DHCP against Tier 1's scripted server, 16 GiB + 32 vCPUs; `cluster-test.sh` adds a
+  leave + power off; `vmm-test.sh` runs Firecracker v1.17.0 and Cloud Hypervisor v53.0 (pinned, CI's metal-e2e job);
+  the metal-selftest gate runs pc, pc-legacy, q35 and microvm. Same throughput as before, 3 MiB guests place 16
+  services instead of 9, image +100 KiB (metal/RESULTS.md §9).
 - Releases: SemVer; tag `vX.Y.Z` on main → stable release, every push to main → `vX.Y.Z-dev.N` pre-release.
 - Performance vs 08f2921 (`bench/k10s/ab.py --same`, 4 interleaved rounds, host load ≈ 7 from the benchmark itself;
   medians): single node within ±2.5 %; local ingress −4 %; forwarded requests −5 % at c=1 (CPU per request +7 %) and
@@ -138,10 +156,15 @@ seek privileges on this machine.
       SetVariable on SMM flash, x2APIC handover), GRUB's Multiboot2 on a real BIOS, a Hetzner or Vultr VM (UEFI and
       BIOS) and a DigitalOcean droplet (BIOS, GRUB → Multiboot2) once 13b's modern virtio-net lands, real machines
       with 13c's NICs.
-    - 13b **M1 platform and virtio** (in parallel with 13a): ACPI tables (MADT with targeted SIPI, x2APIC, ≥ 64 CPUs,
-      FADT reset/S5, SPCR, HPET/PM timer), all RAM and every BAR mapped (above 4 GiB), a coalesced memory map, a full
-      ECAM scan with 64-bit BARs, virtio 1.x net + blk + mmio behind `NetDevice`/`BlockDevice`, DHCPv4 or a static IP,
-      no QEMU-only exits; 16 GiB and 32 vCPUs under QEMU.
+    - 13b **M1 platform and virtio** — done (State of main). Needs real hardware (user): firmware x2APIC handover and
+      APIC ids > 255 (no interrupt remapping yet), real MADT/FADT/DSDT quirks (`_PTS`-dependent S5, a `\_S5` that is
+      not a plain package, broken checksums or SPCR), MTRR/PAT setups and 64-bit BARs that firmware covers with
+      write-back MTRRs, large real memory maps (UEFI, overlapping entries), multi-socket root buses found by the bare
+      metal ECAM brute-force scan, TSC calibration against real HPET/PM timers (and TSC sync across sockets), the
+      8042/0xCF9 reset fallbacks, BMC serial consoles through SPCR; cloud VMs (Hetzner/Vultr modern virtio,
+      DigitalOcean BIOS) with 13a's images. Not done here: wall-clock discipline without kvmclock (an NTP/SNTP client),
+      ACPI events (power button), Firecracker/Cloud Hypervisor secrets (no fw_cfg and no k10boot there: their admin
+      API stays closed until keys come through the boot protocol), interrupt remapping (VT-d, M4).
     - 13c **x86 bare metal** (M4's first part; after 13a and 13b, in parallel with 13d): Intel e1000e (I219 with
       ME/ULP handling, 82574L) and igc (I225/I226), Realtek r8169-class (8111/8125), GOP text console, UDP log
       console, watchdog; a USB-bootable image; then bring-up on the user's machine.
@@ -227,6 +250,9 @@ seek privileges on this machine.
   power cuts during an update on real disks, GRUB `save_env` and systemd-boot boot counting on real firmware (Realtek RTL8111/8125 with `rtl_nic` firmware, or Intel igc/e1000e), NICs and
   USB Ethernet outside QEMU's models, AHCI/eMMC boot disks, the screen console, BIOS/UEFI firmware quirks, slow USB
   storage (`bootwait`), AMD and SMBus-attached Intel watchdogs, RTC chips, real DHCP servers, switches and NTP pools.
+- `metal/test.sh` under TCG (no KVM, e.g. the dev container): the `jit smp4` suite's two `instcount (instance state
+  kept)` checks fail, before and after 13b alike: emulated, the service's CPU time exceeds the 20 µs local-dispatch
+  threshold, so the second request runs on another CPU's instance pool. KVM runs (CI) pass.
 - The x86-64 `update` test timed out once waiting for the commit (release run of 2d12614, before U3); it passed on
   the next run. Watch for a recurrence. Same for `graceful_leave_and_join_under_load` (musl suite, "placement includes
   the newcomer" not within 10 s; release run of 08a3fb7, first failure in the release history).

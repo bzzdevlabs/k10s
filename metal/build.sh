@@ -9,6 +9,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 T=${CARGO_TARGET_DIR:-target}
 
+T="${CARGO_TARGET_DIR:-target}"
 cargo build --release -p mkbundle
 cargo build --release -p k10-metal --target x86_64-unknown-none
 cargo build --release -p k10boot --target x86_64-unknown-uefi

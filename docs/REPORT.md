@@ -164,7 +164,7 @@ the caveats. Highlights beyond §0:
 - **Ecosystem:** workloads must be written in Ten (or compiled to TIR); no Wasm/LLVM front end yet.
 - **Measurements:** Kubernetes ran under Docker Desktop (kind inside a VM whose kernel and port forwarder are not
   counted — favourable to Kubernetes on fixed overhead); "replica" means a pod vs. a process vs. an instance.
-- **Bare metal:** VM guests only today (PVH, legacy virtio-net, 4 GiB mapped, no storage driver).
+- **Bare metal:** VM guests only today (QEMU, Firecracker, Cloud Hypervisor; virtio net and blk; the disk is not used for storage yet).
 
 ## 8. Roadmap (recommended order)
 1. **Tier 2 (next), M1–M2 and x86 bare metal:** UEFI + BIOS + ACPI + modern virtio + Intel/Realtek NICs + NVMe +

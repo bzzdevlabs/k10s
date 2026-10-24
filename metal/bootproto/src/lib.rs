@@ -481,6 +481,7 @@ mod tests {
     #[test]
     fn device_table() {
         assert_eq!(devices::find(0x1af4, 0x1000).map(|d| d.class), Some(devices::Class::Network));
+        assert_eq!(devices::find(0x1af4, 0x1041).map(|d| d.class), Some(devices::Class::Network));
         assert!(devices::find(0x8086, 0x10d3).is_none());
     }
 }

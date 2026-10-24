@@ -1,5 +1,12 @@
-//! Local APIC (xAPIC, memory-mapped at the address in IA32_APIC_BASE, identity-mapped uncached by boot.rs) and
-//! the legacy 8259 PICs (remapped and fully masked: every interrupt we use is LAPIC timer or MSI-X).
+//! Local APIC, in x2APIC mode (MSR interface, 32-bit APIC ids) when the CPU has it, else xAPIC (memory-mapped at
+//! the address in IA32_APIC_BASE, uncached in the identity map), and the legacy 8259 PICs (remapped and fully
+//! masked: every interrupt we use is the LAPIC timer, an IPI, MSI-X or an I/O APIC line).
+//!
+//! Firmware may hand over in x2APIC mode (it must when APIC ids exceed 254); leaving it is an illegal transition,
+//! so the kernel keeps it. Otherwise the boot CPU picks x2APIC under a hypervisor when CPUID offers it (MSR accesses
+//! are cheaper exits than MMIO), or when the MADT lists APIC ids above 254; on bare metal it stays in xAPIC mode,
+//! as Linux does without interrupt remapping (`k10.apic=xapic` keeps xAPIC everywhere it can). The application
+//! processors follow the boot CPU.
 //!
 //! The timer is one-shot ("tickless"): the kernel arms it for the next instant it must regain control (end of an
 //! invocation's time slice, next TCP timer). With TSC-deadline mode (KVM `-cpu host`) arming is a single
@@ -12,29 +19,47 @@ use super::{cpuid, inb, outb, rdmsr, rdtsc, wrmsr};
 
 const IA32_APIC_BASE: u32 = 0x1B;
 const IA32_TSC_DEADLINE: u32 = 0x6E0;
+const APIC_EN: u64 = 1 << 11;
+const APIC_EXTD: u64 = 1 << 10;
+/// x2APIC registers are MSRs 0x800 + (xAPIC offset >> 4).
+const X2APIC_MSR: u32 = 0x800;
 
 const REG_ID: usize = 0x20;
 const REG_TPR: usize = 0x80;
 const REG_EOI: usize = 0xB0;
 const REG_SVR: usize = 0xF0;
+const REG_ICR_LO: usize = 0x300;
+const REG_ICR_HI: usize = 0x310;
 const REG_LVT_TIMER: usize = 0x320;
 const REG_TIMER_INIT: usize = 0x380;
 const REG_TIMER_CUR: usize = 0x390;
 const REG_TIMER_DIV: usize = 0x3E0;
-const REG_ICR_LO: usize = 0x300;
-const REG_ICR_HI: usize = 0x310;
 const ICR_PENDING: u32 = 1 << 12;
+const ICR_NMI: u32 = 0b100 << 8;
+const ICR_INIT: u32 = 0b101 << 8;
+const ICR_STARTUP: u32 = 0b110 << 8;
+const ICR_ASSERT: u32 = 1 << 14;
+const ICR_LEVEL: u32 = 1 << 15;
 
 static BASE: AtomicU64 = AtomicU64::new(0xFEE0_0000);
+static X2APIC: AtomicBool = AtomicBool::new(false);
 static TSC_DEADLINE: AtomicBool = AtomicBool::new(false);
 /// LAPIC timer ticks per 2^32 TSC ticks (count mode only).
 static LAPIC_PER_TSC_FP32: AtomicU64 = AtomicU64::new(0);
 
 fn read(reg: usize) -> u32 {
-    unsafe { core::ptr::read_volatile((BASE.load(Ordering::Relaxed) as usize + reg) as *const u32) }
+    if X2APIC.load(Ordering::Relaxed) {
+        rdmsr(X2APIC_MSR + (reg >> 4) as u32) as u32
+    } else {
+        unsafe { core::ptr::read_volatile((BASE.load(Ordering::Relaxed) as usize + reg) as *const u32) }
+    }
 }
 fn write(reg: usize, v: u32) {
-    unsafe { core::ptr::write_volatile((BASE.load(Ordering::Relaxed) as usize + reg) as *mut u32, v) }
+    if X2APIC.load(Ordering::Relaxed) {
+        wrmsr(X2APIC_MSR + (reg >> 4) as u32, v as u64)
+    } else {
+        unsafe { core::ptr::write_volatile((BASE.load(Ordering::Relaxed) as usize + reg) as *mut u32, v) }
+    }
 }
 
 /// Remaps the 8259 PICs to vectors 0x30..0x3F (so a stray legacy IRQ is never mistaken for an exception) and masks
@@ -53,18 +78,41 @@ fn disable_pic() {
     let _ = inb(0x21);
 }
 
-pub fn init() {
+pub fn has_x2apic() -> bool {
+    cpuid(1, 0).2 & (1 << 21) != 0
+}
+
+/// Boot CPU: masks the 8259s (harmless where there are none: unused ports), picks the APIC mode (`wide_ids`: the
+/// firmware lists APIC ids above 254), enables its local APIC.
+pub fn init(prefer_xapic: bool, wide_ids: bool) {
     disable_pic();
+    let base = rdmsr(IA32_APIC_BASE);
+    let hypervisor = cpuid(1, 0).2 & (1 << 31) != 0;
+    let x2 = base & APIC_EXTD != 0 || has_x2apic() && (wide_ids || hypervisor && !prefer_xapic);
+    X2APIC.store(x2, Ordering::Relaxed);
+    BASE.store(base & 0xF_FFFF_F000, Ordering::Relaxed);
+    if !X2APIC.load(Ordering::Relaxed) {
+        super::paging::map_mmio(BASE.load(Ordering::Relaxed), 4096);
+    }
     init_local();
 }
 
-/// Enables this CPU's local APIC and configures its timer (every CPU; the boot CPU also masks the 8259s and
-/// calibrates).
+pub fn x2apic() -> bool {
+    X2APIC.load(Ordering::Relaxed)
+}
+
+/// Enables this CPU's local APIC in the boot CPU's mode and configures its timer (every CPU).
 pub fn init_local() {
     let base = rdmsr(IA32_APIC_BASE);
-    // Global enable (bit 11), keep xAPIC mode (bit 10 clear).
-    wrmsr(IA32_APIC_BASE, (base | (1 << 11)) & !(1 << 10));
-    BASE.store(base & 0xF_FFFF_F000, Ordering::Relaxed);
+    if X2APIC.load(Ordering::Relaxed) {
+        if base & APIC_EXTD == 0 {
+            // xAPIC (or disabled) → enabled → x2APIC: the architectural order.
+            wrmsr(IA32_APIC_BASE, base | APIC_EN);
+            wrmsr(IA32_APIC_BASE, base | APIC_EN | APIC_EXTD);
+        }
+    } else {
+        wrmsr(IA32_APIC_BASE, (base | APIC_EN) & !APIC_EXTD);
+    }
     write(REG_TPR, 0);
     write(REG_SVR, 0x100 | VEC_SPURIOUS as u32);
     let deadline = cpuid(1, 0).2 & (1 << 24) != 0;
@@ -116,45 +164,59 @@ pub fn eoi() {
     write(REG_EOI, 0);
 }
 
-fn icr_wait() {
-    while read(REG_ICR_LO) & ICR_PENDING != 0 {
-        core::hint::spin_loop();
-    }
-}
-
-/// Fixed-delivery IPI with `vector` to the CPU whose local APIC id is `apic_id`.
-pub fn send_ipi(apic_id: u32, vector: u8) {
-    // Interrupts off: the two ICR writes must not be split by a handler that sends an IPI too.
+/// Sends an IPI: `low` is the ICR's low word (vector, delivery mode, level, shorthand).
+fn icr(dest: u32, low: u32) {
+    // Interrupts off: in xAPIC mode the two ICR writes must not be split by a handler that sends an IPI too.
     let was = super::interrupts_enabled();
     super::interrupts_disable();
-    icr_wait();
-    write(REG_ICR_HI, apic_id << 24);
-    write(REG_ICR_LO, vector as u32);
+    if X2APIC.load(Ordering::Relaxed) {
+        wrmsr(X2APIC_MSR + (REG_ICR_LO >> 4) as u32, (dest as u64) << 32 | low as u64);
+    } else {
+        while read(REG_ICR_LO) & ICR_PENDING != 0 {
+            core::hint::spin_loop();
+        }
+        write(REG_ICR_HI, dest << 24);
+        write(REG_ICR_LO, low);
+        while read(REG_ICR_LO) & ICR_PENDING != 0 {
+            core::hint::spin_loop();
+        }
+    }
     if was {
         super::interrupts_enable();
     }
 }
 
-/// INIT, then two STARTUP IPIs with `vector` (page `vector * 4096`), to every other CPU (MP spec / SDM 8.4.4.1).
-pub fn start_all_aps(vector: u8, delay_us: &dyn Fn(u64)) {
-    icr_wait();
-    write(REG_ICR_HI, 0);
-    write(REG_ICR_LO, 0x000C_4500); // all excluding self, level assert, INIT
-    icr_wait();
-    delay_us(1000);
-    for _ in 0..2 {
-        write(REG_ICR_HI, 0);
-        write(REG_ICR_LO, 0x000C_4600 | vector as u32); // all excluding self, STARTUP
-        icr_wait();
-        delay_us(200);
-    }
+/// Fixed-delivery IPI with `vector` to the CPU whose local APIC id is `apic_id`.
+pub fn send_ipi(apic_id: u32, vector: u8) {
+    icr(apic_id, vector as u32);
+}
+
+/// INIT (level assert) to one CPU: puts it in wait-for-SIPI (SDM 8.4.4.1).
+pub fn send_init(apic_id: u32) {
+    icr(apic_id, ICR_INIT | ICR_ASSERT | ICR_LEVEL);
+}
+
+/// STARTUP to one CPU: it starts in real mode at page `vector * 4096`.
+pub fn send_startup(apic_id: u32, vector: u8) {
+    icr(apic_id, ICR_STARTUP | vector as u32);
+}
+
+/// An NMI to one CPU (stopping the machine; CPUs the kernel did not start are left alone).
+pub fn send_nmi(apic_id: u32) {
+    icr(apic_id, ICR_NMI | ICR_ASSERT);
 }
 
 pub fn id() -> u32 {
-    read(REG_ID) >> 24
+    if X2APIC.load(Ordering::Relaxed) {
+        read(REG_ID)
+    } else {
+        read(REG_ID) >> 24
+    }
 }
 
-/// MSI address/data that deliver `vector` to this CPU (fixed delivery, edge, physical destination).
-pub fn msi(vector: u8) -> (u64, u32) {
-    (0xFEE0_0000 | ((id() as u64) << 12), vector as u32)
+/// MSI address/data that deliver `vector` to this CPU (fixed delivery, edge, physical destination); `None` when the
+/// APIC id does not fit the 8-bit MSI destination (needs interrupt remapping).
+pub fn msi(vector: u8) -> Option<(u64, u32)> {
+    let id = id();
+    (id < 256).then(|| (0xFEE0_0000 | ((id as u64) << 12), vector as u32))
 }

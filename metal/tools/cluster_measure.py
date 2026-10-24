@@ -113,8 +113,10 @@ def guest():
     append = (f"k10.engine={ENGINE} k10.join=127.0.0.1:{G[0]},127.0.0.1:{G[1]} k10.gossip=127.0.0.1:{G[2]} "
               f"k10.rpc=127.0.0.1:{R[2]} k10.http=127.0.0.1:{H[2]} k10.node_id={GUEST_ID} k10.probe_ms={PROBE_MS} "
               f"k10.suspicion_mult={SUSP} k10.mem=67108864")
-    cmd = ["qemu-system-x86_64", "-M", "pc", "-enable-kvm", "-cpu", "host", "-m", "128M", "-smp", "1", "-nodefaults",
-           "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+    accel = ["-enable-kvm", "-cpu", "host"] if (os.environ.get("ACCEL") or ("kvm" if os.access("/dev/kvm", os.W_OK) else "tcg")) == "kvm" \
+        else ["-accel", "tcg,thread=multi", "-cpu", "max"]
+    cmd = ["qemu-system-x86_64", "-M", "pc", *accel, "-m", "128M", "-smp", "1", "-nodefaults",
+           "-display", "none", "-no-reboot",
            "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{H[2]}-:80,hostfwd=udp:127.0.0.1:{G[2]}-:7946,"
                       f"hostfwd=tcp:127.0.0.1:{R[2]}-:7947",
            "-device", "virtio-net-pci,disable-modern=on,netdev=n0,romfile=", "-kernel", "out/k10-metal.elf",

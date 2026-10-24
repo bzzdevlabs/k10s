@@ -8,9 +8,9 @@
 //!
 //! | k10s.conf | argument |
 //! |---|---|
-//! | `join`, `backend`, `jit-indirect`, `timer-res-us`, `idle-spin-us`, `probe-ms`, `suspicion-mult`, `gossip-max-skew` | `k10.join`, `k10.engine`, `k10.jit_indirect`, `k10.timer_res_us`, `k10.spin_us`, `k10.probe_ms`, `k10.suspicion_mult`, `k10.gossip_max_skew_s` |
+//! | `join`, `backend`, `jit-indirect`, `timer-res-us`, `idle-spin-us`, `probe-ms`, `suspicion-mult`, `gossip-max-skew`, `ip` | `k10.join`, `k10.engine`, `k10.jit_indirect`, `k10.timer_res_us`, `k10.spin_us`, `k10.probe_ms`, `k10.suspicion_mult`, `k10.gossip_max_skew_s`, `k10.ip` (`A.B.C.D/P[,GATEWAY]`; DHCP without it) |
 //! | `insecure-unauthenticated-cluster` | `k10.insecure_unauthenticated_cluster` |
-//! | any of `gossip`, `rpc`, `join`, `advertise` (cluster mode, as on Tier 1) | `k10.cluster`, and `k10.gossip`, `k10.rpc`, `k10.http`: the port of `gossip`, `rpc`, `http` (default 7946, 7947, 80) at the address `advertise`, else the one configured unless unspecified, else the node's own |
+//! | any of `gossip`, `rpc`, `join`, `advertise` (cluster mode, as on Tier 1) | `k10.cluster`, and `k10.gossip`, `k10.rpc`, `k10.http`: the port of `gossip`, `rpc`, `http` (default 7946, 7947, 80) at the address `advertise`, else the one configured unless unspecified, else 0.0.0.0: the interface's address (DHCP or `ip`; a changed lease reboots the node, which then advertises the new one) |
 //!
 //! The kernel listens on 7946, 7947 and 80 whatever the ports: these addresses are what it tells its peers.
 
@@ -23,7 +23,7 @@ use k10_bootproto::conf;
 use crate::kprintln;
 use crate::pvh::BootInfo;
 
-const MAPPED: [(&str, &str); 8] = [
+const MAPPED: [(&str, &str); 9] = [
     ("k10.join", "join"),
     ("k10.engine", "backend"),
     ("k10.jit_indirect", "jit-indirect"),
@@ -32,6 +32,7 @@ const MAPPED: [(&str, &str); 8] = [
     ("k10.probe_ms", "probe-ms"),
     ("k10.suspicion_mult", "suspicion-mult"),
     ("k10.gossip_max_skew_s", "gossip-max-skew"),
+    ("k10.ip", "ip"),
 ];
 
 /// Space-separated words in a fixed buffer (no heap yet when it is filled).
@@ -112,7 +113,8 @@ pub fn derive(text: &str, cmdline: &str, out: &mut Args) {
             None
         }
     });
-    let own = IpAddr::V4(crate::net::IP);
+    // Unspecified: the cluster layer advertises the interface's address (cluster.rs).
+    let own = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
     for (arg, key, port) in [("k10.gossip", "gossip", crate::cluster::GOSSIP_PORT), ("k10.rpc", "rpc", crate::cluster::RPC_PORT), ("k10.http", "http", crate::net::HTTP_PORT)] {
         let given = value(text, cmdline, key).and_then(|v| v.parse::<SocketAddr>().ok());
         let ip = advertise.or(given.map(|a| a.ip()).filter(|ip| !ip.is_unspecified())).unwrap_or(own);

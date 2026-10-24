@@ -4,7 +4,8 @@
 //!
 //! Every allocation carries a [`Tag`] so that `/_k10s/status` can report where memory goes.
 
-use crate::pvh::{BootInfo, E820_RAM};
+use crate::mem::memmap::MemoryMap;
+use crate::pvh::Module;
 use crate::sync::IrqLock;
 
 pub const FRAME: u64 = 4096;
@@ -39,7 +40,7 @@ pub struct Frames {
     /// Usable RAM frames (free + allocated), excluding the kernel image and holes.
     usable: usize,
     free: usize,
-    /// Lowest index that may be free.
+    /// Lowest index at or above 1 MiB that may be free (frames below 1 MiB are not tracked by it).
     hint: usize,
     by_tag: [usize; NTAGS],
     /// Lowest free count ever seen (high-water mark of usage).
@@ -58,8 +59,12 @@ pub static FRAMES: IrqLock<Frames> = IrqLock::new(Frames {
     min_free: 0,
 });
 
-/// Memory below this is never handed out (real-mode IVT/BDA/EBDA, option ROMs, the PVH start info).
+/// Memory below this is not handed out at first: the firmware's tables (MP table, RSDP in the EBDA) and the boot
+/// information are read from there. [`add_low_memory`] then frees the RAM between [`LOW_KEEP`] and 1 MiB.
 const LOW_LIMIT: u64 = 1 << 20;
+/// Never handed out: the real-mode IVT and BIOS data area, the AP trampoline (0x8000), and room for firmware that
+/// scribbles on low memory (Linux keeps the first 64 KiB for the same reason).
+const LOW_KEEP: u64 = 64 << 10;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Stats {
@@ -124,16 +129,28 @@ impl Frames {
         None
     }
 
-    /// Allocates `n` contiguous frames whose first frame number is a multiple of `align` (frames).
+    /// Allocates `n` contiguous frames whose first frame number is a multiple of `align` (frames). Memory below
+    /// 1 MiB (mapped with 4 KiB pages: costlier TLB misses) is taken only once there is no room above.
     pub fn alloc(&mut self, n: usize, align: usize, tag: Tag) -> Option<u64> {
+        let low = (LOW_LIMIT / FRAME) as usize;
+        self.alloc_in(self.hint, self.nframes, n, align, tag).or_else(|| self.alloc_in((LOW_KEEP / FRAME) as usize, low, n, align, tag))
+    }
+
+    /// Like [`Frames::alloc`], from frame index `start` up.
+    pub fn alloc_from(&mut self, start: usize, n: usize, align: usize, tag: Tag) -> Option<u64> {
+        self.alloc_in(start.max(self.hint), self.nframes, n, align, tag)
+    }
+
+    /// `n` frames inside frame indices `[start, end)`.
+    fn alloc_in(&mut self, start: usize, end: usize, n: usize, align: usize, tag: Tag) -> Option<u64> {
         if n == 0 || n > self.free {
             return None;
         }
         let align = align.max(1);
-        let mut i = self.next_free(self.hint)?;
+        let mut i = self.next_free(start)?;
         loop {
             i = i.div_ceil(align) * align;
-            if i + n > self.nframes {
+            if i + n > end.min(self.nframes) {
                 return None;
             }
             match self.first_used(i, n) {
@@ -161,7 +178,7 @@ impl Frames {
         }
         self.free += n;
         self.by_tag[tag as usize] -= n;
-        self.hint = self.hint.min(i);
+        self.hint = self.hint.min(i.max((LOW_LIMIT / FRAME) as usize));
     }
 
     /// Marks `[start, end)` used without counting it as an allocation (reserved ranges at boot).
@@ -193,14 +210,14 @@ impl Frames {
 }
 
 /// Total RAM reported by the firmware (all E820 RAM regions).
-pub fn total_ram(bi: &BootInfo) -> u64 {
-    bi.memmap().iter().filter(|r| r.kind == E820_RAM).map(|r| r.size).sum()
+pub fn total_ram(map: &MemoryMap) -> u64 {
+    map.ram().map(|r| r.size).sum()
 }
 
-/// Builds the allocator from the E820 map. `reserved` ranges (kernel image, boot modules) stay in use; boot modules
-/// are accounted under [`Tag::Module`] so they can be released later with [`release_module`].
-pub fn init(bi: &BootInfo, kernel: (u64, u64)) {
-    let ram = || bi.memmap().iter().filter(|r| r.kind == E820_RAM && r.size > 0);
+/// Builds the allocator from the memory map. `reserved` ranges (kernel image, boot modules) stay in use; boot
+/// modules are accounted under [`Tag::Module`] so they can be released later with [`release_module`].
+pub fn init(map: &MemoryMap, modules: &[Module], kernel: (u64, u64)) {
+    let ram = || map.ram();
     let top = ram().map(|r| r.addr + r.size).max().expect("no RAM in the memory map");
     let nframes = (top / FRAME) as usize;
     let words = nframes.div_ceil(64);
@@ -209,7 +226,7 @@ pub fn init(bi: &BootInfo, kernel: (u64, u64)) {
     // Place the bitmap in the first RAM range above 1 MiB that is not the kernel or a module.
     let mut busy: [(u64, u64); 1 + crate::pvh::MAX_MODULES] = [(0, 0); 1 + crate::pvh::MAX_MODULES];
     busy[0] = kernel;
-    for (i, m) in bi.modules().iter().enumerate() {
+    for (i, m) in modules.iter().enumerate() {
         busy[1 + i] = (m.paddr & !(FRAME - 1), (m.paddr + m.size).div_ceil(FRAME) * FRAME);
     }
     let overlaps = |s: u64, e: u64| busy.iter().any(|&(bs, be)| be > bs && s < be && bs < e);
@@ -253,7 +270,7 @@ pub fn init(bi: &BootInfo, kernel: (u64, u64)) {
     let b = f.reserve(at, at + bitmap_bytes);
     f.free -= b;
     f.by_tag[Tag::Kernel as usize] += b;
-    for m in bi.modules() {
+    for m in modules {
         let n = f.reserve(m.paddr & !(FRAME - 1), m.paddr + m.size);
         f.free -= n;
         f.by_tag[Tag::Module as usize] += n;
@@ -261,6 +278,32 @@ pub fn init(bi: &BootInfo, kernel: (u64, u64)) {
     f.usable = f.free + f.by_tag.iter().sum::<usize>();
     f.min_free = f.free;
     f.hint = (LOW_LIMIT / FRAME) as usize;
+}
+
+/// Frees the RAM frames between 64 KiB and 1 MiB except `[keep.0, keep.1)` (the EBDA), once the firmware's tables
+/// there have been read; [`Frames::alloc`] uses them last. Returns the bytes added.
+pub fn add_low_memory(map: &MemoryMap, keep: (u64, u64)) -> u64 {
+    let mut f = FRAMES.lock();
+    let mut n = 0;
+    for r in map.ram() {
+        let s = r.addr.max(LOW_KEEP).div_ceil(FRAME);
+        let e = r.end().min(LOW_LIMIT) / FRAME;
+        for k in s..e {
+            let a = k * FRAME;
+            if (keep.0..keep.1).contains(&a) {
+                continue;
+            }
+            let k = k as usize;
+            if k < f.nframes && f.test(k) {
+                f.clear(k);
+                n += 1;
+            }
+        }
+    }
+    f.free += n;
+    f.usable += n;
+    f.min_free = f.min_free.max(f.free);
+    n as u64 * FRAME
 }
 
 /// Releases a boot module's frames once its contents have been copied/consumed.
@@ -272,6 +315,16 @@ pub fn release_module(paddr: u64, size: u64) {
 
 pub fn alloc(n: usize, align: usize, tag: Tag) -> Option<u64> {
     FRAMES.lock().alloc(n, align, tag)
+}
+
+/// End of the highest RAM frame.
+pub fn top() -> u64 {
+    FRAMES.lock().nframes as u64 * FRAME
+}
+
+/// `n` frames at or above physical address `min` (the self tests reach memory above 4 GiB with it).
+pub fn alloc_above(min: u64, n: usize, tag: Tag) -> Option<u64> {
+    FRAMES.lock().alloc_from((min / FRAME) as usize, n, 1, tag)
 }
 
 pub fn free(paddr: u64, n: usize, tag: Tag) {

@@ -1,6 +1,8 @@
-//! TCP/IP (smoltcp over the virtio-net driver) and the HTTP/1.1 ingress connections on port 80.
+//! TCP/IP (smoltcp over a [`NetDevice`]) and the HTTP/1.1 ingress connections on port 80.
 //!
-//! * Static configuration matching QEMU user networking (slirp): 10.0.2.15/24, gateway 10.0.2.2.
+//! * IPv4 only: DHCPv4 by default (smoltcp's client: renews at T1, rebinds at T2, starts over on a NAK or when
+//!   the lease ends), or a static `k10.ip=A.B.C.D/P[,GATEWAY]`. Boot waits up to 30 s for the first lease, since a
+//!   cluster node advertises its address.
 //! * smoltcp needs one socket in LISTEN state per connection it can accept. Instead of a large idle pool, the
 //!   kernel processes ingress one packet at a time (`poll_ingress_single`) and tops the listening sockets back
 //!   up after every packet, so a burst of SYNs never meets an empty backlog.
@@ -15,19 +17,39 @@ use alloc::vec::Vec;
 use core::net::SocketAddr;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use alloc::boxed::Box;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
-use smoltcp::socket::{tcp, udp};
+use smoltcp::socket::{dhcpv4, tcp, udp};
 use smoltcp::time::{Duration, Instant};
-use smoltcp::wire::{EthernetAddress, HardwareAddress, IpCidr, Ipv4Address};
+use smoltcp::wire::{EthernetAddress, HardwareAddress, IpCidr, Ipv4Address, Ipv4Cidr};
 
+use crate::dev::{NetDevice, NetRx, NetTx};
 use crate::http::{self, Method, Parse};
+use crate::kprintln;
 use crate::sync::Global;
 use crate::time;
-use crate::virtio_net::VirtioNet;
 
 pub const HTTP_PORT: u16 = 80;
-pub const IP: Ipv4Address = Ipv4Address::new(10, 0, 2, 15);
-pub const GATEWAY: Ipv4Address = Ipv4Address::new(10, 0, 2, 2);
+
+/// How the interface gets its address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IpConfig {
+    Dhcp,
+    Static { addr: Ipv4Cidr, gateway: Option<Ipv4Address> },
+}
+
+impl IpConfig {
+    /// `k10.ip`: absent or `dhcp` → DHCP; `A.B.C.D/P[,GATEWAY]` → static.
+    pub fn parse(v: Option<&str>) -> Result<IpConfig, &'static str> {
+        let Some(v) = v.filter(|&v| v != "dhcp") else { return Ok(IpConfig::Dhcp) };
+        let (cidr, gw) = v.split_once(',').map_or((v, None), |(c, g)| (c, Some(g)));
+        let (a, p) = cidr.split_once('/').ok_or("want A.B.C.D/PREFIX[,GATEWAY] or dhcp")?;
+        let addr: Ipv4Address = a.parse().map_err(|_| "bad address")?;
+        let prefix: u8 = p.parse().ok().filter(|&p| (1..=32).contains(&p)).ok_or("bad prefix length")?;
+        let gateway = gw.map(|g| g.parse().map_err(|_| "bad gateway")).transpose()?;
+        Ok(IpConfig::Static { addr: Ipv4Cidr::new(addr, prefix), gateway })
+    }
+}
 
 pub static NET_IRQS: AtomicU64 = AtomicU64::new(0);
 
@@ -49,7 +71,7 @@ pub struct Snapshot {
     pub http_requests: u64,
     pub bad_requests: u64,
     pub nic_ram: u64,
-    pub msix: bool,
+    pub irq: bool,
 }
 
 impl Snapshot {
@@ -66,7 +88,7 @@ impl Snapshot {
         http_requests: 0,
         bad_requests: 0,
         nic_ram: 0,
-        msix: false,
+        irq: false,
     };
 }
 
@@ -74,7 +96,7 @@ impl core::fmt::Display for Snapshot {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "\"net\":{{\"rx_packets\":{},\"tx_packets\":{},\"rx_bytes\":{},\"tx_bytes\":{},\"kicks\":{},\"tx_full\":{},\"accepted\":{},\"closed\":{},\"open_conns\":{},\"http_requests\":{},\"bad_requests\":{},\"nic_ram\":{},\"msix\":{}}}",
+            "\"net\":{{\"rx_packets\":{},\"tx_packets\":{},\"rx_bytes\":{},\"tx_bytes\":{},\"kicks\":{},\"tx_full\":{},\"accepted\":{},\"closed\":{},\"open_conns\":{},\"http_requests\":{},\"bad_requests\":{},\"nic_ram\":{},\"irq\":{}}}",
             self.rx_packets,
             self.tx_packets,
             self.rx_bytes,
@@ -87,19 +109,20 @@ impl core::fmt::Display for Snapshot {
             self.http_requests,
             self.bad_requests,
             self.nic_ram,
-            self.msix
+            self.irq
         )
     }
 }
 
-/// virtio-net MSI-X interrupt. When idle it only wakes the CPU from `hlt` (the main loop polls the rings). While
-/// a CPU-bound invocation runs, RX interrupts are enabled too, and a packet requests preemption so that network
-/// I/O and short requests do not wait for the end of the hog's time slice.
+/// NIC receive interrupt. When idle it only wakes the CPU from `hlt` (the main loop polls the rings). While a
+/// CPU-bound invocation runs, RX interrupts are enabled too, and a packet requests preemption so that network I/O
+/// and short requests do not wait for the end of the hog's time slice.
 pub fn on_irq() {
     NET_IRQS.fetch_add(1, Ordering::Relaxed);
+    crate::dev::net_irq_ack();
     if PREEMPT_ON_RX.load(Ordering::Relaxed) {
         crate::time::request_preempt();
-        crate::virtio_net::set_rx_interrupts(false);
+        crate::dev::set_rx_interrupts(false);
     }
 }
 
@@ -190,8 +213,11 @@ struct ExtraPort {
 }
 
 pub struct Net {
-    pub dev: VirtioNet,
+    pub dev: Box<dyn NetDevice>,
     iface: Interface,
+    dhcp: Option<SocketHandle>,
+    addr: Option<Ipv4Cidr>,
+    gateway: Option<Ipv4Address>,
     sockets: SocketSet<'static>,
     listeners: Vec<SocketHandle>,
     extra: Vec<ExtraPort>,
@@ -216,17 +242,16 @@ fn now() -> Instant {
 }
 
 impl Net {
-    pub fn new(mut dev: VirtioNet, limits: Limits, seed: u64) -> Net {
-        let mut cfg = Config::new(HardwareAddress::Ethernet(EthernetAddress(dev.mac)));
+    pub fn new(mut dev: Box<dyn NetDevice>, limits: Limits, seed: u64, ip: IpConfig) -> Net {
+        let mut cfg = Config::new(HardwareAddress::Ethernet(EthernetAddress(dev.mac())));
         cfg.random_seed = seed;
-        let mut iface = Interface::new(cfg, &mut dev, now());
-        iface.update_ip_addrs(|a| {
-            let _ = a.push(IpCidr::new(IP.into(), 24));
-        });
-        let _ = iface.routes_mut().add_default_ipv4_route(GATEWAY);
+        let iface = Interface::new(cfg, &mut Phy(&mut *dev), now());
         let mut net = Net {
             dev,
             iface,
+            dhcp: None,
+            addr: None,
+            gateway: None,
             sockets: SocketSet::new(vec![]),
             listeners: Vec::new(),
             extra: Vec::new(),
@@ -237,8 +262,71 @@ impl Net {
             limits,
             stats: Stats::default(),
         };
+        match ip {
+            IpConfig::Static { addr, gateway } => net.configure(Some((addr, gateway))),
+            IpConfig::Dhcp => {
+                let mut d = dhcpv4::Socket::new();
+                // Keeps the last offer/ack, for its lease time (one buffer for the node's lifetime).
+                d.set_receive_packet_buffer(alloc::vec![0u8; 1500].leak());
+                net.dhcp = Some(net.sockets.add(d));
+            }
+        }
         net.refill_listeners();
         net
+    }
+
+    /// Sets (or with `None` removes) the interface address and default route.
+    fn configure(&mut self, c: Option<(Ipv4Cidr, Option<Ipv4Address>)>) {
+        self.iface.update_ip_addrs(|a| {
+            a.clear();
+            if let Some((addr, _)) = c {
+                let _ = a.push(IpCidr::Ipv4(addr));
+            }
+        });
+        self.iface.routes_mut().remove_default_ipv4_route();
+        if let Some((_, Some(gw))) = c {
+            let _ = self.iface.routes_mut().add_default_ipv4_route(gw);
+        }
+        self.addr = c.map(|c| c.0);
+        self.gateway = c.and_then(|c| c.1);
+    }
+
+    /// The interface's address, once it has one.
+    pub fn ipv4(&self) -> Option<Ipv4Cidr> {
+        self.addr
+    }
+
+    /// Applies DHCP client events (lease, change of address, lease lost).
+    fn poll_dhcp(&mut self) {
+        let Some(h) = self.dhcp else { return };
+        let ev = match self.sockets.get_mut::<dhcpv4::Socket>(h).poll() {
+            None => return,
+            Some(dhcpv4::Event::Configured(c)) => {
+                let lease = c
+                    .packet
+                    .and_then(|p| smoltcp::wire::DhcpRepr::parse(&p).ok().and_then(|r| r.lease_duration))
+                    .map_or(alloc::string::String::new(), |s| alloc::format!(", lease {s} s"));
+                if self.addr == Some(c.address) && self.gateway == c.router {
+                    // A renewal (the packet changed, not the configuration).
+                    kprintln!("net: DHCP lease of {} renewed{lease}", c.address.address());
+                    return;
+                }
+                kprintln!(
+                    "net: DHCP {} gateway {} from {}{lease}",
+                    c.address,
+                    c.router.map_or(alloc::string::String::from("none"), |r| alloc::format!("{r}")),
+                    c.server.address
+                );
+                Some((c.address, c.router))
+            }
+            Some(dhcpv4::Event::Deconfigured) => {
+                if let Some(a) = self.addr {
+                    kprintln!("net: DHCP lease of {} lost", a.address());
+                }
+                None
+            }
+        };
+        self.configure(ev);
     }
 
     pub fn open_conns(&self) -> usize {
@@ -400,7 +488,7 @@ impl Net {
             if !self.extra.is_empty() {
                 self.refill_extra();
             }
-            match self.iface.poll_ingress_single(t, &mut self.dev, &mut self.sockets) {
+            match self.iface.poll_ingress_single(t, &mut Phy(&mut *self.dev), &mut self.sockets) {
                 smoltcp::iface::PollIngressSingleResult::None => break,
                 _ => any = true,
             }
@@ -409,14 +497,21 @@ impl Net {
         if !self.extra.is_empty() {
             self.refill_extra();
         }
+        self.poll_dhcp();
         any
     }
 
     /// Sends what the sockets have queued and notifies the device.
     pub fn poll_egress(&mut self) {
         let t = now();
-        while self.iface.poll_egress(t, &mut self.dev, &mut self.sockets) != smoltcp::iface::PollResult::None {}
+        while self.iface.poll_egress(t, &mut Phy(&mut *self.dev), &mut self.sockets) != smoltcp::iface::PollResult::None {}
         self.dev.flush();
+        self.poll_dhcp();
+    }
+
+    /// Whether a received frame waits in the NIC.
+    pub fn rx_pending(&mut self) -> bool {
+        self.dev.queue(0).0.pending()
     }
 
     /// When smoltcp next needs to run (retransmissions, delayed ACKs, keep-alive), in ns from now.
@@ -556,20 +651,21 @@ impl Net {
     }
 
     pub fn snapshot(&self) -> Snapshot {
+        let c = self.dev.counters();
         Snapshot {
-            rx_packets: self.dev.rx.packets,
-            tx_packets: self.dev.tx.packets,
-            rx_bytes: self.dev.rx.bytes,
-            tx_bytes: self.dev.tx.bytes,
-            kicks: self.dev.kicks,
-            tx_full: self.dev.tx.full,
+            rx_packets: c.rx_packets,
+            tx_packets: c.tx_packets,
+            rx_bytes: c.rx_bytes,
+            tx_bytes: c.tx_bytes,
+            kicks: c.kicks,
+            tx_full: c.tx_full,
             accepted: self.stats.accepted,
             closed: self.stats.closed,
             open_conns: self.open_conns() as u64,
             http_requests: self.stats.requests,
             bad_requests: self.stats.bad_requests,
             nic_ram: self.dev.footprint() as u64,
-            msix: self.dev.msix,
+            irq: self.dev.has_interrupts(),
         }
     }
 
@@ -579,5 +675,69 @@ impl Net {
             let s = self.sockets.get::<tcp::Socket>(c.handle);
             (c.out_pos < c.out.len() && s.can_send()) || (!c.busy && s.can_recv())
         })
+    }
+}
+
+// --- smoltcp glue -------------------------------------------------------------------------------------------
+
+/// A [`NetDevice`]'s queue pair 0 as a smoltcp device.
+struct Phy<'a>(&'a mut dyn NetDevice);
+
+pub struct RxToken<'a> {
+    rx: &'a mut dyn NetRx,
+    id: u16,
+    len: usize,
+}
+
+pub struct TxToken<'a> {
+    tx: &'a mut dyn NetTx,
+}
+
+impl smoltcp::phy::RxToken for RxToken<'_> {
+    fn consume<R, F: FnOnce(&[u8]) -> R>(self, f: F) -> R {
+        let r = f(self.rx.frame(self.id, self.len));
+        self.rx.recycle(self.id);
+        r
+    }
+}
+
+impl smoltcp::phy::TxToken for TxToken<'_> {
+    fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
+        let (mut f, mut r) = (Some(f), None);
+        self.tx.send(len, &mut |b| r = f.take().map(|f| f(b)));
+        r.expect("NetTx::send calls its fill function once")
+    }
+}
+
+impl smoltcp::phy::Device for Phy<'_> {
+    type RxToken<'a>
+        = RxToken<'a>
+    where
+        Self: 'a;
+    type TxToken<'a>
+        = TxToken<'a>
+    where
+        Self: 'a;
+
+    fn receive(&mut self, _: Instant) -> Option<(RxToken<'_>, TxToken<'_>)> {
+        let (rx, tx) = self.0.queue(0);
+        // A received packet may need an immediate reply (ACK/RST), so only hand one out when TX has room.
+        if !tx.ready() {
+            return None;
+        }
+        let (id, len) = rx.pop()?;
+        Some((RxToken { rx, id, len }, TxToken { tx }))
+    }
+
+    fn transmit(&mut self, _: Instant) -> Option<TxToken<'_>> {
+        let (_, tx) = self.0.queue(0);
+        tx.ready().then(|| TxToken { tx })
+    }
+
+    fn capabilities(&self) -> smoltcp::phy::DeviceCapabilities {
+        let mut caps = smoltcp::phy::DeviceCapabilities::default();
+        caps.medium = smoltcp::phy::Medium::Ethernet;
+        caps.max_transmission_unit = self.0.mtu() + 14;
+        caps
     }
 }

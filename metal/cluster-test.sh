@@ -20,18 +20,25 @@
 #   opt/k10s/cluster_next_key), a shared admin key (hosted: --admin-token-file; guest: opt/k10s/admin_key); every
 #   admin request is signed for the receiving node process's audience (tools/admin_auth.py, bench/k10s/k10s.py); one
 #   signed for another node, or for the guest before its restart, is refused.
+#   8. power off through the admin API: the guest leaves the cluster (the hosted nodes see it leave, not die) and
+#      powers off through ACPI (QEMU exits 0).
 # Environment: BASE (port base, default 19400), K10S (hosted binary, default ../target/metal-host/release/k10s, built
 # with `CARGO_TARGET_DIR=target/metal-host cargo build --release -p k10s`), ENGINE (jit|interp, guest), PROBE_MS
-# (100), SUSPICION_MULT (2), MEM (guest RAM, 128M), SMP (guest CPUs, 1).
+# (100), SUSPICION_MULT (2), MEM (guest RAM, 128M), SMP (guest CPUs, 1), PLATFORM and ACCEL (qemu.sh), CLUSTER_OUT
+# (work directory, default out/cluster-test; the hosted nodes keep their data there).
 set -uo pipefail
 cd "$(dirname "$0")"
+. ./qemu.sh
+PLATFORM="${PLATFORM:-pc}"
+ACCEL_ARGS=$(k10_accel) || exit 1
+MKBUNDLE="${CARGO_TARGET_DIR:-target}/release/mkbundle"
 BASE="${BASE:-19400}"
 PROBE_MS="${PROBE_MS:-100}"
 SUSP="${SUSPICION_MULT:-2}"
 MEM="${MEM:-128M}"
 ENGINE="${ENGINE:-jit}"
 SMP="${SMP:-1}"
-OUT=out/cluster-test
+OUT="${CLUSTER_OUT:-out/cluster-test}"
 rm -rf "$OUT"
 mkdir -p "$OUT"
 if [[ -z "${K10S:-}" ]]; then
@@ -42,7 +49,7 @@ fi
 for k in cluster cluster-next wrong admin; do
     "$K10S" keygen -o "$OUT/$k.key" 2>/dev/null || exit 1
 done
-export K10S_ADMIN_TOKEN_FILE=$PWD/$OUT/admin.key
+export K10S_ADMIN_TOKEN_FILE=$(realpath "$OUT")/admin.key
 # sign PORT METHOD TARGET [BODY|@FILE]: Authorization header value for an admin request to the node at
 # 127.0.0.1:PORT (signed for its audience, /_k10s/audience).
 sign() {
@@ -82,11 +89,10 @@ hosted() { # name http gossip rpc [join [cluster key file]]
 guest() { # serial log [next]: secrets as fw_cfg files; `next`: also the next cluster key (rotation)
     local fw=(-fw_cfg "name=opt/k10s/cluster_key,file=$OUT/cluster.key" -fw_cfg "name=opt/k10s/admin_key,file=$OUT/admin.key")
     [[ "${2:-}" == next ]] && fw+=(-fw_cfg "name=opt/k10s/cluster_next_key,file=$OUT/cluster-next.key")
-    # shellcheck disable=SC2054
-    qemu-system-x86_64 -M pc -enable-kvm -cpu host -m "$MEM" -smp "$SMP" -nodefaults -display none -no-reboot \
-        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+    # shellcheck disable=SC2046,SC2086
+    qemu-system-x86_64 $ACCEL_ARGS $(k10_machine "$PLATFORM") -m "$MEM" -smp "$SMP" -nodefaults -display none -no-reboot \
         -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$H3-:80,hostfwd=udp:127.0.0.1:$G3-:7946,hostfwd=tcp:127.0.0.1:$R3-:7947" \
-        -device virtio-net-pci,disable-modern=on,netdev=n0,romfile= -kernel out/k10-metal.elf -serial "file:$1" "${fw[@]}" \
+        $(k10_nic "$PLATFORM" n0) -kernel out/k10-metal.elf -serial "file:$1" "${fw[@]}" \
         -append "k10.engine=$ENGINE k10.join=127.0.0.1:$G1,127.0.0.1:$G2 k10.gossip=127.0.0.1:$G3 k10.rpc=127.0.0.1:$R3 k10.http=127.0.0.1:$H3 k10.node_id=$GUEST_ID k10.probe_ms=$PROBE_MS k10.suspicion_mult=$SUSP k10.mem=67108864" &
     QPID=$!
 }
@@ -198,7 +204,7 @@ r=$(curl -s -m 5 -H "Authorization: $(sign "$H3" GET /_k10s/status)" "127.0.0.1:
 [[ "$r" == *"another node"* ]] && ok "n1 refuses a request signed for the guest" || ko "request signed for the guest sent to n1: '${r:0:80}'"
 
 echo "== apply through hosted node n1"
-target/release/mkbundle -o "$OUT/bundle.k10b" --version 0 2>/dev/null
+"$MKBUNDLE" -o "$OUT/bundle.k10b" --version 0 2>/dev/null
 T0=$(now_ms)
 r=$(curl -s -m 10 -H "Authorization: $(sign "$H1" POST /_k10s/apply "@$OUT/bundle.k10b")" --data-binary "@$OUT/bundle.k10b" "127.0.0.1:$H1/_k10s/apply")
 V=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['version'])" "$r" 2>/dev/null)
@@ -311,7 +317,7 @@ GSVC2=$(st "$H3" "' '.join(s['name'] for s in d['services'] if s.get('placement'
 serve_all "rejoined"
 
 echo "== apply through the guest (operator apply on the k10-metal node)"
-target/release/mkbundle -o "$OUT/bundle2.k10b" --version 0 --services hello,echo,sha,chain,config,compute 2>/dev/null
+"$MKBUNDLE" -o "$OUT/bundle2.k10b" --version 0 --services hello,echo,sha,chain,config,compute 2>/dev/null
 r=$(curl -s -m 10 -H "Authorization: $(sign "$H3" POST /_k10s/apply "@$OUT/bundle2.k10b")" --data-binary "@$OUT/bundle2.k10b" "127.0.0.1:$H3/_k10s/apply")
 V2=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['version'])" "$r" 2>/dev/null)
 [[ "$V2" == $((V + 1)) ]] && ok "apply via the guest -> version $V2 (highest known + 1)" || ko "apply via the guest: $r"
@@ -359,7 +365,19 @@ F1=$(st "$H3" "c['stats']['link_auth_failures']")
 wait $RAW
 n3=$(st "$H3" "c.get('live_members')")
 [[ "$n3" == 3 ]] && ok "cluster unaffected (3 live members)" || ko "live members after refused peers: $n3"
-grep -q "PANIC\|CPU exception" "$OUT"/guest*.log && ko "kernel panic/exception in guest logs" || ok "no panic or CPU exception in guest logs"
+echo "== power off the guest through its admin API (it leaves the cluster first)"
+r=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H "Authorization: $(sign "$H3" POST /_k10s/power off)" --data-binary off "127.0.0.1:$H3/_k10s/power")
+[[ "$r" == 202 ]] && ok "signed POST /_k10s/power off -> 202" || ko "power off request: $r"
+left() { [[ "$(st "$H1" "[m['state'] for m in c['members'] if m['id'] == '$GUEST_ID']")" == "['left']" ]]; }
+t=$(wait_for 5 left) && ok "n1 sees the guest as left, not dead ($t ms)" || ko "guest state on n1: $(st "$H1" "[m['state'] for m in c['members'] if m['id'] == '$GUEST_ID']")"
+st_q=124
+for _ in $(seq 1 200); do
+    kill -0 "$QPID" 2>/dev/null || { wait "$QPID"; st_q=$?; break; }
+    sleep 0.05
+done
+[[ $st_q == 0 ]] && grep -aq "k10-metal: power off" "$OUT"/guest2.log && ok "guest powered off through ACPI (QEMU exit 0)" || ko "guest power off: QEMU exit $st_q"
+QPID=
+grep -aq "PANIC\|CPU exception" "$OUT"/guest*.log && ko "kernel panic/exception in guest logs" || ok "no panic or CPU exception in guest logs"
 echo "== timings: join ${JOIN_MS} ms, apply->all applied ${APPLY_MS} ms, rejoin ${REJOIN_MS} ms, rejoin->applied ${RESYNC_MS} ms"
 echo "== $pass passed, $fail failed"
 [[ $fail == 0 ]]

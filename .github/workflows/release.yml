@@ -441,7 +441,7 @@ jobs:
           retention-days: 14
 
   metal-e2e:
-    name: Bare-metal kernel end-to-end (metal/test.sh, non-blocking)
+    name: Bare-metal kernel end-to-end (metal/test.sh, cluster-test.sh, vmm-test.sh; non-blocking)
     needs: version
     if: needs.version.outputs.released == 'false'
     # Not a gate: one check bounds latency under a CPU-hog storm, which nested virtualization may exceed.
@@ -462,6 +462,9 @@ jobs:
           qemu: "true"
       - name: scripts/ci-test.sh metal
         run: scripts/ci-test.sh metal
+      - name: scripts/ci-test.sh metal-vmm
+        if: always()
+        run: scripts/ci-test.sh metal-vmm
 
   publish:
     name: Publish ${{ needs.version.outputs.tag }}

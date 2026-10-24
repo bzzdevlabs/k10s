@@ -1,5 +1,5 @@
-//! Interrupt Descriptor Table: CPU exceptions (fatal, with a register dump on the console) and the few device
-//! interrupts the kernel uses (LAPIC timer, virtio-net MSI-X). Entry stubs are generated in assembly: they push a
+//! Interrupt Descriptor Table: CPU exceptions (fatal, with a register dump on the console), the stop NMI, and the
+//! few device interrupts the kernel uses (LAPIC timer, the NIC's MSI-X or I/O APIC line). Entry stubs are generated in assembly: they push a
 //! uniform frame (dummy error code where the CPU pushes none, the vector number, all general registers) and call
 //! [`isr_dispatch`].
 
@@ -14,6 +14,9 @@ pub const VEC_NET: u8 = 0x21;
 /// Inter-processor wake-up: work was queued for this CPU (the handler only acknowledges; the point is leaving `hlt`).
 pub const VEC_WAKE: u8 = 0x22;
 pub const VEC_SPURIOUS: u8 = 0xFF;
+/// NMIs that were not the stop NMI, and the last one's NMI status (port 0x61).
+pub static NMIS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static NMI_REASON: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 /// Number of stubs 0..NSTUBS, plus the spurious vector.
 const NSTUBS: usize = 48;
 
@@ -192,6 +195,14 @@ const EXCEPTIONS: [&str; 32] = [
 #[no_mangle]
 extern "C" fn isr_dispatch(f: &mut Frame) {
     match f.vector as u8 {
+        // Another CPU is powering off, rebooting or panicking (power.rs).
+        2 if crate::power::STOPPING.load(core::sync::atomic::Ordering::SeqCst) => super::halt_forever(),
+        // Any other NMI (a BMC, a watchdog, a bus error: port 0x61 bits 7 and 6) is counted, reported by the main
+        // loop, and survived, as Linux does.
+        2 => {
+            NMIS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            NMI_REASON.store(super::inb(0x61), core::sync::atomic::Ordering::Relaxed);
+        }
         v if v < 32 => exception(f),
         VEC_TIMER => {
             crate::time::on_timer_irq();
@@ -233,6 +244,5 @@ fn exception(f: &Frame) -> ! {
         kprintln!("    running on coroutine stack {:#x}..{:#x}", s.0, s.1);
     }
     kprintln!("    on CPU {}", crate::percpu::id());
-    super::qemu_exit(super::EXIT_FAILURE);
-    super::halt_forever()
+    crate::power::fatal_stop()
 }

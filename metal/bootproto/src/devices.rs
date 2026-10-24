@@ -16,8 +16,13 @@ pub struct Device {
 }
 
 pub const SUPPORTED: &[Device] = &[
-    // virtio-net with its legacy interface (transitional: QEMU's virtio-net-pci unless disable-legacy=on).
-    Device { vendor: 0x1af4, device: 0x1000, class: Class::Network, driver: "virtio-net (legacy)" },
+    // virtio-net transitional (QEMU's virtio-net-pci on a root bus; driven as virtio 1.x when it offers the modern
+    // capabilities, else legacy) and modern-only (behind a PCIe port, Hetzner, Vultr, Cloud Hypervisor).
+    Device { vendor: 0x1af4, device: 0x1000, class: Class::Network, driver: "virtio-net" },
+    Device { vendor: 0x1af4, device: 0x1041, class: Class::Network, driver: "virtio-net (modern)" },
+    // virtio-blk transitional and modern-only.
+    Device { vendor: 0x1af4, device: 0x1001, class: Class::Storage, driver: "virtio-blk" },
+    Device { vendor: 0x1af4, device: 0x1042, class: Class::Storage, driver: "virtio-blk (modern)" },
 ];
 
 /// The table's entry for a PCI vendor and device id.

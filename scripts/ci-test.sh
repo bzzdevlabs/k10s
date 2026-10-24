@@ -11,9 +11,12 @@
 #                   implements no seccomp; os-legacy runs the armv7 node's filter under a real kernel) and the timing
 #                   bounds
 #   campaign        chaos_short + soak_short_* on both backends (minutes long, noise-sensitive)
-#   metal-selftest  kernel self tests (k10.selftest) under QEMU/KVM on 1 and 4 CPUs; the boot protocol's unit tests
-#                   (metal/bootproto: k10s.conf, the tier file, boot counter, E820)
-#   metal           metal/test.sh end-to-end (TEST_PORT, default 18090)
+#   metal-selftest  kernel self tests (k10.selftest) under QEMU/KVM: pc (1 and 4 CPUs, transitional and legacy
+#                   virtio-net), q35 (ECAM, modern-only NIC), microvm (virtio-mmio); each ends in an ACPI power off;
+#                   the boot protocol's unit tests (metal/bootproto: k10s.conf, the tier file, boot counter, E820)
+#   metal           metal/test.sh and metal/cluster-test.sh end-to-end (TEST_PORT, default 18090)
+#   metal-vmm       metal/vmm-test.sh: the kernel on Firecracker and Cloud Hypervisor (pinned downloads; sudo creates
+#                   the tap device the guests use)
 #   dist            the k10s integration tests against the static k10s of dist/ (K10S_BIN), both backends
 #   os              PID 1 mode under QEMU (os/test.sh): boot, apply, serve, power off on the Debian and k10s
 #                   kernels; DHCP renew, rebind and address change; the x86-64 images, A/B updates, rollout; the
@@ -123,21 +126,21 @@ campaign() {
     done
 }
 
-qemu_selftest() { # SMP
-    local log=metal/out/selftest-smp$1.log st=0
+qemu_selftest() { # SMP PLATFORM
+    # $1 = CPUs, $2 = platform (metal/qemu.sh). The kernel prints its verdict and powers off through ACPI.
+    local log=metal/out/selftest-$2-smp$1.log st=0
     rm -f "$log"
-    timeout 120 qemu-system-x86_64 -M pc -enable-kvm -cpu host -m 64M -smp "$1" -nodefaults -display none -no-reboot \
-        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-        -netdev user,id=n0 -device virtio-net-pci,disable-modern=on,netdev=n0,romfile= \
+    # shellcheck disable=SC2046
+    timeout 120 qemu-system-x86_64 $(k10_accel) $(k10_machine "$2") -m 64M -smp "$1" -nodefaults -display none -no-reboot \
+        -netdev user,id=n0 $(k10_nic "$2" n0) \
         -kernel metal/out/k10-metal.elf -serial "file:$log" -append "k10.selftest" || st=$?
     sed 's/^/    /' "$log"
     if [[ -n ${K10S_VERSION_FULL:-} ]] && ! grep -qF "k10-metal $K10S_VERSION_FULL:" "$log"; then
         echo "metal selftest: the boot banner does not carry version $K10S_VERSION_FULL" >&2
         return 1
     fi
-    # isa-debug-exit: 33 = (0x10 << 1) | 1 = success.
-    [[ $st == 33 ]] || {
-        echo "metal selftest (smp $1): exit status $st, want 33" >&2
+    [[ $st == 0 ]] && grep -q "k10-metal selftest: passed" "$log" || {
+        echo "metal selftest ($2, smp $1): exit status $st (want 0 after the ACPI power off), verdict: $(grep -a "k10-metal selftest" "$log")" >&2
         return 1
     }
 }
@@ -152,13 +155,29 @@ for suite in "$@"; do
     metal-selftest)
         run env -u CARGO_TARGET_DIR metal/build.sh
         (cd metal && run env -u CARGO_TARGET_DIR cargo test --release --locked -p k10-bootproto)
-        qemu_selftest 1
-        qemu_selftest 4
+        . metal/qemu.sh
+        qemu_selftest 1 pc
+        qemu_selftest 4 pc
+        qemu_selftest 4 pc-legacy
+        qemu_selftest 4 q35
+        qemu_selftest 2 microvm-v2
         ;;
     metal)
         run env -u CARGO_TARGET_DIR EMBED=1 metal/build.sh
         [[ -x bench/bin/loadgen ]] || run env NO_DOCKER=1 bench/workloads/build.sh
         run env -u CARGO_TARGET_DIR metal/test.sh
+        run env -u CARGO_TARGET_DIR metal/cluster-test.sh
+        ;;
+    metal-vmm)
+        run env -u CARGO_TARGET_DIR metal/build.sh
+        vmm=$(metal/tools/get-vmms.sh "$PWD/target/vmm")
+        # The guests' NIC: a tap owned by this user (creating it is the only step that needs root).
+        if ! ip link show k10tap0 >/dev/null 2>&1; then
+            run sudo ip tuntap add dev k10tap0 mode tap user "$(id -un)"
+            run sudo ip addr add 172.30.0.1/24 dev k10tap0
+            run sudo ip link set k10tap0 up
+        fi
+        run env VMM_DIR="$vmm" metal/vmm-test.sh
         ;;
     os) run os/test.sh ;;
     arm64) arm64 ;;

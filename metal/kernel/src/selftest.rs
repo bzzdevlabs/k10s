@@ -1,8 +1,9 @@
-//! In-kernel self tests (`k10.selftest` on the command line): memory, page permissions (W^X, NX), coroutines, the
-//! one-shot timer, wall-clock resync, fw_cfg files, the admin gate (signed requests), both engines (interpreter and
-//! JIT) through the engine seam — host calls, host traps, stack overflow, time-slice preemption + CPU-budget traps
-//! on a coroutine. Exits QEMU through `isa-debug-exit` with
-//! success/failure (see metal/test.sh).
+//! In-kernel self tests (`k10.selftest` on the command line): memory (above 4 GiB too), page permissions (W^X, NX)
+//! and cache attributes, the ACPI tables, coroutines, the one-shot timer, wall-clock resync, fw_cfg files, the
+//! admin gate (signed requests), disks (write, flush, read back, a block the host wrote), both engines
+//! (interpreter and JIT) through the engine seam — host calls, host traps, stack overflow, time-slice preemption +
+//! CPU-budget traps on a coroutine. The kernel then prints `k10-metal selftest: passed` (or `FAILED`) and powers
+//! off through ACPI (see metal/test.sh).
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -30,9 +31,11 @@ macro_rules! check {
     };
 }
 
-pub fn run() -> bool {
+pub fn run(nic: bool) -> bool {
     let mut ok = true;
     kprintln!("selftest:");
+    ok &= platform(nic);
+    ok &= disks();
 
     // Frames: alignment, contiguity, accounting.
     let before = frames::free_bytes();
@@ -164,16 +167,165 @@ pub fn run() -> bool {
     let pio = time::tsc_to_ns(arch::rdtsc() - t0) / 1000;
     let t0 = arch::rdtsc();
     for _ in 0..1000 {
-        crate::pci::read32(0, 0, 0, 0);
+        crate::pci::read32(crate::pci::Bdf { seg: 0, bus: 0, dev: 0, func: 0 }, 0);
     }
     let cfg = time::tsc_to_ns(arch::rdtsc() - t0) / 1000;
-    kprintln!("  info port I/O exit {} ns, PCI config read {} ns", pio, cfg);
+    kprintln!("  info port I/O exit {} ns, PCI config read {} ns ({})", pio, cfg, if crate::pci::uses_ecam() { "ECAM" } else { "ports" });
 
     kprintln!("selftest: {}", if ok { "PASS" } else { "FAIL" });
     ok
 }
 
 static TEST_STATIC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+/// ACPI tables, CPUs, page attributes, memory above 4 GiB, the NIC.
+fn platform(nic: bool) -> bool {
+    use crate::{acpi, percpu};
+    let mut ok = true;
+    let Some(t) = acpi::get() else {
+        check!(ok, false, "acpi: tables read");
+        return ok;
+    };
+    let listed = t.cpus.len().max(1);
+    check!(
+        ok,
+        !t.source.is_empty() && runtime::cpus() <= listed && percpu::online() == runtime::cpus(),
+        "cpus: {} listed (from {}), {} online, {}, MAX_CPUS {}",
+        listed,
+        if t.source.is_empty() { "nowhere" } else { t.source },
+        percpu::online(),
+        if arch::apic::x2apic() { "x2APIC" } else { "xAPIC" },
+        percpu::MAX_CPUS
+    );
+    let ids_ok = (0..runtime::cpus()).all(|i| {
+        let id = percpu::cpu(i).apic_id.load(Ordering::Relaxed);
+        t.cpus.is_empty() || t.cpus.iter().any(|c| c.apic_id == id)
+    });
+    check!(ok, ids_ok, "cpus: every online CPU's APIC id is one the firmware listed");
+    if t.source == "acpi" {
+        let poweroff = t.s5.is_some() && t.fadt.is_some_and(|f| if t.hw_reduced() { f.sleep_control.valid() } else { f.pm1a_cnt.valid() });
+        check!(ok, poweroff || &t.oem == b"FIRECK", "acpi: S5 power off available (\\_S5 {:?}, {})", t.s5, if t.hw_reduced() { "sleep control register" } else { "PM1 control" });
+    } else {
+        kprintln!("  info acpi: no ACPI tables (CPUs from {}): no power off", if t.source.is_empty() { "nowhere" } else { t.source });
+    }
+    // Cache attributes: devices uncached, the kernel write-back.
+    let text = platform as *const () as u64;
+    let mut uc = alloc::vec![("kernel text", text, false)];
+    for io in &t.ioapics {
+        uc.push(("I/O APIC", io.addr, true));
+    }
+    if !arch::apic::x2apic() {
+        uc.push(("local APIC", t.lapic, true));
+    }
+    if let Some(h) = t.hpet {
+        uc.push(("HPET", h, true));
+    }
+    for e in &t.ecam {
+        uc.push(("ECAM", e.base + ((e.bus_start as u64) << 20), true));
+    }
+    let bad: Vec<_> = uc.iter().filter(|(_, a, want)| arch::paging::uncached(*a) != Some(*want)).map(|x| x.0).collect();
+    check!(ok, bad.is_empty(), "paging: devices mapped uncached, kernel write-back (bad: {:?})", bad);
+    // Memory above 4 GiB, the first frame there and the highest one: mapped write-back, read+write, non-executable.
+    let top = frames::top();
+    let mut high = Vec::new();
+    for min in [4 << 30, top.saturating_sub(4 << 20).max(4 << 30)] {
+        if let Some(p) = frames::alloc_above(min, 1, frames::Tag::Kernel) {
+            high.push(p);
+        }
+    }
+    if high.is_empty() {
+        kprintln!("  info paging: no memory above 4 GiB (RAM ends at {} MiB)", top >> 20);
+    }
+    for &p in &high {
+        let w = p as *mut u64;
+        unsafe { core::ptr::write_volatile(w, 0x6b31_3073_6869_6768) };
+        let back = unsafe { core::ptr::read_volatile(w) };
+        let q = arch::paging::query(p);
+        check!(
+            ok,
+            back == 0x6b31_3073_6869_6768 && q == (true, true, !arch::paging::nx_enabled()) && arch::paging::uncached(p) == Some(false),
+            "paging: frame {:#x} above 4 GiB read and written (rw-, write-back; RAM ends at {:#x})",
+            p,
+            top
+        );
+        frames::free(p, 1, frames::Tag::Kernel);
+    }
+    check!(ok, nic, "dev: a NIC was found");
+    ok
+}
+
+/// Every disk: a block the host wrote (block 1, "k10s disk test" if metal/test.sh prepared the image), then
+/// write + flush + read back of 8 blocks at block 2 (the host checks them after power off), several requests in
+/// flight at once, and an out-of-range request refused.
+fn disks() -> bool {
+    use crate::dev::{block_sync, BlockError, BlockOp, BlockRequest, DmaRegion, BLOCK};
+    let mut ok = true;
+    let mut disks = BLOCK.lock();
+    for d in disks.iter_mut() {
+        let d = &mut **d;
+        let bs = d.block_size() as usize;
+        let name = d.name();
+        let req = |op, lba, blocks, paddr, tag| BlockRequest { op, lba, blocks, paddr, tag };
+        let Some(mut buf) = DmaRegion::alloc(16 * bs, frames::Tag::Kernel) else {
+            check!(ok, false, "{name}: DMA buffer");
+            continue;
+        };
+        let r = block_sync(d, req(BlockOp::Read, 1, 1, buf.paddr(), 1));
+        if r.is_ok() && buf.as_slice().starts_with(b"k10s disk test") {
+            check!(ok, true, "{name}: block 1 holds what the host wrote");
+        } else {
+            check!(ok, r.is_ok(), "{name}: read block 1 ({:?}; no host pattern)", r);
+        }
+        if r == Err(BlockError::Timeout) {
+            // The device may still write there: never give these frames back.
+            core::mem::forget(buf);
+            continue;
+        }
+        if !d.read_only() && d.blocks() >= 16 {
+            let pattern = |i: usize| (i as u8).wrapping_mul(31) ^ 0x5A;
+            let s = buf.as_mut_slice();
+            for (i, b) in s[..8 * bs].iter_mut().enumerate() {
+                *b = pattern(i);
+            }
+            s[..20].copy_from_slice(b"written by k10-metal");
+            let w = block_sync(d, req(BlockOp::Write, 2, 8, buf.paddr(), 2));
+            let f = block_sync(d, req(BlockOp::Flush, 0, 0, 0, 3));
+            let Some(back) = DmaRegion::alloc(8 * bs, frames::Tag::Kernel) else { continue };
+            let r = block_sync(d, req(BlockOp::Read, 2, 8, back.paddr(), 4));
+            let same = back.as_slice()[..8 * bs] == buf.as_slice()[..8 * bs];
+            check!(ok, w.is_ok() && f.is_ok() && r.is_ok() && same, "{name}: 8 blocks written, flushed, read back ({:?} {:?} {:?})", w, f, r);
+            // Four reads in flight at once, completed in any order.
+            let mut tags = Vec::new();
+            for k in 0..4u32 {
+                if d.submit(0, req(BlockOp::Read, 2 + k as u64, 1, back.paddr() + k as u64 * bs as u64, 10 + k)).is_ok() {
+                    tags.push(10 + k);
+                }
+            }
+            let t0 = time::now_ns();
+            while !tags.is_empty() && time::now_ns() - t0 < 5_000_000_000 {
+                if let Some((tag, Ok(()))) = d.poll(0) {
+                    tags.retain(|&t| t != tag);
+                }
+            }
+            check!(ok, tags.is_empty(), "{name}: 4 requests in flight completed");
+            if !tags.is_empty() || [w, f, r].contains(&Err(BlockError::Timeout)) {
+                core::mem::forget(back);
+                core::mem::forget(buf);
+                continue;
+            }
+        }
+        let end = d.blocks();
+        let past = block_sync(d, req(BlockOp::Read, end, 1, buf.paddr(), 5));
+        check!(ok, past == Err(BlockError::Range), "{name}: read past the end refused ({} blocks of {} bytes)", d.blocks(), bs);
+        if past == Err(BlockError::Timeout) {
+            core::mem::forget(buf);
+        }
+    }
+    if disks.is_empty() {
+        kprintln!("  info disks: none");
+    }
+    ok
+}
 
 /// The admin gate with a test key: requests signed for this node's audience pass once, everything else under
 /// `/_k10s` but health and audience is refused.

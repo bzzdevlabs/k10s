@@ -46,8 +46,9 @@ suite started on an idle machine by `bench/run-final.sh`. Details and caveats:
 k10s also outruns the same services run as bare Linux processes (echo 180 k vs 109 k req/s). It is slower on
 CPU-bound code: Ten's SHA-256 takes 2.5× as long as Go's hand-written assembly (1.1–1.6× vs portable Go).
 
-Bare metal (`metal/`, QEMU/KVM): a 694 KB kernel, ready ~3 ms after kernel entry, serving HTTP in 3 MiB of RAM;
-the same kernel joins a cluster of Linux-hosted nodes.
+Bare metal (`metal/`, QEMU/KVM, Firecracker, Cloud Hypervisor): a 1 MB kernel that reads ACPI, drives virtio and
+serves HTTP in 3 MiB of RAM, ready milliseconds after kernel entry; the same kernel joins a cluster of Linux-hosted
+nodes.
 
 ## Quick start
 
@@ -151,7 +152,7 @@ Then set the next version (`scripts/set-version.sh X.Y.(Z+1)`, or a minor or maj
 | [crates/k10-jit](crates/k10-jit) | single-pass TIR → x86-64 and AArch64 compiler (the isolation boundary) |
 | [crates/k10-mesh](crates/k10-mesh) | gossip membership, manifests, bundles, placement, wire protocol |
 | [crates/k10-node](crates/k10-node), [crates/k10s](crates/k10s) | node runtime and the `k10s` binary (also PID 1 of a Linux image) |
-| [metal/](metal/) | the node as a bare-metal kernel (PVH, Multiboot2 and its UEFI loader k10boot, virtio-net, SMP, JIT, cluster member) |
+| [metal/](metal/) | the node as a bare-metal kernel (PVH, Multiboot2 and its UEFI loader k10boot, ACPI, virtio net and blk over PCI and MMIO, SMP, JIT, cluster member) |
 | [os/](os/) | the k10s Linux kernels (`vm`, `metal`), initramfs, firmware and disk image builders, PID 1 and image tests under QEMU ([docs/OS.md](docs/OS.md)) |
 | [examples/](examples/) | Ten services: hello, echo, compute (SHA-256), chain, counter, todo, nbody, sort |
 | [bench/](bench/) | Kubernetes / bare-process / k10s benchmark harness and results |

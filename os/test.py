@@ -1264,7 +1264,7 @@ def tier_test(a, work):
 
     d = t.disk("auto-virtio", "auto")
     g = t.power_on("auto-virtio", d, "pc")
-    g.wait_for(r"k10boot: tier auto: virtio-net \(legacy\) 1af4:1000 at \S+ is supported: native kernel", "auto: native")
+    g.wait_for(r"k10boot: tier auto: virtio-net 1af4:1000 at \S+ is supported: native kernel", "auto: native")
     g.wait_for(METAL_READY, "native kernel ready")
     until("GET /_k10s/health", lambda: http(g.port, "/_k10s/health")[0] == 200, g.log)
     g.kill()

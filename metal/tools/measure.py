@@ -43,14 +43,23 @@ sys.path.insert(0, os.path.abspath("../bench/k10s"))
 from k10s import OPEN, admin_auth  # noqa: E402
 
 
+# ACCEL=kvm|tcg (default: kvm when /dev/kvm is usable); NIC: the virtio-net device options (legacy by default, as in
+# the earlier measurements).
+ACCEL = os.environ.get("ACCEL") or ("kvm" if os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg")
+ACCEL_ARGS = ["-enable-kvm", "-cpu", "host"] if ACCEL == "kvm" else ["-accel", "tcg,thread=multi", "-cpu", "max"]
+NIC = os.environ.get("NIC", "virtio-net-pci,disable-modern=on")
+
+
 def qemu_cmd(mem="64M", kernel=KERNEL, initrd=BUNDLE, append="", port=PORT, bios=None, net=True, debug_exit=True, smp=1):
-    c = ["qemu-system-x86_64", "-name", "k10,debug-threads=on", "-M", "pc", "-enable-kvm", "-cpu", "host", "-m", mem, "-smp", str(smp), "-nodefaults",
+    c = ["qemu-system-x86_64", "-name", "k10,debug-threads=on", "-M", "pc", *ACCEL_ARGS, "-m", mem, "-smp", str(smp), "-nodefaults",
          "-display", "none", "-serial", "stdio", "-no-reboot"]
+    # The kernel powers off through ACPI; the isa-debug-exit device only lets kernels from before that (A/B runs
+    # against older builds, the Linux guest) end QEMU too.
     if debug_exit:
         c += ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]
     if net:
         c += ["-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:80",
-              "-device", "virtio-net-pci,disable-modern=on,netdev=n0,romfile="]
+              "-device", f"{NIC},netdev=n0,romfile="]
     if bios:
         c += ["-bios", bios]
     c += ["-kernel", kernel]
@@ -222,7 +231,7 @@ def sec_boot():
     t = []
     for _ in range(RUNS):
         t0 = time.monotonic()
-        p = subprocess.Popen(["qemu-system-x86_64", "-M", "pc", "-enable-kvm", "-cpu", "host", "-m", "64M", "-nodefaults",
+        p = subprocess.Popen(["qemu-system-x86_64", "-M", "pc", *ACCEL_ARGS, "-m", "64M", "-nodefaults",
                               "-display", "none", "-S", "-monitor", "stdio",
                               "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{PORT}-:80",
                               "-device", "virtio-net-pci,disable-modern=on,netdev=n0,romfile="],

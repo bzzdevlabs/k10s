@@ -1,7 +1,7 @@
 //! QEMU's firmware configuration device (fw_cfg) over its I/O ports: write an item's selector to 0x510, read its
-//! bytes from 0x511. Items are numbered (`-smp` count) or named files (`-fw_cfg name=opt/…,file=PATH`) listed in
-//! the file directory. Secrets (cluster and admin keys) come this way, never on the kernel command line, which the
-//! host shows in its process list.
+//! bytes from 0x511. Named files (`-fw_cfg name=opt/…,file=PATH`) are listed in the file directory. Secrets
+//! (cluster and admin keys) come this way, never on the kernel command line, which the host shows in its process
+//! list.
 
 use alloc::format;
 use alloc::string::String;
@@ -12,8 +12,6 @@ use crate::arch;
 const SELECTOR: u16 = 0x510;
 const DATA: u16 = 0x511;
 const SIGNATURE: u16 = 0x00;
-/// Number of CPUs (`-smp`), little-endian u16.
-pub const NB_CPUS: u16 = 0x05;
 const FILE_DIR: u16 = 0x19;
 /// Directory entry: size (BE u32), selector (BE u16), reserved (u16), NUL-padded name (56 bytes).
 const DIR_ENTRY: usize = 64;
@@ -37,16 +35,6 @@ pub fn present() -> bool {
     let mut sig = [0u8; 4];
     read(SIGNATURE, &mut sig);
     &sig == b"QEMU"
-}
-
-/// A numbered little-endian u16 item (`None` without fw_cfg).
-pub fn read_u16(key: u16) -> Option<u16> {
-    if !present() {
-        return None;
-    }
-    let mut b = [0u8; 2];
-    read(key, &mut b);
-    Some(u16::from_le_bytes(b))
 }
 
 /// The contents of file `name`: `Ok(None)` if there is no such file (or no fw_cfg), `Err(size)` if it is larger

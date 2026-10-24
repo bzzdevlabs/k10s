@@ -7,3 +7,4 @@
 /bench/results/**/.create_ms_*
 /metal/target/
 /dist/
+__pycache__/

@@ -10,7 +10,9 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsiz
 
 use crate::arch::wrmsr;
 
-pub const MAX_CPUS: usize = 8;
+/// CPUs the kernel uses at most (the MADT may list more; the rest are never started). Network I/O runs on CPU 0,
+/// which dispatches requests to the others; 64 is far beyond what one queue feeds, and per-CPU state is static.
+pub const MAX_CPUS: usize = 64;
 const IA32_GS_BASE: u32 = 0xC000_0101;
 
 #[repr(C, align(64))]
@@ -70,16 +72,15 @@ impl PerCpu {
     }
 }
 
-static CPUS: [PerCpu; MAX_CPUS] = [
-    PerCpu::new(0),
-    PerCpu::new(1),
-    PerCpu::new(2),
-    PerCpu::new(3),
-    PerCpu::new(4),
-    PerCpu::new(5),
-    PerCpu::new(6),
-    PerCpu::new(7),
-];
+static CPUS: [PerCpu; MAX_CPUS] = {
+    let mut a = [const { PerCpu::new(0) }; MAX_CPUS];
+    let mut i = 0;
+    while i < MAX_CPUS {
+        a[i].id = i as u32;
+        i += 1;
+    }
+    a
+};
 
 /// Points this CPU's GS base at `CPUS[id]` (first thing a CPU does, before any lock or console use).
 pub fn init_cpu(id: usize) {

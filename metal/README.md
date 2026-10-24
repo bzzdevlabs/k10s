@@ -3,13 +3,15 @@
 k10-metal boots the k10s node runtime directly on a (virtual) x86-64 machine, with no Linux underneath
 (docs/DESIGN.md §2.9). Workloads are TIR modules, isolated by construction: masked memory accesses, structured
 control flow, and a closed host API. So the kernel needs no processes, no system calls, no user/kernel boundary,
-and no per-workload page tables. It runs one identity-mapped address space on one or more cores (`-smp N`, up to 8),
-with a timer, a NIC and a serial console.
+and no per-workload page tables. It runs one identity-mapped address space (all RAM, above 4 GiB too) on one or more
+cores (up to 64, from the ACPI MADT), with a timer, a NIC, an optional disk and a serial console. It finds the
+platform in the ACPI tables, without an AML interpreter, and powers off and reboots through ACPI.
 
-It boots in QEMU/KVM with `-kernel` (PVH), and from the x86-64 disk images of `os/` through its UEFI loader k10boot
-or through GRUB and Multiboot2 on BIOS ("Booting"; docs/OS.md, "Tiers"). It deploys a `k10_mesh::Bundle` (manifest +
-TIR blobs) and serves HTTP/1.1 on port 80 with the same routing and host API as the hosted node (docs/NODE.md,
-docs/HOSTAPI.md). Services run as
+It boots with PVH (`-kernel`) on QEMU (`pc` and `q35` with SeaBIOS or qboot, `microvm`), Firecracker and Cloud
+Hypervisor, under KVM or TCG, and from the x86-64 disk images of `os/` through its UEFI loader k10boot or through
+GRUB and Multiboot2 on BIOS ("Booting"; docs/OS.md, "Tiers"); NICs and disks are virtio (PCI modern and legacy,
+MMIO). It deploys a `k10_mesh::Bundle` (manifest + TIR blobs) and serves HTTP/1.1 on port 80 with the same routing
+and host API as the hosted node (docs/NODE.md, docs/HOSTAPI.md). Services run as
 machine code from `k10-jit` (the default) or on the `k10-ir` interpreter. With `k10.join=…` the guest joins a k10s
 cluster as a full member next to Linux-hosted `k10s node` processes: gossip membership, desired state fetched from
 peers, the same placement, forwarding both ways.
@@ -21,7 +23,8 @@ Measurements: [RESULTS.md](RESULTS.md).
 ./build.sh                 # out/k10-metal.elf (kernel), out/k10boot.efi (UEFI loader), out/bundle.k10b (19 test
                            # services, 4 of them compiled from ../examples/*.ten); EMBED=1 also bakes the bundle in
 k10s keygen -o admin.key   # admin key (mode 0600); without one the admin API serves only /_k10s/health
-ADMIN_KEY=admin.key ./run.sh # QEMU/KVM, serial on stdout, host 127.0.0.1:8090 -> guest :80 (PORT=, MEM=, BIOS=);
+ADMIN_KEY=admin.key ./run.sh # QEMU (KVM, else TCG), serial on stdout, host 127.0.0.1:8090 -> guest :80 (PORT=, MEM=,
+                           # BIOS=, PLATFORM=pc|pc-legacy|pc-legacy-split|pc-modern|q35|microvm|microvm-v2, DISK=raw file);
                            # the key goes in as fw_cfg opt/k10s/admin_key, never on the kernel command line
 curl localhost:8090/hello/ # -> hello from k10-metal
 curl 'localhost:8090/sha/?n=1000'                # Ten SHA-256 chain (examples/compute.ten), JIT-compiled
@@ -31,27 +34,38 @@ curl -H "Authorization: $(tools/admin_auth.py 127.0.0.1:8090 GET '/_k10s/bench/1
      'localhost:8090/_k10s/bench/100/sha/?n=1000'  # per-invocation CPU time (JSON)
 curl -H "Authorization: $(tools/admin_auth.py 127.0.0.1:8090 POST /_k10s/apply @out/bundle.k10b)" --data-binary @out/bundle.k10b \
      localhost:8090/_k10s/apply                  # redeploy
+curl -H "Authorization: $(tools/admin_auth.py 127.0.0.1:8090 POST /_k10s/power reboot)" --data-binary reboot \
+     localhost:8090/_k10s/power                  # reboot (body `off`: power off) through ACPI
 SMP=4 ./run.sh             # four CPUs: CPU 0 runs the network, CPU-heavy requests are spread over all four
-./test.sh                  # in-kernel self tests + end-to-end checks: JIT, interpreter, JIT on 4 CPUs, admin API signing
-                           # (TEST_PORT=18090)
+./test.sh                  # in-kernel self tests + end-to-end checks: JIT, interpreter, JIT on 4 CPUs, admin API signing,
+                           # every QEMU platform (power off/reboot, disks), SPCR console, static address, DHCP renew,
+                           # 16 GiB + 32 vCPUs (TEST_PORT=18090, PLATFORM=, ACCEL=kvm|tcg)
 ./cluster-test.sh          # 2 hosted `k10s node` + 1 k10-metal guest: join, apply, routing, failover, rejoin with a next
-                           # cluster key, refused peers (wrong key, unauthenticated links)
+                           # cluster key, refused peers (wrong key, unauthenticated links), leave + power off
+./vmm-test.sh              # Firecracker and Cloud Hypervisor (KVM, a tap device; tools/get-vmms.sh downloads them)
 tools/linux-compare.sh     # builds the Linux comparison guest (host kernel + tiny initramfs)
 tools/measure.py           # measurements -> out/results/*.json (see RESULTS.md); `engines` = JIT vs interpreter,
                            # `smp` = throughput with -smp 1/2/4
 tools/cluster_measure.py   # cluster measurements with a metal member -> out/results/cluster.json
 ```
 
-Kernel command line (`APPEND=` for run.sh): `k10.verbose` (boot banner, phases, apply log), `k10.selftest` (run the
-in-kernel tests, then exit QEMU with status 33 on success), `k10.exit_on_ready`, `k10.spin_us=N` (busy-poll window
-before halting, default 50), `k10.engine=jit|interp` (default jit), `k10.smp=N` (use at most N CPUs),
+Kernel command line (`APPEND=` for run.sh): `k10.verbose` (boot banner, ACPI summary, phases, apply log),
+`k10.selftest` (run the in-kernel tests, print `k10-metal selftest: passed` or `FAILED`, power off),
+`k10.exit_on_ready` (power off once ready), `k10.spin_us=N` (busy-poll window before halting, default 50),
+`k10.engine=jit|interp` (default jit), `k10.smp=N` (use at most N CPUs), `k10.ip=A.B.C.D/PREFIX[,GATEWAY]` (static
+IPv4; default DHCP, `k10.ip=dhcp`), `k10.console=com1|com2|com3|com4|io:0xPORT|mmio:0xADDR|mmio32:0xADDR|none`
+(default: the ACPI SPCR table's UART, else COM1), `k10.panic=N` (seconds before a fatal error reboots, default 10,
+0 = halt), `k10.apic=xapic` (stay in xAPIC mode where the firmware did not hand over in x2APIC mode), `k10.pci=full`
+(probe every bus of the ECAM windows under a hypervisor too), `virtio_mmio.device=SIZE@BASE:IRQ` (virtio-mmio slots,
+Linux syntax; also read from the ACPI DSDT),
 `k10.jit_indirect=jump|lfence|retpoline` (Spectre v2 hardening of JIT indirect branches, default jump),
 `k10.timer_res_us=N` (resolution of the guests' `now_ns`/`time_ms`, default 100, 0 = full; any other value needs
 RDRAND for its key; SECURITY.md),
 Cluster mode: `k10.join=HOST:PORT[,…]`, `k10.gossip=`, `k10.rpc=`, `k10.http=` (advertised addresses),
 `k10.node_id=HEX`, `k10.probe_ms=N`, `k10.suspicion_mult=N`, `k10.mem=BYTES`, `k10.host_alias=IP`,
 `k10.gossip_max_skew_s=N` (default 300, at least 1), and `k10.insecure_unauthenticated_cluster` when no cluster key
-is given. An invalid `k10.spin_us`, `k10.engine`, `k10.smp`, `k10.jit_indirect`, `k10.timer_res_us` or
+is given. The advertised addresses default to the interface's (DHCP or static) address. An invalid `k10.spin_us`,
+`k10.engine`, `k10.smp`, `k10.jit_indirect`, `k10.timer_res_us`, `k10.ip`, `k10.console`, `k10.panic` or
 `k10.gossip_max_skew_s` value stops the boot.
 
 Booted by k10boot or GRUB, the kernel also takes these from `k10s.conf` on the disk's `K10S-BOOT` ("Booting").
@@ -76,23 +90,29 @@ exists, the node starts empty and waits for `POST /_k10s/apply` (or, in a cluste
 ```
 metal/                    its own cargo workspace (own target dir); path-depends on ../crates/k10-ir, k10-mesh, k10-jit
                           (kernel) and k10-lang (mkbundle)
-  kernel/                 the kernel (x86_64-unknown-none, no_std + alloc), ~9.5k lines incl. comments and self tests
+  kernel/                 the kernel (x86_64-unknown-none, no_std + alloc), ~12k lines incl. comments and self tests
     linker.ld, build.rs   linked at 1 MiB, non-PIE (.cargo/config.toml), optional embedded bundle
     src/boot.rs           PVH ELF note + 32-bit entry → page tables → long mode → kmain; Multiboot2 header and shim
-    src/arch/             port I/O, MSRs, per-CPU GDT+TSS (IST for #DF), IDT + asm entry stubs, local APIC timer
-                          and IPIs, paging.rs (NX, W^X for the kernel image and JIT code, TLB generations)
+    src/arch/             port I/O, MSRs, per-CPU GDT+TSS (IST for #DF), IDT + asm entry stubs, local APIC (x2APIC or
+                          xAPIC: timer, IPIs, INIT/STARTUP, NMI), I/O APIC routing, paging.rs (the identity map: all
+                          RAM, uncached device ranges, NX, W^X for the kernel image and JIT code, TLB generations)
+    src/acpi.rs           ACPI tables without AML: MADT, FADT, MCFG, HPET, SPCR, \_S5 and virtio-mmio by DSDT scan;
+                          MP table fallback
+    src/power.rs          ACPI S5 power off, reset chain, the fatal-error path (stop the other CPUs, reboot)
     src/percpu.rs         per-CPU state through the GS base (preemption request, idle flag, load, counters)
-    src/smp.rs            application processors: real-mode trampoline, INIT-SIPI-SIPI, AP entry
-    src/pvh.rs            hvm_start_info: E820 map (merged), command line, RSDP, named modules
+    src/smp.rs            application processors from the MADT: real-mode trampoline, targeted INIT-SIPI-SIPI, AP entry
+    src/pvh.rs            hvm_start_info: E820 map (merged), command line, ACPI RSDP, named modules
     src/bootcfg.rs        k10s.conf → boot arguments, key files and the bundle from the loader's modules
     src/efi.rs            UEFI runtime services: clears k10boot's boot counter once the node is healthy
-    src/fw_cfg.rs         QEMU fw_cfg over I/O ports: CPU count, named files (secrets under -kernel)
-    src/mem/              frame allocator (bitmap), kernel heap, instance slots
-    src/time.rs           TSC clock (kvmclock / CPUID 0x15 / PIT), wall clock (kvmclock resync), guest clock, preemption flag
-                          + JIT preemption word
-    src/pci.rs            config space via 0xCF8/0xCFC, BAR assignment when firmware did none
-    src/virtio_net.rs     legacy virtio-net driver + smoltcp Device glue
-    src/net.rs            smoltcp interface, listener pool, HTTP connections, UDP + extra listeners + TCP dial
+    src/fw_cfg.rs         QEMU fw_cfg over I/O ports: named files (secrets under -kernel)
+    src/mem/              memory map (sorted, disjoint), frame allocator (bitmap), kernel heap, instance slots
+    src/time.rs           TSC clock (kvmclock / CPUID 0x15 / HPET / PM timer / PIT), wall clock (kvmclock resync), guest
+                          clock, preemption flag + JIT preemption word
+    src/pci.rs            config space via ECAM (MCFG) or 0xCF8/0xCFC, bus scan, 64-bit BARs, MSI-X, bridges
+    src/dev/              NetDevice and BlockDevice traits, DMA regions, device probe, virtio-mmio slots
+    src/virtio/           virtio transports (PCI modern + legacy, MMIO v1 + v2), split virtqueues, net and blk drivers
+    src/net.rs            smoltcp interface (DHCPv4 or static), listener pool, HTTP connections, UDP + extra listeners
+                          + TCP dial, smoltcp glue for any NetDevice
     src/cluster.rs        cluster mode: gossip over UDP, peer links over TCP, desired-state fetch, placement, routing
     src/http.rs           HTTP/1.1 framing
     src/coro.rs           coroutines (context switch in asm), stack pool
@@ -107,8 +127,10 @@ metal/                    its own cargo workspace (own target dir); path-depends
                           counter, E820; devices.rs, the supported-device table
   mkbundle/               host tool: test services built with k10_ir::builder and compiled from Ten → Bundle
   tools/                  boottime.py, measure.py, cluster_measure.py, linux-guest (comparison /init),
-                          mkinitramfs.py, linux-compare.sh, admin_auth.py (signs admin requests for curl)
-  build.sh run.sh test.sh cluster-test.sh
+                          mkinitramfs.py, linux-compare.sh, admin_auth.py (signs admin requests for curl),
+                          dhcp_test.py (DHCP client against a scripted server), get-vmms.sh (pinned Firecracker and
+                          Cloud Hypervisor)
+  build.sh run.sh test.sh cluster-test.sh vmm-test.sh qemu.sh (the QEMU platforms the scripts share)
 ```
 
 ## How it works
@@ -125,8 +147,34 @@ the a.out kludge with a flat binary. And PVH is also what Firecracker and Cloud 
    SSE, for JIT code; the kernel itself is soft-float.
 4. Loads a GDT, far-returns to 64-bit code, sets the stack and calls `kmain`.
 
-The image works with SeaBIOS (QEMU's default) and with qboot (`BIOS=/usr/share/qemu/qboot.rom`, faster). qboot
-leaves PCI BARs unprogrammed, so the PCI code assigns them itself.
+The image works with SeaBIOS (QEMU's default), qboot (`BIOS=/usr/share/qemu/qboot.rom`, faster; it leaves PCI BARs
+unprogrammed, so the PCI code assigns them itself), QEMU `microvm`, Firecracker and Cloud Hypervisor.
+
+**Platform (acpi.rs).** Right after the memory map is up, the kernel reads the ACPI tables, with no AML interpreter:
+the RSDP from `hvm_start_info` (else the EBDA and BIOS-area scan), then the XSDT (RSDT on revision 0) and
+* MADT: the CPUs to start (enabled local APIC and x2APIC entries; disabled and hot-plug-only ones are never woken),
+  the I/O APICs and the ISA interrupt overrides;
+* FADT: PM1a/PM1b control and event blocks, the GPE blocks, SMI_CMD/ACPI_ENABLE, the PM timer, the reset register,
+  the hardware-reduced flag and sleep control register — always the 64-bit (X_) form when present;
+* DSDT and SSDTs, scanned byte by byte: `Name (_S5, Package () {a, b, ...})` for the S5 sleep types, and
+  `_HID "LNRO0005"` devices (virtio-mmio slots: the Memory32Fixed base and the Extended Interrupt of their `_CRS`),
+  which is how QEMU microvm and Firecracker describe them;
+* MCFG (PCI Express ECAM windows), HPET (the timer block), SPCR (the console UART: 16550 in I/O or memory space).
+Without ACPI (QEMU `microvm,acpi=off`) an Intel MultiProcessor table gives the CPUs and I/O APICs, walked to its
+length (QEMU leaves its entry count at 0). Tables with a bad checksum are used, as Linux does. Parsing takes a few
+microseconds; `k10.verbose` prints a summary line.
+
+**Power (power.rs).** Power off is ACPI S5: on hardware-reduced platforms (microvm, Cloud Hypervisor) SLP_TYP | SLP_EN
+in the sleep control register; otherwise ACPI mode is entered if the firmware left SMM in charge (SMI_CMD ←
+ACPI_ENABLE, up to 3 s for SCI_EN), every GPE is disabled (no wake-up), the PM1 status bits cleared, and SLP_TYP, then
+SLP_TYP | SLP_EN, written to PM1a/PM1b control (the port differs between firmwares: 0x604 under SeaBIOS, 0xB004 under
+OVMF `pc`). Firecracker has no ACPI power off; there a reset ends the VM, so power off resets. Reboot is the FADT
+reset register, then the 8042 reset line, then port 0xCF9, then a triple fault. Both first stop the other CPUs with
+an NMI. They are reached through `POST /_k10s/power` (body `off` or `reboot`; a signed admin request), which answers
+202, leaves the cluster (gossip `Left`, so peers do not wait for failure detection), waits 300 ms and acts, through
+`k10.exit_on_ready`, and after `k10.selftest`. A panic, a CPU exception or a configuration error prints its message,
+stops the other CPUs and reboots after `k10.panic` seconds (default 10; 0 halts), so a boot-counting loader can fall
+back to another image. There is no QEMU-specific exit device anywhere.
 
 **Booting from a disk (k10boot, Multiboot2).** The x86-64 images of `os/` carry the kernel as `/k10s/metal.elf` on
 their `K10S-BOOT` partition, signed as a k10s image (`k10s image sign --profile native`: the ELF followed by its
@@ -174,26 +222,63 @@ the heap and the instance slots share all of RAM. An instance slot is `2^k + 409
 Slots are cached per size class for reuse. Instance creation, coroutine stacks and socket buffers are refused when
 they would eat into a heap reserve (max(256 KiB, RAM/16)), and requests then queue instead.
 
-**Page permissions (arch/paging.rs).** Right after the frame allocator starts, EFER.NXE is enabled and every 2 MiB
-page of the identity map becomes non-executable. The first 2 MiB (low memory and the kernel image) are split into
+The memory map is kept sorted and disjoint (the more restrictive type wins where firmware entries overlap), with
+adjacent regions merged, so UEFI maps of 100+ descriptors take a few entries.
+
+**The identity map (arch/paging.rs).** boot.rs maps the first 4 GiB with 2 MiB pages; right after the frame
+allocator starts, the kernel rebuilds the map from the memory map. IA32_PAT is set to its power-on layout on every
+CPU, so PCD|PWT always means uncached whatever the firmware programmed. Below 4 GiB, a 2 MiB page holding any memory
+(RAM, ACPI tables, ACPI NVS) is write-back and every other one uncached: the PCI hole with every 32-bit BAR, ECAM,
+the I/O APICs, the HPET and the local APIC. RAM above 4 GiB is mapped write-back with 1 GiB pages where the CPU has
+them (2 MiB, and 4 KiB at unaligned edges, otherwise). Devices above 4 GiB (64-bit BARs; OVMF puts them at hundreds
+of GiB) are mapped uncached by `map_mmio` when a driver claims them. Identity mapping limits physical addresses to
+the 47-bit lower canonical half. EFER.NXE is enabled and everything is non-executable except the kernel's text.
+The first 2 MiB (low memory and the kernel image) are split into
 4 KiB pages: `.text` read+execute, `.rodata` read-only, the rest read+write, page 0 not present (null guard). JIT
 code gets its own frames (tag `code`): written through the writable, non-executable identity mapping, then
-*sealed* read+execute (the 2 MiB page around them is split once, its page table kept) and never written again;
+*sealed* read+execute (the large page around them is split once, its page table kept) and never written again;
 when the last service using the code is gone, the pages are unsealed and freed. So nothing is ever writable and
 executable at the same time: not the kernel, not instance memory, not JIT code.
 
 **Interrupts and time.** The IDT has handlers for every exception, which print a register dump (CR2 for page
-faults) and exit QEMU. The double fault, NMI and machine-check handlers use an IST stack. The 8259 PICs are
-remapped and masked; only the local APIC and MSI-X are used. The TSC frequency comes from kvmclock (exact, with no
-calibration wait), else CPUID 0x15, else 10 ms of PIT. Wall time comes from the kvmclock wall clock, else the CMOS
-RTC. The LAPIC timer is one-shot and tickless: TSC-deadline mode, or count mode calibrated against the TSC. It is
+faults) and take the fatal-error path (power.rs). The double fault, NMI and machine-check handlers use an IST stack.
+The 8259 PICs are remapped and masked, and so is every I/O APIC pin until a driver routes one; devices use MSI-X, or
+an I/O APIC line (virtio-mmio, edge-triggered, acknowledged at the device). The local APIC runs in x2APIC mode (MSR
+interface, 32-bit APIC ids) under a hypervisor when the CPU has it, when the MADT lists APIC ids above 254, and always
+when the firmware handed over in that mode (which cannot be left); otherwise, on bare metal without interrupt
+remapping, in xAPIC mode, as Linux does (`k10.apic=xapic` keeps xAPIC wherever it can). An NMI that is not the
+kernel's own stop signal is counted and reported, not fatal. The TSC frequency comes from kvmclock (exact, with no
+calibration wait), else CPUID 0x15 when it states the crystal frequency, else 20 ms against the HPET, else the ACPI PM
+timer, else CPUID 0x16's nominal frequency, else 20 ms of PIT channel 0 (read back by latch commands: microVMs have no
+port 0x61 gate). A CPU without an invariant TSC is reported. Wall time comes from the kvmclock wall clock, else the
+CMOS RTC. The LAPIC timer is one-shot and tickless: TSC-deadline mode, or count mode calibrated against the TSC. It is
 armed only for the next deadline: the end of the running invocation's slice or budget, a TCP timer, or a queue
 timeout. When idle the CPU `hlt`s, so an idle node takes no timer interrupts.
 
-**NIC.** PCI enumeration uses port I/O. The scan stops at the first 1AF4:1000 function, because each config read
-costs two VM exits (~14 µs here). The legacy virtio-pci driver (`disable-modern=on`) negotiates MAC and
-ANY_LAYOUT only, so there is no checksum or GSO offload and no mergeable buffers. It sets up 2 KiB RX and TX
-buffers bound to fixed descriptors, so nothing is allocated per packet. MSI-X vector 0 is used for RX:
+**PCI (pci.rs).** Configuration space goes through the MCFG's ECAM windows (every segment, the 4 KiB extended
+space), else through ports 0xCF8/0xCFC (segment 0). One scan at boot follows PCI-PCI bridges from each segment's
+first bus; on bare metal every other bus of the ECAM windows is probed too (other root buses of multi-socket
+machines), under a hypervisor only with `k10.pci=full` (each absent function costs a VM exit there). BARs are 32- or
+64-bit; a driver maps the ones it uses uncached; unprogrammed ones (qboot) get addresses in the hole below 4 GiB.
+Enabling a device also enables memory, I/O and bus mastering on every bridge above it. MSI-X tables are programmed
+masked-then-unmasked, to the boot CPU (an APIC id above 255 would need interrupt remapping: the driver then polls).
+
+**Devices (dev/, virtio/).** Drivers implement `NetDevice` (numbered queue pairs of receive and transmit halves,
+interrupt switch, counters) or `BlockDevice` (logical block size, capacity, numbered request queues, asynchronous
+`submit` with a tag and polled completions, `block_sync` for one request). DMA memory is a `DmaRegion`: contiguous,
+zeroed, page-aligned frames, like an instance slot — the shape a driver written as a TIR module would get later.
+The network stack and the disk users see only the traits. The first NIC is used, every disk is kept in `dev::BLOCK`
+(the storage of milestone M2 builds on it). virtio devices come from PCI (modern `1af4:1041`/`1af4:1042`,
+transitional `1af4:1000`/`1af4:1001` driven as virtio 1.x when they offer the modern capabilities, legacy when they
+do not) and from virtio-mmio slots (command line and DSDT; version 2, and version 1, which QEMU microvm defaults to).
+The transports share split virtqueues: one zeroed region per queue (descriptors, available ring, used ring on the next
+page — the legacy layout, valid for modern devices too). Modern devices negotiate VERSION_1 and FEATURES_OK and use
+64-bit queue addresses; legacy queue sizes are the device's, modern ones are sized to the buffers.
+
+**NIC (virtio/net.rs).** virtio-net negotiates MAC (and ANY_LAYOUT on legacy devices) only, so there is no checksum
+or GSO offload and no mergeable buffers: every frame fits one 2 KiB buffer behind a 10-byte (legacy) or 12-byte
+(VERSION_1) header. RX and TX buffers are bound to fixed descriptors, so nothing is allocated per packet. RX raises
+MSI-X entry 0 on PCI, the slot's I/O APIC line on MMIO:
 
 * Interrupts are suppressed while the kernel is busy. They are re-enabled, and the ring re-checked, just before
   `hlt`.
@@ -201,7 +286,14 @@ buffers bound to fixed descriptors, so nothing is allocated per packet. MSI-X ve
 * Kicks are batched per main-loop iteration and skipped while the device sets `VRING_USED_F_NO_NOTIFY`.
 * After activity the loop busy-polls for 50 µs before halting.
 
-**TCP/IP and HTTP.** smoltcp uses a static 10.0.2.15/24 address with gateway 10.0.2.2 (QEMU slirp). Ingress is
+**Disk (virtio/blk.rs).** One request queue; each request is a fixed three-descriptor chain (header, data, status
+byte) per slot, so nothing is allocated per request; FLUSH when the device has a write cache. The self test reads a
+block the host wrote, writes, flushes and reads back 8 blocks, keeps four requests in flight and checks that a
+request past the end is refused; test.sh then checks the written blocks in the host's image file.
+
+**TCP/IP and HTTP.** The interface address comes from DHCPv4 (smoltcp's client: renewal by unicast at T1,
+rebinding by broadcast at T2, a NAK or the end of the lease starts over; boot waits up to 30 s for the first lease,
+since a cluster node advertises its address; a lost lease removes the address) or from `k10.ip=` (static). Ingress is
 processed one packet at a time (`poll_ingress_single`), and the listening sockets are topped up after every
 packet. A SYN burst therefore never meets an empty backlog, without keeping a large pool of idle sockets.
 HTTP/1.1 supports keep-alive, pipelining (one request in flight per connection), Content-Length bodies and
@@ -235,15 +327,16 @@ capacity); cluster mode: see below. Then it swaps the service table atomically: 
 did not change keep their runtime (warm instances, counters), prepared code is reused by code hash, in-flight
 invocations finish on the old code and queued ones move to the new version.
 
-**SMP (smp.rs, percpu.rs).** The boot CPU reads the CPU count from QEMU's fw_cfg (`-smp N`; no ACPI parsing),
-copies a 16→32→64-bit trampoline to page 0x8000 (made read+execute just for the bring-up; the APs take their index
-with a `lock xadd` while paging is still off, so the page never needs to be writable for them), and broadcasts INIT +
-2×STARTUP. Each AP loads the shared page tables (with NXE), gets its own stack, GDT + TSS + IST stack, the shared
-IDT, its local APIC (TSC-deadline timer) and its per-CPU block (GS base), and enters `runtime::worker_main`. Four
-CPUs are online ≈ 1.5 ms after the broadcast. Locks (`IrqLock`) are spinlocks that also mask interrupts on the
+**SMP (smp.rs, percpu.rs).** The boot CPU takes the CPUs the MADT lists as enabled (or the MP table's), up to 64 and
+`k10.smp=N`, copies a 16→32→64-bit trampoline to page 0x8000 (made read+execute just for the bring-up; the APs take
+their index with a `lock xadd` while paging is still off, so the page never needs to be writable for them), and sends
+each AP its own INIT, then after 1 ms a STARTUP, and a second STARTUP to those not up 200 µs later — all APs at once,
+and none the firmware did not list. Each AP loads the shared page tables (with NXE), gets its own stack, GDT + TSS +
+IST stack, the shared IDT, the PAT, its local APIC (in the boot CPU's mode; TSC-deadline timer) and its per-CPU block
+(GS base), and enters `runtime::worker_main`. Under TCG, 32 CPUs are online 5 ms after the first INIT. Locks (`IrqLock`) are spinlocks that also mask interrupts on the
 holding CPU; per-CPU state (preemption request, JIT preemption word, coroutine bookkeeping, scheduler queues) needs
 none.
-* *Dispatch*: CPU 0 owns the NIC (MSI-X targets it), TCP/IP, HTTP parsing, the cluster layer and the admin API, and
+* *Dispatch*: CPU 0 owns the NIC (its interrupt targets it), TCP/IP, HTTP parsing, the cluster layer and the admin API, and
   dispatches every invocation: requests of services whose average CPU time is under 20 µs stay on CPU 0 (a
   cross-CPU hand-off costs more) while its queue holds under 0.5 ms of them; others go to the least loaded CPU
   (CPU 0 counts one extra). A dispatched request lands in the target's inbox, plus a wake-up IPI if that CPU is
@@ -339,6 +432,10 @@ cluster, speaking the hosted node's protocols (docs/NODE.md "Cluster mode", crat
   known not to have run (bytes never handed to the TCP socket, or `NOT_HERE`). A peer's `Call` runs here whatever
   the placement (one hop at most) and without a `calls` check (the calling peer is trusted to have done it); an
   unknown service answers `NOT_HERE`.
+* *Addresses*: without `k10.gossip`/`k10.rpc`/`k10.http` (or with a bare port), the member advertises the
+  interface's address — the DHCP lease or `k10.ip` — with the default ports.
+* *Leaving*: before a power off or reboot (`POST /_k10s/power`) the guest gossips `Left`, so the other members
+  move its services at once instead of after failure detection.
 * *NAT*: the guest is 10.0.2.15 behind QEMU's slirp. `hostfwd` rules expose its gossip (UDP), rpc and http ports
   on the host; it advertises those host addresses (`127.0.0.1:<port>`), and every loopback address it sends to —
   hosted members, or other guests, advertising `127.0.0.1:<port>` — is reached through the slirp host alias
@@ -366,7 +463,7 @@ k10s status --node 127.0.0.1:19003 --admin-token-file admin.key     # any member
 | `k10-mesh` (path, no default features) | kernel, mkbundle, k10boot | `Bundle`, `Manifest`, `sha256`, `place()`, gossip state machine, peer-protocol framing; signed images (`osimage`, Ed25519) |
 | `k10-bootproto` (path) | kernel, k10boot | the boot protocol between them and the supported-device table (`bootproto/`) |
 | `k10-lang` (path) | mkbundle only | compiles the Ten example services (`examples/*.ten`) into the test bundle |
-| `smoltcp` 0.14 (`alloc`, `medium-ethernet`, `proto-ipv4`, `socket-tcp`, `socket-udp`) | kernel | A correct TCP (retransmission, windows, RST/TIME-WAIT, congestion control) is the one part where writing our own would be large and risky. smoltcp is the standard `no_std` stack, 0BSD-licensed and dependency-light (`heapless`, `managed`, `byteorder`, `bitflags`, `cfg-if`). |
+| `smoltcp` 0.14 (`alloc`, `medium-ethernet`, `proto-ipv4`, `proto-dhcpv4`, `socket-dhcpv4`, `socket-tcp`, `socket-udp`) | kernel | A correct TCP (retransmission, windows, RST/TIME-WAIT, congestion control) is the one part where writing our own would be large and risky. smoltcp is the standard `no_std` stack, 0BSD-licensed and dependency-light (`heapless`, `managed`, `byteorder`, `bitflags`, `cfg-if`). |
 | `libc` | tools/linux-guest only | ioctl/finit_module for the Linux comparison `/init` (not part of the kernel) |
 
 Deliberately *not* used:
@@ -380,26 +477,37 @@ Deliberately *not* used:
 
 ## Limitations (v0)
 
-* **SMP is simple**: CPU 0 does all network I/O (one NIC queue, slirp-bound anyway), dispatch is decided once per
-  request (no work stealing or migration of queued work), at most 8 CPUs, CPU count from QEMU's fw_cfg (no ACPI
-  MADT), xAPIC with MMIO ICR writes (a VM exit per IPI; x2APIC would be cheaper). TLB coherence is lazy
-  (generation check before running JIT code) rather than shootdown IPIs.
+* **SMP is simple**: CPU 0 does all network I/O (one NIC queue), dispatch is decided once per request (no work
+  stealing or migration of queued work), at most 64 CPUs (a larger machine runs on 64; per-CPU state is static).
+  TLB coherence is lazy (generation check before running JIT code) rather than shootdown IPIs. Interrupts go to CPU
+  0 in physical destination mode without interrupt remapping (no IOMMU), so a boot CPU whose APIC id exceeds 255 gets
+  no device interrupts (the NIC is then polled every millisecond).
 * **No demand paging.** A slot is fully backed (64 KiB + 4 KiB for the test services). There are no CoW snapshots;
   `fresh` restores with `memcpy`.
 * **No per-service memory reservations.** Instances take free frames first come, first served (hosted nodes reserve
   one instance per placed service, `docs/NODE.md`); placement, shared with hosted nodes, charges each replica
   `2^memory` + 4 KiB against the guest's capacity, so placed services fit, but a busy service can take the frames
   another one needs for its first instance.
-* **KV is in memory only.** There is no virtio-blk, so it is not durable across reboots.
+* **KV is in memory only.** virtio-blk works (reads, writes, flush) but nothing stores on it yet (milestone M2).
 * **Cluster mode is volatile.** The desired state lives in memory: a rebooted guest fetches it again from its
-  peers (a guest alone keeps nothing). No graceful leave (a stopped guest is detected as failed). KV is node-local,
-  as on hosted nodes. The keys are files on `K10S-BOOT` (readable by whoever reads the disk, as on Tier 1) or QEMU's
-  fw_cfg (readable by whoever controls the hypervisor, as the guest's memory is). No separate admin listener and no
-  `/_k10s/metrics`.
+  peers (a guest alone keeps nothing). A guest that is killed rather than powered off is detected as failed. KV is
+  node-local, as on hosted nodes. The keys are files on `K10S-BOOT` (readable by whoever reads the disk, as on Tier
+  1) or QEMU's fw_cfg (readable by whoever controls the hypervisor, as the guest's memory is); Firecracker and Cloud
+  Hypervisor have neither, so no keys reach a guest there yet. No separate admin listener and no `/_k10s/metrics`.
+  A member advertising the interface's address reboots when DHCP changes it (Tier 1 restarts its node), after
+  leaving the cluster.
 * **JIT code is page-granular per module** (W^X forbids appending to an executable page): a 300-byte module takes a
   4 KiB page; modules deployed several times share one copy by code hash.
-* **Static IP, IPv4 only.** No DHCP or TLS.
-* **Legacy virtio-pci only.** It needs `disable-modern=on`. There is no virtio-mmio, so no QEMU `microvm`.
+* **IPv4 only, no TLS.** No DNS resolver (addresses are given as IPs).
+* **virtio only.** Physical NICs and disks (Intel, Realtek, NVMe, AHCI) come next (milestones M2, M4). virtio-mmio
+  interrupts are edge-triggered I/O APIC lines; PCI devices need MSI-X (INTx routing would need `_PRT`, which is AML),
+  a virtio-pci device without it is polled.
+* **ACPI without AML.** `_PTS`, `_PRT`, `_OSC` and every other method are never run: S5 works where `\_S5` is a plain
+  package (QEMU's, and most firmware's), the power button and other ACPI events are not handled, devices described
+  only in AML other than virtio-mmio slots are not found. Real-firmware quirks (x2APIC handover, broken tables,
+  MTRR/PAT setups, `_PTS`-dependent S5) are untested (QEMU only).
+* **Wall-clock accuracy.** Without kvmclock (bare metal), the wall clock runs on the TSC calibrated at boot (20 ms
+  against the HPET or PM timer, tens of ppm) from the CMOS RTC; there is no NTP client yet.
 * **Slow serial console.** Logging costs about 15 µs per byte under QEMU (one host `write()` per byte), so boot is
   quiet unless `k10.verbose` is given.
 * **No guard pages on coroutine stacks.** A canary is checked at every switch instead, and the call depth is
@@ -410,8 +518,6 @@ Deliberately *not* used:
   absorbs the 8-byte straddle). Hardware protection that does exist: slot memory is never executable (NX), JIT code
   and the kernel are W^X, page 0 is unmapped. There is no OS layer under the kernel: an SFI escape here reaches
   everything, which is why the JIT's output is verified independently (SECURITY.md, "Defense in depth").
-* **No ACPI.** The kernel parses no ACPI tables (the loaders hand it the RSDP) and assumes an xAPIC at the
-  MSR-reported base and QEMU's fw_cfg for the CPU count. Power-off works only through `isa-debug-exit`.
 * **BIOS boots are unchecked.** GRUB verifies no signature and k10boot's boot counter exists only on UEFI.
 
 ## Changes needed in other crates

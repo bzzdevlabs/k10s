@@ -132,14 +132,15 @@ pub fn config(bi: &BootInfo) -> Option<Config> {
             _ => fatal(&alloc::format!("k10.gossip_max_skew_s={v}: want seconds, at least 1")),
         },
     };
-    let lo = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    // Advertised addresses: `k10.gossip=` etc. (a bare port, or IP:port), else the interface's address (filled
+    // in by `start`).
+    let any = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
     let addr = |key: &str, port: u16| -> SocketAddr {
         match bi.arg(key) {
-            Some(v) => v.parse().or_else(|_| v.parse::<u16>().map(|p| SocketAddr::new(lo, p))).unwrap_or_else(|_| {
-                kprintln!("cluster: bad {key}={v}, using {lo}:{port}");
-                SocketAddr::new(lo, port)
+            Some(v) => v.parse().or_else(|_| v.parse::<u16>().map(|p| SocketAddr::new(any, p))).unwrap_or_else(|_| {
+                fatal(&alloc::format!("bad {key}={v}: want IP:PORT or PORT"))
             }),
-            None => SocketAddr::new(lo, port),
+            None => SocketAddr::new(any, port),
         }
     };
     let join = bi
@@ -364,9 +365,20 @@ fn now_ms() -> u64 {
     time::now_ms() + 1
 }
 
+/// Whether the member advertises the interface's address (gossip, rpc or http given without an IP).
+pub fn advertises_interface(cfg: &Config) -> bool {
+    [cfg.gossip, cfg.rpc, cfg.http].iter().any(|a| a.ip().is_unspecified())
+}
+
 /// Binds the gossip socket and the peer listener, creates the gossip state machine and joins the seeds.
-pub fn start(cfg: Config, net: &mut Net) -> bool {
+pub fn start(mut cfg: Config, net: &mut Net) -> bool {
     let ram = crate::total_ram();
+    let own = net.ipv4().map_or(Ipv4Addr::LOCALHOST, |a| a.address());
+    for a in [&mut cfg.gossip, &mut cfg.rpc, &mut cfg.http] {
+        if a.ip().is_unspecified() {
+            a.set_ip(IpAddr::V4(own));
+        }
+    }
     let Some(udp) = net.udp_bind(GOSSIP_PORT, if ram >= 48 << 20 { 32 } else { 8 }, 1500) else {
         kprintln!("cluster: cannot bind the gossip socket");
         return false;
@@ -455,6 +467,15 @@ pub fn start(cfg: Config, net: &mut Net) -> bool {
     }
     *CLUSTER.borrow_mut() = Some(c);
     true
+}
+
+/// Graceful leave (before a power off or reboot): tells some members, who re-gossip it; the next polls send it.
+pub fn leave() {
+    let mut g = CLUSTER.borrow_mut();
+    if let Some(c) = g.as_mut() {
+        let out = c.gossip.leave(now_ms());
+        c.absorb(out);
+    }
 }
 
 /// Main-loop hook: gossip I/O and timers, peer links, routing, fetching, placement.
