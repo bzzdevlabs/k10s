@@ -223,7 +223,7 @@ impl Esp {
         Ok(())
     }
 
-    fn read(&self, rel: &str) -> Option<Vec<u8>> {
+    pub(crate) fn read(&self, rel: &str) -> Option<Vec<u8>> {
         fs::read(self.path(rel)).ok()
     }
 
@@ -236,7 +236,7 @@ impl Esp {
     }
 
     /// `rel` replaced by `data`: written to `rel.tmp`, synced, renamed (see [`Esp::rename`]).
-    fn write(&self, rel: &str, data: &[u8]) -> io::Result<()> {
+    pub(crate) fn write(&self, rel: &str, data: &[u8]) -> io::Result<()> {
         self.step()?;
         let tmp = format!("{rel}.tmp");
         fs::create_dir_all(self.path(Self::parent(rel)))?;
@@ -256,7 +256,7 @@ impl Esp {
         self.sync_dir(Self::parent(to))
     }
 
-    fn remove(&self, rel: &str) -> io::Result<()> {
+    pub(crate) fn remove(&self, rel: &str) -> io::Result<()> {
         self.step()?;
         match fs::remove_file(self.path(rel)) {
             Ok(()) => self.sync_dir(Self::parent(rel)),
@@ -324,14 +324,14 @@ impl Esp {
         names.pop()
     }
 
-    fn begin(&self) -> io::Result<()> {
+    pub(crate) fn begin(&self) -> io::Result<()> {
         if self.remount {
             remount(false)?;
         }
         Ok(())
     }
 
-    fn end(&self) {
+    pub(crate) fn end(&self) {
         if self.remount {
             if let Err(e) = remount(true) {
                 say!("update: remounting K10S-BOOT read-only: {e}");

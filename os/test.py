@@ -3,16 +3,17 @@
 and, for the DHCP test, a host-side DHCP server on a QEMU socket netdev. os/test.sh builds the inputs and runs them.
 
   test.py boot --kernel K --initrd I --k10s HOST_K10S --examples DIR [--work DIR]
-      A GPT disk with K10S-BOOT (k10s.conf, admin key) and K10S-DATA (ext4). Boot → apply → serve → power button,
-      then a second boot that serves the applied services and their KV state → power button. The guest RTC starts in
+      A GPT disk with K10S-BOOT (k10s.conf, admin key) and K10S-DATA as older images made it (ext4). Boot 1 keeps
+      the ext4 (k10s.data=/dev/vda2:ext4) → apply → serve → power button; boot 2 converts it to a k10s store and
+      serves the applied services and their KV state; boot 3 serves them from the store. The guest RTC starts in
       2001: the signed apply only succeeds once SNTP has set the clock.
   test.py dhcp --kernel K --initrd I [--work DIR]
       6 s leases from a scripted server: renew (unicast, ciaddr), rebind (broadcast), NAK → a new address, which
       restarts the cluster node so that it advertises the new address.
   test.py image --image IMG --k10s HOST_K10S --examples DIR (--bios | --uefi) [--metal] [--work DIR]
       A disk image (os/mkimage.py) on a 4 GiB disk, configured like an operator would: k10s.conf and the admin key
-      copied to K10S-BOOT. Boot 1 grows K10S-DATA and its ext4 to the end of the disk, applies and serves; boot 2 keeps
-      the state and grows nothing. --metal: q35, NVMe, e1000e and the Intel TCO watchdog (signed modules). On i686:
+      copied to K10S-BOOT. Boot 1 grows K10S-DATA and its store to the end of the disk, applies and serves; boot 2
+      keeps the state and grows nothing. --metal: q35, NVMe, e1000e and the Intel TCO watchdog (signed modules). On i686:
       the MBR image on SeaBIOS, an Atom N270, an IDE disk and an RTL8139 (8139too, a signed module).
   test.py unsigned --kernel K --kmods DIR --k10s K10S --work DIR
       The metal kernel refuses e1000e once its signature is stripped (no network).
@@ -376,7 +377,7 @@ def http(port, path, method="GET"):
 
 
 def make_disk(work, k10s):
-    """GPT: K10S-BOOT (FAT, k10s.conf + admin.key) and K10S-DATA (ext4)."""
+    """GPT: K10S-BOOT (FAT, k10s.conf + admin.key) and K10S-DATA (ext4, as images before the k10s store)."""
     key = os.path.join(work, "admin.key")
     subprocess.run([k10s, "keygen", "-o", key], check=True)
     conf = os.path.join(work, "k10s.conf")
@@ -405,16 +406,23 @@ def boot_test(a, work):
     disk, key = make_disk(work, a.k10s)
     ntp = free_port(socket.SOCK_DGRAM)
     sntp_server(ntp)
-    for run in (1, 2):
+    for run in (1, 2, 3):
         port = free_port()
-        g = Guest(work, f"boot{run}", a.kernel, a.initrd, f"k10s.ntp=10.0.2.2:{ntp}",
+        ext4 = " k10s.data=/dev/vda2:ext4" if run == 1 else ""
+        g = Guest(work, f"boot{run}", a.kernel, a.initrd, f"k10s.ntp=10.0.2.2:{ntp}{ext4}",
                   ["-rtc", "base=2001-01-01T00:00:00", "-device", "i6300esb",
                    "-drive", f"file={disk},if=virtio,format=raw",
                    "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:80", "-device", "virtio-net-pci,netdev=n0"])
         g.wait_for(r"k10s-init\[ *[\d.]+\]: k10s \S+ as PID 1", "init banner")
         g.wait_for(r"config: /dev/vda1 \(K10S-BOOT\): k10s.conf merged", "k10s.conf from K10S-BOOT")
         g.wait_for(r"net: eth0 DHCP 10\.0\.2\.15/24 gateway 10\.0\.2\.2", "DHCP lease")
-        g.wait_for(r"data: /dev/vda2 \(ext4\) on /data", "data partition")
+        if run == 1:
+            g.wait_for(r"data: /dev/vda2 \(ext4\) on /data", "data partition")
+        else:
+            if run == 2:
+                g.wait_for(r"data: /dev/vda2 converted from ext4 to a k10s store", "ext4 converted")
+            g.wait_for(r"data: /dev/vda2 \(k10s store\) for the node", "data partition")
+            g.wait_for(r"k10s: data store fd 4: 61 MiB, \d+ keys in \d+ namespaces", "store opened")
         g.wait_for(r"watchdog: armed", "watchdog")
         g.wait_for(r"sandbox mode=on user=65532\(65532:65532\) caps=none landlock=abi\d+ seccomp=kill", "node sandbox")
         g.wait_for(r"ready: the node answers", "node ready")
@@ -424,7 +432,7 @@ def boot_test(a, work):
                             "--admin-token-file", key], check=True)
         if http(port, "/hello/") != (200, "hello"):
             fail("GET /hello/", g.log)
-        want = [f"{n}\n" for n in ((1, 2) if run == 1 else (3,))]
+        want = [f"{n}\n" for n in ((1, 2) if run == 1 else (run + 1,))]
         got = [http(port, "/counter/")[1] for _ in want]
         if got != want:
             fail(f"counter: got {got}, want {want}", g.log)
@@ -547,8 +555,8 @@ def dhcp_test(a, work):
 
 def data_partition_check(disk):
     """After the first boot: both GPT headers valid, the backup in the last sector, K10S-DATA ending at the last
-    1 MiB boundary before it (MBR: partition 2 ending at the last 1 MiB boundary of the disk), and ext4 filling
-    K10S-DATA. Returns an error or None."""
+    1 MiB boundary before it (MBR: partition 2 ending at the last 1 MiB boundary of the disk), and its k10s store
+    filling it. Returns an error or None."""
     total = os.path.getsize(disk) // 512
     with open(disk, "rb") as f:
         def read(lba, n=512):
@@ -559,7 +567,7 @@ def data_partition_check(disk):
             start, size = (x // 512 for x in mbr_parts(disk)[1])
             if start + size != total // 2048 * 2048:
                 return f"K10S-DATA ends at LBA {start + size} of {total}"
-            return ext4_fills(read, start, start + size - 1)
+            return store_fills(read, start, start + size - 1)
 
         for lba, other in ((1, total - 1), (total - 1, 1)):
             h = read(lba, 92)
@@ -580,16 +588,30 @@ def data_partition_check(disk):
             return "no K10S-DATA partition"
         if end != (total - 33) // 2048 * 2048 - 1:
             return f"K10S-DATA ends at LBA {end} of {total}"
-        return ext4_fills(read, start, end)
+        return store_fills(read, start, end)
 
 
-def ext4_fills(read, start, end):
-    """None if the ext4 at LBA `start` fills the partition up to LBA `end`, else an error."""
-    sb = read(start + 2, 1024)
-    hi = struct.unpack_from("<I", sb, 0x150)[0] if struct.unpack_from("<I", sb, 0x60)[0] & 0x80 else 0
-    blocks = hi << 32 | struct.unpack_from("<I", sb, 4)[0]
-    if blocks * (1024 << struct.unpack_from("<I", sb, 0x18)[0]) != (end - start + 1) * 512:
-        return f"ext4 has {blocks} blocks"
+def store_superblock(b):
+    """(generation, segments) of the current k10s store superblock in the store's first 8 KiB, or None."""
+    best = None
+    for at in (0, 4096):
+        sb = b[at:at + 512]
+        if sb[:8] == b"K10SDATA" and zlib.crc32(sb[:508]) == struct.unpack_from("<I", sb, 508)[0]:
+            gen, segments = struct.unpack_from("<Q", sb, 16)[0], struct.unpack_from("<I", sb, 68)[0]
+            if best is None or gen > best[0]:
+                best = (gen, segments)
+    return best
+
+
+def store_fills(read, start, end):
+    """None if the k10s store at LBA `start` covers the partition up to LBA `end` (to a 4 MiB segment), else an
+    error."""
+    sb = store_superblock(read(start, 8192))
+    if sb is None:
+        return "K10S-DATA holds no k10s store"
+    size = (33 + 4 * sb[1]) << 20
+    if not 0 <= (end - start + 1) * 512 - size < 4 << 20:
+        return f"the store covers {size >> 20} MiB of {((end - start + 1) * 512) >> 20}"
     return None
 
 
@@ -637,9 +659,8 @@ def image_test(a, work):
         g.wait_for(r"net: eth0 DHCP 10\.0\.2\.15/24 gateway 10\.0\.2\.2", "DHCP lease")
         if run == 1:
             g.wait_for(rf"data: /dev/{dev}{pdata} grown to {grown} MiB \(end of disk\)", "K10S-DATA grown")
-        g.wait_for(rf"data: /dev/{dev}{pdata} \(ext4\) on /data", "data partition")
-        if run == 1:
-            g.wait_for(rf"data: ext4 grown to {grown} MiB", "ext4 grown")
+        g.wait_for(rf"data: /dev/{dev}{pdata} \(k10s store\) for the node", "data partition")
+        g.wait_for(r"k10s: data store fd 4: 3837 MiB", "the store fills K10S-DATA")
         g.wait_for(r"watchdog: armed", "watchdog")
         g.wait_for(r"sandbox mode=on user=65532\(65532:65532\) caps=none landlock=abi\d+ seccomp=kill", "node sandbox")
         g.wait_for(r"ready: the node answers", "node ready")

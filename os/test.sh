@@ -2,9 +2,11 @@
 # PID 1 mode and the disk images under QEMU (docs/OS.md), no root. Builds the static k10s, the k10s kernels
 # (os/kbuild.sh), the pinned Debian kernel (os/debian-kernel.sh), their initramfs images and the release disk images
 # (os/images.sh), then runs os/test.py:
-#   boot-debian, boot-k10s  kernel + initramfs: boot → apply → serve → power button → boot again → state kept
+#   boot-debian, boot-k10s  kernel + initramfs: boot on an ext4 K10S-DATA → apply → serve → power button → boot
+#                           again: converted to a k10s store, state kept → once more
 #   dhcp                    renew, rebind, NAK → a new address (k10s kernel)
-#   image-bios, image-uefi  the vm image on SeaBIOS and OVMF: K10S-DATA grown to the disk, apply, serve, state kept
+#   image-bios, image-uefi  the vm image on SeaBIOS and OVMF: K10S-DATA (a k10s store) grown to the disk, apply,
+#                           serve, state kept
 #   image-metal             the metal image (console on serial instead of the screen) on OVMF q35: NVMe, signed
 #                           e1000e, Intel TCO watchdog
 #   unsigned                the metal kernel refuses a module whose signature is stripped

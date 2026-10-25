@@ -12,5 +12,6 @@ path = "src/main.rs"
 k10-ir = { workspace = true }
 k10-lang = { workspace = true }
 k10-mesh = { workspace = true }
+k10-kvlog = { workspace = true }
 k10-node = { workspace = true }
 libc = { workspace = true }

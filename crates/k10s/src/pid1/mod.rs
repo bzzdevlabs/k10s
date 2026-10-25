@@ -3,12 +3,13 @@
 //!
 //! The kernel starts `/init` (the static k10s) as PID 1. Init stays privileged and does the system work: mounts,
 //! drivers by modalias ([`modules`]), configuration ([`config`]), network ([`net`], [`dhcp`]), time ([`sntp`]), the
-//! data partition, the hardware watchdog and the power button. It runs the node as its child, `k10s node … --user
+//! data partition ([`data`]), the hardware watchdog and the power button. It runs the node as its child, `k10s node … --user
 //! 65532:65532`, which enters the normal sandbox (user switch, no capabilities, Landlock, seccomp), restarts it when
 //! it exits, and on a power-off request stops it, syncs, unmounts and powers off. If init itself panics, the kernel
 //! panics: images boot with `panic=5` to reboot. Signed A/B updates of the image itself: [`update`].
 
 mod config;
+mod data;
 mod dhcp;
 mod grow;
 mod modules;
@@ -36,6 +37,8 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 const SIG_UPDATE: libc::c_int = libc::SIGUSR1;
 /// The node's end of the update channel (`--os-agent-fd`).
 const OS_AGENT_FD: libc::c_int = 3;
+/// The node's K10S-DATA store (`--store-fd`).
+const STORE_FD: libc::c_int = 4;
 
 pub(crate) fn boot_secs() -> f64 {
     let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
@@ -155,6 +158,7 @@ pub fn main() -> ! {
         }
     }
     // Reading the slots hashes the booted image: alongside the network setup.
+    let boot_ok = boot_mounted.is_some();
     let slots = boot_mounted.map(|dev| {
         let keys = |k: &str| cfg.get(k).map(str::to_string);
         let (slot, os_key, os_trial) = (keys("slot"), keys("os_key"), keys("os_trial"));
@@ -163,7 +167,9 @@ pub fn main() -> ! {
     let lease = Arc::new(dhcp::Shared::default());
     let iface = network(&cfg, &lease);
     set_hostname(&cfg, iface.as_deref());
-    mount_data(&cfg);
+    // The update agent is done with K10S-BOOT's start-up writes before a data conversion writes there.
+    let agent = slots.and_then(|t| t.join().ok().flatten());
+    let data = data::setup(&cfg, boot_ok.then(|| update::Esp::new("/boot", true)).as_ref());
     hand_data_to_node(&cfg);
     if cfg.flag("prune_modules") {
         say!("modules: {} KiB of unused module files freed", modules::prune() >> 10);
@@ -178,8 +184,7 @@ pub fn main() -> ! {
     if cfg.flag("watchdog") {
         spawn_watchdog(health.clone());
     }
-    let agent = slots.and_then(|t| t.join().ok().flatten());
-    let how = supervise(&cfg, &set, &health, agent.as_ref());
+    let how = supervise(&cfg, &set, &health, agent.as_ref(), &data);
     shutdown(how)
 }
 
@@ -350,11 +355,14 @@ fn sibling_partition(dev: &str, n: u32) -> Option<String> {
     })
 }
 
-/// The volume label of a FAT or ext4 filesystem.
+/// The volume label of a FAT or ext4 filesystem (a k10s store is K10S-DATA).
 fn fs_label(dev: &str) -> Option<String> {
     use std::os::unix::fs::FileExt;
-    let mut b = [0u8; 2048];
+    let mut b = [0u8; 8192];
     fs::File::open(dev).ok()?.read_exact_at(&mut b, 0).ok()?;
+    if k10_kvlog::layout::pick(&b[..512], &b[4096..4608]).is_ok() {
+        return Some("K10S-DATA".into());
+    }
     let raw = if b[1080..1082] == [0x53, 0xEF] {
         &b[1144..1160]
     } else if b[510..512] == [0x55, 0xAA] && &b[82..87] == b"FAT32" {
@@ -366,45 +374,6 @@ fn fs_label(dev: &str) -> Option<String> {
     };
     let s = String::from_utf8_lossy(raw);
     Some(s.trim_end_matches(['\0', ' ']).to_string())
-}
-
-/// The data partition (`data=/dev/X[:FSTYPE]`, else the partition K10S-DATA, ext4) on /data; without one the node's
-/// state lives in RAM. K10S-DATA grows to the end of its disk unless `grow=0`.
-fn mount_data(cfg: &Config) {
-    let (spec, grow) = match cfg.get("data") {
-        Some("none") => (None, false),
-        Some(s) => (Some(s.to_string()), false),
-        None => (find_partition("K10S-DATA", Duration::ZERO), cfg.get("grow").is_none() || cfg.flag("grow")),
-    };
-    let _ = fs::create_dir_all(DATA);
-    let Some(spec) = spec else {
-        say!("data: no data partition, state is volatile");
-        return;
-    };
-    let (dev, fstype) = spec.split_once(':').unwrap_or((&spec, "ext4"));
-    modules::load_by_name(&[fstype]);
-    let t = Instant::now();
-    while !Path::new(dev).exists() && t.elapsed() < Duration::from_secs(10) {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    if grow {
-        match grow::partition(dev) {
-            Ok(Some(b)) => say!("data: {dev} grown to {} MiB (end of disk)", b >> 20),
-            Ok(None) => {}
-            Err(e) => say!("data: growing {dev}: {e}"),
-        }
-    }
-    match mount(dev, DATA, fstype, libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_NOATIME, "") {
-        Ok(()) => say!("data: {dev} ({fstype}) on {DATA}"),
-        Err(e) => return say!("data: mounting {dev} ({fstype}): {e}; state is volatile"),
-    }
-    if grow && fstype == "ext4" {
-        match grow::ext4(dev, DATA) {
-            Ok(Some(b)) => say!("data: ext4 grown to {} MiB", b >> 20),
-            Ok(None) => {}
-            Err(e) => say!("data: growing the filesystem on {dev}: {e}"),
-        }
-    }
 }
 
 /// A fresh data directory (root-owned mountpoint or RAM directory) goes to the node's user, which the node requires.
@@ -534,7 +503,7 @@ enum Halt {
 /// The node, by `posix_spawn` of our own binary: std's spawn would link glibc symbols newer than the gnu build's floor
 /// (2.34). The child starts with an empty signal mask and default dispositions; it reads its secrets, binds, then
 /// sandboxes itself.
-fn spawn_node(cfg: &Config, agent: Option<&update::Agent>) -> io::Result<libc::pid_t> {
+fn spawn_node(cfg: &Config, agent: Option<&update::Agent>, data: &data::Data) -> io::Result<libc::pid_t> {
     use std::ffi::CString;
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStringExt;
@@ -549,6 +518,14 @@ fn spawn_node(cfg: &Config, agent: Option<&update::Agent>) -> io::Result<libc::p
     };
     if channel.is_some() {
         args.extend(["--os-agent-fd".to_string(), OS_AGENT_FD.to_string()]);
+    }
+    // The store's descriptor (numbered 10 or above) becomes the node's fd 4.
+    let store = match data {
+        data::Data::Store(f) => Some(f.as_raw_fd()),
+        _ => None,
+    };
+    if store.is_some() {
+        args.extend(["--store-fd".to_string(), STORE_FD.to_string()]);
     }
     say!("node: k10s {}", args.join(" "));
     let argv: Vec<CString> =
@@ -574,6 +551,9 @@ fn spawn_node(cfg: &Config, agent: Option<&update::Agent>) -> io::Result<libc::p
         libc::posix_spawn_file_actions_addopen(&mut fa, 0, c"/dev/null".as_ptr(), libc::O_RDONLY, 0);
         if let Some(c) = &channel {
             libc::posix_spawn_file_actions_adddup2(&mut fa, c.as_raw_fd(), OS_AGENT_FD);
+        }
+        if let Some(s) = store {
+            libc::posix_spawn_file_actions_adddup2(&mut fa, s, STORE_FD);
         }
         let r = libc::posix_spawn(&mut pid, c"/proc/self/exe".as_ptr(), &fa, &attr, argv_p.as_ptr(), env_p.as_ptr());
         libc::posix_spawn_file_actions_destroy(&mut fa);
@@ -619,14 +599,14 @@ fn describe(st: libc::c_int) -> String {
 
 /// Runs the node until init is asked to stop: restarts it when it exits (backoff 1 s doubling to 60 s, reset after a
 /// minute of uptime), and on SIGHUP (address change) when it advertises the lease's address.
-fn supervise(cfg: &Config, set: &libc::sigset_t, health: &Health, agent: Option<&update::Agent>) -> Halt {
+fn supervise(cfg: &Config, set: &libc::sigset_t, health: &Health, agent: Option<&update::Agent>, data: &data::Data) -> Halt {
     let mut node: Option<(libc::pid_t, Instant)> = None;
     let mut restart_at = Some(Instant::now());
     let mut backoff = Duration::from_secs(1);
     loop {
         if node.is_none() && restart_at.is_some_and(|t| t <= Instant::now()) {
             restart_at = None;
-            match spawn_node(cfg, agent) {
+            match spawn_node(cfg, agent, data) {
                 Ok(pid) => node = Some((pid, Instant::now())),
                 Err(e) => {
                     say!("node: cannot start: {e}");

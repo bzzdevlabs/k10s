@@ -31,7 +31,8 @@ EFI/Linux/k10s-a.efi, the image's record of the slot), p2 K10S-DATA:
          /k10s/metal.elf         the native kernel (--metal)
          /k10s/tier              tier=linux and metal_cmdline=, a GRUB environment block (k10boot reads it too)
          /k10s.conf              node configuration, for both tiers
-  p3   K10S-DATA (ext4); init grows it to the end of the disk on first boot
+  p3   K10S-DATA, a k10s store (crates/k10-kvlog: the node's KV and files, the native kernel's A/B slots), shared
+       by both tiers; it grows to the end of the disk on first boot
 
 --pi (KERNEL is the arm64 Image.gz, --dtbs the kernel's arch/arm64/boot/dts/broadcom):
 
@@ -44,10 +45,10 @@ EFI/Linux/k10s-a.efi, the image's record of the slot), p2 K10S-DATA:
          config.txt and tryboot.txt (the same: a Pi 3 whose bootcode.bin ignores tryboot_a_b reads tryboot.txt in a
          trial), cmdline.txt, kernel8.img, initramfs8, the Pi 3, 4 and 5 devicetrees, LICENCE.broadcom
   p3   slot B (empty until an update)
-  p4   K10S-DATA (ext4); init grows it to the end of the disk on first boot
+  p4   K10S-DATA, a k10s store (MBR type 0xda); it grows to the end of the disk on first boot
 
-GUIDs, volume ids, the ext4 hash seed and every timestamp (SOURCE_DATE_EPOCH, else 0) are fixed, so the same inputs
-give the same image. Needs sfdisk, mkfs.fat, mtools and mkfs.ext4.
+GUIDs, volume ids, the store id and every timestamp (SOURCE_DATE_EPOCH, else 0) are fixed, so the same inputs give
+the same image. Needs sfdisk, mkfs.fat and mtools.
 """
 import argparse
 import os
@@ -57,6 +58,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zlib
 
 PATH = os.environ.get("PATH", "") + ":/sbin:/usr/sbin"
 EPOCH = max(int(os.environ.get("SOURCE_DATE_EPOCH", "0")), 315532800)  # FAT dates start in 1980
@@ -65,11 +67,11 @@ DISK_GUID = "6B10C5A0-0000-4000-8000-000000000001"
 PARTS = [  # name, type GUID, unique GUID
     ("bios-boot", "21686148-6449-6E6F-744E-656564454649", "6B10C5A0-0000-4000-8000-000000000011"),
     ("K10S-BOOT", "C12A7328-F81F-11D2-BA4B-00A0C93EC93B", "6B10C5A0-0000-4000-8000-000000000012"),
-    ("K10S-DATA", "0FC63DAF-8483-4772-8E79-3D69D8477DE4", "6B10C5A0-0000-4000-8000-000000000013"),
+    ("K10S-DATA", "6B10C5A0-DA7A-4000-8000-000000000001", "6B10C5A0-0000-4000-8000-000000000013"),
 ]
 ESP_VOLID = "6B10C5A0"
-DATA_UUID = "6b10c5a0-0000-4000-8000-0000000000da"
-DATA_SEED = "6b10c5a0-0000-4000-8000-0000000000db"
+# The store id of K10S-DATA (it only salts the log's checksums: images may share it).
+STORE_ID = bytes.fromhex("6b10c5a0000040008000000000000da7")
 # Pi slot (MiB): room for any signed image (MAX_IMAGE_BYTES is 64 MiB).
 PI_SLOT_MIB = 128
 PI_BOOT_MIB = 64
@@ -282,10 +284,42 @@ def sign(a, payload, out):
     run(a.k10s, "image", "sign", "--key", a.sign, "--arch", a.arch, "--profile", a.profile, "--version", a.version, payload, out)
 
 
-def data_fs(a, tmp, env):
+def store_format(f, size, store_id=STORE_ID, offset=0):
+    """Formats `size` bytes of file `f` at `offset` as an empty k10s store, byte for byte what
+    k10_kvlog::store::Store::format writes (superblocks of generations 1 and 2, the first segment's SEGMENT record)."""
+    unit, log_offset, seg, slot_offset, slot_bytes, reserve = 4096, 33 * MIB, 4 * MIB, MIB, 16 * MIB, 1024
+    segments = min((size - log_offset) // seg, 1 << 22)
+    if segments < 5:
+        raise SystemExit(f"mkimage: a store needs {(log_offset + 5 * seg) >> 20} MiB")
+    mask = zlib.crc32(struct.pack("<Q", 1), zlib.crc32(store_id))
+
+    def record(op, value):
+        body = bytes([op, 0, 0]) + value
+        return struct.pack("<II", len(body), zlib.crc32(body) ^ mask) + body
+
+    first = record(6, store_id + struct.pack("<QI", 1, 0))
+    first += record(4, bytes(unit - len(first) - 11))
+
+    def superblock(gen):
+        b = bytearray(unit)
+        b[0:8] = b"K10SDATA"
+        struct.pack_into("<IIQ", b, 8, 1, 512, gen)
+        b[24:40] = store_id
+        struct.pack_into("<QQQIIIIQQ", b, 40, slot_offset, slot_bytes, log_offset, seg, segments, 0, 0, 1, 1 + reserve)
+        b[176:178] = b"\xff\xff"
+        struct.pack_into("<I", b, 508, zlib.crc32(bytes(b[:508])))
+        return bytes(b)
+
+    for at, data in ((log_offset, first), (unit, superblock(1)), (0, superblock(2))):
+        f.seek(offset + at)
+        f.write(data)
+
+
+def data_store(a, tmp):
     data = os.path.join(tmp, "data.img")
-    run("mkfs.ext4", "-q", "-F", "-L", "K10S-DATA", "-U", DATA_UUID, "-E", f"hash_seed={DATA_SEED},root_owner=0:0",
-        "-b", "4096", "-T", "default", "-J", "size=64", data, f"{a.data_mib}M", env=env, stdout=subprocess.DEVNULL)
+    with open(data, "wb") as f:
+        f.truncate(a.data_mib * MIB)
+        store_format(f, a.data_mib * MIB)
     return data
 
 
@@ -322,13 +356,13 @@ def pi(a, tmp, env, put, initrd):
     fat_image(boot, "K10S-BOOT", ESP_VOLID, PI_BOOT_MIB * 1024,
               [(put("autoboot.txt", autoboot), "autoboot.txt"), (a.conf or put("k10s.conf", CONF), "k10s.conf"),
                (os.path.join(fw, "bootcode.bin"), "bootcode.bin"), (put("start.elf", b""), "start.elf")], env, spc=1)
-    data = data_fs(a, tmp, env)
+    data = data_store(a, tmp)
     at = [MIB]
     for mib in (PI_BOOT_MIB, PI_SLOT_MIB, PI_SLOT_MIB, a.data_mib):
         at.append(at[-1] + mib * MIB)
     line = lambda n, t: f"start={at[n] // 512}, size={(at[n + 1] - at[n]) // 512}, type={t}\n"
     disk(a.out, f"label: dos\nlabel-id: 0x{ESP_VOLID}\n",
-         [(boot, at[0], line(0, "c")), (signed, at[1], line(1, "e")), (None, at[2], line(2, "e")), (data, at[3], line(3, "83"))],
+         [(boot, at[0], line(0, "c")), (signed, at[1], line(1, "e")), (None, at[2], line(2, "e")), (data, at[3], line(3, "da"))],
          at[4] + MIB)
     print(f"mkimage: {a.out}: {(at[4] + MIB) >> 20} MiB (slots {PI_SLOT_MIB} MiB, data {a.data_mib} MiB), "
           f"slot image {os.path.getsize(signed)} bytes", file=sys.stderr)
@@ -363,8 +397,7 @@ def main():
     bios, uefi = a.arch in ("x86_64", "i686"), a.arch != "i686"
     efi_arch = {"x86_64": "x64", "aarch64": "aa64", "i686": "ia32", "armv7": "arm"}[a.arch]
 
-    # mke2fs takes a fake time of 0 for "unset", hence the 1980 floor of EPOCH.
-    env = dict(os.environ, MTOOLS_SKIP_CHECK="1", E2FSPROGS_FAKE_TIME=str(EPOCH))
+    env = dict(os.environ, MTOOLS_SKIP_CHECK="1")
     with tempfile.TemporaryDirectory() as tmp:
         def put(name, data):
             p = os.path.join(tmp, name)
@@ -406,13 +439,13 @@ def main():
             files.append((put("tier", TIER), "k10s/tier"))
         # 2 KiB clusters: GRUB reads files one cluster at a time, and BIOS disk reads are slow.
         fat_image(esp, "K10S-BOOT", ESP_VOLID, a.esp_mib * 1024, files, env)
-        data = data_fs(a, tmp, env)
+        data = data_store(a, tmp)
 
         if not uefi:
             at = [MIB, MIB + a.esp_mib * MIB, MIB + (a.esp_mib + a.data_mib) * MIB]
             disk(a.out, f"label: dos\nlabel-id: 0x{ESP_VOLID}\n",
                  [(esp, at[0], f"start={at[0] // 512}, size={a.esp_mib * MIB // 512}, type=c, bootable\n"),
-                  (data, at[1], f"start={at[1] // 512}, size={a.data_mib * MIB // 512}, type=83\n")], at[2] + MIB)
+                  (data, at[1], f"start={at[1] // 512}, size={a.data_mib * MIB // 512}, type=da\n")], at[2] + MIB)
             grub_bios(a.boot, a.out, tmp, mbr=True)
         else:
             parts = PARTS if bios else PARTS[1:]
