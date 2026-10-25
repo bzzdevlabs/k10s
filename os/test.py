@@ -1480,7 +1480,7 @@ def native_update_test(a, work):
         print("test.py: update-native: armed, trial boot cut, second trial boot committed, cut: ok", file=sys.stderr)
         g = boot()
         kernel(g, "v2", "slot A of K10S-DATA")
-        g.wait_for(r"os: x86_64-native v2 \([0-9a-f]+\) from slot A\r?$", "the committed slot")
+        g.wait_for(r"(?m)os: x86_64-native v2 \([0-9a-f]+\) from slot A\r?$", "the committed slot")
         serves(g)
         # A kernel that crashes at boot: two trial boots, then back to v2, which records it as failed.
         apply(a, t.key, hp, manifest("bad", bad))
