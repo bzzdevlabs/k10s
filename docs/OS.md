@@ -112,17 +112,17 @@ update files:
 
 | Release file | For | Kernel | Compressed size |
 |---|---|---|---|
-| `k10s-os-V-x86_64-vm.img.xz` | QEMU/KVM guests and clouds | `vm` profile, every driver built in; console on serial; and the native kernel | 4.8 MB |
-| `k10s-os-V-x86_64-metal.img.xz` | PCs, mini-PCs, servers, from their disk or a USB stick | `metal` profile, signed driver modules, NIC firmware; console on the screen; and the native kernel | 7.2 MB |
+| `k10s-os-V-x86_64-vm.img.xz` | QEMU/KVM guests and clouds | `vm` profile, every driver built in; console on serial; and the native kernel | 5.0 MB |
+| `k10s-os-V-x86_64-metal.img.xz` | PCs, mini-PCs, servers, from their disk or a USB stick | `metal` profile, signed driver modules, NIC firmware; console on the screen; and the native kernel | 7.4 MB |
 | `k10s-os-V-x86_64-{vm,metal}.efi` | updates (`os` in `k10s apply`), PXE or another UEFI loader | the signed slot-A UKI of the image | 4.2 / 6.6 MB |
-| `k10s-os-V-x86_64-native.elf` | the native kernel (Tier 2, "Tiers") as both x86-64 images carry it | `metal/`, signed (profile `native`) | 1.1 MB |
+| `k10s-os-V-x86_64-native.elf` | the native kernel (Tier 2, "Tiers") as both x86-64 images carry it | `metal/`, signed (profile `native`) | 1.2 MB |
 | `k10s-os-V-aarch64-vm.img.xz` | QEMU virt (UEFI) and arm64 cloud guests | `arm64`, every driver built in; console on the PL011 serial port | 4.0 MB |
 | `k10s-os-V-aarch64-vm.efi` | updates, another UEFI loader | the signed slot-A UKI of the image | 9.5 MB |
-| `k10s-os-V-aarch64-pi.img.xz` | Raspberry Pi 3 B and 3 B+, 4 B, 400, CM4 and Pi 5 (SD card, USB or NVMe boot) | `arm64`; console on the serial pins (Pi 3, Pi 4) or the debug UART connector (Pi 5) | 5.3 MB |
+| `k10s-os-V-aarch64-pi.img.xz` | Raspberry Pi 3 B and 3 B+, 4 B, 400, CM4 and Pi 5 (SD card, USB or NVMe boot) | `arm64`; console on the serial pins (Pi 3, Pi 4) or the debug UART connector (Pi 5) | 5.4 MB |
 | `k10s-os-V-aarch64-pi.fat` | updates of Pi nodes | the signed boot slot of the image (FAT) | 8.4 MB |
-| `k10s-os-V-i686-metal.img.xz` | old PCs: BIOS, a 32-bit or 64-bit CPU with PAE and SSE2 (best effort) | `i386`, signed driver modules, NIC firmware; console on the screen | 5.7 MB |
+| `k10s-os-V-i686-metal.img.xz` | old PCs: BIOS, a 32-bit or 64-bit CPU with PAE and SSE2 (best effort) | `i386`, signed driver modules, NIC firmware; console on the screen | 5.8 MB |
 | `k10s-os-V-i686-metal.efi` | updates of i686 nodes | the signed slot-A image (a UKI, booted through GRUB) | 5.7 MB |
-| `k10s-os-V-armv7-vm.img.xz` | QEMU virt and other 32-bit ARM UEFI machines (best effort) | `armv7`, every driver built in; console on the PL011 serial port | 3.5 MB |
+| `k10s-os-V-armv7-vm.img.xz` | QEMU virt and other 32-bit ARM UEFI machines (best effort) | `armv7`, every driver built in; console on the PL011 serial port | 3.6 MB |
 | `k10s-os-V-armv7-vm.efi` | updates, another UEFI loader | the signed slot-A UKI of the image | 3.5 MB |
 
 Write an image to the whole disk (`xz -dc IMG.xz | dd of=/dev/sdX bs=4M conv=fsync`, or any image writer that reads

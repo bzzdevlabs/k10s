@@ -5,10 +5,10 @@ PROJECT STATE: HARDENING
 Last updated: 2026-10-25. This file is the single place to learn where the project stands and what comes next.
 
 ## State of `main`
-`main` is pushed; every push publishes a dev pre-release (v0.1.0-dev.165 = bd1ff90, steps 13a, 13b and 13d: release
+`main` is pushed; every push publishes a dev pre-release (v0.1.0-dev.167 = a0dffc5, steps 13a, 13b, 13c and 13d: release
 and pages workflows green; the `unit`, `musl`, `i686`, `arm64` (JIT and interpreter), `armv7`, `dist`, `os`, `os-arm64` and
 `os-legacy` suites gate the release; glibc, musl (x86-64, aarch64, i686, armv7), metal, bench, examples and source
-archives; disk images x86-64 `vm` 4.9 MB and `metal` 7.4 MB (13a added k10boot and the native kernel),
+archives; disk images x86-64 `vm` 5.0 MB and `metal` 7.4 MB (13a added k10boot and the native kernel),
 `i686-metal` 5.8 MB, `armv7-vm` 3.6 MB, `aarch64-vm` 4.0 MB, `aarch64-pi` 5.4 MB (xz) with their update files (`.efi`, the Pi's `.fat`) signed by the release key and
 verified against the key built into k10s; `SHA256SUMS`).
 `main` contains:

@@ -46,7 +46,7 @@ suite started on an idle machine by `bench/run-final.sh`. Details and caveats:
 k10s also outruns the same services run as bare Linux processes (echo 180 k vs 109 k req/s). It is slower on
 CPU-bound code: Ten's SHA-256 takes 2.5× as long as Go's hand-written assembly (1.1–1.6× vs portable Go).
 
-Bare metal (`metal/`, QEMU/KVM, Firecracker, Cloud Hypervisor, PCs from a disk or USB stick): a 1.1 MB kernel that
+Bare metal (`metal/`, QEMU/KVM, Firecracker, Cloud Hypervisor, PCs from a disk or USB stick): a 1.2 MB kernel that
 reads ACPI, drives virtio, NVMe and SATA disks and the Intel (e1000e, igb, igc) and Realtek (r8169-class) Ethernet
 controllers of PCs, shows its console on the screen or sends it over UDP, arms the hardware watchdog, and serves HTTP
 in 3 MiB of RAM, ready milliseconds after kernel entry; the same kernel joins a cluster of Linux-hosted nodes, keeps
