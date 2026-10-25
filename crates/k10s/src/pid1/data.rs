@@ -52,7 +52,7 @@ enum Content {
 
 fn content(head: &[u8]) -> Content {
     let unit = layout::UNIT as usize;
-    match layout::pick(&head[..layout::SUPER_LEN], &head[unit..unit + layout::SUPER_LEN]) {
+    match layout::pick(&head[..unit], &head[unit..2 * unit]) {
         Ok(_) => Content::Store,
         Err(layout::Decode::Newer(v)) => Content::Newer(v),
         _ if head.iter().all(|&b| b == 0) => Content::Blank,

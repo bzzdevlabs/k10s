@@ -128,8 +128,20 @@ pub struct Storage {
     batch: Option<Batch>,
     failures: u32,
     retry_at: u64,
-    /// The node's own namespaces.
+    /// The node's own namespaces, and their bytes in a checkpoint.
     own: Own,
+    own_live: u64,
+    /// A batch never completed (the device stopped answering): nothing more is written.
+    dead: bool,
+}
+
+fn rec_size(k: usize, v: usize) -> u64 {
+    record::size(k, v) as u64
+}
+
+/// Bytes of `own` in a checkpoint (an NS record per namespace, a PUT per entry).
+fn own_bytes(own: &Own) -> u64 {
+    own.iter().map(|(ns, m)| rec_size(ns.len(), 0) + m.iter().map(|(k, v)| rec_size(k.len(), v.len())).sum::<u64>()).sum()
 }
 
 /// `K10S-DATA` on `d`: (first block, blocks, partition number, unique GUID), from the primary GPT.
@@ -270,7 +282,8 @@ pub fn init(data: Option<&str>, allow_grow: bool, want: Option<[u8; 16]>) {
         }
         Err(e) => return kprintln!("storage: K10S-DATA ({name}, partition {pno}): {e}: KV data in memory only"),
     };
-    let live = crate::runtime::kv_log_on(store.max_live());
+    let own_live = own_bytes(&own);
+    let live = crate::runtime::kv_log_on(store.max_live().saturating_sub(own_live));
     SIZE.store(store.superblock().size(), Ordering::Relaxed);
     LOG_BYTES.store(store.log_bytes(), Ordering::Relaxed);
     DURABLE.store(true, Ordering::Relaxed);
@@ -279,13 +292,14 @@ pub fn init(data: Option<&str>, allow_grow: bool, want: Option<[u8; 16]>) {
         store.superblock().size() >> 20,
         live >> 10
     );
-    *STORAGE.borrow_mut() = Some(Storage { dev: d, bounce, base: first, size: blocks * bs, store, batch: None, failures: 0, retry_at: 0, own });
+    *STORAGE.borrow_mut() =
+        Some(Storage { dev: d, bounce, base: first, size: blocks * bs, store, batch: None, failures: 0, retry_at: 0, own, own_live, dead: false });
 }
 
 impl Storage {
     /// Starts a batch of the pending writes (or a checkpoint, which completes here).
     fn start(&mut self, live: u64, pending: usize) {
-        if self.store.wants_checkpoint(live, pending as u64, COMPACT_MIN) {
+        if self.store.wants_checkpoint(live + self.own_live, pending as u64, COMPACT_MIN) {
             self.checkpoint("compaction");
             return;
         }
@@ -378,6 +392,7 @@ impl Storage {
             }
             // The step is written and flushed.
             if b.super_pending {
+                self.store.first_done(&b.writes);
                 b.super_pending = false;
                 b.flushing = false;
                 let mut b = self.batch.take().unwrap();
@@ -405,21 +420,33 @@ impl Storage {
         self.advance();
     }
 
-    /// Waits for the batch in flight.
-    fn drain(&mut self) {
+    /// Waits for the batch in flight; false if the store is unusable (the device stopped answering).
+    fn drain(&mut self) -> bool {
         let deadline = time::now_ns() + 30_000_000_000;
-        while self.batch.is_some() && time::now_ns() < deadline {
+        while self.batch.is_some() && !self.dead {
+            if time::now_ns() >= deadline {
+                // Its requests may still be in flight, into the bounce buffer: nothing else may use the device.
+                kprintln!("storage: {} does not complete a write in 30 s: K10S-DATA is off until reboot", self.dev.name());
+                self.dead = true;
+                ERRORS.fetch_add(1, Ordering::Relaxed);
+                DURABLE.store(false, Ordering::Relaxed);
+                break;
+            }
             self.reap();
             core::hint::spin_loop();
         }
+        !self.dead
     }
 
     /// Writes the whole KV state as a checkpoint (compaction, or the rewrite of a degraded store).
     fn checkpoint(&mut self, why: &str) {
-        self.drain();
+        if !self.drain() {
+            return;
+        }
         let nss = crate::runtime::kv_namespaces();
         let res = (|| {
-            self.store.checkpoint_begin()?;
+            let mut p = Part { dev: &mut *self.dev, bounce: &mut self.bounce, base: self.base, size: self.size };
+            self.store.checkpoint_begin(&mut p)?;
             for (ns, m) in &self.own {
                 let mut recs = Vec::new();
                 for (k, v) in m {
@@ -471,6 +498,10 @@ impl Storage {
     }
 
     fn poll(&mut self, force: bool) {
+        if self.dead {
+            let _ = crate::runtime::kv_take_pending();
+            return;
+        }
         self.reap();
         if self.batch.is_some() {
             return;
@@ -498,14 +529,35 @@ impl Storage {
 impl Storage {
     /// Writes records (PUT/DEL) of own namespace `ns`, committed before it returns.
     fn write_own(&mut self, ns: &[u8], recs: &[u8]) -> Result<(), String> {
-        self.drain();
+        if !self.drain() {
+            return Err("K10S-DATA does not respond".into());
+        }
         if self.failures > 0 {
             self.checkpoint("rewrite");
             if self.failures > 0 {
                 return Err("K10S-DATA is not writable".into());
             }
         }
-        let res = self.store.push(ns, recs).and_then(|()| {
+        // Room for the result next to the KV data, and for a checkpoint after the append.
+        let mut after = self.own_live + if self.own.contains_key(ns) { 0 } else { rec_size(ns.len(), 0) };
+        let m = self.own.get(ns);
+        for (r, _) in record::split(recs, 0) {
+            after = after.saturating_sub(m.and_then(|m| m.get(r.key)).map_or(0, |v| rec_size(r.key.len(), v.len())));
+            if r.op == record::PUT {
+                after += rec_size(r.key.len(), r.value.len());
+            }
+        }
+        let (_, pending, kv_live) = crate::runtime::kv_log_state();
+        if kv_live + after > self.store.max_live() {
+            return Err("K10S-DATA is full".into());
+        }
+        if self.store.wants_checkpoint(kv_live + self.own_live, (pending + recs.len()) as u64, COMPACT_MIN) {
+            self.checkpoint("compaction");
+            if self.failures > 0 {
+                return Err("K10S-DATA is not writable".into());
+            }
+        }
+        let res = self.store.push(ns, recs).inspect_err(|_| self.store.set_degraded()).and_then(|()| {
             let mut p = Part { dev: &mut *self.dev, bounce: &mut self.bounce, base: self.base, size: self.size };
             self.store.commit(&mut p)
         });
@@ -521,6 +573,8 @@ impl Storage {
                 m.remove(r.key);
             }
         }
+        self.own_live = own_bytes(&self.own);
+        crate::runtime::kv_log_cap(self.store.max_live().saturating_sub(self.own_live));
         LOG_BYTES.store(self.store.log_bytes(), Ordering::Relaxed);
         Ok(())
     }
@@ -594,7 +648,9 @@ pub fn write_files(changes: &[(&str, Option<&[u8]>)]) -> Result<(), String> {
 pub fn install_slot(slot: u8, image: &[u8], sha256: [u8; 32]) -> Result<(), String> {
     let mut st = STORAGE.borrow_mut();
     let s = st.as_mut().ok_or("no K10S-DATA")?;
-    s.drain();
+    if !s.drain() {
+        return Err("K10S-DATA does not respond".into());
+    }
     let mut p = Part { dev: &mut *s.dev, bounce: &mut s.bounce, base: s.base, size: s.size };
     s.store.install_slot(&mut p, slot, image, sha256).map_err(|e| alloc::format!("writing kernel slot {}: {e}", (b'A' + slot) as char))
 }
@@ -603,7 +659,9 @@ pub fn install_slot(slot: u8, image: &[u8], sha256: [u8; 32]) -> Result<(), Stri
 pub fn set_boot(committed: Option<u8>, trial: Option<u8>) -> Result<(), String> {
     let mut st = STORAGE.borrow_mut();
     let s = st.as_mut().ok_or("no K10S-DATA")?;
-    s.drain();
+    if !s.drain() {
+        return Err("K10S-DATA does not respond".into());
+    }
     let mut p = Part { dev: &mut *s.dev, bounce: &mut s.bounce, base: s.base, size: s.size };
     s.store.set_boot(&mut p, committed, trial).map_err(|e| alloc::format!("K10S-DATA superblock: {e}"))
 }
@@ -617,13 +675,13 @@ pub fn poll() {
 
 /// Whether storage needs the main loop soon: a batch in flight on a device without completion interrupts.
 pub fn busy() -> bool {
-    STORAGE.borrow().as_ref().is_some_and(|s| s.batch.is_some() && !s.dev.has_interrupts())
+    STORAGE.borrow().as_ref().is_some_and(|s| s.batch.is_some() && !s.dead && !s.dev.has_interrupts())
 }
 
 /// When the main loop must run storage next (the end of the group commit window, a retry, or polling a batch).
 pub fn next_deadline_ns() -> Option<u64> {
     let st = STORAGE.borrow();
-    let s = st.as_ref()?;
+    let s = st.as_ref().filter(|s| !s.dead)?;
     if s.batch.is_some() {
         return Some(time::now_ns() + if s.dev.has_interrupts() { 10_000_000 } else { 50_000 });
     }
@@ -638,10 +696,12 @@ pub fn next_deadline_ns() -> Option<u64> {
 pub fn shutdown() {
     let mut st = STORAGE.borrow_mut();
     let Some(s) = st.as_mut() else { return };
-    s.drain();
-    s.poll(true);
-    s.drain();
-    s.dev.shutdown();
+    if s.drain() {
+        s.poll(true);
+        if s.drain() {
+            s.dev.shutdown();
+        }
+    }
 }
 
 /// `"storage":{…}` for `/_k10s/status`.

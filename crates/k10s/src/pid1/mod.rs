@@ -360,7 +360,7 @@ fn fs_label(dev: &str) -> Option<String> {
     use std::os::unix::fs::FileExt;
     let mut b = [0u8; 8192];
     fs::File::open(dev).ok()?.read_exact_at(&mut b, 0).ok()?;
-    if k10_kvlog::layout::pick(&b[..512], &b[4096..4608]).is_ok() {
+    if k10_kvlog::layout::pick(&b[..4096], &b[4096..8192]).is_ok() {
         return Some("K10S-DATA".into());
     }
     let raw = if b[1080..1082] == [0x53, 0xEF] {

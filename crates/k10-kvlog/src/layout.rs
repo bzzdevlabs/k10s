@@ -111,20 +111,28 @@ impl Super {
         b
     }
 
+    /// Decodes a copy from its unit (at least `SUPER_LEN` bytes). Every format version starts with the magic, the
+    /// version and the length of what is checksummed (CRC-32 in its last 4 bytes): a copy of a later version is told
+    /// apart from a torn one.
     pub fn decode(b: &[u8]) -> Result<Super, Decode> {
-        let b = b.get(..SUPER_LEN).ok_or(Decode::Foreign)?;
-        if b.iter().all(|&x| x == 0) {
+        let head = b.get(..SUPER_LEN).ok_or(Decode::Foreign)?;
+        if head.iter().all(|&x| x == 0) {
             return Err(Decode::Blank);
         }
-        if b[..8] != MAGIC {
+        if head[..8] != MAGIC {
             return Err(Decode::Foreign);
         }
-        if u32_at(b, 8) != VERSION {
-            return Err(Decode::Newer(u32_at(b, 8)));
-        }
-        if u32_at(b, 12) as usize != SUPER_LEN || crate::crc32(&b[..SUPER_LEN - 4]) != u32_at(b, SUPER_LEN - 4) {
+        let len = u32_at(head, 12) as usize;
+        if !(24..=b.len()).contains(&len) || crate::crc32(&b[..len - 4]) != u32_at(b, len - 4) {
             return Err(Decode::Foreign);
         }
+        if u32_at(head, 8) != VERSION {
+            return Err(Decode::Newer(u32_at(head, 8)));
+        }
+        if len != SUPER_LEN {
+            return Err(Decode::Foreign);
+        }
+        let b = head;
         let geometry = (u64_at(b, 40), u64_at(b, 48), u64_at(b, 56), u32_at(b, 64) as u64);
         let segments = u32_at(b, 68);
         let tail_index = u32_at(b, 72);
@@ -161,12 +169,13 @@ impl Super {
     }
 }
 
-/// The current superblock of the two copies' first `SUPER_LEN` bytes: the valid one of the higher generation.
+/// The current superblock of the two copies (their units): the valid one of the higher generation. A whole copy of
+/// a later format version wins: the store may have been converted.
 pub fn pick(a: &[u8], b: &[u8]) -> Result<Super, Decode> {
     match (Super::decode(a), Super::decode(b)) {
+        (Err(Decode::Newer(v)), _) | (_, Err(Decode::Newer(v))) => Err(Decode::Newer(v)),
         (Ok(x), Ok(y)) => Ok(if y.generation > x.generation { y } else { x }),
         (Ok(x), Err(_)) | (Err(_), Ok(x)) => Ok(x),
-        (Err(Decode::Newer(v)), _) | (_, Err(Decode::Newer(v))) => Err(Decode::Newer(v)),
         (Err(Decode::Blank), Err(Decode::Blank)) => Err(Decode::Blank),
         _ => Err(Decode::Foreign),
     }
@@ -224,7 +233,18 @@ mod tests {
         assert_eq!(pick(&[0; 512], &ext4), Err(Decode::Foreign));
         let mut v2 = e;
         v2[8] = 2;
+        assert_eq!(Super::decode(&v2), Err(Decode::Foreign), "a version byte flipped by a torn write");
+        let crc = crate::crc32(&v2[..SUPER_LEN - 4]);
+        v2[SUPER_LEN - 4..].copy_from_slice(&crc.to_le_bytes());
         assert_eq!(Super::decode(&v2), Err(Decode::Newer(2)));
+        assert_eq!(pick(&newer.encode(), &v2), Err(Decode::Newer(2)), "a converted copy wins over an older one");
+        // A later version may checksum more of the unit.
+        let mut unit = [0u8; UNIT as usize];
+        unit[..SUPER_LEN].copy_from_slice(&v2);
+        unit[12..16].copy_from_slice(&1024u32.to_le_bytes());
+        let crc = crate::crc32(&unit[..1020]);
+        unit[1020..1024].copy_from_slice(&crc.to_le_bytes());
+        assert_eq!(pick(&unit, &[0; UNIT as usize]), Err(Decode::Newer(2)));
     }
 
     #[test]

@@ -23,7 +23,7 @@
 //!   leave `pending`. It runs when a log exceeds `2 × live size` (and `compact_min`); a failure before the rename
 //!   changes nothing and is retried once the log has grown by another `max(live size, compact_min)`. A raw store
 //!   compacts the same way, all namespaces at once (a checkpoint), also when its free space runs low; it holds at
-//!   most a third of its log area as live data, past which writes are refused like quota overruns.
+//!   most about a quarter of its log area as live data, past which writes are refused like quota overruns.
 //! * **Degraded log**: after a failed write, fsync or post-rename directory sync, the file can no longer be trusted
 //!   (the kernel may have dropped the pages) and the map is the only good copy. The namespace (every namespace, on a
 //!   raw store) stops appending, drops its `pending` records (the map has them), reports `durable() == false`, and
@@ -1021,7 +1021,7 @@ fn append_raw(r: &mut Raw, nss: &[Arc<KvNs>]) -> Result<(), k10_kvlog::store::Er
 /// Writes every namespace's live entries as the new state of the store; each namespace's pending records leave
 /// with the snapshot that covers them (both taken under its lock).
 fn checkpoint(r: &mut Raw, nss: &[Arc<KvNs>]) -> Result<(), k10_kvlog::store::Error> {
-    r.log.checkpoint_begin()?;
+    r.log.checkpoint_begin(&mut *r.disk)?;
     let res = (|| {
         for ns in nss {
             let buf = {

@@ -17,8 +17,9 @@
 //!   in an earlier life, or by a checkpoint that never completed, never carries a number in use.
 //! * **Checkpoints** (compaction, and the recovery after a failed write) write the whole live state as a new chain
 //!   of free segments, flush, then switch the superblock's tail to it; until that switch the old chain is the
-//!   store. A third of the log may hold live data ([`Store::max_live`]), which keeps room for appends between
-//!   checkpoints and for the checkpoint itself.
+//!   store. A third of the segments may hold live data, less what the largest record may leave unused in each
+//!   ([`Store::max_live`], about a quarter of the log); the rest keeps room for appends between checkpoints and for
+//!   the checkpoint itself. Appends leave that room free whatever the caller does ([`Error::Full`]).
 
 use alloc::collections::VecDeque;
 use alloc::vec;
@@ -94,8 +95,17 @@ const SEAL_VALUE: usize = 12;
 const SEAL_LEN: u64 = (HDR + BODY_MIN + SEAL_VALUE) as u64;
 const SEGMENT_VALUE: usize = 16 + 8 + 4;
 const SEGMENT_LEN: u64 = (HDR + BODY_MIN + SEGMENT_VALUE) as u64;
-/// Record bytes a segment holds at least (each record leaves room for a SEAL and a PAD behind it).
-pub const PAYLOAD: u64 = SEG_BYTES - SEGMENT_LEN - SEAL_LEN - 2 * UNIT;
+/// The longest namespace name.
+pub const MAX_NS: usize = 255;
+/// Record bytes (NS records included) a segment holds at least: each record leaves room for a SEAL and a PAD behind
+/// it, the NS record of the namespace it continues is repeated, and the next record (the largest, with its NS
+/// record) may not fit.
+pub const PAYLOAD: u64 = SEG_BYTES
+    - SEGMENT_LEN
+    - SEAL_LEN
+    - 2 * UNIT
+    - 2 * record::size(MAX_NS, 0) as u64
+    - record::size(record::MAX_KEY, record::MAX_VALUE) as u64;
 /// Checkpoints write in runs of this size.
 const RUN_MAX: usize = 1 << 20;
 /// Replay reads segments in windows of this size.
@@ -141,7 +151,7 @@ pub fn read_super(d: &mut dyn Disk) -> Result<Super, Error> {
     }
     let mut b = vec![0u8; 2 * UNIT as usize];
     d.read(0, &mut b)?;
-    layout::pick(&b[..SUPER_LEN], &b[UNIT as usize..UNIT as usize + SUPER_LEN]).map_err(|e| match e {
+    layout::pick(&b[..UNIT as usize], &b[UNIT as usize..]).map_err(|e| match e {
         // Blank only if the whole 8 KiB are (an ext4 superblock sits at 1 KiB).
         layout::Decode::Blank if b.iter().all(|&x| x == 0) => Error::Blank,
         layout::Decode::Foreign | layout::Decode::Blank => Error::Foreign,
@@ -258,6 +268,8 @@ impl Writes {
 struct Saved {
     chain: VecDeque<(u32, u64)>,
     head: Head,
+    /// A superblock naming the new chain was written, with an unknown outcome.
+    switch_tried: bool,
 }
 
 pub struct Store {
@@ -450,7 +462,7 @@ impl Store {
                 (seal, stop.end.index, s)
             }
             _ => {
-                let (j, s) = self.alloc()?;
+                let (j, s) = self.alloc(0)?;
                 self.chain.push_back((j, s));
                 (stop.end, j, s)
             }
@@ -512,7 +524,8 @@ impl Store {
     }
 
     /// Whether the next batch, of `pending` bytes, should be a checkpoint instead: to compact (the log is over
-    /// twice the live data and over `compact_min`), or to keep room for a checkpoint after it.
+    /// twice the live data and over `compact_min`), or to keep room for a checkpoint after it (appends that would
+    /// not fail with [`Error::Full`]).
     pub fn wants_checkpoint(&self, live: u64, pending: u64, compact_min: u64) -> bool {
         let log = self.log_bytes() + pending;
         (log > compact_min && log > 2 * live)
@@ -530,8 +543,11 @@ impl Store {
         self.run_open = false;
     }
 
-    /// A free segment and a fresh sequence number for it.
-    fn alloc(&mut self) -> Result<(u32, u64), Error> {
+    /// A free segment and a fresh sequence number for it, leaving `keep` free.
+    fn alloc(&mut self, keep: u32) -> Result<(u32, u64), Error> {
+        if self.free_segments() <= keep {
+            return Err(Error::Full);
+        }
         let n = self.sb.segments;
         let j = (0..n).map(|k| (self.cursor + k) % n).find(|&j| !self.used.get(j)).ok_or(Error::Full)?;
         self.used.set(j, true);
@@ -572,9 +588,11 @@ impl Store {
         self.emit(record::SEGMENT, &[], &v);
     }
 
-    /// Seals the head segment and continues in a fresh one.
+    /// Seals the head segment and continues in a fresh one. Appends leave room for the SEAL of the next open and a
+    /// checkpoint after it.
     fn next_segment(&mut self) -> Result<(), Error> {
-        let (j, s) = self.alloc()?;
+        let keep = if self.checkpoint.is_some() { 0 } else { self.max_live_segments() + 1 };
+        let (j, s) = self.alloc(keep)?;
         self.emit(record::SEAL, &[], &seal_value(j, s));
         let run = self.run();
         run.resize(run.len().div_ceil(UNIT as usize) * UNIT as usize, 0);
@@ -611,13 +629,16 @@ impl Store {
         if self.degraded && self.checkpoint.is_none() {
             return Err(Error::Degraded);
         }
-        if ns.len() > u16::MAX as usize {
+        if ns.len() > MAX_NS {
             return Err(Error::TooLarge);
         }
         let mut at = 0;
         while at < records.len() {
-            let len = records[at..].first_chunk::<HDR>().and_then(record::header).map(|(l, _)| l);
-            let rec = len.and_then(|l| records.get(at..at + HDR + l)).ok_or(Error::Corrupt("records to append"))?;
+            // Only whole PUT and DEL records: replay would stop at anything else, for every namespace.
+            let rec = match record::next(&records[at..], 0) {
+                Next::Rec(r, n) if matches!(r.op, record::PUT | record::DEL) => &records[at..at + n],
+                _ => return Err(Error::Corrupt("records to append")),
+            };
             self.reserve(ns, rec.len() as u64)?;
             let m = self.head.mask;
             let run = self.run();
@@ -661,11 +682,18 @@ impl Store {
         Writes { first, runs: self.runs.drain(..).map(|r| (r.offset, r.buf)).collect(), generation }
     }
 
+    /// The caller wrote and flushed `w.first` (the runs may still fail: the superblock is on disk regardless).
+    pub fn first_done(&mut self, w: &Writes) {
+        if let Some((g, next_seq)) = w.generation {
+            if g > self.written {
+                self.superblock_written(g, next_seq);
+            }
+        }
+    }
+
     /// The caller wrote and flushed `w`.
     pub fn writes_done(&mut self, w: &Writes) {
-        if let Some((g, next_seq)) = w.generation {
-            self.superblock_written(g, next_seq);
-        }
+        self.first_done(w);
     }
 
     fn superblock_written(&mut self, g: u64, next_seq: u64) {
@@ -701,6 +729,7 @@ impl Store {
             if let Some((off, unit)) = &w.first {
                 d.write(*off, unit)?;
                 d.flush()?;
+                self.first_done(&w);
             }
             for (off, buf) in &w.runs {
                 d.write(*off, buf)?;
@@ -736,14 +765,18 @@ impl Store {
 
     /// Starts a checkpoint: what is pushed until [`Store::checkpoint_end`] becomes the whole state of the store.
     /// The caller pushes every namespace's live records (and nothing of the batch it replaces).
-    pub fn checkpoint_begin(&mut self) -> Result<(), Error> {
+    pub fn checkpoint_begin(&mut self, d: &mut dyn Disk) -> Result<(), Error> {
         debug_assert!(self.checkpoint.is_none());
         self.runs.clear();
         self.run_open = false;
-        let (j, s) = self.alloc()?;
+        if !self.limbo.is_empty() {
+            // A superblock written whole names the old chain again: an abandoned checkpoint's segments are free.
+            self.store_super(d, self.sb)?;
+        }
+        let (j, s) = self.alloc(0)?;
         let head = core::mem::replace(&mut self.head, Head::new(&self.sb.id, j, s));
         let chain = core::mem::replace(&mut self.chain, VecDeque::from([(j, s)]));
-        self.checkpoint = Some(Saved { chain, head });
+        self.checkpoint = Some(Saved { chain, head, switch_tried: false });
         self.start_segment();
         Ok(())
     }
@@ -775,8 +808,9 @@ impl Store {
         d.flush()?;
         let mut sb = self.sb;
         (sb.tail_index, sb.tail_seq) = self.chain[0];
-        let old = self.checkpoint.take().expect("checkpoint_end without checkpoint_begin");
+        let mut old = self.checkpoint.take().expect("checkpoint_end without checkpoint_begin");
         if let Err(e) = self.store_super(d, sb) {
+            old.switch_tried = true;
             self.checkpoint = Some(old);
             return Err(e);
         }
@@ -795,8 +829,14 @@ impl Store {
         self.run_open = false;
         let new = core::mem::replace(&mut self.chain, old.chain);
         self.head = old.head;
-        // A superblock write that failed may still have reached the disk naming the new chain.
-        self.limbo.extend(new.iter().map(|&(i, _)| i));
+        for &(i, _) in &new {
+            if old.switch_tried {
+                // A superblock write that failed may still have reached the disk naming the new chain.
+                self.limbo.push(i);
+            } else {
+                self.used.set(i, false);
+            }
+        }
         self.degraded = true;
     }
 

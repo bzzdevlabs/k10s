@@ -66,6 +66,8 @@ struct CrashDisk {
     dead: bool,
     /// Writes left before one fails with an I/O error (the disk stays up).
     fail_in: Option<u64>,
+    /// The next superblock write fails (the disk stays up).
+    fail_super: bool,
     writes: u64,
     flushes: u64,
 }
@@ -75,7 +77,7 @@ impl CrashDisk {
         CrashDisk::from(Image { size, ..Image::default() })
     }
     fn from(image: Image) -> CrashDisk {
-        CrashDisk { image, cache: Vec::new(), budget: None, dead: false, fail_in: None, writes: 0, flushes: 0 }
+        CrashDisk { image, cache: Vec::new(), budget: None, dead: false, fail_in: None, fail_super: false, writes: 0, flushes: 0 }
     }
     fn tick(&mut self) -> Result<(), IoError> {
         if self.dead {
@@ -90,16 +92,11 @@ impl CrashDisk {
         }
         Ok(())
     }
-    /// The disk after a power cut now: each unflushed sector landed or not.
+    /// The disk after a power cut now: each unflushed sector landed or not, in any order (a sector written twice
+    /// holds the old data or either write).
     fn cut(&self, rng: &mut Rng) -> Image {
         let mut img = self.image.clone();
-        let mut order: Vec<usize> = (0..self.cache.len()).collect();
-        // The device may apply cached writes in any order.
-        for i in (1..order.len()).rev() {
-            order.swap(i, rng.below(i as u64 + 1) as usize);
-        }
-        for &w in &order {
-            let (off, data) = &self.cache[w];
+        for (off, data) in &self.cache {
             for (k, s) in data.chunks(SECTOR as usize).enumerate() {
                 if rng.chance(50) {
                     img.put(off + k as u64 * SECTOR, s);
@@ -139,11 +136,11 @@ impl Disk for CrashDisk {
             }
             *n -= 1;
         }
-        self.writes += 1;
-        // A cached write never overlaps another unflushed one (the store never rewrites before a flush).
-        for (off, data) in &self.cache {
-            assert!(offset >= off + data.len() as u64 || offset + buf.len() as u64 <= *off, "overlapping unflushed writes at {offset}");
+        if self.fail_super && offset < 2 * UNIT {
+            self.fail_super = false;
+            return Err(IoError);
         }
+        self.writes += 1;
         self.cache.push((offset, buf.to_vec()));
         Ok(())
     }
@@ -286,7 +283,7 @@ fn life(d: &mut CrashDisk, st: &mut Store, model: &mut BTreeMap<Vec<u8>, Ns>, rn
         let live = live_bytes(model);
         assert!(live <= st.max_live(), "test workload exceeds the store: {live} > {}", st.max_live());
         if st.degraded() || st.wants_checkpoint(live, pending, 64 << 10) || rng.chance(3) {
-            st.checkpoint_begin()?;
+            st.checkpoint_begin(d)?;
             let mut r = Ok(());
             for (name, ns) in model.iter() {
                 let mut recs = Vec::new();
@@ -476,4 +473,102 @@ fn records_too_large_and_full_store() {
     };
     assert_eq!(err, Error::Full);
     assert_eq!(st.max_live(), PAYLOAD);
+}
+
+fn big_record(i: u32) -> Vec<u8> {
+    let mut r = Vec::new();
+    record::encode(&mut r, PUT, format!("k{i:03}").as_bytes(), &vec![i as u8; record::MAX_VALUE]);
+    r
+}
+
+/// A checkpoint of `n` of the largest records (namespace `a`).
+fn checkpoint_big(st: &mut Store, d: &mut CrashDisk, n: u32) -> Result<(), Error> {
+    st.checkpoint_begin(d)?;
+    let r = (0..n).try_for_each(|i| st.checkpoint_push(d, b"a", &big_record(i))).and_then(|()| st.checkpoint_end(d));
+    if r.is_err() {
+        st.checkpoint_abort();
+    }
+    r
+}
+
+#[test]
+fn largest_records_fill_max_live_and_aborted_checkpoints_free_their_segments() {
+    let mut d = CrashDisk::new(LOG_OFFSET + 11 * SEG_BYTES);
+    let mut st = Store::format(&mut d, [8; 16]).unwrap();
+    let rec = big_record(0).len() as u64;
+    let n = ((st.max_live() - record::size(1, 0) as u64) / rec) as u32;
+    // Checkpoints at the limit, again and again (each frees the chain before it), in the segments it counts on.
+    for _ in 0..4 {
+        checkpoint_big(&mut st, &mut d, n).unwrap();
+        assert!(st.chain.len() as u32 <= st.max_live_segments());
+    }
+    let free = st.free_segments();
+    // Failing before the switch: the new chain's segments are free again at once.
+    for k in [0, 2, 5] {
+        d.fail_in = Some(k);
+        assert_eq!(checkpoint_big(&mut st, &mut d, n), Err(Error::Io), "failing write {k}");
+        assert_eq!(st.free_segments(), free);
+    }
+    checkpoint_big(&mut st, &mut d, n).unwrap();
+    // Failing at the switch: its segments wait for the next superblock, which the next checkpoint writes first.
+    for _ in 0..4 {
+        d.fail_super = true;
+        assert_eq!(checkpoint_big(&mut st, &mut d, n), Err(Error::Io));
+        assert!(st.free_segments() < free);
+        assert!(st.degraded());
+    }
+    checkpoint_big(&mut st, &mut d, n).unwrap();
+    assert!(!st.degraded());
+    assert_eq!(st.free_segments(), free);
+    let (_, got) = open_into(&mut d).unwrap();
+    assert_eq!(got[&b"a"[..]].len(), n as usize);
+}
+
+#[test]
+fn a_full_store_reopens_and_compacts() {
+    let mut d = CrashDisk::new(MIN_SIZE);
+    let mut st = Store::format(&mut d, [9; 16]).unwrap();
+    let r = big_record(1);
+    let err = loop {
+        if let Err(e) = st.push(b"a", &r) {
+            break e;
+        }
+        st.commit(&mut d).unwrap();
+    };
+    assert_eq!(err, Error::Full);
+    // The SEAL of the next open has its segment, and the checkpoint after it its own.
+    let (mut st, got) = open_into(&mut d).unwrap();
+    assert_eq!(got[&b"a"[..]].len(), 1);
+    assert!(st.wants_checkpoint(r.len() as u64, 0, u64::MAX));
+    st.checkpoint_begin(&mut d).unwrap();
+    st.checkpoint_push(&mut d, b"a", &r).unwrap();
+    st.checkpoint_end(&mut d).unwrap();
+    st.push(b"a", &big_record(2)).unwrap();
+    st.commit(&mut d).unwrap();
+    let (_, got) = open_into(&mut d).unwrap();
+    assert_eq!(got[&b"a"[..]].len(), 2);
+}
+
+#[test]
+fn a_reservation_written_counts_even_if_the_batch_fails() {
+    let mut d = CrashDisk::new(MIN_SIZE);
+    let mut st = Store::format(&mut d, [10; 16]).unwrap();
+    let g = st.written;
+    st.super_due = true;
+    let mut r = Vec::new();
+    record::encode(&mut r, PUT, b"k", b"v");
+    st.push(b"a", &r).unwrap();
+    // The superblock, then the records' write fails.
+    d.fail_in = Some(1);
+    assert_eq!(st.commit(&mut d), Err(Error::Io));
+    assert_eq!(st.written, g + 1);
+    assert_eq!(read_super(&mut d).unwrap().generation, g + 1);
+    // Only PUT and DEL records, whole and checksummed, are appended.
+    let mut st = Store::format(&mut d, [11; 16]).unwrap();
+    let mut bad = r.clone();
+    bad[HDR] = record::SEAL;
+    assert_eq!(st.push(b"a", &bad), Err(Error::Corrupt("records to append")));
+    let mut bad = r.clone();
+    *bad.last_mut().unwrap() ^= 1;
+    assert_eq!(st.push(b"a", &bad), Err(Error::Corrupt("records to append")));
 }

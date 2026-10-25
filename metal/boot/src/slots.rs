@@ -86,7 +86,7 @@ pub fn open(esp: Handle) -> Option<Data> {
         let Some(e) = gpt::entries(&header, &array).ok().and_then(|v| v.into_iter().find(|e| e.is_data())) else { continue };
         let Ok(head) = read(bio, e.first_lba, 2 * layout::UNIT as usize) else { continue };
         let unit = layout::UNIT as usize;
-        let sb = layout::pick(&head[..layout::SUPER_LEN], &head[unit..unit + layout::SUPER_LEN]).ok();
+        let sb = layout::pick(&head[..unit], &head[unit..2 * unit]).ok();
         let controller = efi::handle_on_path(&efi::PCI_IO, &path).and_then(|p| {
             // SAFETY: the handle has the PCI I/O protocol.
             let pci = unsafe { efi::protocol::<efi::PciIo>(p, &efi::PCI_IO)? };

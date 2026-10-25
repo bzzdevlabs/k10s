@@ -795,7 +795,10 @@ impl Cluster {
     // --- desired state ------------------------------------------------------------------------------------------
 
     fn on_desired(&mut self, net: &mut Net, d: DesiredState) {
-        if self.store.current.as_ref().is_some_and(|c| c.key() >= (d.version, d.hash)) {
+        // The desired state held already, unless it came from K10S-DATA without the kernel image it rolls out here
+        // (the store keeps service code, not images): fetched again for that.
+        let image_missing = |c: &Stored| crate::osupdate::wanted(&c.manifest.os).is_some_and(|h| !self.store.blobs.contains_key(&h));
+        if self.store.current.as_ref().is_some_and(|c| c.key() > (d.version, d.hash) || (c.key() == (d.version, d.hash) && !image_missing(c))) {
             return;
         }
         if self.fetch.as_ref().is_some_and(|f| (f.want.version, f.want.hash) >= (d.version, d.hash)) {

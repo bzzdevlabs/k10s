@@ -1448,6 +1448,11 @@ pub fn kv_log_on(cap: u64) -> u64 {
     live
 }
 
+/// Storage: the most live data KV may hold (the store's room less the node's own data).
+pub fn kv_log_cap(cap: u64) {
+    NODE.lock().kv_log.cap = cap;
+}
+
 /// Storage: when the oldest pending record was made (0: none), the pending bytes and the live data.
 pub fn kv_log_state() -> (u64, usize, u64) {
     let node = NODE.lock();
