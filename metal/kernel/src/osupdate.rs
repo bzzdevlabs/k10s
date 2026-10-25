@@ -203,13 +203,16 @@ pub fn tick(plan: &OsPlan, members: &[Member], me: NodeId, ready: bool, expects_
         if now - since < a.grace_ns {
             return None;
         }
+        // The counter first: committed with the trial's count left, the kernel would be refused as never healthy (a
+        // power cut between the two only counts the trial's boots again).
+        if let Err(e) = crate::efi::clear_boot_counter() {
+            kprintln!("os: k10boot's boot counter is not cleared ({e}): slot {} not committed", letter(slot));
+            return None;
+        }
         match crate::storage::set_boot(Some(slot), None) {
             Ok(()) => {
                 a.committed = true;
                 kprintln!("os: slot {} ({}) committed", letter(slot), to_hex(&a.image.sha256[..4]));
-                if let Err(e) = crate::efi::clear_boot_counter() {
-                    kprintln!("os: k10boot's boot counter is not cleared: {e}");
-                }
                 drop(g);
                 return info();
             }

@@ -1467,8 +1467,10 @@ def native_update_test(a, work):
         if m.group(1) == "/k10s/metal.elf":
             g.cut.wait(g.timeout)
             g.kill()
-            g = boot(cut=r"k10boot: kernel native v2 from slot A of K10S-DATA \(trial\)")
-            g.cut.wait(g.timeout)
+            g = boot()
+            kernel(g, "v2", r"slot A of K10S-DATA \(trial\)")
+        # k10boot logs this once its boot counter is written.
+        g.wait_for(r"k10boot: native boot 1 of 2 before Tier 1 is pinned", "the first trial boot counted")
         g.kill()
         g = boot(cut=r"os: slot A \([0-9a-f]+\) committed")
         kernel(g, "v2", r"slot A of K10S-DATA \(trial\)")

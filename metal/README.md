@@ -543,8 +543,8 @@ reports it in its gossip record (platform `x86_64-native`, updatable when it has
 image the manifest's OS plan gives its platform, and follows `k10_mesh::rollout` like a Tier 1 node: when its wave
 comes it verifies the image against the keys k10boot trusted, writes it into the slot it does not run (data
 flushed, then the superblock arms the trial), leaves the cluster and reboots. k10boot boots the trial while the boot
-counter allows (two boots), else the committed slot. The trial commits (superblock, then the boot counter cleared)
-once the node holds and applied the cluster's desired state and, if it has peers, sees one, for
+counter allows (two boots), else the committed slot. The trial commits (the boot counter cleared, then the
+superblock) once the node holds and applied the cluster's desired state and, if it has peers, sees one, for
 `k10.os_commit_grace` seconds; it is abandoned after `k10.os_trial` seconds, and when k10boot fell back. An abandoned
 or refused image is recorded as failed, which halts the rollout cluster-wide. Power cuts at any step leave the
 committed kernel booting or the armed trial being counted (`os/test.py update-native`). Updates need cluster mode
