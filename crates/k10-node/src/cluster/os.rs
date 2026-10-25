@@ -256,6 +256,11 @@ pub fn spawn(mut link: OsLink, mut status: OsStatus, cs: Option<Arc<ClusterShare
             }
             if let Step::Update { image, .. } = step {
                 if asked_update != Some(image) && cs.store.blob_on_disk(&image) {
+                    // Init reads DATA/blobs/IMAGE: a raw store's copy goes there first.
+                    if let Err(e) = cs.store.export_blob(&image) {
+                        eprintln!("k10s: os: cannot hand the image to init: {e}");
+                        continue;
+                    }
                     if link.send(&format!("update {}\n", to_hex(&image))).is_err() {
                         return;
                     }

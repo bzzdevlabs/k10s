@@ -1,0 +1,8 @@
+[package]
+name = "k10-kvlog"
+description = "The k10s data format: KV record codec, GPT, the K10S-DATA store (segmented KV log, kernel slots); no_std"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

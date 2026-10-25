@@ -31,10 +31,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-CRATES=(-p k10-nospec -p k10-ir -p k10-host -p k10-mesh -p k10-lang -p k10-jit -p k10-node -p k10s)
+CRATES=(-p k10-nospec -p k10-ir -p k10-host -p k10-mesh -p k10-kvlog -p k10-lang -p k10-jit -p k10-node -p k10s)
 # The 32-bit targets: no JIT; under qemu-user the crates whose tests run in-process.
-I32_CRATES=(-p k10-nospec -p k10-ir -p k10-host -p k10-mesh -p k10-lang -p k10-node -p k10s)
-EMU_CRATES=(-p k10-nospec -p k10-ir -p k10-host -p k10-mesh -p k10-lang -p k10-node)
+I32_CRATES=(-p k10-nospec -p k10-ir -p k10-host -p k10-mesh -p k10-kvlog -p k10-lang -p k10-node -p k10s)
+EMU_CRATES=(-p k10-nospec -p k10-ir -p k10-host -p k10-mesh -p k10-kvlog -p k10-lang -p k10-node)
 # Campaign tests, skipped elsewhere (`--skip` matches test names in every test binary).
 SKIP=(--skip chaos_short --skip soak_short)
 read -r -a EXTRA <<<"${CARGO_TEST_ARGS:-}"

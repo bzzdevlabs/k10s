@@ -1,18 +1,20 @@
-//! Cluster-mode persistence: the content-addressed blob store (`DATA/blobs/<sha256 hex>`), the desired manifest this
-//! node holds (`DATA/manifest.k10m`, canonical encoding), the node identity (`DATA/node-id`) and the members last
-//! seen alive (`DATA/peers`).
+//! Cluster-mode persistence ([`Data`]: the data directory, or the files of a raw store): the content-addressed
+//! blob store (`blobs/<sha256 hex>`), the desired manifest this node holds (`manifest.k10m`, canonical encoding),
+//! the node identity (`node-id`) and the members last seen alive (`peers`).
 //!
 //! Blobs live in memory (they are small: compiled TIR modules) and on disk; a blob file is verified against its name
 //! when loaded, so a torn write is detected and the blob is fetched again from a peer. The manifest is written with
-//! tmp + fsync + rename; the node id once.
+//! tmp + fsync + rename (in a raw store: one file write, flushed); the node id once.
 
 use k10_mesh::sha256::{from_hex, sha256, to_hex};
 use k10_mesh::{Bundle, Manifest, NodeId};
 use std::collections::{HashMap, HashSet};
-use std::io::{self, Write};
+use std::io;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
+
+use crate::data::Data;
 
 /// A complete desired state held by this node: the manifest, its canonical bytes and their hash (every blob it
 /// references is in the [`Store`]).
@@ -49,7 +51,7 @@ impl Stored {
 type BlobEntry = (Arc<Vec<u8>>, u64);
 
 pub struct Store {
-    dir: Option<PathBuf>,
+    data: Option<Data>,
     blobs: RwLock<HashMap<[u8; 32], BlobEntry>>,
     current: Mutex<Option<Arc<Stored>>>,
     /// Blobs of the manifest being fetched: kept by [`Store::gc`] (lock order: `blobs`, then `pinned`).
@@ -57,37 +59,38 @@ pub struct Store {
 }
 
 impl Store {
-    /// Opens (creates) the store under `data` (memory only without a data directory) and loads the blobs and the
-    /// stored manifest. A manifest whose blobs are not all present is ignored.
-    pub fn open(data: Option<&Path>) -> io::Result<Store> {
+    /// Opens (creates) the store in `data` (memory only without) and loads the blobs and the stored manifest. A
+    /// manifest whose blobs are not all present is ignored.
+    pub fn open(data: Option<&Data>) -> io::Result<Store> {
         let st = Store {
-            dir: data.map(|d| d.to_path_buf()),
+            data: data.cloned(),
             blobs: RwLock::new(HashMap::new()),
             current: Mutex::new(None),
             pinned: Mutex::new(HashSet::new()),
         };
-        let Some(dir) = &st.dir else { return Ok(st) };
-        let bdir = dir.join("blobs");
-        std::fs::create_dir_all(&bdir)?;
-        remove_stale_tmp(dir);
-        remove_stale_tmp(&bdir);
-        for e in std::fs::read_dir(&bdir)? {
-            let e = e?;
-            let name = e.file_name();
-            let Some(want) = name.to_str().and_then(from_hex) else {
+        let Some(data) = &st.data else { return Ok(st) };
+        if let Some(dir) = data.dir() {
+            let bdir = dir.join("blobs");
+            std::fs::create_dir_all(&bdir)?;
+            remove_stale_tmp(dir);
+            remove_stale_tmp(&bdir);
+        }
+        for name in data.list("blobs")? {
+            let Some(want) = from_hex(&name) else {
                 continue; // tmp files, foreign files
             };
-            match std::fs::read(e.path()) {
-                Ok(b) if sha256(&b) == want => {
+            let path = format!("blobs/{name}");
+            match data.read(&path) {
+                Ok(Some(b)) if sha256(&b) == want => {
                     st.blobs.write().unwrap().insert(want, (Arc::new(b), crate::sys::mono_ns()));
                 }
                 _ => {
-                    eprintln!("k10s: cluster: dropping corrupt blob {}", e.path().display());
-                    let _ = std::fs::remove_file(e.path());
+                    eprintln!("k10s: cluster: dropping corrupt blob {path}");
+                    let _ = data.remove(&path);
                 }
             }
         }
-        if let Ok(bytes) = std::fs::read(dir.join("manifest.k10m")) {
+        if let Ok(Some(bytes)) = data.read("manifest.k10m") {
             match Manifest::decode(&bytes) {
                 Ok(m) => {
                     let s = Stored::new(m);
@@ -129,9 +132,14 @@ impl Store {
         self.pinned.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
-    /// The blob is in `DATA/blobs` (persisted with the desired state that references it).
+    /// The blob is persisted (with the desired state that references it).
     pub fn blob_on_disk(&self, h: &[u8; 32]) -> bool {
-        self.dir.as_ref().is_some_and(|d| d.join("blobs").join(to_hex(h)).is_file())
+        self.data.as_ref().is_some_and(|d| d.exists(&format!("blobs/{}", to_hex(h))))
+    }
+
+    /// A path where another process (init's update agent) can read a persisted blob.
+    pub fn export_blob(&self, h: &[u8; 32]) -> io::Result<std::path::PathBuf> {
+        self.data.as_ref().ok_or_else(|| io::Error::other("no data store"))?.export(&format!("blobs/{}", to_hex(h)))
     }
 
     pub fn blob_count(&self) -> usize {
@@ -166,20 +174,18 @@ impl Store {
 
     /// Writes the blobs of `s` that are not on disk yet, then the manifest (tmp + rename; `sync` adds fsyncs).
     pub fn persist(&self, s: &Stored, sync: bool) -> io::Result<()> {
-        let Some(dir) = &self.dir else { return Ok(()) };
-        let bdir = dir.join("blobs");
+        let Some(data) = &self.data else { return Ok(()) };
         for h in s.code_hashes() {
-            let path = bdir.join(to_hex(&h));
-            if path.exists() {
+            let name = format!("blobs/{}", to_hex(&h));
+            if data.exists(&name) {
                 continue;
             }
             let b = self.blob(&h).ok_or_else(|| io::Error::other("blob missing from the store"))?;
-            write_atomic(&path, &b, sync)?;
+            data.write(&name, &b, sync)?;
         }
-        write_atomic(&dir.join("manifest.k10m"), &s.bytes, sync)?;
+        data.write("manifest.k10m", &s.bytes, sync)?;
         if sync {
-            std::fs::File::open(dir)?.sync_all()?;
-            std::fs::File::open(&bdir)?.sync_all()?;
+            data.sync()?;
         }
         Ok(())
     }
@@ -203,44 +209,44 @@ impl Store {
             }
             d
         };
-        if let Some(dir) = &self.dir {
+        if let Some(data) = &self.data {
             for h in dropped {
-                let _ = std::fs::remove_file(dir.join("blobs").join(to_hex(&h)));
+                let _ = data.remove(&format!("blobs/{}", to_hex(&h)));
             }
         }
     }
 
-    /// Gossip addresses of members last seen alive (`DATA/peers`), if written under one of `stamps` (the key ids).
+    /// Gossip addresses of members last seen alive (`peers`), if written under one of `stamps` (the key ids).
     pub fn load_peers(&self, stamps: &[String]) -> Vec<SocketAddr> {
-        let Some(dir) = &self.dir else { return Vec::new() };
-        let Ok(s) = std::fs::read_to_string(dir.join("peers")) else { return Vec::new() };
+        let Some(data) = &self.data else { return Vec::new() };
+        let Some(s) = data.read("peers").ok().flatten().and_then(|b| String::from_utf8(b).ok()) else { return Vec::new() };
         let mut lines = s.lines();
         if !lines.next().and_then(|l| l.strip_prefix("k10s-peers ")).is_some_and(|st| stamps.iter().any(|s| s == st)) {
-            eprintln!("k10s: cluster: ignoring {} (written for another cluster key)", dir.join("peers").display());
+            eprintln!("k10s: cluster: ignoring the remembered peers (written for another cluster key)");
             return Vec::new();
         }
         lines.filter_map(|l| l.trim().parse().ok()).take(MAX_PEERS).collect()
     }
 
-    /// Replaces `DATA/peers` (no fsync: a lost update only leaves a stale hint).
+    /// Replaces `peers` (no sync: a lost update only leaves a stale hint).
     pub fn save_peers(&self, stamp: &str, peers: &[SocketAddr]) -> io::Result<()> {
-        let Some(dir) = &self.dir else { return Ok(()) };
+        let Some(data) = &self.data else { return Ok(()) };
         let text: String = peers.iter().take(MAX_PEERS).map(|p| format!("{p}\n")).collect();
-        write_atomic(&dir.join("peers"), format!("k10s-peers {stamp}\n{text}").as_bytes(), false)
+        data.write("peers", format!("k10s-peers {stamp}\n{text}").as_bytes(), false)
     }
 
     /// This life's incarnation: above the wall clock and every incarnation persisted before (clock steps back).
     pub fn next_incarnation(&self, wall_ms: u64) -> io::Result<u64> {
-        let Some(dir) = &self.dir else { return Ok(wall_ms) };
-        let last = std::fs::read_to_string(dir.join("incarnation")).ok().and_then(|s| s.trim().parse::<u64>().ok());
+        let Some(data) = &self.data else { return Ok(wall_ms) };
+        let last = data.read("incarnation").ok().flatten().and_then(|b| String::from_utf8(b).ok()).and_then(|s| s.trim().parse::<u64>().ok());
         let inc = wall_ms.max(last.map_or(0, |l| l + 1));
         self.save_incarnation(inc)?;
         Ok(inc)
     }
 
     pub fn save_incarnation(&self, inc: u64) -> io::Result<()> {
-        let Some(dir) = &self.dir else { return Ok(()) };
-        write_atomic(&dir.join("incarnation"), format!("{inc}\n").as_bytes(), true)
+        let Some(data) = &self.data else { return Ok(()) };
+        data.write("incarnation", format!("{inc}\n").as_bytes(), true)
     }
 }
 
@@ -257,37 +263,26 @@ fn remove_stale_tmp(dir: &Path) {
 /// Members remembered in `DATA/peers`.
 pub const MAX_PEERS: usize = 16;
 
-fn write_atomic(path: &Path, bytes: &[u8], sync: bool) -> io::Result<()> {
-    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        if sync {
-            f.sync_all()?;
-        }
-    }
-    std::fs::rename(&tmp, path)
-}
-
-/// The node identity: read from `DATA/node-id`, or a new random id (persisted when there is a data directory).
-pub fn node_id(data: Option<&Path>) -> io::Result<NodeId> {
+/// The node identity: read from `node-id`, or a new random id (persisted when there is a data store).
+pub fn node_id(data: Option<&Data>) -> io::Result<NodeId> {
     let fresh = || loop {
         let v = crate::sys::getrandom_u64();
         if v != 0 {
             return NodeId(v);
         }
     };
-    let Some(dir) = data else { return Ok(fresh()) };
-    std::fs::create_dir_all(dir)?;
-    let path = dir.join("node-id");
-    if let Ok(s) = std::fs::read_to_string(&path) {
+    let Some(data) = data else { return Ok(fresh()) };
+    if let Some(dir) = data.dir() {
+        std::fs::create_dir_all(dir)?;
+    }
+    if let Some(s) = data.read("node-id")?.and_then(|b| String::from_utf8(b).ok()) {
         if let Ok(v) = u64::from_str_radix(s.trim(), 16) {
             return Ok(NodeId(v));
         }
-        eprintln!("k10s: cluster: ignoring invalid {}", path.display());
+        eprintln!("k10s: cluster: ignoring an invalid node-id");
     }
     let id = fresh();
-    write_atomic(&path, format!("{id}\n").as_bytes(), true)?;
+    data.write("node-id", format!("{id}\n").as_bytes(), true)?;
     Ok(id)
 }
 
@@ -314,7 +309,7 @@ mod tests {
     fn persist_reload_gc_and_ids() {
         let dir = std::env::temp_dir().join(format!("k10-store-{}-{}", std::process::id(), crate::sys::mono_ns()));
         let (a, b) = (b"module a".to_vec(), b"module b".to_vec());
-        let st = Store::open(Some(&dir)).unwrap();
+        let st = Store::open(Some(&Data::Dir(dir.clone()))).unwrap();
         assert!(st.current().is_none());
         st.insert_blob(sha256(&a), a.clone());
         st.insert_blob(sha256(&b), b.clone());
@@ -323,12 +318,12 @@ mod tests {
         assert!(st.set_current_if_newer(s1.clone()));
         assert!(!st.set_current_if_newer(s1.clone()), "same key is not newer");
         // reload
-        let st2 = Store::open(Some(&dir)).unwrap();
+        let st2 = Store::open(Some(&Data::Dir(dir.clone()))).unwrap();
         assert_eq!(st2.current().unwrap().hash, s1.hash);
         assert_eq!(st2.bundle(&s1).unwrap().blobs.len(), 2);
         // a corrupt blob is dropped, and the manifest is then ignored
         std::fs::write(dir.join("blobs").join(to_hex(&sha256(&a))), b"garbage").unwrap();
-        let st3 = Store::open(Some(&dir)).unwrap();
+        let st3 = Store::open(Some(&Data::Dir(dir.clone()))).unwrap();
         assert!(!st3.has_blob(&sha256(&a)));
         assert!(st3.current().is_none());
         // gc keeps what the current manifest references, and young blobs
@@ -343,15 +338,15 @@ mod tests {
         st.gc(std::time::Duration::ZERO);
         assert!(!st.has_blob(&sha256(&a)) && st.has_blob(&sha256(&b)));
         // node ids persist
-        let id = node_id(Some(&dir)).unwrap();
-        assert_eq!(node_id(Some(&dir)).unwrap(), id);
+        let id = node_id(Some(&Data::Dir(dir.clone()))).unwrap();
+        assert_eq!(node_id(Some(&Data::Dir(dir.clone()))).unwrap(), id);
         assert_ne!(node_id(None).unwrap(), node_id(None).unwrap());
         // remembered peers: bounded, survive a reopen, garbage lines skipped
         let (k1, k2) = (vec!["k1".to_string()], vec!["k2".to_string()]);
         assert!(st.load_peers(&k1).is_empty());
         let peers: Vec<SocketAddr> = (0..20).map(|i| format!("127.0.0.1:{}", 7000 + i).parse().unwrap()).collect();
         st.save_peers("k1", &peers).unwrap();
-        assert_eq!(Store::open(Some(&dir)).unwrap().load_peers(&k1), peers[..MAX_PEERS]);
+        assert_eq!(Store::open(Some(&Data::Dir(dir.clone()))).unwrap().load_peers(&k1), peers[..MAX_PEERS]);
         assert!(st.load_peers(&k2).is_empty(), "another cluster key: ignored");
         assert_eq!(st.load_peers(&["k2".to_string(), "k1".to_string()]).len(), MAX_PEERS, "written under the old key");
         std::fs::write(dir.join("peers"), "k10s-peers k1\ngarbage\n10.0.0.1:7946\n").unwrap();
@@ -365,7 +360,7 @@ mod tests {
         // stale temporary files are removed at open
         std::fs::write(dir.join("peers.tmp4242"), "x").unwrap();
         std::fs::write(dir.join("blobs").join("ab.tmp1"), "x").unwrap();
-        let _ = Store::open(Some(&dir)).unwrap();
+        let _ = Store::open(Some(&Data::Dir(dir.clone()))).unwrap();
         assert!(!dir.join("peers.tmp4242").exists() && !dir.join("blobs").join("ab.tmp1").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }

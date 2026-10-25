@@ -4,76 +4,58 @@
 //!   copy, or an insert plus appending the encoded record to an in-memory `pending` buffer). A namespace is one
 //!   object shared by every shard, so its operations are linearizable node-wide: `add` (`kv_add`) and `cas`
 //!   (`kv_cas`) are atomic read-modify-writes under that lock, logged as ordinary put/del records in lock order.
-//! * **Log**: `DATA/kv/<service>.log`, append-only records
-//!   `len:u32 | crc32:u32 | op:u8 (1 put, 2 del) | klen:u16 | key | value`, `len = 3 + klen + vlen`,
-//!   CRC over `op..value`. Replayed at start; a torn or corrupt tail is truncated at the last good record.
+//! * **Records**: `len:u32 | crc32:u32 | op:u8 (1 put, 2 del) | klen:u16 | key | value`, `len = 3 + klen + vlen`,
+//!   CRC over `op..value` (the codec of `k10-kvlog`, shared with the native kernel).
+//! * **Backends**: a data directory keeps one log per namespace, `DATA/kv/<service>.log`, replayed at start (a torn
+//!   or corrupt tail is truncated at the last good record). A raw store (`--store`: Tier 1's `K10S-DATA`
+//!   partition, which the native kernel reads too) keeps every namespace, and the node's files ([`KvNs::put_file`]),
+//!   in one segmented log (`k10_kvlog::store`): same records, per-namespace prefix guarantee after a power cut.
 //! * **Group commit**: `kv_put`/`kv_del` return as soon as the record is in `pending`. A single flusher thread wakes on
 //!   the first dirty namespace, waits `flush_interval` to batch, writes every namespace's pending bytes and
-//!   `fdatasync`s the files. **Durability window**: an acknowledged write can be lost if the process or machine dies
-//!   within `flush_interval` + write + fsync time (default 2 ms + a few ms) — the same contract as a database with
-//!   asynchronous commit. Shutdown flushes and syncs everything.
-//! * **Ordering**: the open log files live in one mutex (`StoreShared::logs`). A flush (flusher thread, `flush_now`,
-//!   shutdown) holds it from taking `pending` to the last fsync, so batches and compaction swaps hit the disk in the
-//!   order the writes were made, and a restart recovers a prefix of them.
-//! * **Rewrite** (compaction and recovery): the flush snapshots the map (under the lock, a memory copy), writes it to
-//!   `<service>.log.tmp`, fsyncs, renames it over the log and fsyncs the directory; the records the snapshot covers
-//!   then leave `pending`. Compaction runs when a log exceeds `2 × live size` (and `compact_min`); a failure before
-//!   the rename changes nothing and is retried once the log has grown by another `max(live size, compact_min)`.
+//!   syncs (`fdatasync` of the files, or one batch of the store). **Durability window**: an acknowledged write can
+//!   be lost if the process or machine dies within `flush_interval` + write + sync time (default 2 ms + a few ms) —
+//!   the same contract as a database with asynchronous commit. Shutdown flushes and syncs everything.
+//! * **Ordering**: a flush (flusher thread, `flush_now`, shutdown) holds the backend's lock from taking `pending` to
+//!   the last sync, so batches and compactions hit the disk in the order the writes were made, and a restart
+//!   recovers a prefix of them.
+//! * **Compaction**: a directory log is rewritten from a snapshot of its map (under the lock, a memory copy) into
+//!   `<service>.log.tmp`, fsynced, renamed over the log, the directory fsynced; the records the snapshot covers then
+//!   leave `pending`. It runs when a log exceeds `2 × live size` (and `compact_min`); a failure before the rename
+//!   changes nothing and is retried once the log has grown by another `max(live size, compact_min)`. A raw store
+//!   compacts the same way, all namespaces at once (a checkpoint), also when its free space runs low; it holds at
+//!   most a third of its log area as live data, past which writes are refused like quota overruns.
 //! * **Degraded log**: after a failed write, fsync or post-rename directory sync, the file can no longer be trusted
-//!   (the kernel may have dropped the pages) and the map is the only good copy. The namespace stops appending, drops
-//!   its `pending` records (the map has them), reports `durable() == false`, and the flusher retries a full rewrite
-//!   with exponential backoff until one succeeds. Each state change is logged once.
+//!   (the kernel may have dropped the pages) and the map is the only good copy. The namespace (every namespace, on a
+//!   raw store) stops appending, drops its `pending` records (the map has them), reports `durable() == false`, and
+//!   the flusher retries a full rewrite with exponential backoff until one succeeds. Each state change is logged
+//!   once.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufReader, Read, Write};
+use std::io::{self, BufReader, Read, Seek, Write};
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-pub use k10_host::{MAX_KEY, MAX_VALUE};
-const OP_PUT: u8 = 1;
-const OP_DEL: u8 = 2;
-const HDR: usize = 8;
+use k10_kvlog::store::{Disk, IoError, Store as RawLog};
+use k10_kvlog::{files, record};
 
-/// CRC-32 (IEEE, reflected), table-driven.
-pub fn crc32(data: &[u8]) -> u32 {
-    static TABLE: std::sync::OnceLock<[u32; 256]> = std::sync::OnceLock::new();
-    let t = TABLE.get_or_init(|| {
-        let mut t = [0u32; 256];
-        for (i, e) in t.iter_mut().enumerate() {
-            let mut c = i as u32;
-            for _ in 0..8 {
-                c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
-            }
-            *e = c;
-        }
-        t
-    });
-    let mut c = !0u32;
-    for &b in data {
-        c = t[((c ^ b as u32) & 0xFF) as usize] ^ (c >> 8);
-    }
-    !c
-}
+pub use k10_host::{MAX_KEY, MAX_VALUE};
+pub use k10_kvlog::crc32;
+const OP_PUT: u8 = record::PUT;
+const OP_DEL: u8 = record::DEL;
+const HDR: usize = record::HDR;
+const _: () = assert!(MAX_KEY == record::MAX_KEY && MAX_VALUE == record::MAX_VALUE);
 
 fn rec_size(klen: usize, vlen: usize) -> u64 {
-    (HDR + 3 + klen + vlen) as u64
+    record::size(klen, vlen) as u64
 }
 
 fn encode_rec(out: &mut Vec<u8>, op: u8, key: &[u8], val: &[u8]) {
-    let len = 3 + key.len() + val.len();
-    let start = out.len();
-    out.extend_from_slice(&(len as u32).to_le_bytes());
-    out.extend_from_slice(&[0; 4]);
-    out.push(op);
-    out.extend_from_slice(&(key.len() as u16).to_le_bytes());
-    out.extend_from_slice(key);
-    out.extend_from_slice(val);
-    let crc = crc32(&out[start + HDR..]);
-    out[start + 4..start + 8].copy_from_slice(&crc.to_le_bytes());
+    record::encode(out, op, key, val)
 }
 
 #[derive(Clone, Debug)]
@@ -103,15 +85,17 @@ struct Inner {
     map: HashMap<Box<[u8]>, Box<[u8]>>,
     /// Encoded size of the live entries (what a compacted log would weigh).
     live_bytes: u64,
-    /// Size of the log including `pending`.
+    /// Size of the log including `pending` (directory backend).
     log_bytes: u64,
     /// Records not yet written to the file.
     pending: Vec<u8>,
     /// No compaction is attempted below this log size (raised after a failure).
     compact_at: u64,
+    /// Bytes of the raw store's capacity this namespace holds.
+    reserved: u64,
 }
 
-/// Flush-side state of a namespace's log.
+/// Flush-side state of a namespace's log (directory backend).
 #[derive(Default)]
 struct Log {
     file: Option<File>,
@@ -129,7 +113,8 @@ const RETRY_MAX_NS: u64 = 5_000_000_000;
 pub enum KvError {
     /// `add` on a value that is not exactly 8 bytes (trap `Host(4)`).
     NotInt,
-    /// The write would push the namespace past its live-bytes quota (trap `Host(3)`).
+    /// The write would push the namespace past its live-bytes quota, or the raw store past its capacity (trap
+    /// `Host(3)`).
     Quota,
 }
 
@@ -143,13 +128,23 @@ struct Signal {
     cv: Condvar,
 }
 
+/// A raw store's room for live data, shared by its namespaces (each reserves it in chunks, so the shared counter is
+/// touched once per [`CAP_CHUNK`] of growth).
+struct Capacity {
+    used: AtomicU64,
+    max: u64,
+}
+
+const CAP_CHUNK: u64 = 64 << 10;
+
 /// One service's namespace.
 pub struct KvNs {
     name: String,
-    /// Records are logged (the store has a directory).
+    /// Records are logged (the store has a directory or a raw store).
     logged: bool,
     /// Per-service live-bytes quota (0 = unlimited); see [`KvConfig::max_bytes`].
     max_bytes: u64,
+    cap: Option<Arc<Capacity>>,
     inner: Mutex<Inner>,
     healthy: AtomicBool,
     signal: Arc<Signal>,
@@ -265,6 +260,9 @@ impl KvNs {
         if self.max_bytes != 0 && new_live > self.max_bytes {
             return false; // quota exceeded: nothing is mutated
         }
+        if self.cap.is_some() && !self.reserve(g, new_live) {
+            return false;
+        }
         if self.logged {
             encode_rec(&mut g.pending, OP_PUT, key, val);
             g.log_bytes += add;
@@ -278,6 +276,9 @@ impl KvNs {
                 g.map.insert(key.into(), val.into());
             }
         }
+        if add < old_contrib {
+            self.release(g);
+        }
         true
     }
 
@@ -289,7 +290,41 @@ impl KvNs {
             encode_rec(&mut g.pending, OP_DEL, key, &[]);
             g.log_bytes += rec_size(key.len(), 0);
         }
+        self.release(g);
         true
+    }
+
+    /// The store's NS record for this namespace.
+    fn overhead(&self) -> u64 {
+        rec_size(self.name.len(), 0)
+    }
+
+    /// Reserves room in the raw store for `live` bytes of this namespace.
+    fn reserve(&self, g: &mut Inner, live: u64) -> bool {
+        let Some(c) = &self.cap else { return true };
+        let need = live + self.overhead();
+        if need <= g.reserved {
+            return true;
+        }
+        let short = need - g.reserved;
+        for grab in [short.max(CAP_CHUNK), short] {
+            if c.used.fetch_add(grab, Ordering::AcqRel) + grab <= c.max {
+                g.reserved += grab;
+                return true;
+            }
+            c.used.fetch_sub(grab, Ordering::AcqRel);
+        }
+        false
+    }
+
+    /// Returns reserved room the namespace no longer needs.
+    fn release(&self, g: &mut Inner) {
+        let Some(c) = &self.cap else { return };
+        let keep = g.live_bytes + self.overhead() + CAP_CHUNK;
+        if g.reserved > keep + CAP_CHUNK {
+            c.used.fetch_sub(g.reserved - keep, Ordering::AcqRel);
+            g.reserved = keep;
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -313,15 +348,139 @@ impl KvNs {
             s.cv.notify_one();
         }
     }
+
+    /// File `name` (see `k10_kvlog::files`), whole and checksummed.
+    pub fn file(&self, name: &str) -> Option<Vec<u8>> {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        files::read(name.as_bytes(), &mut |k| g.map.get(k).map(|v| v.to_vec()))
+    }
+
+    /// Replaces file `name` by `data` (one write: a restart finds the old file or the new one). [`KvError::Quota`]
+    /// (nothing changed) when the store has no room for it.
+    pub fn put_file(&self, name: &str, data: &[u8]) -> Result<(), KvError> {
+        if !files::valid_name(name.as_bytes()) {
+            return Err(KvError::Quota);
+        }
+        {
+            let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let old = g.map.get(name.as_bytes()).and_then(|v| files::Header::decode(v));
+            let mut recs = Vec::new();
+            files::write(&mut recs, name.as_bytes(), old, data);
+            self.apply_file_records(&mut g, &recs)?;
+        }
+        if self.logged {
+            self.mark_dirty();
+        }
+        Ok(())
+    }
+
+    /// Removes file `name`; returns whether it existed.
+    pub fn remove_file(&self, name: &str) -> bool {
+        {
+            let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(old) = g.map.get(name.as_bytes()).and_then(|v| files::Header::decode(v)) else { return false };
+            let mut recs = Vec::new();
+            files::delete(&mut recs, name.as_bytes(), old);
+            let _ = self.apply_file_records(&mut g, &recs);
+        }
+        if self.logged {
+            self.mark_dirty();
+        }
+        true
+    }
+
+    /// Whether file `name` exists (its header; [`KvNs::file`] checks the content).
+    pub fn has_file(&self, name: &str) -> bool {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).map.contains_key(name.as_bytes())
+    }
+
+    /// Names of the files, sorted.
+    pub fn file_names(&self) -> Vec<String> {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut v: Vec<String> =
+            g.map.keys().filter(|k| files::is_header_key(k)).filter_map(|k| String::from_utf8(k.to_vec()).ok()).collect();
+        v.sort();
+        v
+    }
+
+    /// Applies a file write's records; undoes the puts already made if one is refused.
+    fn apply_file_records(&self, g: &mut Inner, recs: &[u8]) -> Result<(), KvError> {
+        let mut done: Vec<Vec<u8>> = Vec::new();
+        for (r, _) in record::split(recs, 0) {
+            match r.op {
+                OP_PUT if self.put_locked(g, r.key, r.value) => done.push(r.key.to_vec()),
+                OP_PUT => {
+                    for k in done {
+                        self.del_locked(g, &k);
+                    }
+                    return Err(KvError::Quota);
+                }
+                _ => {
+                    self.del_locked(g, r.key);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A raw store's device: a block device (the `K10S-DATA` partition) or a file, through `pread`/`pwrite` and
+/// `fdatasync` (which on a block device also flushes the disk's write cache).
+pub struct FileDisk {
+    file: File,
+    size: u64,
+    name: String,
+}
+
+impl FileDisk {
+    pub fn new(mut file: File, name: &str) -> io::Result<FileDisk> {
+        let size = file.seek(io::SeekFrom::End(0))?;
+        Ok(FileDisk { file, size, name: name.to_string() })
+    }
+
+    fn fail(&self, what: &str, offset: u64, e: io::Error) -> IoError {
+        eprintln!("k10s: kv store {}: {what} at {offset}: {e}", self.name);
+        IoError
+    }
+}
+
+impl Disk for FileDisk {
+    fn size(&self) -> u64 {
+        self.size
+    }
+    fn read(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), IoError> {
+        self.file.read_exact_at(buf, offset).map_err(|e| self.fail("read", offset, e))
+    }
+    fn write(&mut self, offset: u64, buf: &[u8]) -> Result<(), IoError> {
+        self.file.write_all_at(buf, offset).map_err(|e| self.fail("write", offset, e))
+    }
+    fn flush(&mut self) -> Result<(), IoError> {
+        self.file.sync_data().map_err(|e| self.fail("sync", 0, e))
+    }
+}
+
+/// The raw backend: the store and its device, locked for a whole flush.
+struct Raw {
+    disk: Box<dyn Disk + Send>,
+    log: RawLog,
+    name: String,
+    failures: u32,
+    retry_at: u64,
+}
+
+enum Backend {
+    Memory,
+    /// `DATA/kv`: open logs by namespace; the map's lock is held for a whole flush (see the module doc).
+    Dir { dir: PathBuf, logs: Mutex<HashMap<String, Log>> },
+    Raw(Mutex<Raw>),
 }
 
 struct StoreShared {
-    dir: Option<PathBuf>,
+    backend: Backend,
     cfg: KvConfig,
     namespaces: Mutex<HashMap<String, Arc<KvNs>>>,
     signal: Arc<Signal>,
-    /// Open logs by namespace; held for a whole flush (see the module doc).
-    logs: Mutex<HashMap<String, Log>>,
+    cap: Option<Arc<Capacity>>,
     flushes: AtomicU64,
     compactions: AtomicU64,
     errors: AtomicU64,
@@ -345,12 +504,13 @@ pub struct KvStats {
     pub degraded: usize,
 }
 
+/// The namespace of the node's own files in a raw store (service names cannot start with a dot).
+pub const FILES: &str = ".files";
+
 impl KvStore {
-    /// Opens the store. With `dir = Some(d)`, every `d/*.log` is replayed and the flusher thread starts; with
-    /// `None` the store is memory-only.
-    pub fn open(dir: Option<&Path>, cfg: KvConfig) -> io::Result<KvStore> {
+    fn with(backend: Backend, cfg: KvConfig, cap: Option<Arc<Capacity>>) -> KvStore {
         let shared = Arc::new(StoreShared {
-            dir: dir.map(|d| d.to_path_buf()),
+            backend,
             cfg,
             namespaces: Mutex::new(HashMap::new()),
             signal: Arc::new(Signal {
@@ -360,33 +520,125 @@ impl KvStore {
                 lock: Mutex::new(()),
                 cv: Condvar::new(),
             }),
-            logs: Mutex::new(HashMap::new()),
+            cap,
             flushes: AtomicU64::new(0),
             compactions: AtomicU64::new(0),
             errors: AtomicU64::new(0),
         });
-        let store = KvStore { shared, flusher: Mutex::new(None) };
-        if let Some(d) = dir {
-            fs::create_dir_all(d)?;
-            let mut names = Vec::new();
-            for e in fs::read_dir(d)? {
-                let e = e?;
-                let fname = e.file_name().to_string_lossy().into_owned();
-                if let Some(name) = fname.strip_suffix(".log") {
-                    names.push(name.to_string());
-                } else if fname.ends_with(".log.tmp") {
-                    let _ = fs::remove_file(e.path()); // interrupted compaction: the old log is still authoritative
+        KvStore { shared, flusher: Mutex::new(None) }
+    }
+
+    /// Opens the store. With `dir = Some(d)`, every `d/*.log` is replayed and the flusher thread starts; with
+    /// `None` the store is memory-only.
+    pub fn open(dir: Option<&Path>, cfg: KvConfig) -> io::Result<KvStore> {
+        let Some(d) = dir else { return Ok(KvStore::with(Backend::Memory, cfg, None)) };
+        fs::create_dir_all(d)?;
+        let store = KvStore::with(Backend::Dir { dir: d.to_path_buf(), logs: Mutex::new(HashMap::new()) }, cfg, None);
+        let mut names = Vec::new();
+        for e in fs::read_dir(d)? {
+            let e = e?;
+            let fname = e.file_name().to_string_lossy().into_owned();
+            if let Some(name) = fname.strip_suffix(".log") {
+                names.push(name.to_string());
+            } else if fname.ends_with(".log.tmp") {
+                let _ = fs::remove_file(e.path()); // interrupted compaction: the old log is still authoritative
+            }
+        }
+        for name in names {
+            let file = replay(&store.ns(&name), &d.join(format!("{name}.log")))?;
+            if let Backend::Dir { logs, .. } = &store.shared.backend {
+                logs.lock().unwrap().insert(name, Log { file: Some(file), ..Log::default() });
+            }
+        }
+        store.start()?;
+        Ok(store)
+    }
+
+    /// Formats `disk` as a new, empty raw store (whatever it held) and opens it.
+    pub fn format_raw(mut disk: Box<dyn Disk + Send>, name: &str, cfg: KvConfig) -> io::Result<KvStore> {
+        let mut id = [0u8; 16];
+        crate::sys::fill_random(&mut id)?;
+        let log = RawLog::format(&mut *disk, id).map_err(|e| io::Error::other(format!("kv store {name}: {e}")))?;
+        Ok(KvStore::raw(disk, log, HashMap::new(), name, cfg))
+    }
+
+    /// Opens a raw store on `disk` (formatting a blank one) and replays it; [`KvStore::start`] starts the flusher.
+    /// `name` is for messages.
+    pub fn open_raw(mut disk: Box<dyn Disk + Send>, name: &str, cfg: KvConfig) -> io::Result<KvStore> {
+        let mut maps: HashMap<Vec<u8>, Inner> = HashMap::new();
+        let apply = &mut |ns: &[u8], r: record::Rec<'_>| {
+            let g = maps.entry(ns.to_vec()).or_default();
+            match r.op {
+                OP_PUT => {
+                    let add = rec_size(r.key.len(), r.value.len());
+                    match g.map.insert(r.key.into(), r.value.into()) {
+                        Some(old) => g.live_bytes = g.live_bytes - rec_size(r.key.len(), old.len()) + add,
+                        None => g.live_bytes += add,
+                    }
+                }
+                _ => {
+                    if let Some(old) = g.map.remove(r.key) {
+                        g.live_bytes -= rec_size(r.key.len(), old.len());
+                    }
                 }
             }
-            for name in names {
-                let file = replay(&store.ns(&name), &d.join(format!("{name}.log")))?;
-                store.shared.logs.lock().unwrap().insert(name, Log { file: Some(file), ..Log::default() });
+        };
+        let log = match RawLog::open(&mut *disk, apply) {
+            Err(k10_kvlog::store::Error::Blank) => {
+                let mut id = [0u8; 16];
+                crate::sys::fill_random(&mut id)?;
+                eprintln!("k10s: kv store {name}: blank, formatting");
+                RawLog::format(&mut *disk, id)
             }
-            let sh = store.shared.clone();
-            let h = std::thread::Builder::new().name("k10s-kv".into()).spawn(move || crate::sys::run_or_abort("kv-flusher", || flusher(sh)))?;
-            *store.flusher.lock().unwrap() = Some(h);
+            r => r,
         }
+        .map_err(|e| io::Error::other(format!("kv store {name}: {e}")))?;
+        let store = KvStore::raw(disk, log, maps, name, cfg);
+        let st = store.stats();
+        eprintln!("k10s: data store {name}: {} MiB, {} keys in {} namespaces", store.size() >> 20, st.keys, st.namespaces);
         Ok(store)
+    }
+
+    fn raw(disk: Box<dyn Disk + Send>, log: RawLog, maps: HashMap<Vec<u8>, Inner>, name: &str, cfg: KvConfig) -> KvStore {
+        let cap = Arc::new(Capacity { used: AtomicU64::new(0), max: log.max_live() });
+        let raw = Raw { disk, log, name: name.to_string(), failures: 0, retry_at: 0 };
+        let store = KvStore::with(Backend::Raw(Mutex::new(raw)), cfg, Some(cap.clone()));
+        let mut used = 0;
+        for (ns, mut inner) in maps {
+            let Ok(name) = String::from_utf8(ns) else { continue };
+            if inner.map.is_empty() {
+                continue;
+            }
+            let n = store.ns(&name);
+            inner.reserved = inner.live_bytes + n.overhead();
+            used += inner.reserved;
+            *n.inner.lock().unwrap() = inner;
+        }
+        cap.used.store(used, Ordering::Release);
+        store
+    }
+
+    /// Bytes of a raw store's partition it uses (0 for the other backends).
+    pub fn size(&self) -> u64 {
+        match &self.shared.backend {
+            Backend::Raw(r) => r.lock().unwrap_or_else(|e| e.into_inner()).log.superblock().size(),
+            _ => 0,
+        }
+    }
+
+    /// Starts the flusher thread (once; the directory backend starts it at open).
+    pub fn start(&self) -> io::Result<()> {
+        let mut f = self.flusher.lock().unwrap_or_else(|e| e.into_inner());
+        if f.is_none() && !matches!(self.shared.backend, Backend::Memory) && !self.shared.signal.stop.load(Ordering::Acquire) {
+            let sh = self.shared.clone();
+            *f = Some(std::thread::Builder::new().name("k10s-kv".into()).spawn(move || crate::sys::run_or_abort("kv-flusher", || flusher(sh)))?);
+        }
+        Ok(())
+    }
+
+    /// Whether this is a raw store.
+    pub fn is_raw(&self) -> bool {
+        matches!(self.shared.backend, Backend::Raw(_))
     }
 
     /// The namespace of `service` (created on first use).
@@ -396,14 +648,21 @@ impl KvStore {
             .or_insert_with(|| {
                 Arc::new(KvNs {
                     name: service.to_string(),
-                    logged: self.shared.dir.is_some(),
-                    max_bytes: self.shared.cfg.max_bytes,
+                    logged: !matches!(self.shared.backend, Backend::Memory),
+                    // The node's own namespaces are bounded by the store, not by the per-service quota.
+                    max_bytes: if service.starts_with('.') { 0 } else { self.shared.cfg.max_bytes },
+                    cap: self.shared.cap.clone(),
                     inner: Mutex::new(Inner::default()),
                     healthy: AtomicBool::new(true),
                     signal: self.shared.signal.clone(),
                 })
             })
             .clone()
+    }
+
+    /// The node's files (a raw store's [`FILES`] namespace).
+    pub fn files(&self) -> Arc<KvNs> {
+        self.ns(FILES)
     }
 
     pub fn stats(&self) -> KvStats {
@@ -415,6 +674,10 @@ impl KvStore {
             s.live_bytes += i.live_bytes;
             s.log_bytes += i.log_bytes;
             s.degraded += (ns.logged && !ns.durable()) as usize;
+        }
+        drop(g);
+        if let Backend::Raw(r) = &self.shared.backend {
+            s.log_bytes = r.lock().unwrap_or_else(|e| e.into_inner()).log.log_bytes();
         }
         s.flushes = self.shared.flushes.load(Ordering::Relaxed);
         s.compactions = self.shared.compactions.load(Ordering::Relaxed);
@@ -451,6 +714,17 @@ impl KvStore {
     }
 }
 
+impl std::fmt::Debug for KvStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = match &self.shared.backend {
+            Backend::Memory => "memory",
+            Backend::Dir { .. } => "directory",
+            Backend::Raw(_) => "raw store",
+        };
+        write!(f, "KvStore({kind})")
+    }
+}
+
 impl Drop for KvStore {
     fn drop(&mut self) {
         self.shutdown();
@@ -471,33 +745,27 @@ fn replay(ns: &KvNs, path: &Path) -> io::Result<File> {
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
             Err(e) => return Err(e),
         }
-        let len = u32::from_le_bytes(hdr[0..4].try_into().unwrap()) as usize;
-        let crc = u32::from_le_bytes(hdr[4..8].try_into().unwrap());
-        if !(3..=3 + MAX_KEY + MAX_VALUE).contains(&len) || good + (HDR + len) as u64 > file_len {
+        let Some((len, crc)) = record::header(&hdr) else { break };
+        if good + (HDR + len) as u64 > file_len {
             break;
         }
         body.resize(len, 0);
-        if r.read_exact(&mut body).is_err() || crc32(&body) != crc {
+        if r.read_exact(&mut body).is_err() {
             break;
         }
-        let op = body[0];
-        let klen = u16::from_le_bytes([body[1], body[2]]) as usize;
-        if 3 + klen > len || klen > MAX_KEY {
-            break;
-        }
-        let key = &body[3..3 + klen];
-        let val = &body[3 + klen..];
-        match op {
+        let Some(rec) = record::body(&body, crc, 0) else { break };
+        let (key, val) = (rec.key, rec.value);
+        match rec.op {
             OP_PUT => {
-                let add = rec_size(klen, val.len());
+                let add = rec_size(key.len(), val.len());
                 match g.map.insert(key.into(), val.into()) {
-                    Some(old) => g.live_bytes = g.live_bytes - rec_size(klen, old.len()) + add,
+                    Some(old) => g.live_bytes = g.live_bytes - rec_size(key.len(), old.len()) + add,
                     None => g.live_bytes += add,
                 }
             }
             OP_DEL => {
                 if let Some(old) = g.map.remove(key) {
-                    g.live_bytes -= rec_size(klen, old.len());
+                    g.live_bytes -= rec_size(key.len(), old.len());
                 }
             }
             _ => break,
@@ -542,10 +810,32 @@ fn flusher(sh: Arc<StoreShared>) {
 
 /// One flush of every namespace; `last` (shutdown) skips compaction and retries degraded logs without waiting.
 fn flush_all(sh: &StoreShared, last: bool) {
-    let Some(dir) = sh.dir.as_ref() else { return };
-    let mut logs = sh.logs.lock().unwrap_or_else(|e| e.into_inner());
+    match &sh.backend {
+        Backend::Memory => {}
+        Backend::Dir { dir, logs } => flush_dir(sh, dir, logs, last),
+        Backend::Raw(raw) => flush_raw(sh, raw, last),
+    }
+}
+
+/// Wakes the flusher for the earliest rewrite retry (`next`, 0: none).
+fn set_retry(sh: &StoreShared, next: u64) {
+    let sig = &sh.signal;
+    if sig.retry_at.swap(next, Ordering::AcqRel) != next && next != 0 {
+        let _g = sig.lock.lock().unwrap_or_else(|e| e.into_inner());
+        sig.cv.notify_one();
+    }
+}
+
+fn namespaces(sh: &StoreShared) -> Vec<Arc<KvNs>> {
+    let mut v: Vec<Arc<KvNs>> = sh.namespaces.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
+    v.sort_by(|a, b| a.name.cmp(&b.name));
+    v
+}
+
+fn flush_dir(sh: &StoreShared, dir: &Path, logs: &Mutex<HashMap<String, Log>>, last: bool) {
+    let mut logs = logs.lock().unwrap_or_else(|e| e.into_inner());
     sh.signal.dirty.store(false, Ordering::Release);
-    let nss: Vec<Arc<KvNs>> = sh.namespaces.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
+    let nss = namespaces(sh);
     let mut to_sync: Vec<Arc<KvNs>> = Vec::new();
     for ns in nss {
         if !logs.contains_key(&ns.name) {
@@ -609,12 +899,7 @@ fn flush_all(sh: &StoreShared, last: bool) {
             }
         }
     }
-    let next = logs.values().filter(|l| l.failures > 0).map(|l| l.retry_at).min().unwrap_or(0);
-    let sig = &sh.signal;
-    if sig.retry_at.swap(next, Ordering::AcqRel) != next && next != 0 {
-        let _g = sig.lock.lock().unwrap_or_else(|e| e.into_inner());
-        sig.cv.notify_one();
-    }
+    set_retry(sh, logs.values().filter(|l| l.failures > 0).map(|l| l.retry_at).min().unwrap_or(0));
     sh.flushes.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -671,6 +956,110 @@ fn rewrite(log: &mut Log, ns: &KvNs, dir: &Path) -> io::Result<()> {
     g.log_bytes = g.log_bytes - old_log + snapshot.len() as u64;
     g.compact_at = 0;
     Ok(())
+}
+
+/// One flush of a raw store: the pending records of every namespace as one batch, or a checkpoint (compaction, or
+/// the rewrite of a degraded store).
+fn flush_raw(sh: &StoreShared, raw: &Mutex<Raw>, last: bool) {
+    let mut guard = raw.lock().unwrap_or_else(|e| e.into_inner());
+    let r = &mut *guard;
+    sh.signal.dirty.store(false, Ordering::Release);
+    let nss = namespaces(sh);
+    if r.failures > 0 {
+        if last || crate::sys::mono_ns() >= r.retry_at {
+            match checkpoint(r, &nss) {
+                Ok(()) => {
+                    r.failures = 0;
+                    for ns in &nss {
+                        ns.healthy.store(true, Ordering::Release);
+                    }
+                    eprintln!("k10s: kv store {}: rewritten, writes are durable again", r.name);
+                }
+                Err(e) => degrade_raw(sh, r, &nss, "rewrite", e),
+            }
+        } else {
+            for ns in &nss {
+                ns.inner.lock().unwrap_or_else(|e| e.into_inner()).pending.clear();
+            }
+        }
+    } else {
+        let (mut live, mut pending) = (0u64, 0u64);
+        for ns in &nss {
+            let g = ns.inner.lock().unwrap_or_else(|e| e.into_inner());
+            live += g.live_bytes + if g.map.is_empty() { 0 } else { ns.overhead() };
+            pending += g.pending.len() as u64;
+        }
+        // At shutdown only a lack of room makes it a checkpoint.
+        let compact_min = if last { u64::MAX } else { sh.cfg.compact_min };
+        if r.log.wants_checkpoint(live, pending, compact_min) {
+            match checkpoint(r, &nss) {
+                Ok(()) => {
+                    sh.compactions.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(e) => degrade_raw(sh, r, &nss, "compaction", e),
+            }
+        } else if pending > 0 {
+            if let Err(e) = append_raw(r, &nss) {
+                degrade_raw(sh, r, &nss, "write", e);
+            }
+        }
+    }
+    set_retry(sh, if r.failures > 0 { r.retry_at } else { 0 });
+    sh.flushes.fetch_add(1, Ordering::Relaxed);
+}
+
+fn append_raw(r: &mut Raw, nss: &[Arc<KvNs>]) -> Result<(), k10_kvlog::store::Error> {
+    for ns in nss {
+        let buf = std::mem::take(&mut ns.inner.lock().unwrap_or_else(|e| e.into_inner()).pending);
+        if !buf.is_empty() {
+            r.log.push(ns.name.as_bytes(), &buf).inspect_err(|_| r.log.set_degraded())?;
+        }
+    }
+    r.log.commit(&mut *r.disk)
+}
+
+/// Writes every namespace's live entries as the new state of the store; each namespace's pending records leave
+/// with the snapshot that covers them (both taken under its lock).
+fn checkpoint(r: &mut Raw, nss: &[Arc<KvNs>]) -> Result<(), k10_kvlog::store::Error> {
+    r.log.checkpoint_begin()?;
+    let res = (|| {
+        for ns in nss {
+            let buf = {
+                let mut g = ns.inner.lock().unwrap_or_else(|e| e.into_inner());
+                g.pending.clear();
+                let mut buf = Vec::with_capacity(g.live_bytes as usize);
+                for (k, v) in &g.map {
+                    encode_rec(&mut buf, OP_PUT, k, v);
+                }
+                buf
+            };
+            if !buf.is_empty() {
+                r.log.checkpoint_push(&mut *r.disk, ns.name.as_bytes(), &buf)?;
+            }
+        }
+        r.log.checkpoint_end(&mut *r.disk)
+    })();
+    if res.is_err() {
+        r.log.checkpoint_abort();
+    }
+    res
+}
+
+/// Marks the raw store degraded after `what` failed (every namespace), and schedules the next rewrite.
+fn degrade_raw(sh: &StoreShared, r: &mut Raw, nss: &[Arc<KvNs>], what: &str, e: k10_kvlog::store::Error) {
+    sh.errors.fetch_add(1, Ordering::Relaxed);
+    r.log.set_degraded();
+    if r.failures == 0 {
+        for ns in nss {
+            ns.healthy.store(false, Ordering::Release);
+        }
+        eprintln!("k10s: kv store {}: {what} failed ({e}); not durable until it is rewritten", r.name);
+    }
+    r.failures += 1;
+    r.retry_at = crate::sys::mono_ns() + (RETRY_MIN_NS << (r.failures - 1).min(20)).min(RETRY_MAX_NS);
+    for ns in nss {
+        ns.inner.lock().unwrap_or_else(|e| e.into_inner()).pending.clear();
+    }
 }
 
 #[cfg(test)]
@@ -1101,7 +1490,8 @@ mod tests {
     /// Swaps the open log of `ns` for `file`, and blocks rewrites with a directory at `<ns>.log.tmp`.
     fn inject(s: &KvStore, d: &Path, ns: &str, file: File) {
         fs::create_dir(d.join(format!("{ns}.log.tmp"))).unwrap();
-        s.shared.logs.lock().unwrap().get_mut(ns).unwrap().file = Some(file);
+        let Backend::Dir { logs, .. } = &s.shared.backend else { panic!("not a directory store") };
+        logs.lock().unwrap().get_mut(ns).unwrap().file = Some(file);
     }
 
     /// A failed write degrades the log; once rewrites can succeed, the flusher rewrites it on its own timer.
@@ -1157,5 +1547,163 @@ mod tests {
         assert_eq!(s.ns("f").get(b"k"), Some(v.to_le_bytes().to_vec()));
         drop(s);
         let _ = fs::remove_dir_all(&d);
+    }
+
+    /// A raw store in a sparse file of `mib` MiB.
+    fn raw_file(tag: &str, mib: u64) -> PathBuf {
+        let p = tmpdir(tag).join("store");
+        let f = File::create(&p).unwrap();
+        f.set_len(mib << 20).unwrap();
+        p
+    }
+
+    fn open_raw_at(p: &Path, cfg: KvConfig) -> KvStore {
+        let f = OpenOptions::new().read(true).write(true).open(p).unwrap();
+        let s = KvStore::open_raw(Box::new(FileDisk::new(f, "test").unwrap()), "test", cfg).unwrap();
+        s.start().unwrap();
+        s
+    }
+
+    /// Namespaces and files of a raw store survive a restart; the format is the native kernel's.
+    #[test]
+    fn raw_replay_after_reopen() {
+        let p = raw_file("raw-replay", 64);
+        {
+            let s = open_raw_at(&p, KvConfig::default());
+            assert!(s.is_raw());
+            let a = s.ns("alpha");
+            let b = s.ns("beta");
+            for i in 0..1000u32 {
+                assert!(a.put(format!("k{i}").as_bytes(), &i.to_le_bytes()));
+            }
+            for i in 0..500u32 {
+                a.del(format!("k{i}").as_bytes());
+            }
+            assert_eq!(b.add(b"n", 7), Ok(7));
+            let blob: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
+            s.files().put_file("blobs/abc", &blob).unwrap();
+            s.files().put_file("node-id", b"1234\n").unwrap();
+            s.files().put_file("node-id", b"5678\n").unwrap();
+            assert!(s.files().remove_file("blobs/abc"));
+            s.files().put_file("blobs/def", &blob).unwrap();
+            s.shutdown();
+        }
+        let s = open_raw_at(&p, KvConfig::default());
+        let a = s.ns("alpha");
+        assert_eq!(a.len(), 500);
+        assert_eq!(a.get(b"k500"), Some(500u32.to_le_bytes().to_vec()));
+        assert_eq!(s.ns("beta").add(b"n", 0), Ok(7));
+        assert_eq!(s.files().file("node-id").as_deref(), Some(&b"5678\n"[..]));
+        assert_eq!(s.files().file_names(), ["blobs/def", "node-id"]);
+        assert_eq!(s.files().file("blobs/def").unwrap().len(), 3_000_000);
+        assert_eq!(s.files().file("blobs/abc"), None);
+        assert!(s.stats().log_bytes > 0);
+        drop(s);
+        let _ = fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    /// Compaction (checkpoints) keeps the data; a small store refuses writes past its capacity, and deletes make room.
+    #[test]
+    fn raw_compaction_and_capacity() {
+        let p = raw_file("raw-cap", 53);
+        let cfg = KvConfig { flush_interval: Duration::from_millis(1), compact_min: 64 << 10, ..KvConfig::default() };
+        {
+            let s = open_raw_at(&p, cfg.clone());
+            let a = s.ns("c");
+            for round in 0..200u32 {
+                for i in 0..100u32 {
+                    assert!(a.put(format!("key{i}").as_bytes(), format!("value-{round}-{i}-{}", "x".repeat(100)).as_bytes()));
+                }
+                if round % 20 == 0 {
+                    s.flush_now();
+                }
+            }
+            s.flush_now();
+            assert!(s.stats().compactions >= 1, "{:?}", s.stats());
+            assert!(a.durable());
+            // One segment's worth of live data is the most a 5-segment store holds.
+            let big = vec![7u8; 500_000];
+            let mut n = 0;
+            while a.put(format!("big{n}").as_bytes(), &big) {
+                n += 1;
+                assert!(n < 20);
+            }
+            assert!((5..=8).contains(&n), "{n} values of 500 KB");
+            assert_eq!(a.cas(b"big-new", None, Some(&big)), Err(KvError::Quota));
+            assert!(s.files().put_file("f", &big).is_err());
+            assert!(a.del(b"big0") && a.del(b"big1"));
+            assert!(a.put(b"big-new", &big), "deletes make room");
+            s.shutdown();
+        }
+        let s = open_raw_at(&p, cfg);
+        let a = s.ns("c");
+        assert_eq!(a.get(b"key7").unwrap(), format!("value-199-7-{}", "x".repeat(100)).as_bytes());
+        assert!(a.get(b"big-new").is_some() && a.get(b"big0").is_none());
+        drop(s);
+        let _ = fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    /// A disk whose writes fail while `broken` is set.
+    struct Flaky {
+        inner: FileDisk,
+        broken: Arc<AtomicBool>,
+    }
+
+    impl Disk for Flaky {
+        fn size(&self) -> u64 {
+            self.inner.size()
+        }
+        fn read(&mut self, o: u64, b: &mut [u8]) -> Result<(), IoError> {
+            self.inner.read(o, b)
+        }
+        fn write(&mut self, o: u64, b: &[u8]) -> Result<(), IoError> {
+            if self.broken.load(Ordering::Acquire) {
+                return Err(IoError);
+            }
+            self.inner.write(o, b)
+        }
+        fn flush(&mut self) -> Result<(), IoError> {
+            self.inner.flush()
+        }
+    }
+
+    /// A failed write degrades the whole raw store; the flusher rewrites it once writes work again.
+    #[test]
+    fn raw_failed_write_is_rewritten() {
+        let p = raw_file("raw-fail", 64);
+        let broken = Arc::new(AtomicBool::new(false));
+        let f = OpenOptions::new().read(true).write(true).open(&p).unwrap();
+        let disk = Flaky { inner: FileDisk::new(f, "flaky").unwrap(), broken: broken.clone() };
+        let cfg = KvConfig { flush_interval: Duration::from_millis(1), ..KvConfig::default() };
+        let s = KvStore::open_raw(Box::new(disk), "flaky", cfg).unwrap();
+        s.start().unwrap();
+        let (a, b) = (s.ns("a"), s.ns("b"));
+        assert!(a.put(b"k", &1u64.to_le_bytes()));
+        s.flush_now();
+        assert!(a.durable() && b.durable());
+        broken.store(true, Ordering::Release);
+        assert!(a.put(b"k", &2u64.to_le_bytes()));
+        assert!(b.put(b"x", b"y"));
+        s.flush_now();
+        assert!(!a.durable() && !b.durable() && s.stats().errors >= 1);
+        broken.store(false, Ordering::Release);
+        wait_until("the rewrite", || a.durable() && b.durable());
+        drop(s);
+        let s = open_raw_at(&p, KvConfig::default());
+        assert_eq!(s.ns("a").get(b"k"), Some(2u64.to_le_bytes().to_vec()));
+        assert_eq!(s.ns("b").get(b"x"), Some(b"y".to_vec()));
+        drop(s);
+        let _ = fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    /// Something that is not a store is refused, never formatted.
+    #[test]
+    fn raw_refuses_foreign_data() {
+        let p = raw_file("raw-foreign", 64);
+        let f = OpenOptions::new().read(true).write(true).open(&p).unwrap();
+        f.write_all_at(&[0x53, 0xEF], 1080).unwrap();
+        let err = KvStore::open_raw(Box::new(FileDisk::new(f, "x").unwrap()), "x", KvConfig::default()).err().unwrap();
+        assert!(err.to_string().contains("not a k10s store"), "{err}");
+        let _ = fs::remove_dir_all(p.parent().unwrap());
     }
 }

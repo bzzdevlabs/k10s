@@ -12,6 +12,7 @@ k10-host = { path = "crates/k10-host" }
 k10-ir = { path = "crates/k10-ir" }
 k10-lang = { path = "crates/k10-lang" }
 k10-jit = { path = "crates/k10-jit" }
+k10-kvlog = { path = "crates/k10-kvlog" }
 k10-mesh = { path = "crates/k10-mesh" }
 k10-node = { path = "crates/k10-node" }
 k10-nospec = { path = "crates/k10-nospec" }

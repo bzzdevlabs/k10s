@@ -8,6 +8,7 @@ edition.workspace = true
 k10-host = { workspace = true }
 k10-ir = { workspace = true }
 k10-mesh = { workspace = true }
+k10-kvlog = { workspace = true }
 libc = { workspace = true }
 
 # k10-jit is built for the 64-bit targets only (its VmCtx assumes 64-bit pointers); 32-bit targets run the

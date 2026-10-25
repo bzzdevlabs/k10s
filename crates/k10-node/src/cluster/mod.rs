@@ -32,7 +32,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::*};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -712,7 +711,7 @@ pub struct ClusterBound {
 impl ClusterBound {
     /// After the sandbox, before the node serves (so the cluster status is attached as soon as the ingress answers):
     /// the store, the node id and the persisted incarnation.
-    pub fn open(self, data: Option<&Path>) -> io::Result<ClusterSetup> {
+    pub fn open(self, data: Option<&crate::data::Data>) -> io::Result<ClusterSetup> {
         let ClusterBound { cfg, inbox, udp, listener, fallback_ip } = self;
         let id = store::node_id(data)?;
         let store = Store::open(data)?;

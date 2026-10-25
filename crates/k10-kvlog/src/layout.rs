@@ -1,0 +1,243 @@
+//! `K10S-DATA`'s fixed layout and its superblock.
+//!
+//! ```text
+//! 0        superblock copy 0 (4 KiB unit; 512 bytes used)
+//! 4 KiB    superblock copy 1
+//! 1 MiB    kernel slot A (16 MiB): a signed native kernel image (`k10s image sign`, profile `native`)
+//! 17 MiB   kernel slot B
+//! 33 MiB   the log: segments of 4 MiB up to the end of the partition
+//! ```
+//!
+//! The two superblock copies are written alternately (by generation), each in its own sector-sized write, so one of
+//! them is always whole. The superblock names the oldest live segment (where replay starts), the sequence numbers
+//! that may already be on disk, the kernel slots' contents, and which slot is committed or on trial.
+
+/// I/O unit of the store: every write is whole, aligned units.
+pub const UNIT: u64 = 4096;
+pub const SUPER_LEN: usize = 512;
+/// Offsets of the two superblock copies.
+pub const SUPER_AT: [u64; 2] = [0, UNIT];
+pub const SLOT_OFFSET: u64 = 1 << 20;
+pub const SLOT_BYTES: u64 = 16 << 20;
+pub const LOG_OFFSET: u64 = SLOT_OFFSET + 2 * SLOT_BYTES;
+pub const SEG_BYTES: u64 = 4 << 20;
+/// A third of the log may be live data (the rest lets appends and checkpoints run), so at least one segment's worth.
+pub const MIN_SEGMENTS: u32 = 5;
+pub const MIN_SIZE: u64 = LOG_OFFSET + MIN_SEGMENTS as u64 * SEG_BYTES;
+/// 16 TiB of log.
+pub const MAX_SEGMENTS: u32 = 1 << 22;
+pub const MAGIC: [u8; 8] = *b"K10SDATA";
+pub const VERSION: u32 = 1;
+
+/// A kernel slot: the length and SHA-256 of the signed image in it (`len == 0`: empty).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Slot {
+    pub len: u64,
+    pub sha256: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Super {
+    pub generation: u64,
+    /// Random at format: ties the log's records to this store.
+    pub id: [u8; 16],
+    pub segments: u32,
+    /// The oldest live segment: index and sequence number.
+    pub tail_index: u32,
+    pub tail_seq: u64,
+    /// No segment with this sequence number or above was ever written.
+    pub next_seq: u64,
+    pub slots: [Slot; 2],
+    /// The slot the loader boots (none: the kernel file of K10S-BOOT).
+    pub committed: Option<u8>,
+    /// A slot on trial: the loader boots it while the boot counter allows, else `committed`.
+    pub trial: Option<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decode {
+    /// The unit is all zeros.
+    Blank,
+    /// Not a superblock (another filesystem, garbage, or a torn write).
+    Foreign,
+    /// A superblock of a later format version.
+    Newer(u32),
+}
+
+fn u32_at(b: &[u8], o: usize) -> u32 {
+    u32::from_le_bytes(b[o..o + 4].try_into().unwrap())
+}
+
+fn u64_at(b: &[u8], o: usize) -> u64 {
+    u64::from_le_bytes(b[o..o + 8].try_into().unwrap())
+}
+
+fn slot_byte(s: Option<u8>) -> u8 {
+    s.unwrap_or(0xFF)
+}
+
+fn byte_slot(b: u8) -> Result<Option<u8>, Decode> {
+    match b {
+        0 | 1 => Ok(Some(b)),
+        0xFF => Ok(None),
+        _ => Err(Decode::Foreign),
+    }
+}
+
+impl Super {
+    pub fn encode(&self) -> [u8; SUPER_LEN] {
+        let mut b = [0u8; SUPER_LEN];
+        let mut put = |o: usize, v: &[u8]| b[o..o + v.len()].copy_from_slice(v);
+        put(0, &MAGIC);
+        put(8, &VERSION.to_le_bytes());
+        put(12, &(SUPER_LEN as u32).to_le_bytes());
+        put(16, &self.generation.to_le_bytes());
+        put(24, &self.id);
+        put(40, &SLOT_OFFSET.to_le_bytes());
+        put(48, &SLOT_BYTES.to_le_bytes());
+        put(56, &LOG_OFFSET.to_le_bytes());
+        put(64, &(SEG_BYTES as u32).to_le_bytes());
+        put(68, &self.segments.to_le_bytes());
+        put(72, &self.tail_index.to_le_bytes());
+        put(80, &self.tail_seq.to_le_bytes());
+        put(88, &self.next_seq.to_le_bytes());
+        for (i, s) in self.slots.iter().enumerate() {
+            put(96 + 40 * i, &s.len.to_le_bytes());
+            put(104 + 40 * i, &s.sha256);
+        }
+        put(176, &[slot_byte(self.committed), slot_byte(self.trial)]);
+        let crc = crate::crc32(&b[..SUPER_LEN - 4]);
+        b[SUPER_LEN - 4..].copy_from_slice(&crc.to_le_bytes());
+        b
+    }
+
+    pub fn decode(b: &[u8]) -> Result<Super, Decode> {
+        let b = b.get(..SUPER_LEN).ok_or(Decode::Foreign)?;
+        if b.iter().all(|&x| x == 0) {
+            return Err(Decode::Blank);
+        }
+        if b[..8] != MAGIC {
+            return Err(Decode::Foreign);
+        }
+        if u32_at(b, 8) != VERSION {
+            return Err(Decode::Newer(u32_at(b, 8)));
+        }
+        if u32_at(b, 12) as usize != SUPER_LEN || crate::crc32(&b[..SUPER_LEN - 4]) != u32_at(b, SUPER_LEN - 4) {
+            return Err(Decode::Foreign);
+        }
+        let geometry = (u64_at(b, 40), u64_at(b, 48), u64_at(b, 56), u32_at(b, 64) as u64);
+        let segments = u32_at(b, 68);
+        let tail_index = u32_at(b, 72);
+        if geometry != (SLOT_OFFSET, SLOT_BYTES, LOG_OFFSET, SEG_BYTES)
+            || !(MIN_SEGMENTS..=MAX_SEGMENTS).contains(&segments)
+            || tail_index >= segments
+        {
+            return Err(Decode::Foreign);
+        }
+        let mut slots = [Slot::default(); 2];
+        for (i, s) in slots.iter_mut().enumerate() {
+            s.len = u64_at(b, 96 + 40 * i);
+            s.sha256 = b[104 + 40 * i..136 + 40 * i].try_into().unwrap();
+            if s.len > SLOT_BYTES {
+                return Err(Decode::Foreign);
+            }
+        }
+        Ok(Super {
+            generation: u64_at(b, 16),
+            id: b[24..40].try_into().unwrap(),
+            segments,
+            tail_index,
+            tail_seq: u64_at(b, 80),
+            next_seq: u64_at(b, 88),
+            slots,
+            committed: byte_slot(b[176])?,
+            trial: byte_slot(b[177])?,
+        })
+    }
+
+    /// Bytes of the partition the store covers.
+    pub fn size(&self) -> u64 {
+        LOG_OFFSET + self.segments as u64 * SEG_BYTES
+    }
+}
+
+/// The current superblock of the two copies' first `SUPER_LEN` bytes: the valid one of the higher generation.
+pub fn pick(a: &[u8], b: &[u8]) -> Result<Super, Decode> {
+    match (Super::decode(a), Super::decode(b)) {
+        (Ok(x), Ok(y)) => Ok(if y.generation > x.generation { y } else { x }),
+        (Ok(x), Err(_)) | (Err(_), Ok(x)) => Ok(x),
+        (Err(Decode::Newer(v)), _) | (_, Err(Decode::Newer(v))) => Err(Decode::Newer(v)),
+        (Err(Decode::Blank), Err(Decode::Blank)) => Err(Decode::Blank),
+        _ => Err(Decode::Foreign),
+    }
+}
+
+/// Byte offset of kernel slot `i` (0 = A, 1 = B).
+pub fn slot_offset(i: u8) -> u64 {
+    SLOT_OFFSET + i as u64 * SLOT_BYTES
+}
+
+/// What the loader boots: `Some((slot, trial))`, or `None` for the kernel file of K10S-BOOT. `refused(slot)` says
+/// that the boot counter allows no more boots of that slot's kernel.
+pub fn boot_choice(sb: &Super, refused: impl Fn(u8) -> bool) -> Option<(u8, bool)> {
+    let usable = |s: u8| sb.slots[s as usize].len > 0;
+    if let Some(t) = sb.trial.filter(|&t| usable(t) && !refused(t)) {
+        return Some((t, true));
+    }
+    sb.committed.filter(|&c| usable(c)).map(|c| (c, false))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> Super {
+        Super {
+            generation: 7,
+            id: [9; 16],
+            segments: 100,
+            tail_index: 3,
+            tail_seq: 44,
+            next_seq: 4140,
+            slots: [Slot { len: 1_000_000, sha256: [1; 32] }, Slot::default()],
+            committed: Some(0),
+            trial: None,
+        }
+    }
+
+    #[test]
+    fn round_trip_and_pick() {
+        let s = sample();
+        let e = s.encode();
+        assert_eq!(Super::decode(&e), Ok(s));
+        let mut newer = s;
+        newer.generation = 8;
+        newer.trial = Some(1);
+        assert_eq!(pick(&e, &newer.encode()), Ok(newer));
+        assert_eq!(pick(&newer.encode(), &e), Ok(newer));
+        let mut torn = newer.encode();
+        torn[100] ^= 1;
+        assert_eq!(pick(&e, &torn), Ok(s), "a torn copy loses to the whole one");
+        assert_eq!(pick(&[0; 512], &[0; 512]), Err(Decode::Blank));
+        let mut ext4 = [0u8; 512];
+        ext4[56] = 0x53;
+        assert_eq!(pick(&[0; 512], &ext4), Err(Decode::Foreign));
+        let mut v2 = e;
+        v2[8] = 2;
+        assert_eq!(Super::decode(&v2), Err(Decode::Newer(2)));
+    }
+
+    #[test]
+    fn boot_choices() {
+        let mut s = sample();
+        assert_eq!(boot_choice(&s, |_| false), Some((0, false)));
+        s.slots[1].len = 5;
+        s.trial = Some(1);
+        assert_eq!(boot_choice(&s, |_| false), Some((1, true)));
+        assert_eq!(boot_choice(&s, |x| x == 1), Some((0, false)), "trial refused by the counter");
+        s.committed = None;
+        assert_eq!(boot_choice(&s, |x| x == 1), None, "then the kernel file");
+        s.slots[1].len = 0;
+        assert_eq!(boot_choice(&s, |_| false), None);
+    }
+}

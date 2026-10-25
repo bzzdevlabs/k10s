@@ -563,6 +563,41 @@ fn sigkill_failover_then_restart_catches_up() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A node on a raw store (`--store`, Tier 1's K10S-DATA format) keeps its identity, its desired state, its blobs
+/// and its KV namespaces through a SIGKILL: alone after the restart, it serves the stored manifest and the data.
+#[test]
+fn raw_store_keeps_state_through_sigkill() {
+    let dir = tmpdir("store");
+    write_modules(&dir, 0);
+    std::fs::write(dir.join("kv.k10"), k10_ir::encode(&demo::kv())).unwrap();
+    let store = dir.join("n1.store");
+    let o = Opts { extra: vec!["--store".into(), store.display().to_string(), "--store-size".into(), "64MiB".into()], ..Opts::default() };
+    let n = spawn_node("n1", &dir.join("n1"), None, &o);
+    let m = manifest("v1", 0) + "service kv { code = \"kv.k10\" memory = 64KiB }\n";
+    apply(&dir, &n, &m);
+    wait_applied(std::slice::from_ref(&n), 1, Duration::from_secs(30));
+    let mut c = Client::connect(&n.http, Duration::from_secs(10)).unwrap();
+    for i in 0..50 {
+        assert_eq!(c.request("POST", &format!("/kv/k{i}"), format!("v{i}").as_bytes()).unwrap().status, 200);
+    }
+    assert!(n.log.lock().unwrap().contains("data store"), "{}", n.log.lock().unwrap());
+    let id = n.id.clone();
+    // The group commit's window is 2 ms: wait for it, then cut the power.
+    std::thread::sleep(Duration::from_millis(200));
+    n.signal(libc::SIGKILL);
+    drop(n);
+    assert!(!dir.join("n1").join("blobs").exists(), "blobs live in the store, not in --data");
+    let n = spawn_node("n1", &dir.join("n1"), None, &o);
+    assert_eq!(n.id, id, "the node id is in the store");
+    wait_applied(std::slice::from_ref(&n), 1, Duration::from_secs(30));
+    check_all_services(std::slice::from_ref(&n), "v1", 0);
+    let mut c = Client::connect(&n.http, Duration::from_secs(10)).unwrap();
+    for i in 0..50 {
+        assert_eq!(c.request("GET", &format!("/kv/k{i}"), b"").unwrap().text(), format!("v{i}"));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Graceful leave under load (SIGTERM): peers see `left`, services move, no request fails. Then a new node joins,
 /// takes its share of the services and serves everything through its own ingress.
 #[test]

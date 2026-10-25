@@ -15,6 +15,7 @@
 pub mod admin;
 pub mod cluster;
 pub mod coro;
+pub mod data;
 pub mod demo;
 pub mod exec;
 pub mod host;

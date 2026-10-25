@@ -181,6 +181,37 @@ fn kv_and_bundle_persist_across_restart() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The same with a raw store (`--store`): KV namespaces and the bundle live in the store's segmented log.
+#[test]
+fn kv_and_bundle_persist_in_a_raw_store() {
+    use k10_node::kv::{FileDisk, KvConfig, KvStore};
+    use k10_node::NodeConfig;
+    let dir = tmpdir("persist-raw");
+    let path = dir.join("store");
+    std::fs::File::create(&path).unwrap().set_len(64 << 20).unwrap();
+    let mk = || {
+        let f = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        let kv = KvStore::open_raw(Box::new(FileDisk::new(f, "test").unwrap()), "test", KvConfig::default()).unwrap();
+        NodeConfig { store: Some(std::sync::Arc::new(kv)), ..config(2) }
+    };
+    {
+        let node = start(mk());
+        node.apply(bundle(vec![svc("kv", &demo::kv()), svc("counter", &demo::counter())])).unwrap();
+        let mut c = client(&node);
+        assert_eq!(c.request("POST", "/kv/foo", b"bar").unwrap().status, 200);
+        for i in 1..=3 {
+            assert_eq!(c.request("GET", "/counter", b"").unwrap().text(), i.to_string());
+        }
+        node.shutdown();
+    }
+    let node = start(mk());
+    let mut c = client(&node);
+    assert_eq!(c.request("GET", "/kv/foo", b"").unwrap().text(), "bar");
+    assert_eq!(c.request("GET", "/counter", b"").unwrap().text(), "4");
+    node.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn trap_fails_request_and_replaces_instance() {
     let node = start(config(1));

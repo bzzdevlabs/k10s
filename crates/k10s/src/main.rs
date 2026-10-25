@@ -10,7 +10,8 @@
 //!             cluster auth: --cluster-key-file FILE [--cluster-next-key-file FILE] | --insecure-unauthenticated-cluster
 //!                           [--gossip-max-skew SECS]
 //!             tuning: [--probe-ms N] [--suspicion-mult N] [--leave-grace-ms N]
-//!             disk images (docs/OS.md): [--os-commit-grace SECS], and `--os-agent-fd N` from init
+//!             [--store DEV|FILE [--store-size SIZE]] (a raw store: Tier 1's K10S-DATA, docs/OS.md)
+//!             disk images (docs/OS.md): [--os-commit-grace SECS], and `--os-agent-fd N`, `--store-fd N` from init
 //! k10s keygen [-o FILE]
 //! k10s image  pubkey KEY | sign --key KEY --arch A --profile P --version V IN OUT | verify FILE [--trust PUB,…]
 //! k10s apply  FILE.k10s [--node HOST:PORT] [--admin-token-file FILE]
@@ -45,6 +46,8 @@ use std::time::{Duration, Instant};
 const USAGE: &str = "usage:
   k10s node   [--http ADDR] [--data DIR] [--shards N] [--backend jit|interp] [--name NAME] [--mem SIZE]
               [--kv-max SIZE] (per-service KV quota, default 256MiB, 0 = unlimited)
+              [--store DEV|FILE] (a raw store, e.g. a K10S-DATA partition: KV and the node's files live there,
+                --data is only scratch space; a missing or empty FILE is created at [--store-size SIZE], 256MiB)
               [--conn-buffer-max SIZE] (bytes buffered in HTTP connections node-wide, default max(--mem/8, 64MiB))
               [--snapshots fresh|all] [--idle-timeout SECS] [--idle-spin-us N] [--log-stderr] [--pin]
               [--timer-res-us N] (guest clock resolution, default 100; 0 = full, trusted tenants only)
@@ -52,8 +55,8 @@ const USAGE: &str = "usage:
               [--sandbox on|seccomp-only|log|off] (process sandbox: Landlock + seccomp, default on or $K10S_SANDBOX)
               [--user USER[:GROUP]] (started as root: run as USER once the listeners are bound)
               admin API (/_k10s/): requests signed with the admin key; health is open, metrics too on --admin
-              [--admin-token-file FILE] (the admin key; default DATA/admin.key, or admin.key in the state
-                directory without --data, generated on first start)
+              [--admin-token-file FILE] (the admin key; default DATA/admin.key (in the store with --store), or
+                admin.key in the state directory without --data, generated on first start)
               [--admin ADDR] (own listener for the admin API; the ingress then serves only /_k10s/health)
               cluster mode (any of these flags turns it on):
               [--gossip ADDR] (UDP, default 0.0.0.0:7946)  [--rpc ADDR] (TCP, default 0.0.0.0:7947)
@@ -284,11 +287,58 @@ fn state_dir() -> Option<PathBuf> {
     env("K10S_HOME").or_else(|| env("XDG_STATE_HOME").map(|d| d.join("k10s"))).or_else(|| env("HOME").map(|h| h.join(".local/state/k10s")))
 }
 
-/// The node's admin key: `--admin-token-file`, else `admin.key` in the data (or state) directory, created if missing.
-/// Started as root with `--user`, the data directory and a created key belong to that user.
-fn node_admin_key(a: &Args, user: Option<&sandbox::User>) -> Result<(AdminKey, PathBuf), String> {
+/// `--store DEV|FILE` or init's `--store-fd N`: the raw store, opened (formatted if blank) and replayed.
+fn open_store(a: &Args, fd: Option<i32>, kv: k10_node::kv::KvConfig) -> Result<Option<Arc<k10_node::kv::KvStore>>, String> {
+    use std::os::fd::FromRawFd;
+    let (file, name) = match (a.get("store"), fd) {
+        (None, None) => return Ok(None),
+        (Some(_), Some(_)) => return Err("--store and --store-fd exclude each other".into()),
+        (Some(p), None) => {
+            let f = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(p).map_err(|e| format!("--store {p}: {e}"))?;
+            let m = f.metadata().map_err(|e| format!("--store {p}: {e}"))?;
+            if m.is_file() && m.len() == 0 {
+                let size = a.get("store-size").map(parse_size).transpose()?.unwrap_or(256 << 20);
+                f.set_len(size).map_err(|e| format!("--store {p}: {e}"))?;
+            }
+            (f, p.to_string())
+        }
+        (None, Some(fd)) => {
+            // SAFETY: fcntl only queries the descriptor.
+            if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+                return Err(format!("--store-fd {fd}: not an open descriptor"));
+            }
+            // SAFETY: an open descriptor init handed over for the node to own.
+            (unsafe { std::fs::File::from_raw_fd(fd) }, format!("fd {fd}"))
+        }
+    };
+    let disk = k10_node::kv::FileDisk::new(file, &name).map_err(|e| format!("store {name}: {e}"))?;
+    k10_node::kv::KvStore::open_raw(Box::new(disk), &name, kv).map(|s| Some(Arc::new(s))).map_err(|e| e.to_string())
+}
+
+/// The node's admin key: `--admin-token-file`, else `admin.key` in the raw store, the data directory or the state
+/// directory, created if missing. Started as root with `--user`, the data directory and a created key belong to
+/// that user.
+fn node_admin_key(a: &Args, user: Option<&sandbox::User>, store: Option<&k10_node::kv::KvStore>) -> Result<(AdminKey, PathBuf), String> {
     if let Some(f) = a.get("admin-token-file") {
         return Ok((load_admin_key("admin-token-file", Path::new(f))?, PathBuf::from(f)));
+    }
+    if let Some(s) = store {
+        let files = s.files();
+        let key = match files.file("admin.key") {
+            Some(k) => Secret(k),
+            None => {
+                let k = new_key()?;
+                files.put_file("admin.key", &k.0).map_err(|_| "the store has no room for the admin key")?;
+                s.flush_now();
+                if !files.durable() {
+                    return Err("cannot write the admin key to the store".into());
+                }
+                eprintln!("k10s: generated the admin key (admin.key in the store)");
+                k
+            }
+        };
+        let k = AdminKey::parse(key.text()).map_err(|e| format!("admin.key in the store: {e}"))?;
+        return Ok((k, PathBuf::from("admin.key in the store")));
     }
     // SAFETY: geteuid has no preconditions.
     let owner = user.filter(|_| unsafe { libc::geteuid() } == 0);
@@ -398,15 +448,19 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
         "pin", "rpc", "gossip", "join", "advertise", "probe-ms", "suspicion-mult", "leave-grace-ms",
         "timer-res-us", "jit-indirect", "admin", "admin-token-file", "cluster-key-file", "cluster-next-key-file",
         "insecure-unauthenticated-cluster", "gossip-max-skew", "sandbox", "user", "os-agent-fd", "os-commit-grace",
+        "store", "store-fd", "store-size",
     ])?;
     // Process sandbox (k10-node/src/sandbox): early() here, enter() between binding the sockets and starting threads.
     let sandbox_mode = match a.get("sandbox") {
         None => sandbox::Mode::from_env()?,
         Some(m) => sandbox::Mode::parse(m).ok_or_else(|| format!("invalid --sandbox `{m}` (on|seccomp-only|log|off)"))?,
     };
-    let os_fd = a.get("os-agent-fd").map(|fd| fd.parse::<i32>().map_err(|_| format!("invalid --os-agent-fd `{fd}`"))).transpose()?;
+    let fd_flag = |f: &str| a.get(f).map(|fd| fd.parse::<i32>().map_err(|_| format!("invalid --{f} `{fd}`"))).transpose();
+    let os_fd = fd_flag("os-agent-fd")?;
+    let store_fd = fd_flag("store-fd")?;
     if sandbox_mode != sandbox::Mode::Off {
-        sandbox::early(os_fd).map_err(|e| format!("sandbox: {e} (use --sandbox off to run without it)"))?;
+        let keep: Vec<i32> = os_fd.into_iter().chain(store_fd).collect();
+        sandbox::early(&keep).map_err(|e| format!("sandbox: {e} (use --sandbox off to run without it)"))?;
     }
     let user = a.get("user").map(sandbox::User::resolve).transpose()?;
     if !a.positional.is_empty() {
@@ -419,9 +473,15 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
     if let Some(h) = a.get("admin") {
         cfg.admin_listen = Some(h.parse().map_err(|_| format!("invalid --admin address `{h}` (want IP:PORT)"))?);
     }
-    let (admin_key, admin_key_path) = node_admin_key(&a, user.as_ref())?;
+    if let Some(m) = a.get("kv-max") {
+        cfg.kv.max_bytes = parse_size(m)?;
+    }
+    // A raw store is replayed now (it may hold the admin key); its flusher starts with the node, in the sandbox.
+    let store = open_store(&a, store_fd, cfg.kv.clone())?;
+    let (admin_key, admin_key_path) = node_admin_key(&a, user.as_ref(), store.as_deref())?;
     cfg.admin_key = Some(admin_key);
     cfg.data_dir = a.get("data").map(PathBuf::from);
+    cfg.store = store;
     if let Some(n) = a.get("shards") {
         cfg.shards = n.parse().ok().filter(|n: &usize| (1..=1024).contains(n)).ok_or("invalid --shards")?;
     }
@@ -431,9 +491,6 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
     }
     if let Some(m) = a.get("mem") {
         cfg.mem_limit = parse_size(m)?;
-    }
-    if let Some(m) = a.get("kv-max") {
-        cfg.kv.max_bytes = parse_size(m)?;
     }
     if let Some(m) = a.get("conn-buffer-max") {
         cfg.conn_buffer_max = parse_size(m)?.max(1);
@@ -489,6 +546,11 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
     let shards = cfg.shards;
     let backend = cfg.backend;
     let data = cfg.data_dir.clone();
+    let node_data = match &cfg.store {
+        Some(kv) => Some(k10_node::data::Data::Store { kv: kv.clone(), scratch: data.clone() }),
+        None => data.clone().map(k10_node::data::Data::Dir),
+    };
+    let store_name = cfg.store.as_ref().map(|_| a.get("store").map_or_else(|| "from init".to_string(), String::from));
     let policy = sandbox::Policy {
         data_dir: data.clone(),
         write_dirs: std::env::var_os("K10_JIT_DUMP").filter(|d| !d.is_empty()).map(PathBuf::from).into_iter().collect(),
@@ -507,7 +569,7 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
     let sandbox_line = sandbox::enter(sandbox_mode, user.as_ref(), &policy).map_err(|e| format!("sandbox: {e}"))?;
     let setup = match cluster_bound {
         None => None,
-        Some(b) => Some(b.open(data.as_deref()).map_err(|e| format!("cannot start cluster mode: {e}"))?),
+        Some(b) => Some(b.open(node_data.as_ref()).map_err(|e| format!("cannot start cluster mode: {e}"))?),
     };
     let router = setup.as_ref().map_or_else(|| Arc::new(NoRemote) as Arc<dyn RemoteRouter>, ClusterSetup::router);
     let node = bound.start(router).map_err(|e| format!("cannot start node: {e}"))?;
@@ -530,7 +592,11 @@ fn cmd_node(args: &[String]) -> Result<(), String> {
         node.http_addr(),
         shards,
         backend.name(),
-        data.map(|d| d.display().to_string()).unwrap_or_else(|| "none (memory only)".into())
+        match (store_name, data) {
+            (Some(s), _) => format!("store {s}"),
+            (None, Some(d)) => d.display().to_string(),
+            (None, None) => "none (memory only)".into(),
+        }
     );
     let mut sig: libc::c_int = 0;
     // SAFETY: `set` is valid; sigwait writes the received signal number.

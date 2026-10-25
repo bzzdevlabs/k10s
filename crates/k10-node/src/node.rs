@@ -4,6 +4,7 @@ use crate::exec::{Backend, InterpBackend};
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::jit::JitBackend;
 use crate::http::{self, Limits};
+use crate::data::Data;
 use crate::kv::{KvConfig, KvStore};
 use crate::logs::Logs;
 use crate::router::{NoRemote, RemoteRouter};
@@ -83,8 +84,11 @@ pub struct NodeConfig {
     pub admin_listen: Option<SocketAddr>,
     /// Key of signed admin requests (`k10_mesh::admin_auth`); `None`: only `health` and `metrics` are served.
     pub admin_key: Option<k10_mesh::admin_auth::AdminKey>,
-    /// Persistent state (KV logs, last applied bundle). `None` = memory only.
+    /// Persistent state (KV logs, last applied bundle). `None` = memory only. With `store`, a scratch directory.
     pub data_dir: Option<PathBuf>,
+    /// A raw store (`--store`) holding the KV namespaces and the node's files instead of `data_dir`; opened (and
+    /// replayed) by the caller, started with the node.
+    pub store: Option<Arc<KvStore>>,
     pub shards: usize,
     /// Default: [`BackendKind::from_env`] (the JIT on x86-64 and AArch64 unless `K10S_BACKEND=interp`).
     pub backend: BackendKind,
@@ -155,6 +159,7 @@ impl Default for NodeConfig {
             admin_listen: None,
             admin_key: None,
             data_dir: None,
+            store: None,
             shards: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
             backend: BackendKind::from_env(),
             mem_limit: sys::phys_mem_bytes(),
@@ -241,7 +246,9 @@ pub struct NodeShared {
     pub mem: Arc<MemStats>,
     /// `--mem` with per-service reservations: what instance creation may use.
     pub budget: MemBudget,
-    pub kv: KvStore,
+    pub kv: Arc<KvStore>,
+    /// Where the bundle (and the cluster's state) persist.
+    pub data: Option<Data>,
     pub logs: Logs,
     pub router: Arc<dyn RemoteRouter>,
     pub stop: AtomicBool,
@@ -286,9 +293,6 @@ impl NodeShared {
         }
     }
 
-    pub fn persist_path(&self) -> Option<PathBuf> {
-        self.cfg.data_dir.as_ref().map(|d| d.join("bundle.k10b"))
-    }
 
     /// Validates, prepares and atomically installs a bundle (see [`ApplyReport`]). Every service is local.
     pub fn apply(&self, bundle: Bundle, persist: bool) -> Result<ApplyReport, String> {
@@ -475,8 +479,8 @@ impl NodeShared {
             by_name,
         });
         if persist {
-            if let Some(p) = self.persist_path() {
-                persist_bundle(&p, &bundle).map_err(|e| format!("cannot persist bundle: {e}"))?;
+            if let Some(d) = &self.data {
+                d.write(BUNDLE_FILE, &bundle.encode(), true).and_then(|()| d.sync()).map_err(|e| format!("cannot persist bundle: {e}"))?;
             }
         }
         // Reserve, publish, then retire and release what was replaced (live instances keep their bytes until freed).
@@ -506,20 +510,8 @@ impl NodeShared {
     }
 }
 
-fn persist_bundle(path: &std::path::Path, b: &Bundle) -> io::Result<()> {
-    use std::io::Write;
-    let tmp = path.with_extension("k10b.tmp");
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(&b.encode())?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, path)?;
-    if let Some(dir) = path.parent() {
-        std::fs::File::open(dir)?.sync_all()?;
-    }
-    Ok(())
-}
+/// The last applied bundle of a single node, in its data.
+const BUNDLE_FILE: &str = "bundle.k10b";
 
 /// Result of an apply.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -652,7 +644,16 @@ impl Bound {
         if let Some(d) = &cfg.data_dir {
             std::fs::create_dir_all(d)?;
         }
-        let kv = KvStore::open(cfg.data_dir.as_ref().map(|d| d.join("kv")).as_deref(), cfg.kv.clone())?;
+        let (kv, data) = match &cfg.store {
+            Some(s) => {
+                s.start()?;
+                (s.clone(), Some(Data::Store { kv: s.clone(), scratch: cfg.data_dir.clone() }))
+            }
+            None => (
+                Arc::new(KvStore::open(cfg.data_dir.as_ref().map(|d| d.join("kv")).as_deref(), cfg.kv.clone())?),
+                cfg.data_dir.clone().map(Data::Dir),
+            ),
+        };
         let mut shard_shared = Vec::new();
         for i in 0..shards_n {
             shard_shared.push(Arc::new(ShardShared::new(i)?));
@@ -682,6 +683,7 @@ impl Bound {
             mem: Arc::new(MemStats::default()),
             budget,
             kv,
+            data,
             router,
             stop: AtomicBool::new(false),
             ticker_parked: AtomicBool::new(false),
@@ -707,13 +709,13 @@ impl Bound {
         }
         let mut admin_listener = admin_listener;
         // Reload the last applied bundle.
-        if let Some(p) = shared.persist_path().filter(|_| shared.cfg.reload_bundle) {
-            if let Ok(bytes) = std::fs::read(&p) {
+        if let Some(d) = shared.data.as_ref().filter(|_| shared.cfg.reload_bundle) {
+            if let Ok(Some(bytes)) = d.read(BUNDLE_FILE) {
                 let reload = |b| shared.apply_inner(b, false, &|_| Placement::Local, ApplyMode::Reload);
                 match Bundle::decode(&bytes).map_err(|e| e.to_string()).and_then(reload) {
                     Ok(r) => eprintln!("k10s: reloaded bundle version {} ({} services)", r.version, r.unchanged.len() + r.added.len()),
                     Err(e) => {
-                        eprintln!("k10s: ERROR: cannot reload {}: {e}; serving nothing until the next apply", p.display());
+                        eprintln!("k10s: ERROR: cannot reload the bundle: {e}; serving nothing until the next apply");
                         let _ = shared.reload_error.set(e);
                     }
                 }
