@@ -198,7 +198,9 @@ impl Store {
     /// Drops blobs that neither the current manifest nor a fetch in progress references.
     fn gc(&mut self) {
         let Some(cur) = &self.current else { return };
-        let keep: Vec<[u8; 32]> = cur.manifest.services.iter().map(|s| s.code_hash).chain(self.pinned.iter().copied()).collect();
+        let os = crate::osupdate::wanted(&cur.manifest.os);
+        let keep: Vec<[u8; 32]> =
+            cur.manifest.services.iter().map(|s| s.code_hash).chain(self.pinned.iter().copied()).chain(os).collect();
         self.blobs.retain(|h, _| keep.contains(h));
     }
     fn bytes(&self) -> usize {
@@ -356,6 +358,8 @@ pub struct Cluster {
     max_frame: usize,
     link_buf: usize,
     stats: Stats,
+    /// The next OS update step (osupdate.rs), ns.
+    os_next: u64,
 }
 
 static CLUSTER: Global<Option<Cluster>> = Global::new(None);
@@ -391,6 +395,8 @@ pub fn start(mut cfg: Config, net: &mut Net) -> bool {
     let mut me = Member::new(cfg.id, cfg.gossip, cfg.rpc, cfg.http, Capacity { mem_bytes, cores: runtime::cpus() as u32 });
     // A rebooted guest that reuses its id must start above any incarnation it used before.
     me.incarnation = time::unix_ms();
+    // The kernel image this node runs, for cluster-rolled updates (none when k10boot did not boot it).
+    me.os = crate::osupdate::info();
     let mut gc = k10_mesh::Config::default();
     if let Some(ms) = cfg.probe_ms {
         gc.probe_interval_ms = ms;
@@ -458,6 +464,7 @@ pub fn start(mut cfg: Config, net: &mut Net) -> bool {
         max_frame: k10_mesh::wire::DEFAULT_MAX_FRAME.min((ram / 4) as usize),
         link_buf,
         stats: Stats::default(),
+        os_next: 0,
         cfg,
     };
     if !c.cfg.join.is_empty() {
@@ -566,6 +573,10 @@ impl Cluster {
             self.absorb(out);
         }
         self.on_gossip_events(net);
+        if time::now_ns() >= self.os_next {
+            self.os_next = time::now_ns() + 1_000_000_000;
+            self.os_tick();
+        }
         // Peer links.
         for h in net.take_accepted(RPC_PORT) {
             match self.add_link(h, None, false) {
@@ -696,6 +707,28 @@ impl Cluster {
         }
     }
 
+    // --- OS updates (osupdate.rs) -------------------------------------------------------------------------------
+
+    /// The trial kernel may commit: this node holds and applied the cluster's desired state and, if it joins peers,
+    /// sees one.
+    fn commit_ready(&self) -> bool {
+        let Some(cur) = &self.store.current else { return false };
+        self.applied == Some(cur.key())
+            && self.last_error.is_none()
+            && (self.cfg.join.is_empty() || self.gossip.live_members().iter().any(|m| m.id != self.me))
+    }
+
+    fn os_tick(&mut self) {
+        let plan = self.store.current.as_ref().map(|c| c.manifest.os.clone()).unwrap_or_default();
+        let members: Vec<Member> = self.gossip.members().cloned().collect();
+        let ready = self.commit_ready();
+        let blobs = &self.store.blobs;
+        let changed = crate::osupdate::tick(&plan, &members, self.me, ready, !self.cfg.join.is_empty(), &|h| blobs.get(h).cloned());
+        if let Some(info) = changed {
+            self.gossip.set_local_os(Some(info));
+        }
+    }
+
     // --- desired state ------------------------------------------------------------------------------------------
 
     fn on_desired(&mut self, net: &mut Net, d: DesiredState) {
@@ -804,11 +837,13 @@ impl Cluster {
                     Err(_) => return self.fetch_fail(net, "bad manifest"),
                 };
                 let st = Rc::new(Stored { manifest: m, bytes, hash: f.want.hash });
-                let mut missing: Vec<[u8; 32]> =
-                    st.manifest.services.iter().map(|s| s.code_hash).filter(|h| !self.store.blobs.contains_key(h)).collect();
+                // Service code, and the kernel image this node's platform rolls out.
+                let os = crate::osupdate::wanted(&st.manifest.os);
+                let wanted: Vec<[u8; 32]> = st.manifest.services.iter().map(|s| s.code_hash).chain(os).collect();
+                let mut missing: Vec<[u8; 32]> = wanted.iter().copied().filter(|h| !self.store.blobs.contains_key(h)).collect();
                 missing.sort();
                 missing.dedup();
-                self.store.pinned = st.manifest.services.iter().map(|s| s.code_hash).collect();
+                self.store.pinned = wanted;
                 f.missing = missing;
                 f.manifest = Some(st);
                 f.attempt_deadline = time::now_ns() + FETCH_TIMEOUT_NS;
@@ -1497,6 +1532,7 @@ impl Cluster {
             }
             None => s.push_str("\"last_error\":null,"),
         }
+        let _ = write!(s, "\"os_step\":\"{}\",", json_escape(&crate::osupdate::step_text()));
         let _ = write!(s, "\"live_members\":{},\"members\":[", self.gossip.num_live());
         for (i, m) in self.gossip.members().enumerate() {
             if i > 0 {
@@ -1504,7 +1540,7 @@ impl Cluster {
             }
             let _ = write!(
                 s,
-                "{{\"id\":\"{}\",\"state\":\"{}\",\"incarnation\":{},\"gossip\":\"{}\",\"rpc\":\"{}\",\"http\":\"{}\",\"mem\":{},\"cores\":{},\"self\":{}}}",
+                "{{\"id\":\"{}\",\"state\":\"{}\",\"incarnation\":{},\"gossip\":\"{}\",\"rpc\":\"{}\",\"http\":\"{}\",\"mem\":{},\"cores\":{},\"os\":{},\"self\":{}}}",
                 m.id,
                 state_str(m.state),
                 m.incarnation,
@@ -1513,6 +1549,7 @@ impl Cluster {
                 m.http,
                 m.capacity.mem_bytes,
                 m.capacity.cores,
+                os_json(m.os.as_ref()),
                 m.id == self.me
             );
         }
@@ -1617,6 +1654,20 @@ fn ranking(m: &Manifest, members: &[Member]) -> BTreeMap<String, Vec<NodeId>> {
             (s.name.clone(), v)
         })
         .collect()
+}
+
+fn os_json(os: Option<&k10_mesh::OsInfo>) -> String {
+    match os {
+        None => "null".into(),
+        Some(o) => alloc::format!(
+            "{{\"platform\":\"{}\",\"image\":\"{}\",\"committed\":{},\"updatable\":{},\"failed\":{}}}",
+            json_escape(&o.platform),
+            to_hex(&o.image),
+            o.committed,
+            o.updatable,
+            if o.failed == [0; 8] { "null".into() } else { alloc::format!("\"{}\"", to_hex(&o.failed)) }
+        ),
+    }
 }
 
 fn state_str(s: MemberState) -> &'static str {

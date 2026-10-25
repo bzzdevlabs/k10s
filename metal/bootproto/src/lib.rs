@@ -10,6 +10,7 @@
 //! | `/boot/NAME` | a file of K10S-BOOT that k10s.conf names (`admin-token-file=/boot/admin.key`), by its Tier 1 path |
 //! | `k10s.framebuffer` | the UEFI GOP mode ([`Framebuffer`]) |
 //! | `k10s.efi` | UEFI runtime services, to clear the boot counter ([`EfiHandoff`], [`counter`]) |
+//! | `k10s.image` | which signed kernel k10boot booted: the kernel file of K10S-BOOT or a slot of K10S-DATA, on trial or not, its hash, platform and version, and the keys k10boot trusted ([`BootedImage`]) |
 //!
 //! Nothing here allocates: the kernel reads these before it has a heap.
 
@@ -24,6 +25,99 @@ pub const MOD_BUNDLE: &str = "k10s.bundle";
 pub const MOD_CONF: &str = "k10s.conf";
 pub const MOD_FRAMEBUFFER: &str = "k10s.framebuffer";
 pub const MOD_EFI: &str = "k10s.efi";
+pub const MOD_IMAGE: &str = "k10s.image";
+
+/// Where the booted kernel came from (module `k10s.image`), for the kernel's cluster-rolled updates.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct BootedImage {
+    /// 0: `/k10s/metal.elf` of K10S-BOOT; 1 + i: kernel slot i of K10S-DATA.
+    pub source: u8,
+    /// The slot is on trial (it commits once healthy).
+    pub trial: bool,
+    /// SHA-256 of the signed image.
+    pub sha256: [u8; 32],
+    /// The unique GUID of the K10S-DATA partition k10boot read (zeros: none).
+    pub data_partition: [u8; 16],
+    platform: [u8; 64],
+    version: [u8; 64],
+    keys: [[u8; 32]; BootedImage::MAX_KEYS],
+    nkeys: u8,
+}
+
+impl BootedImage {
+    pub const MAX_KEYS: usize = 16;
+    pub const LEN: usize = 4 + 32 + 16 + 64 + 64 + 32 * Self::MAX_KEYS;
+    const VERSION: u8 = 1;
+
+    /// `platform` and `version` are cut to 63 bytes; at most [`Self::MAX_KEYS`] keys are kept.
+    pub fn new(source: u8, trial: bool, sha256: [u8; 32], data_partition: [u8; 16], platform: &str, version: &str, keys: &[[u8; 32]]) -> BootedImage {
+        let text = |s: &str| {
+            let mut b = [0u8; 64];
+            let n = s.len().min(63);
+            b[0] = n as u8;
+            b[1..1 + n].copy_from_slice(&s.as_bytes()[..n]);
+            b
+        };
+        let mut k = [[0u8; 32]; Self::MAX_KEYS];
+        let n = keys.len().min(Self::MAX_KEYS);
+        k[..n].copy_from_slice(&keys[..n]);
+        BootedImage { source, trial, sha256, data_partition, platform: text(platform), version: text(version), keys: k, nkeys: n as u8 }
+    }
+
+    fn text(b: &[u8; 64]) -> &str {
+        core::str::from_utf8(&b[1..1 + (b[0] as usize).min(63)]).unwrap_or("")
+    }
+
+    /// `ARCH-PROFILE` of the image (`x86_64-native`).
+    pub fn platform(&self) -> &str {
+        Self::text(&self.platform)
+    }
+
+    pub fn version(&self) -> &str {
+        Self::text(&self.version)
+    }
+
+    /// The keys k10boot verified the kernel against (the kernel verifies updates against the same).
+    pub fn keys(&self) -> &[[u8; 32]] {
+        &self.keys[..self.nkeys as usize]
+    }
+
+    pub fn encode(&self) -> [u8; Self::LEN] {
+        let mut b = [0u8; Self::LEN];
+        b[0] = Self::VERSION;
+        b[1] = self.source;
+        b[2] = self.trial as u8;
+        b[3] = self.nkeys;
+        b[4..36].copy_from_slice(&self.sha256);
+        b[36..52].copy_from_slice(&self.data_partition);
+        b[52..116].copy_from_slice(&self.platform);
+        b[116..180].copy_from_slice(&self.version);
+        for (i, k) in self.keys.iter().enumerate() {
+            b[180 + 32 * i..212 + 32 * i].copy_from_slice(k);
+        }
+        b
+    }
+
+    pub fn decode(b: &[u8]) -> Option<BootedImage> {
+        if b.len() < Self::LEN || b[0] != Self::VERSION || b[1] > 2 || b[3] as usize > Self::MAX_KEYS {
+            return None;
+        }
+        let mut keys = [[0u8; 32]; Self::MAX_KEYS];
+        for (i, k) in keys.iter_mut().enumerate() {
+            k.copy_from_slice(&b[180 + 32 * i..212 + 32 * i]);
+        }
+        Some(BootedImage {
+            source: b[1],
+            trial: b[2] != 0,
+            sha256: b[4..36].try_into().unwrap(),
+            data_partition: b[36..52].try_into().unwrap(),
+            platform: b[52..116].try_into().unwrap(),
+            version: b[116..180].try_into().unwrap(),
+            keys,
+            nkeys: b[3],
+        })
+    }
+}
 
 fn u32_at(b: &[u8], o: usize) -> u32 {
     u32::from_le_bytes(b[o..o + 4].try_into().unwrap())
@@ -283,10 +377,12 @@ pub mod counter {
     pub const GUID: [u8; 16] = [0xa0, 0xc5, 0x10, 0x6b, 0, 0, 0, 0x40, 0x80, 0, 0, 0, 0, 0, 0, 0xe2];
     /// EFI_VARIABLE_NON_VOLATILE | BOOTSERVICE_ACCESS | RUNTIME_ACCESS.
     pub const ATTRIBUTES: u32 = 7;
-    /// Unhealthy native boots in a row before Tier 1 is pinned.
+    /// Unhealthy native boots in a row before Tier 1 is pinned (or a trial kernel abandoned).
     pub const MAX_FAILURES: u8 = 2;
-    pub const LEN: usize = 50;
-    const VERSION: u8 = 1;
+    pub const LEN: usize = 82;
+    /// Records of the first version (without `failed_trial`) still decode.
+    const LEN_V1: usize = 50;
+    const VERSION: u8 = 2;
 
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub struct State {
@@ -296,6 +392,8 @@ pub mod counter {
         pub kernel: [u8; 32],
         /// `/k10s/tier`'s modification time (EFI_TIME) then.
         pub tier_stamp: [u8; 16],
+        /// SHA-256 of a trial kernel (K10S-DATA's slots) that used up its boots: never tried again.
+        pub failed_trial: [u8; 32],
     }
 
     impl State {
@@ -305,15 +403,18 @@ pub mod counter {
             b[1] = self.failures;
             b[2..34].copy_from_slice(&self.kernel);
             b[34..50].copy_from_slice(&self.tier_stamp);
+            b[50..82].copy_from_slice(&self.failed_trial);
             b
         }
 
-        /// `None` for anything but a record of this version (treated as no record).
+        /// `None` for anything but a record of this version or the first (treated as no record).
         pub fn decode(b: &[u8]) -> Option<State> {
-            (b.len() == LEN && b[0] == VERSION).then(|| State {
+            let ok = (b.len() == LEN && b[0] == VERSION) || (b.len() == LEN_V1 && b[0] == 1);
+            ok.then(|| State {
                 failures: b[1],
                 kernel: b[2..34].try_into().unwrap(),
                 tier_stamp: b[34..50].try_into().unwrap(),
+                failed_trial: b.get(50..82).map_or([0; 32], |f| f.try_into().unwrap()),
             })
         }
     }
@@ -328,7 +429,7 @@ pub mod counter {
         if failures >= MAX_FAILURES {
             return Err(failures);
         }
-        Ok(State { failures: failures + 1, kernel, tier_stamp })
+        Ok(State { failures: failures + 1, kernel, tier_stamp, failed_trial: prev.map_or([0; 32], |p| p.failed_trial) })
     }
 }
 
@@ -463,6 +564,33 @@ mod tests {
         assert_eq!(counter::count(Some(s2), k2, t1).unwrap().failures, 1);
         assert_eq!(counter::count(Some(s2), k1, t2).unwrap().failures, 1);
         assert_eq!(counter::State::decode(&[9; counter::LEN]), None);
+        // A failed trial is remembered through later counts; a record of the first version still reads.
+        let s3 = counter::State { failed_trial: [7; 32], ..s2 };
+        assert_eq!(counter::count(Some(s3), k2, t1).unwrap().failed_trial, [7; 32]);
+        assert_eq!(counter::State::decode(&s3.encode()), Some(s3));
+        let mut v1 = [0u8; 50];
+        v1[0] = 1;
+        v1[1] = 1;
+        assert_eq!(counter::State::decode(&v1).map(|s| (s.failures, s.failed_trial)), Some((1, [0; 32])));
+    }
+
+    #[test]
+    fn storage_controllers() {
+        assert_eq!(devices::storage(0x1af4, 0x1042, 0x01_00_00), Some("virtio-blk (modern)"));
+        assert_eq!(devices::storage(0x8086, 0x2922, 0x01_06_01), Some("ahci"));
+        assert_eq!(devices::storage(0x1b36, 0x0010, 0x01_08_02), Some("nvme"));
+        assert_eq!(devices::storage(0x8086, 0x7010, 0x01_01_80), None, "IDE");
+        assert_eq!(devices::storage(0x1af4, 0x1000, 0x02_00_00), None, "a NIC");
+    }
+
+    #[test]
+    fn booted_image() {
+        let keys = [[1u8; 32], [2u8; 32]];
+        let b = BootedImage::new(2, true, [5; 32], [6; 16], "x86_64-native", "0.1.0-dev.200", &keys);
+        let d = BootedImage::decode(&b.encode()).unwrap();
+        assert_eq!(d, b);
+        assert_eq!((d.platform(), d.version(), d.keys(), d.source, d.trial), ("x86_64-native", "0.1.0-dev.200", &keys[..], 2, true));
+        assert_eq!(BootedImage::decode(&[0; 10]), None);
     }
 
     #[test]

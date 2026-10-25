@@ -7,6 +7,7 @@
 //! recovery after a failed write run synchronously. Without K10S-DATA the KV data lives in memory only.
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -30,6 +31,8 @@ const RETRY_MIN_NS: u64 = 10_000_000;
 const RETRY_MAX_NS: u64 = 5_000_000_000;
 /// Tags of the asynchronous batch's requests (synchronous requests use others).
 const TAG_BATCH: u32 = 0x5700_0000;
+/// The kernel's own namespace in the store (osupdate.rs: failed images).
+const NATIVE: &[u8] = b".native";
 
 static STORAGE: Global<Option<Storage>> = Global::new(None);
 /// For `/_k10s/status` (any CPU): the store's size and log, whether writes are durable, batches and errors.
@@ -120,10 +123,12 @@ pub struct Storage {
     batch: Option<Batch>,
     failures: u32,
     retry_at: u64,
+    /// The `.native` namespace.
+    native: BTreeMap<Vec<u8>, Vec<u8>>,
 }
 
-/// `K10S-DATA` on `d`: (first block, blocks), from the primary GPT.
-fn find(p: &mut Part) -> Option<(u64, u64, u32)> {
+/// `K10S-DATA` on `d`: (first block, blocks, partition number, unique GUID), from the primary GPT.
+fn find(p: &mut Part) -> Option<(u64, u64, u32, [u8; 16])> {
     let bs = p.bs();
     let mut h = alloc::vec![0u8; bs as usize];
     p.read(bs, &mut h).ok()?;
@@ -131,7 +136,7 @@ fn find(p: &mut Part) -> Option<(u64, u64, u32)> {
     let mut a = alloc::vec![0u8; (hd.array_bytes() as u64).div_ceil(bs) as usize * bs as usize];
     p.read(hd.entries_lba * bs, &mut a).ok()?;
     let e = gpt::entries(&hd, &a).ok()?.into_iter().find(|e| e.is_data())?;
-    Some((e.first_lba, e.blocks(), e.number))
+    Some((e.first_lba, e.blocks(), e.number, e.unique.0))
 }
 
 /// Grows partition `pno` to the end of the disk (backup GPT first, as Tier 1's init does); the new size in blocks.
@@ -165,9 +170,10 @@ fn grow(p: &mut Part, pno: u32) -> Result<Option<u64>, String> {
     Ok(Some(plan.end - plan.start + 1))
 }
 
-/// Finds K10S-DATA on the disks, opens its store (formatting a blank one) and replays the KV namespaces. `grow`:
-/// take the rest of the disk. `k10.data=none` (or a disk-less machine) keeps KV in memory.
-pub fn init(data: Option<&str>, allow_grow: bool) {
+/// Finds K10S-DATA on the disks (the partition k10boot read, `want`, if it is there), opens its store (formatting a
+/// blank one) and replays the KV namespaces. `grow`: take the rest of the disk. `k10.data=none` (or a disk-less
+/// machine) keeps KV in memory.
+pub fn init(data: Option<&str>, allow_grow: bool, want: Option<[u8; 16]>) {
     if data == Some("none") {
         kprintln!("storage: k10.data=none: KV data in memory only");
         return;
@@ -176,14 +182,25 @@ pub fn init(data: Option<&str>, allow_grow: bool) {
         kprintln!("storage: no memory for I/O buffers: KV data in memory only");
         return;
     };
-    let disks = core::mem::take(&mut *dev::BLOCK.lock());
+    let mut disks = core::mem::take(&mut *dev::BLOCK.lock());
+    // The disk with the partition k10boot read goes first.
+    if let Some(w) = want {
+        let pos = disks.iter_mut().position(|d| {
+            let size = d.blocks() * d.block_size() as u64;
+            !d.read_only() && find(&mut Part { dev: &mut **d, bounce: &mut bounce, base: 0, size }).is_some_and(|f| f.3 == w)
+        });
+        if let Some(i) = pos {
+            let d = disks.remove(i);
+            disks.insert(0, d);
+        }
+    }
     let mut found = None;
     let mut rest = Vec::new();
     for mut d in disks {
         if found.is_none() && !d.read_only() && (d.block_size() as u64) <= layout::UNIT {
             let size = d.blocks() * d.block_size() as u64;
             let mut p = Part { dev: &mut *d, bounce: &mut bounce, base: 0, size };
-            if let Some((first, blocks, pno)) = find(&mut p) {
+            if let Some((first, blocks, pno, _)) = find(&mut p) {
                 let blocks = if allow_grow {
                     match grow(&mut p, pno) {
                         Ok(Some(b)) => {
@@ -218,8 +235,15 @@ pub fn init(data: Option<&str>, allow_grow: bool) {
     }
     let mut p = Part { dev: &mut *d, bounce: &mut bounce, base: first, size: blocks * bs };
     let mut replayed = 0u64;
+    let mut native = BTreeMap::new();
     let opened = Store::open(&mut p, &mut |ns, r| {
-        if let Ok(ns) = core::str::from_utf8(ns) {
+        if ns == NATIVE {
+            if r.op == record::PUT {
+                native.insert(r.key.to_vec(), r.value.to_vec());
+            } else {
+                native.remove(r.key);
+            }
+        } else if let Ok(ns) = core::str::from_utf8(ns) {
             if !ns.starts_with('.') {
                 crate::runtime::kv_restore(ns, r.op == record::PUT, r.key, r.value);
                 replayed += 1;
@@ -251,7 +275,7 @@ pub fn init(data: Option<&str>, allow_grow: bool) {
         store.superblock().size() >> 20,
         live >> 10
     );
-    *STORAGE.borrow_mut() = Some(Storage { dev: d, bounce, base: first, size: blocks * bs, store, batch: None, failures: 0, retry_at: 0 });
+    *STORAGE.borrow_mut() = Some(Storage { dev: d, bounce, base: first, size: blocks * bs, store, batch: None, failures: 0, retry_at: 0, native });
 }
 
 impl Storage {
@@ -392,6 +416,14 @@ impl Storage {
         let nss = crate::runtime::kv_namespaces();
         let res = (|| {
             self.store.checkpoint_begin()?;
+            let mut own = Vec::new();
+            for (k, v) in &self.native {
+                record::encode(&mut own, record::PUT, k, v);
+            }
+            if !own.is_empty() {
+                let mut p = Part { dev: &mut *self.dev, bounce: &mut self.bounce, base: self.base, size: self.size };
+                self.store.checkpoint_push(&mut p, NATIVE, &own)?;
+            }
             for ns in &nss {
                 let recs = crate::runtime::kv_snapshot(ns);
                 if !recs.is_empty() {
@@ -451,6 +483,79 @@ impl Storage {
             self.start(live, pending);
         }
     }
+}
+
+impl Storage {
+    /// Writes the `.native` record `key` (`None`: deletes it), committed before it returns.
+    fn set_native(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<(), String> {
+        self.drain();
+        if self.failures > 0 {
+            self.checkpoint("rewrite");
+            if self.failures > 0 {
+                return Err("K10S-DATA is not writable".into());
+            }
+        }
+        let mut rec = Vec::new();
+        match value {
+            Some(v) => record::encode(&mut rec, record::PUT, key, v),
+            None => record::encode(&mut rec, record::DEL, key, &[]),
+        }
+        let res = self.store.push(NATIVE, &rec).and_then(|()| {
+            let mut p = Part { dev: &mut *self.dev, bounce: &mut self.bounce, base: self.base, size: self.size };
+            self.store.commit(&mut p)
+        });
+        match res {
+            Ok(()) => {
+                match value {
+                    Some(v) => self.native.insert(key.to_vec(), v.to_vec()),
+                    None => self.native.remove(key),
+                };
+                Ok(())
+            }
+            Err(e) => {
+                self.failed("write", &e);
+                Err(alloc::format!("K10S-DATA: {e}"))
+            }
+        }
+    }
+}
+
+/// Whether K10S-DATA is open (KV is durable, the kernel slots usable).
+pub fn available() -> bool {
+    STORAGE.borrow().is_some()
+}
+
+/// The store's superblock (kernel slots).
+pub fn superblock() -> Option<layout::Super> {
+    STORAGE.borrow().as_ref().map(|s| *s.store.superblock())
+}
+
+/// A value of the kernel's own namespace.
+pub fn native_get(key: &[u8]) -> Option<Vec<u8>> {
+    STORAGE.borrow().as_ref()?.native.get(key).cloned()
+}
+
+/// Writes (or with `None` deletes) a value of the kernel's own namespace, durably.
+pub fn native_set(key: &[u8], value: Option<&[u8]>) -> Result<(), String> {
+    STORAGE.borrow_mut().as_mut().ok_or("no K10S-DATA")?.set_native(key, value)
+}
+
+/// Writes a signed kernel image into slot `slot` and arms it as the trial (data flushed before the superblock).
+pub fn install_slot(slot: u8, image: &[u8], sha256: [u8; 32]) -> Result<(), String> {
+    let mut st = STORAGE.borrow_mut();
+    let s = st.as_mut().ok_or("no K10S-DATA")?;
+    s.drain();
+    let mut p = Part { dev: &mut *s.dev, bounce: &mut s.bounce, base: s.base, size: s.size };
+    s.store.install_slot(&mut p, slot, image, sha256).map_err(|e| alloc::format!("writing kernel slot {}: {e}", (b'A' + slot) as char))
+}
+
+/// Sets the committed and trial slots.
+pub fn set_boot(committed: Option<u8>, trial: Option<u8>) -> Result<(), String> {
+    let mut st = STORAGE.borrow_mut();
+    let s = st.as_mut().ok_or("no K10S-DATA")?;
+    s.drain();
+    let mut p = Part { dev: &mut *s.dev, bounce: &mut s.bounce, base: s.base, size: s.size };
+    s.store.set_boot(&mut p, committed, trial).map_err(|e| alloc::format!("K10S-DATA superblock: {e}"))
 }
 
 /// CPU 0's main loop: completions, and the next group commit when its window closed.

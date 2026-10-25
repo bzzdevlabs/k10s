@@ -7,7 +7,8 @@
 //!   operator's keys, handed a PVH `start_info` with the files of K10S-BOOT as modules. A kernel that fails
 //!   verification, or that failed to get healthy on its last two boots (the boot counter), boots Tier 1 instead.
 //! * `auto`: `metal` if one of the machine's network adapters (PCI, as the firmware enumerated it) is in the
-//!   supported-device table (k10-bootproto `devices`), else `linux`.
+//!   supported-device table (k10-bootproto `devices`) and so is the controller of the disk with K10S-DATA (when the
+//!   firmware tells which it is), else `linux`.
 //!
 //! `k10s.tier=X` on the loader's command line (UEFI load options) overrides the file; the rest of the command line
 //! is the native kernel's, else `metal_cmdline` of `/k10s/tier`.
@@ -20,6 +21,7 @@ extern crate alloc;
 #[macro_use]
 mod efi;
 mod native;
+mod slots;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -110,12 +112,12 @@ fn run() -> Status {
     let native = match tier {
         Tier::Linux => false,
         Tier::Metal => true,
-        Tier::Auto => auto_select(),
+        Tier::Auto => auto_select() && data_disk_supported(device),
     };
     if native {
         let stamp = tier_file.as_ref().map_or([0; 16], |f| f.mtime);
         // Returns only when the kernel is not booted.
-        let why = native::boot(&esp, &cmdline, stamp);
+        let why = native::boot(&esp, device, &cmdline, stamp);
         log!("native kernel not booted: {why}");
         log!("booting Tier 1 instead");
     }
@@ -194,6 +196,25 @@ fn auto_select() -> bool {
         log!("tier auto: no supported network adapter ({}): linux", seen.join(", "));
     }
     false
+}
+
+/// `tier=auto`: whether the native kernel drives the disk controller of K10S-DATA (none, or one the firmware does
+/// not place on PCI: yes).
+fn data_disk_supported(device: Handle) -> bool {
+    let Some(d) = slots::open(device) else { return true };
+    match d.controller {
+        Some((vendor, dev, class)) => match devices::storage(vendor, dev, class) {
+            Some(driver) => {
+                log!("tier auto: K10S-DATA's controller {vendor:04x}:{dev:04x} is supported ({driver})");
+                true
+            }
+            None => {
+                log!("tier auto: K10S-DATA's controller {vendor:04x}:{dev:04x} (class {class:06x}) is not supported: linux");
+                false
+            }
+        },
+        None => true,
+    }
 }
 
 /// Starts Tier 1's systemd-boot from K10S-BOOT; returns only if that fails.

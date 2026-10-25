@@ -29,3 +29,23 @@ pub const SUPPORTED: &[Device] = &[
 pub fn find(vendor: u16, device: u16) -> Option<&'static Device> {
     SUPPORTED.iter().find(|d| d.vendor == vendor && d.device == device)
 }
+
+/// Controllers driven by their PCI class code (class, subclass, programming interface), whatever the vendor.
+#[derive(Clone, Copy, Debug)]
+pub struct ByClass {
+    pub class: u32,
+    pub kind: Class,
+    pub driver: &'static str,
+}
+
+pub const CLASSES: &[ByClass] = &[
+    ByClass { class: 0x01_08_02, kind: Class::Storage, driver: "nvme" },
+    ByClass { class: 0x01_06_01, kind: Class::Storage, driver: "ahci" },
+];
+
+/// The driver of a storage controller (ids, then class code `class`: class << 16 | subclass << 8 | prog-if).
+pub fn storage(vendor: u16, device: u16, class: u32) -> Option<&'static str> {
+    find(vendor, device).filter(|d| d.class == Class::Storage).map(|d| d.driver).or_else(|| {
+        CLASSES.iter().find(|c| c.class == class && c.kind == Class::Storage).map(|c| c.driver)
+    })
+}

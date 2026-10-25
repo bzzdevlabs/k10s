@@ -19,6 +19,8 @@
 #                           and q35 (the native kernel joins a hosted node and serves, k10s.conf and keys from
 #                           K10S-BOOT, boot counter cleared once healthy), tier=auto (virtio-net: native, e1000e: Tier
 #                           1), a failing native kernel (2 boots, then Tier 1), refused signatures, PVH -kernel
+#   update-native           the native kernel updated through K10S-DATA's slots (cluster rollout, power cuts, a
+#                           crashing kernel, a trial that cannot commit)
 #   mb2                     the vm image on SeaBIOS with tier=metal: GRUB, Multiboot2, the native kernel serves
 #   secureboot              the vm image on OVMF with Secure Boot on and Microsoft's keys (docs/OS.md "Secure Boot"):
 #                           refused as released; serves with Secure Boot off, with a MOK under Debian's shim and with
@@ -62,7 +64,7 @@ fi
 tests=("$@")
 if [[ ${#tests[@]} == 0 ]]; then
     case $arch in
-    x86_64) tests=(boot-debian boot-k10s dhcp image-bios image-uefi image-metal unsigned boottime repro update-bios update-uefi rollout tier mb2 secureboot) ;;
+    x86_64) tests=(boot-debian boot-k10s dhcp image-bios image-uefi image-metal unsigned boottime repro update-bios update-uefi rollout tier update-native mb2 secureboot) ;;
     aarch64) tests=(boot-arm64 image-arm64 update-arm64 pi pi3 mixed secureboot-arm64) ;;
     i686) tests=(boot-i686 image-i686 update-i686) ;;
     armv7) tests=(boot-armv7 image-armv7 update-armv7) ;;
@@ -126,7 +128,7 @@ if has boot-debian; then
         --mod 'fs/nls/nls_cp437.ko*' --mod 'fs/nls/nls_iso8859-1.ko*' --mod 'drivers/acpi/button.ko*' \
         --mod 'drivers/input/evdev.ko*' --mod 'drivers/watchdog/i6300esb.ko*'
 fi
-if has image-bios image-uefi image-metal unsigned boottime repro update-bios update-uefi rollout tier mb2 secureboot; then
+if has image-bios image-uefi image-metal unsigned boottime repro update-bios update-uefi rollout tier update-native mb2 secureboot; then
     K10S_BIN=$k10s os/images.sh --arch x86_64 "$out/images"
     metal=$(os/kbuild.sh metal)
     kmods=$(echo "$metal"/modroot/lib/modules/*)
@@ -137,7 +139,7 @@ if has update-bios update-uefi rollout; then
     upd=(--image "$out/k10s-os-x86_64-vm.img" --uki "$(echo "$out"/images/k10s-os-*-x86_64-vm.efi)" --image-key "$image_key"
         --boot "$(os/bootfiles.sh)" --k10s "$k10s" --examples examples)
 fi
-if has tier mb2; then
+if has tier update-native mb2; then
     image_key=$out/image-test.key
     [[ -f $image_key ]] || "$k10s" keygen -o "$image_key"
     tier=(--image "$out/k10s-os-x86_64-vm.img" --image-key "$image_key" --k10s "$k10s" --examples examples
@@ -207,6 +209,7 @@ for t in "${tests[@]}"; do
             --examples examples --work "$work"
         ;;
     tier) python3 os/test.py tier "${tier[@]}" --work "$work" ;;
+    update-native) python3 os/test.py update-native "${tier[@]}" --work "$work" ;;
     mb2) python3 os/test.py mb2 "${tier[@]}" --work "$work" ;;
     secureboot) python3 os/test.py secureboot "${sb[@]}" --work "$work" ;;
     secureboot-arm64) python3 os/test.py secureboot --arch aarch64 "${sb[@]}" --work "$work" ;;

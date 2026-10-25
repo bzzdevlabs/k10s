@@ -51,6 +51,11 @@ and, for the DHCP test, a host-side DHCP server on a QEMU socket netdev. os/test
       kernel, its k10s.conf and keys from K10S-BOOT, joins a hosted node on the host, serves, clears the boot counter),
       tier=auto (legacy virtio-net: native; e1000e: Tier 1), a failing native kernel (2 boots, then Tier 1 until the
       tier file is written again), kernels with an untrusted or broken signature refused, the signed kernel on PVH.
+  test.py update-native --image IMG --image-key KEY --k10s K10S --examples DIR
+      Cluster-rolled updates of the native kernel through K10S-DATA's kernel slots (OVMF, tier=metal, a hosted node on
+      the host): power cuts while slot A is written, after the trial is armed, during the trial boot and after the
+      commit; a kernel that crashes at boot (two trial boots, back to the committed one, recorded as failed, the
+      rollout stops); a trial that cannot commit (abandoned after os_trial). The node's KV state survives throughout.
   test.py mb2 --image IMG --image-key KEY --k10s K10S --examples DIR [--bundle K10B]
       The x86-64 image on SeaBIOS with tier=metal: GRUB boots the native kernel through Multiboot2 with k10s.conf,
       the bundle and the keys as modules; it serves.
@@ -1266,7 +1271,7 @@ def tier_test(a, work):
                            port=vhp, extra=extra)
             g.wait_for(r"k10boot: tier metal \(from /k10s/tier\)", "k10boot reads /k10s/tier")
             g.wait_for(r"k10boot: native boot 1 of 2 before Tier 1 is pinned", "the boot counted")
-            g.wait_for(rf"k10-metal: boot loader modules: k10s.conf, {fb}k10s.efi, /boot/admin.key, /boot/cluster.key; ACPI RSDP at 0x[1-9a-f]",
+            g.wait_for(rf"k10-metal: boot loader modules: k10s.conf, {fb}k10s.efi, k10s.image, /boot/admin.key, /boot/cluster.key; ACPI RSDP at 0x[1-9a-f]",
                        "modules from K10S-BOOT")
             g.wait_for(METAL_READY, "native kernel ready")
             if machine == "pc":
@@ -1344,6 +1349,174 @@ def tier_test(a, work):
     until("GET /_k10s/health", lambda: http(port, "/_k10s/health")[0] == 200, g.log)
     g.kill()
     print("test.py: tier: the signed kernel file boots through PVH (-kernel): ok", file=sys.stderr)
+
+
+def crashing_kernel(elf):
+    """The kernel ELF with `ud2` at its PVH entry: it faults before any handler exists (a triple fault, a reset)."""
+    b = bytearray(open(elf, "rb").read())
+    phoff, phsize, phnum = struct.unpack_from("<Q", b, 32)[0], *struct.unpack_from("<HH", b, 54)
+    segments, entry = [], None
+    for i in range(phnum):
+        kind, _, off, _, paddr, filesz = struct.unpack_from("<IIQQQQ", b, phoff + i * phsize)
+        if kind == 1:
+            segments.append((off, paddr, filesz))
+        elif kind == 4:
+            notes = b[off:off + filesz]
+            while len(notes) >= 12:
+                namesz, descsz, ntype = struct.unpack_from("<III", notes)
+                desc = 12 + (namesz + 3) // 4 * 4
+                if ntype == 18 and notes[12:12 + namesz] == b"Xen\0":
+                    entry = struct.unpack_from("<Q" if descsz == 8 else "<I", notes, desc)[0]
+                notes = notes[desc + (descsz + 3) // 4 * 4:]
+    off = next(o + entry - p for o, p, n in segments if p <= entry < p + n)
+    b[off:off + 2] = b"\x0f\x0b"
+    return bytes(b)
+
+
+def native_update_test(a, work):
+    """Cluster-rolled updates of the native kernel (metal/README.md, "Updates") on the x86-64 image under OVMF: a native
+    node (tier=metal) joins a hosted node on the host and serves; an OS plan with a re-signed kernel makes it write
+    slot A of K10S-DATA and reboot into it on trial (k10boot), and commit once back in the cluster. Power cuts as it
+    writes the slot, after it armed the trial, during the trial boot and after the commit: every boot runs a good
+    kernel, the trial is redone or goes on, and the node's KV state survives. A kernel that crashes at boot gets two
+    trial boots, then k10boot goes back to the committed one, which records it as failed: the rollout stops there. A
+    trial that cannot commit (its peer is gone) is abandoned after os_trial."""
+    t = TierDisks(a, work)
+    clu = os.path.join(work, "cluster.key")
+    gp, rp, hp = free_port(socket.SOCK_DGRAM), free_port(), free_port()
+    vgp, vrp, vhp = free_port(socket.SOCK_DGRAM), free_port(), free_port()
+    host = subprocess.Popen([a.k10s, "node", "--name", "host", "--data", os.path.join(work, "host-data"), "--http", f"127.0.0.1:{hp}",
+                             "--gossip", f"127.0.0.1:{gp}", "--rpc", f"127.0.0.1:{rp}", "--advertise", "10.0.2.2",
+                             "--cluster-key-file", clu, "--admin-token-file", t.key, "--sandbox", "off"],
+                            stdout=open(os.path.join(work, "host.log"), "w"), stderr=subprocess.STDOUT)
+    d = t.disk("native-update", "metal", conf=["cluster-key-file=/boot/cluster.key", f"gossip=0.0.0.0:{vgp}", f"rpc=0.0.0.0:{vrp}",
+                                               f"http=0.0.0.0:{vhp}", "advertise=127.0.0.1", f"join=10.0.2.2:{gp}", "os_trial=60",
+                                               "os-commit-grace=5"])
+    fw = uefi_firmware(work, "native-update")
+    runs = [0]
+
+    def boot(cut=None):
+        runs[0] += 1
+        g = Guest(work, f"native-update{runs[0]}", None, None, None,
+                  fw + ["-M", "pc", "-drive", f"file={d},if=virtio,format=raw", "-netdev",
+                        f"user,id=n0,hostfwd=tcp:127.0.0.1:{vhp}-:80,hostfwd=udp:127.0.0.1:{vgp}-:7946,hostfwd=tcp:127.0.0.1:{vrp}-:7947",
+                        "-device", "virtio-net-pci,disable-modern=on,netdev=n0,romfile="], cut=cut)
+        g.timeout = 240 if KVM else 900
+        return g
+
+    def kernel(g, version, source):
+        g.wait_for(rf"k10boot: kernel native {version} from {source}, signed by", f"k10boot boots {version} from {source}")
+
+    def manifest(name, image=None):
+        p = os.path.join(work, f"{name}.k10s")
+        ex = os.path.abspath(a.examples)
+        with open(p, "w") as f:
+            f.write(f'service hello {{ code = "{ex}/hello.ten" memory = 64KiB replicas = 2 }}\n'
+                    f'service counter {{ code = "{ex}/counter.ten" memory = 64KiB replicas = 2 }}\n')
+            if image:
+                f.write(f'os {{ images = ["{image}"] wave = 1 }}\n')
+        return p
+
+    count = [0]
+
+    def serves(g):
+        # The guest's own counter instance: its KV state lives in K10S-DATA.
+        until("the guest does not serve its counter", lambda: http(vhp, "/hello/") == (200, "hello") and http(vhp, "/counter/")[0] == 200, g.log)
+        count[0] += 1
+        got = http(vhp, "/counter/")[1].strip()
+        count[0] += 1
+        if got != str(count[0]):
+            fail(f"counter on the guest: {got}, want {count[0]} (KV state lost?)", g.log)
+        # Past the group commit's window before any power cut.
+        time.sleep(0.5)
+
+    payload = os.path.join(work, "native.payload")
+    open(payload, "wb").write(unsigned_payload(open(t.kernel, "rb").read()))
+
+    def sign(version, src=payload):
+        out = os.path.join(work, f"native-{version}.elf")
+        subprocess.run([a.k10s, "image", "sign", "--key", a.image_key, "--arch", "x86_64", "--profile", "native", "--version", version,
+                        src, out], check=True, capture_output=True)
+        return out
+    v2, v3 = sign("v2"), sign("v3")
+    bad_payload = os.path.join(work, "bad.payload")
+    open(bad_payload, "wb").write(crashing_kernel(payload))
+    bad = sign("bad", bad_payload)
+    try:
+        g = boot()
+        kernel(g, r"\S+", "/k10s/metal.elf")
+        g.wait_for(r"storage: K10S-DATA on virtio-blk", "K10S-DATA opened")
+        g.wait_for(METAL_READY, "native kernel ready")
+        until("the native kernel did not join the hosted node", lambda: http(hp, "/_k10s/health")[0] == 200 and
+              '"live_members":2' in subprocess.run([a.k10s, "status", "--node", f"127.0.0.1:{hp}", "--admin-token-file", t.key, "--json"],
+                                                   capture_output=True, text=True).stdout.replace(" ", ""), g.log)
+        apply(a, t.key, hp, manifest("v1"))
+        serves(g)
+        # The plan names v2: cut as it writes slot A (the trial may not be armed yet).
+        g.kill()
+        g = boot(cut=r"os: verified [0-9a-f]+ \(x86_64-native v2, signed by [0-9a-f]+\): writing slot A")
+        g.wait_for(METAL_READY, "native kernel ready")
+        apply(a, t.key, hp, manifest("v2", v2))
+        g.cut.wait(g.timeout)
+        g.kill()
+        print("test.py: update-native: power cut while slot A is written", file=sys.stderr)
+        # The committed kernel again (the trial, if the cut came late): the rollout goes on; cut once it armed the trial,
+        # then during the first trial boot, before it commits (k10boot counted it).
+        g = boot(cut=r"os: rebooting into slot A on trial")
+        m = g.wait_for(r"k10boot: kernel native \S+ from (/k10s/metal.elf|slot A of K10S-DATA \(trial\)),", "a good kernel")
+        if m.group(1) == "/k10s/metal.elf":
+            g.cut.wait(g.timeout)
+            g.kill()
+            g = boot(cut=r"k10boot: kernel native v2 from slot A of K10S-DATA \(trial\)")
+            g.cut.wait(g.timeout)
+        g.kill()
+        g = boot(cut=r"os: slot A \([0-9a-f]+\) committed")
+        kernel(g, "v2", r"slot A of K10S-DATA \(trial\)")
+        g.wait_for(r"k10boot: native boot 2 of 2 before Tier 1 is pinned", "the second trial boot")
+        g.cut.wait(g.timeout)
+        g.kill()
+        print("test.py: update-native: armed, trial boot cut, second trial boot committed, cut: ok", file=sys.stderr)
+        g = boot()
+        kernel(g, "v2", "slot A of K10S-DATA")
+        g.wait_for(r"os: x86_64-native v2 \([0-9a-f]+\) from slot A\r?$", "the committed slot")
+        serves(g)
+        # A kernel that crashes at boot: two trial boots, then back to v2, which records it as failed.
+        apply(a, t.key, hp, manifest("bad", bad))
+        g.wait_for(r"os: rebooting into slot B on trial", "bad image installed")
+        g.wait_exit()
+        for n in (1, 2):
+            g = boot()
+            kernel(g, "bad", r"slot B of K10S-DATA \(trial\)")
+            g.wait_for(rf"k10boot: native boot {n} of 2 before Tier 1 is pinned", f"trial boot {n} counted")
+            try:
+                g.proc.wait(g.timeout)
+            except subprocess.TimeoutExpired:
+                fail("the crashing kernel did not reset the machine", g.log)
+        g = boot()
+        g.wait_for(r"k10boot: the trial kernel of slot B never got healthy in 2 boots: back to the committed kernel", "trial given up")
+        kernel(g, "v2", "slot A of K10S-DATA")
+        g.wait_for(r"os: the trial kernel of slot B did not come up: recorded as failed", "recorded as failed")
+        serves(g)
+        until("the rollout did not stop", lambda: "stopped" in subprocess.run(
+            [a.k10s, "status", "--node", f"127.0.0.1:{vhp}", "--admin-token-file", t.key, "--json"], capture_output=True, text=True).stdout, g.log)
+        print("test.py: update-native: a crashing kernel: 2 trial boots, back to the committed kernel, rollout stopped: ok", file=sys.stderr)
+        # A trial that never commits: its only peer is gone once it installed.
+        apply(a, t.key, hp, manifest("v3", v3))
+        g.wait_for(r"os: rebooting into slot B on trial", "v3 installed")
+        host.kill()
+        g.wait_exit()
+        g = boot()
+        kernel(g, "v3", r"slot B of K10S-DATA \(trial\)")
+        g.wait_for(r"os: the trial of [0-9a-f]+ did not commit in time: back to the committed kernel", "trial abandoned", timeout=g.timeout + 60)
+        g.wait_exit()
+        g = boot()
+        kernel(g, "v2", "slot A of K10S-DATA")
+        g.wait_for(METAL_READY, "native kernel ready")
+        until("the guest does not serve", lambda: http(vhp, "/hello/") == (200, "hello"), g.log)
+        g.kill()
+        print("test.py: update-native: a trial that cannot commit is abandoned after os_trial: ok", file=sys.stderr)
+    finally:
+        host.kill()
 
 
 def mb2_test(a, work):
@@ -1581,7 +1754,7 @@ def main():
     ap = argparse.ArgumentParser()
     tests = {"boot": boot_test, "dhcp": dhcp_test, "image": image_test, "unsigned": unsigned_test, "boottime": boottime_test,
              "update": update_test, "rollout": rollout_test, "pi": pi_test, "pi3": pi3_test, "mixed": mixed_test,
-             "secureboot": secureboot_test, "tier": tier_test, "mb2": mb2_test}
+             "secureboot": secureboot_test, "tier": tier_test, "mb2": mb2_test, "update-native": native_update_test}
     ap.add_argument("test", choices=tests)
     ap.add_argument("--arch", choices=["x86_64", "aarch64", "i686", "armv7"], default="x86_64")
     ap.add_argument("--host-k10s")

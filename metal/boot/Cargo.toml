@@ -14,3 +14,4 @@ bench = false
 [dependencies]
 k10-bootproto.workspace = true
 k10-mesh.workspace = true
+k10-kvlog.workspace = true

@@ -39,6 +39,7 @@ mod power;
 mod pvh;
 mod runtime;
 mod selftest;
+mod osupdate;
 mod storage;
 mod serial;
 mod smp;
@@ -228,8 +229,10 @@ extern "C" fn kmain() -> ! {
         kprintln!("k10-metal selftest: {}", if ok { "passed" } else { "FAILED" });
         power::off();
     }
-    // K10S-DATA: the KV namespaces come back before any service runs.
-    storage::init(bi.arg("k10.data"), bi.arg("k10.grow") != Some("0"));
+    // K10S-DATA: the KV namespaces come back before any service runs (the partition k10boot read, if several).
+    let booted = bi.module(k10_bootproto::MOD_IMAGE).and_then(|(_, m)| k10_bootproto::BootedImage::decode(unsafe { m.bytes() }));
+    storage::init(bi.arg("k10.data"), bi.arg("k10.grow") != Some("0"), booted.map(|b| b.data_partition).filter(|g| *g != [0; 16]));
+    osupdate::init(&bi);
 
     if bi.from_loader() {
         let mut names = alloc::string::String::new();

@@ -1,18 +1,22 @@
-//! Booting the native kernel: `/k10s/metal.elf` of K10S-BOOT, a signed k10s image (`k10s image sign`, profile
-//! `native`) whose payload is the kernel's ELF, verified against the k10s release key, the keys built into k10boot
-//! and, with Secure Boot off, the operator's `os_key` of k10s.conf (with Secure Boot on, k10s.conf is not covered by
-//! any signature, so its keys do not count). Then, as QEMU's PVH loader would: the ELF's segments at their physical
-//! addresses, a PVH `start_info` (version 1: E820 map, command line, ACPI RSDP, modules) below 4 GiB, and the jump
-//! to the PVH entry in 32-bit protected mode with paging off. The modules (k10-bootproto) carry k10s.conf, the
-//! bundle, the key files k10s.conf names, the GOP framebuffer and the runtime services for the boot counter.
+//! Booting the native kernel, a signed k10s image (`k10s image sign`, profile `native`) whose payload is the kernel's
+//! ELF: the trial slot of K10S-DATA if one is armed and the boot counter allows it (slots.rs; cluster-rolled
+//! updates), else the committed slot, else `/k10s/metal.elf` of K10S-BOOT (the kernel the image was installed with).
+//! Each is verified against the k10s release key, the keys built into k10boot and, with Secure Boot off, the
+//! operator's `os_key` of k10s.conf (with Secure Boot on, k10s.conf is not covered by any signature, so its keys do
+//! not count); a slot's must also match the hash its superblock records. A trial kernel that used up its boots (or
+//! does not verify) is remembered in the boot counter and not tried again. Then, as QEMU's PVH loader would: the
+//! ELF's segments at their physical addresses, a PVH `start_info` (version 1: E820 map, command line, ACPI RSDP,
+//! modules) below 4 GiB, and the jump to the PVH entry in 32-bit protected mode with paging off. The modules
+//! (k10-bootproto) carry k10s.conf, the bundle, the key files k10s.conf names, the GOP framebuffer, the runtime
+//! services for the boot counter, and which kernel this is (`k10s.image`).
 
-use crate::efi::{self, St, Volume, Where};
+use crate::efi::{self, Handle, St, Volume, Where};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::arch::global_asm;
-use k10_bootproto::{conf, counter, e820, EfiHandoff, Framebuffer, PixelFormat, RuntimeRegion};
-use k10_bootproto::{MOD_BUNDLE, MOD_CONF, MOD_EFI, MOD_FRAMEBUFFER};
+use k10_bootproto::{conf, counter, e820, BootedImage, EfiHandoff, Framebuffer, PixelFormat, RuntimeRegion};
+use k10_bootproto::{MOD_BUNDLE, MOD_CONF, MOD_EFI, MOD_FRAMEBUFFER, MOD_IMAGE};
 use k10_mesh::osimage;
 use k10_mesh::sha256::{sha256, to_hex};
 
@@ -105,9 +109,10 @@ extern "C" {
     static k10boot_stub_end: u8;
 }
 
-/// Boots the kernel; returns only why it did not (boot services still up: Tier 1 boots instead).
-pub fn boot(esp: &Volume, cmdline: &str, tier_stamp: [u8; 16]) -> String {
-    match prepare(esp, cmdline, tier_stamp) {
+/// Boots the kernel; returns only why it did not (boot services still up: Tier 1 boots instead). `device`: the
+/// boot volume's handle (K10S-DATA is looked for on its disk first).
+pub fn boot(esp: &Volume, device: Handle, cmdline: &str, tier_stamp: [u8; 16]) -> String {
+    match prepare(esp, device, cmdline, tier_stamp) {
         Ok(b) => b.start(),
         Err(e) => e,
     }
@@ -275,11 +280,89 @@ fn framebuffer() -> Option<Framebuffer> {
     })
 }
 
-fn prepare(esp: &Volume, cmdline: &str, tier_stamp: [u8; 16]) -> Result<Boot, String> {
+/// A signed native kernel that verified: the image, its signature's details, where it came from (0: K10S-BOOT,
+/// 1 + slot) and whether it is on trial.
+struct Kernel {
+    blob: Vec<u8>,
+    info: osimage::ImageInfo,
+    source: u8,
+    trial: bool,
+}
+
+fn verified(blob: Vec<u8>, trusted: &[[u8; 32]], what: &str, source: u8, trial: bool) -> Result<Kernel, String> {
+    let info = osimage::verify(&blob, trusted).map_err(|e| format!("{what} refused: {e}"))?;
+    if info.meta.arch != "x86_64" {
+        return Err(format!("{what} is an image for {}", info.meta.arch));
+    }
+    Ok(Kernel { blob, info, source, trial })
+}
+
+/// The kernel to boot and the boot counter's new state (see the module docs); `Err` when none may boot.
+fn choose(esp: &Volume, data: Option<&crate::slots::Data>, trusted: &[[u8; 32]], tier_stamp: [u8; 16]) -> Result<(Kernel, counter::State), String> {
+    // The boot counter: the last native boots, and a trial kernel that failed.
+    let mut buf = [0u8; counter::LEN];
+    let mut prev = match efi::get_variable(counter::NAME, &counter_guid(), &mut buf) {
+        Ok(Some(n)) => counter::State::decode(&buf[..n]),
+        Ok(None) => None,
+        // Counting from zero would never pin Tier 1.
+        Err(e) => return Err(format!("cannot read the boot counter ({})", St(e))),
+    };
+    let failed = |prev: &Option<counter::State>| prev.map_or([0; 32], |p| p.failed_trial);
+    let mark_failed = |prev: &mut Option<counter::State>, sha: [u8; 32]| {
+        *prev = Some(prev.map_or(counter::State { failures: 0, kernel: [0; 32], tier_stamp, failed_trial: sha }, |p| counter::State { failed_trial: sha, ..p }));
+    };
+    let slot = |d: &crate::slots::Data, s: u8, trial: bool| -> Result<Kernel, String> {
+        let what = format!("kernel slot {} of K10S-DATA", (b'A' + s) as char);
+        let blob = d.slot(s).map_err(|e| format!("{what}: {e}"))?;
+        if d.sb.is_none_or(|sb| sha256(&blob) != sb.slots[s as usize].sha256) {
+            return Err(format!("{what} does not match its recorded hash"));
+        }
+        verified(blob, trusted, &what, 1 + s, trial)
+    };
+    let data = data.and_then(|d| Some((d, d.sb?)));
+    if let Some((d, sb)) = data {
+        if let Some(t) = sb.trial.filter(|&t| sb.slots[t as usize].len > 0) {
+            let sha = sb.slots[t as usize].sha256;
+            if sha == failed(&prev) {
+                log!("the trial kernel of slot {} failed before: not tried again", (b'A' + t) as char);
+            } else {
+                match counter::count(prev, sha, tier_stamp) {
+                    Err(n) => {
+                        log!("the trial kernel of slot {} never got healthy in {n} boots: back to the committed kernel", (b'A' + t) as char);
+                        mark_failed(&mut prev, sha);
+                    }
+                    Ok(state) => match slot(d, t, true) {
+                        Ok(k) => return Ok((k, state)),
+                        Err(e) => {
+                            log!("{e}");
+                            mark_failed(&mut prev, sha);
+                        }
+                    },
+                }
+            }
+        }
+    }
+    let committed = data.and_then(|(d, sb)| sb.committed.filter(|&c| sb.slots[c as usize].len > 0).map(|c| (d, c)));
+    let k = match committed.map(|(d, c)| slot(d, c, false)) {
+        Some(Ok(k)) => k,
+        other => {
+            if let Some(Err(e)) = other {
+                log!("{e}: the kernel of K10S-BOOT instead");
+            }
+            let blob = esp.read(KERNEL, MAX_KERNEL)?.ok_or("no /k10s/metal.elf on K10S-BOOT")?.data;
+            verified(blob, trusted, "/k10s/metal.elf", 0, false)?
+        }
+    };
+    let state = counter::count(prev, sha256(&k.blob), tier_stamp).map_err(|n| {
+        format!("pinned to Tier 1: the last {n} boots of this kernel never got healthy (write /k10s/tier again, or install another kernel, to retry)")
+    })?;
+    Ok((k, state))
+}
+
+fn prepare(esp: &Volume, device: Handle, cmdline: &str, tier_stamp: [u8; 16]) -> Result<Boot, String> {
     if cmdline.len() >= CMDLINE_MAX {
         return Err(format!("a command line of {} bytes (at most {})", cmdline.len(), CMDLINE_MAX - 1));
     }
-    let blob = esp.read(KERNEL, MAX_KERNEL)?.ok_or("no /k10s/metal.elf on K10S-BOOT")?.data;
     let conf = match esp.read(CONF, MAX_CONF)? {
         Some(f) => Some(String::from_utf8(f.data).map_err(|_| "/k10s.conf is not UTF-8")?),
         None => None,
@@ -296,13 +379,17 @@ fn prepare(esp: &Volume, cmdline: &str, tier_stamp: [u8; 16]) -> Result<Boot, St
             trusted.extend(v.split(',').filter_map(|k| hex32(k.trim())));
         }
     }
-    let info = osimage::verify(&blob, &trusted).map_err(|e| format!("/k10s/metal.elf refused: {e}"))?;
-    if info.meta.arch != "x86_64" {
-        return Err(format!("/k10s/metal.elf is an image for {}", info.meta.arch));
-    }
-    log!("kernel {} {} signed by {}… (Secure Boot {})", info.meta.profile, info.meta.version, &to_hex(&info.key)[..16],
+    let data = crate::slots::open(device);
+    let (kernel, state) = choose(esp, data.as_ref(), &trusted, tier_stamp)?;
+    let info = &kernel.info;
+    let from = match kernel.source {
+        0 => String::from("/k10s/metal.elf"),
+        s => format!("slot {} of K10S-DATA{}", (b'A' + s - 1) as char, if kernel.trial { " (trial)" } else { "" }),
+    };
+    log!("kernel {} {} from {from}, signed by {}… (Secure Boot {})", info.meta.profile, info.meta.version, &to_hex(&info.key)[..16],
          if secure { "on" } else { "off" });
-    let elf = Elf::parse(&blob[..info.payload_len]).map_err(|e| format!("/k10s/metal.elf: {e}"))?;
+    let blob = &kernel.blob;
+    let elf = Elf::parse(&blob[..info.payload_len]).map_err(|e| format!("{from}: {e}"))?;
 
     // The application processors' start-up page must be memory the kernel may use once boot services are gone.
     match page_type(TRAMPOLINE)? {
@@ -312,18 +399,6 @@ fn prepare(esp: &Volume, cmdline: &str, tier_stamp: [u8; 16]) -> Result<Boot, St
         }
         t => return Err(format!("page {TRAMPOLINE:#x} (application processor start-up) is firmware memory (E820 type {t})")),
     }
-
-    // The boot counter: refused once the last native boots never got healthy; written last (start).
-    let mut buf = [0u8; counter::LEN];
-    let prev = match efi::get_variable(counter::NAME, &counter_guid(), &mut buf) {
-        Ok(Some(n)) => counter::State::decode(&buf[..n]),
-        Ok(None) => None,
-        // Counting from zero would never pin Tier 1.
-        Err(e) => return Err(format!("cannot read the boot counter ({})", St(e))),
-    };
-    let state = counter::count(prev, sha256(&blob), tier_stamp).map_err(|n| {
-        format!("pinned to Tier 1: the last {n} boots of this kernel never got healthy (write /k10s/tier again, or install another kernel, to retry)")
-    })?;
 
     // The kernel at its physical addresses.
     let pages = ((elf.hi - elf.lo) / PAGE) as usize;
@@ -352,6 +427,10 @@ fn prepare(esp: &Volume, cmdline: &str, tier_stamp: [u8; 16]) -> Result<Boot, St
     }
     let efi_module = below_4g(&[0; EfiHandoff::MAX_LEN], efi::LOADER_DATA)?;
     modules.push((MOD_EFI, efi_module, EfiHandoff::MAX_LEN));
+    let platform = format!("{}-{}", info.meta.arch, info.meta.profile);
+    let unique = data.as_ref().map_or([0; 16], |d| d.unique);
+    let image = BootedImage::new(kernel.source, kernel.trial, sha256(blob), unique, &platform, &info.meta.version, &trusted).encode();
+    modules.push((MOD_IMAGE, below_4g(&image, efi::LOADER_DATA)?, image.len()));
     let base = efi::allocate_pages(Where::Below(FOUR_GIB), efi::LOADER_DATA, SI_LEN.div_ceil(PAGE as usize))
         .map_err(|e| format!("out of memory below 4 GiB ({})", St(e)))?;
     // The jump stub, in code pages below 4 GiB.

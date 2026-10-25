@@ -55,7 +55,8 @@ pub fn init(bi: &BootInfo) {
 
 /// Called from the main loop: clears the boot counter once the node is healthy (`rx` frames received so far).
 pub fn poll_health(rx: u64) {
-    if DONE.load(Ordering::Relaxed) || rx == 0 || time::now_ns() < crate::boot_ns() + HEALTHY_AFTER_NS {
+    // A trial kernel clears it when it commits (osupdate.rs).
+    if DONE.load(Ordering::Relaxed) || rx == 0 || time::now_ns() < crate::boot_ns() + HEALTHY_AFTER_NS || crate::osupdate::on_trial() {
         return;
     }
     DONE.store(true, Ordering::Relaxed);
@@ -67,7 +68,7 @@ pub fn poll_health(rx: u64) {
 }
 
 /// Deletes the counter variable if k10boot counted this boot; `Ok(false)` if there is nothing to clear.
-fn clear_boot_counter() -> Result<bool, String> {
+pub fn clear_boot_counter() -> Result<bool, String> {
     let mut st = STATE.lock();
     let Some(h) = st.handoff.filter(|h| h.counter_armed) else { return Ok(false) };
     if st.root == 0 {

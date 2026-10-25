@@ -60,6 +60,7 @@ pub const DEVICE_PATH: Guid = Guid(0x09576e91, 0x6d3f, 0x11d2, [0x8e, 0x39, 0x00
 pub const SIMPLE_FILE_SYSTEM: Guid = Guid(0x964e5b22, 0x6459, 0x11d2, [0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b]);
 const FILE_INFO: Guid = Guid(0x09576e92, 0x6d3f, 0x11d2, [0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b]);
 pub const GRAPHICS_OUTPUT: Guid = Guid(0x9042a9de, 0x23dc, 0x4a38, [0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a]);
+pub const BLOCK_IO: Guid = Guid(0x964e5b21, 0x6459, 0x11d2, [0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b]);
 pub const PCI_IO: Guid = Guid(0x4cf5b200, 0x68b8, 0x4ca5, [0x9e, 0xec, 0xb2, 0x3e, 0x3f, 0x50, 0x02, 0x9a]);
 pub const ACPI_20_TABLE: Guid = Guid(0x8868e871, 0xe4f1, 0x11d3, [0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81]);
 pub const ACPI_10_TABLE: Guid = Guid(0xeb9d2d30, 0x2d88, 0x11d3, [0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d]);
@@ -119,7 +120,7 @@ pub struct BootServices {
     reserved: Unused,
     register_protocol_notify: Unused,
     locate_handle: Unused,
-    locate_device_path: Unused,
+    pub locate_device_path: unsafe extern "efiapi" fn(*const Guid, *mut *const u8, *mut Handle) -> Status,
     install_configuration_table: Unused,
     pub load_image: unsafe extern "efiapi" fn(u8, Handle, *const u8, *const c_void, usize, *mut Handle) -> Status,
     pub start_image: unsafe extern "efiapi" fn(Handle, *mut usize, *mut *mut u16) -> Status,
@@ -231,6 +232,29 @@ pub struct PciIo {
     buffers: [Unused; 2],
     flush: Unused,
     pub get_location: unsafe extern "efiapi" fn(*mut PciIo, *mut usize, *mut usize, *mut usize, *mut usize) -> Status,
+}
+
+#[repr(C)]
+pub struct BlockIoMedia {
+    pub media_id: u32,
+    pub removable: u8,
+    pub present: u8,
+    pub logical_partition: u8,
+    pub read_only: u8,
+    pub write_caching: u8,
+    pub block_size: u32,
+    pub io_align: u32,
+    pub last_block: u64,
+}
+
+#[repr(C)]
+pub struct BlockIo {
+    pub revision: u64,
+    pub media: *const BlockIoMedia,
+    reset: Unused,
+    pub read_blocks: unsafe extern "efiapi" fn(*mut BlockIo, u32, u64, usize, *mut c_void) -> Status,
+    write_blocks: Unused,
+    flush_blocks: Unused,
 }
 
 static SYSTEM_TABLE: AtomicPtr<SystemTable> = AtomicPtr::new(null_mut());
@@ -555,8 +579,8 @@ fn read_open(f: *mut File, max: usize) -> Result<FileData, String> {
     Ok(FileData { data, mtime: info[56..72].try_into().unwrap() })
 }
 
-/// The device path of `device` with a file path node for `path` appended (for LoadImage).
-pub fn file_device_path(device: Handle, path: &str) -> Option<Vec<u8>> {
+/// The nodes of `device`'s device path, without its end node.
+pub fn device_path(device: Handle) -> Option<Vec<u8>> {
     // SAFETY: a device path protocol is a sequence of nodes (type, subtype, u16 length) ending in an end node.
     let dp = unsafe { protocol::<u8>(device, &DEVICE_PATH)? };
     let mut v = Vec::new();
@@ -569,6 +593,21 @@ pub fn file_device_path(device: Handle, path: &str) -> Option<Vec<u8>> {
         v.extend_from_slice(unsafe { core::slice::from_raw_parts(p, len) });
         p = unsafe { p.add(len) };
     }
+    Some(v)
+}
+
+/// The handle nearest to `path`'s end (its own, or an ancestor's) that has protocol `guid`.
+pub fn handle_on_path(guid: &Guid, path: &[u8]) -> Option<Handle> {
+    let mut dp = path.to_vec();
+    dp.extend_from_slice(&[0x7f, 0xff, 4, 0]);
+    let (mut p, mut h): (*const u8, Handle) = (dp.as_ptr(), null_mut());
+    // SAFETY: a well-formed device path (with its end node) that outlives the call.
+    (unsafe { (bs().locate_device_path)(guid, &mut p, &mut h) } == SUCCESS && !h.is_null()).then_some(h)
+}
+
+/// The device path of `device` with a file path node for `path` appended (for LoadImage).
+pub fn file_device_path(device: Handle, path: &str) -> Option<Vec<u8>> {
+    let mut v = device_path(device)?;
     let name = ucs2(&alloc::format!("\\{}", path.replace('/', "\\")));
     let len = 4 + 2 * name.len();
     // Media device path, file path subtype.

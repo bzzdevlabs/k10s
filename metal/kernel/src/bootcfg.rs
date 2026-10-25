@@ -23,7 +23,7 @@ use k10_bootproto::conf;
 use crate::kprintln;
 use crate::pvh::BootInfo;
 
-const MAPPED: [(&str, &str); 11] = [
+const MAPPED: [(&str, &str); 13] = [
     ("k10.join", "join"),
     ("k10.engine", "backend"),
     ("k10.jit_indirect", "jit-indirect"),
@@ -35,6 +35,8 @@ const MAPPED: [(&str, &str); 11] = [
     ("k10.ip", "ip"),
     ("k10.data", "data"),
     ("k10.grow", "grow"),
+    ("k10.os_commit_grace", "os-commit-grace"),
+    ("k10.os_trial", "os_trial"),
 ];
 
 /// Space-separated words in a fixed buffer (no heap yet when it is filled).
