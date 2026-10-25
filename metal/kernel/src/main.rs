@@ -26,6 +26,7 @@ mod arch;
 mod boot;
 mod bootcfg;
 mod cluster;
+mod console;
 mod coro;
 mod dev;
 mod efi;
@@ -46,6 +47,7 @@ mod smp;
 mod sync;
 mod time;
 mod virtio;
+mod watchdog;
 
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -127,10 +129,21 @@ extern "C" fn kmain() -> ! {
     frames::add_low_memory(&memmap, acpi::ebda_range());
     let fs = frames::stats();
     RESERVE.store((fs.usable / 16).max(256 << 10), Ordering::Relaxed);
-    match serial::choose(bi.arg("k10.console"), acpi::get().and_then(|t| t.spcr)) {
+    let serial_arg = console::configure(bi.arg("k10.console"))
+        .unwrap_or_else(|e| fatal(format_args!("k10.console={}: {e}", bi.arg("k10.console").unwrap_or(""))));
+    match serial::choose(serial_arg, acpi::get().and_then(|t| t.spcr)) {
         Ok(Some((port, baud, fifo))) => serial::set_port(port, baud, fifo),
         Ok(None) => {}
         Err(e) => fatal(format_args!("k10.console={}: {e}", bi.arg("k10.console").unwrap_or(""))),
+    }
+    if let Some((_, m)) = bi.module(k10_bootproto::MOD_FRAMEBUFFER) {
+        // SAFETY: the framebuffer module is never released.
+        if let Some((w, h, cols, rows, cw, ch)) = console::fb::init(unsafe { m.bytes() }) {
+            kprintln!("console: framebuffer {w}x{h}, {cols}x{rows} characters of {cw}x{ch} pixels");
+        }
+    }
+    if let Some(dst) = console::udp::target() {
+        kprintln!("console: UDP to {dst} from port {} once the network is up", console::udp::LOCAL_PORT);
     }
     if memmap.dropped > 0 {
         kprintln!("k10-metal: memory map: {} region(s) beyond {} ignored", memmap.dropped, mem::memmap::MAX_REGIONS);
@@ -224,7 +237,15 @@ extern "C" fn kmain() -> ! {
         }
     }
 
-    if bi.has_flag("k10.selftest") {
+    watchdog::init(bi.arg("k10.watchdog"), tables.and_then(|t| t.wdat.as_deref()))
+        .unwrap_or_else(|e| fatal(format_args!("k10.watchdog={}: {e}", bi.arg("k10.watchdog").unwrap_or(""))));
+    // Test modes: `k10.selftest` runs the self tests; `=watchdog` hangs with the watchdog armed; `=panic` panics
+    // once the UDP console has sent a datagram (its panic path).
+    let test_mode = bi.arg("k10.selftest");
+    if test_mode == Some("watchdog") {
+        watchdog::selftest_hang();
+    }
+    if bi.has_flag("k10.selftest") && test_mode != Some("panic") {
         let ok = selftest::run(nic.is_some());
         kprintln!("k10-metal selftest: {}", if ok { "passed" } else { "FAILED" });
         power::off();
@@ -269,6 +290,7 @@ extern "C" fn kmain() -> ! {
     let (nic_name, irq, pairs) = (nic.name(), nic.has_interrupts(), nic.queue_pairs());
     let seed = arch::rdrand().unwrap_or(arch::rdtsc());
     let mut net = net::Net::new(nic, limits, seed, ip);
+    console::udp::set_nic(&mut net.dev);
     // DHCP: the DISCOVER goes out now; the lease arrives while the bundle is applied. A cluster member waits for it
     // before it starts (it sends from, and may advertise, that address); a single node before the ready line.
     let cluster_cfg = cluster::config(&bi);
@@ -278,6 +300,9 @@ extern "C" fn kmain() -> ! {
         if cluster_cfg.is_some() {
             wait_for_address(&mut net, 30_000_000_000);
         }
+    }
+    if test_mode == Some("panic") {
+        selftest_panic(&mut net);
     }
     let t_net = arch::rdtsc();
     if verbose { kprintln!(
@@ -384,6 +409,7 @@ fn wait_for_address(net: &mut net::Net, timeout_ns: u64) {
     let end = time::now_ns() + timeout_ns;
     while net.ipv4().is_none() && time::now_ns() < end {
         net.poll_ingress();
+        net.poll_console();
         net.poll_egress();
         if net.ipv4().is_some() {
             break;
@@ -403,12 +429,27 @@ fn wait_for_address(net: &mut net::Net, timeout_ns: u64) {
     }
 }
 
+/// `k10.selftest=panic`: waits for an address and for the UDP console's first datagram, then panics.
+fn selftest_panic(net: &mut net::Net) -> ! {
+    wait_for_address(net, 30_000_000_000);
+    kprintln!("selftest: the UDP console's first datagram");
+    let end = time::now_ns() + 10_000_000_000;
+    while !console::udp::sent_one() && time::now_ns() < end {
+        net.poll_ingress();
+        net.poll_console();
+        net.poll_egress();
+        arch::pause();
+    }
+    panic!("k10.selftest=panic: a panic reported over the UDP console");
+}
+
 /// After a power request: time to answer it and send the cluster leave.
 const POWER_GRACE_NS: u64 = 300_000_000;
 
 /// `advertised`: the address the cluster member advertises, when it is the interface's (a lease that changes it
 /// reboots the node, as Tier 1 restarts its node, so peers learn the new one).
 fn main_loop(net: &mut net::Net, spin_ns: u64, advertised: Option<smoltcp::wire::Ipv4Cidr>) -> ! {
+    watchdog::arm();
     let mut last_busy = time::now_ns();
     let mut spin_from: Option<u64> = None;
     let mut leaving = false;
@@ -449,7 +490,9 @@ fn main_loop(net: &mut net::Net, spin_ns: u64, advertised: Option<smoltcp::wire:
             net.respond(r.conn, r.status, r.content_type, &r.body);
         }
         net.service(&mut runtime::submit);
+        net.poll_console();
         net.poll_egress();
+        watchdog::pet();
         *net::SNAPSHOT.borrow_mut() = net.snapshot();
         runtime::housekeeping();
         storage::poll();
@@ -515,7 +558,10 @@ fn idle(net: &mut net::Net) {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    unsafe { serial::SERIAL.force_unlock() };
+    unsafe {
+        serial::SERIAL.force_unlock();
+        console::force_unlock();
+    }
     kprintln!("\n!!! k10-metal PANIC: {}", info);
     if let Some((lo, hi)) = coro::current_stack() {
         kprintln!("    (in coroutine, stack {:#x}..{:#x})", lo, hi);

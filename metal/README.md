@@ -4,13 +4,16 @@ k10-metal boots the k10s node runtime directly on a (virtual) x86-64 machine, wi
 (docs/DESIGN.md §2.9). Workloads are TIR modules, isolated by construction: masked memory accesses, structured
 control flow, and a closed host API. So the kernel needs no processes, no system calls, no user/kernel boundary,
 and no per-workload page tables. It runs one identity-mapped address space (all RAM, above 4 GiB too) on one or more
-cores (up to 64, from the ACPI MADT), with a timer, a NIC, an optional disk and a serial console. It finds the
-platform in the ACPI tables, without an AML interpreter, and powers off and reboots through ACPI.
+cores (up to 64, from the ACPI MADT), with a timer, a NIC, an optional disk and its consoles (serial, the screen of
+a UEFI machine, UDP). It finds the platform in the ACPI tables, without an AML interpreter, powers off and reboots
+through ACPI, and arms the machine's hardware watchdog while it runs.
 
 It boots with PVH (`-kernel`) on QEMU (`pc` and `q35` with SeaBIOS or qboot, `microvm`), Firecracker and Cloud
 Hypervisor, under KVM or TCG, and from the x86-64 disk images of `os/` through its UEFI loader k10boot or through
-GRUB and Multiboot2 on BIOS ("Booting"; docs/OS.md, "Tiers"); NICs are virtio (PCI modern and legacy, MMIO), disks
-virtio-blk, NVMe or AHCI. On a disk with a `K10S-DATA` partition it keeps the services' KV data, its node id and the
+GRUB and Multiboot2 on BIOS ("Booting"; docs/OS.md, "Tiers"), from a disk or a USB stick. NICs are virtio (PCI modern
+and legacy, MMIO) and the Ethernet controllers of PCs ("Real machines": Intel e1000e — 82574L, I217/I218, I219 —,
+igb — 82576, I350, I210/I211 — and igc — I225/I226 —, Realtek RTL8111/8168/8411 and RTL8125), disks virtio-blk,
+NVMe or AHCI. On a disk with a `K10S-DATA` partition it keeps the services' KV data, its node id and the
 cluster's desired state, in the format Tier 1 uses (crates/k10-kvlog), and installs cluster-rolled kernel updates
 into the partition's two kernel slots ("Storage", "Updates"). It deploys a `k10_mesh::Bundle` (manifest + TIR blobs) and serves HTTP/1.1 on port 80 with the same routing
 and host API as the hosted node (docs/NODE.md, docs/HOSTAPI.md). Services run as
@@ -26,7 +29,8 @@ Measurements: [RESULTS.md](RESULTS.md).
                            # services, 4 of them compiled from ../examples/*.ten); EMBED=1 also bakes the bundle in
 k10s keygen -o admin.key   # admin key (mode 0600); without one the admin API serves only /_k10s/health
 ADMIN_KEY=admin.key ./run.sh # QEMU (KVM, else TCG), serial on stdout, host 127.0.0.1:8090 -> guest :80 (PORT=, MEM=,
-                           # BIOS=, PLATFORM=pc|pc-legacy|pc-legacy-split|pc-modern|q35|microvm|microvm-v2, DISK=raw file);
+                           # BIOS=, PLATFORM=pc|pc-legacy|pc-legacy-split|pc-modern|q35|microvm|microvm-v2|e1000e|igb,
+                           # DISK=raw file);
                            # the key goes in as fw_cfg opt/k10s/admin_key, never on the kernel command line
 curl localhost:8090/hello/ # -> hello from k10-metal
 curl 'localhost:8090/sha/?n=1000'                # Ten SHA-256 chain (examples/compute.ten), JIT-compiled
@@ -40,8 +44,8 @@ curl -H "Authorization: $(tools/admin_auth.py 127.0.0.1:8090 POST /_k10s/power r
      localhost:8090/_k10s/power                  # reboot (body `off`: power off) through ACPI
 SMP=4 ./run.sh             # four CPUs: CPU 0 runs the network, CPU-heavy requests are spread over all four
 ./test.sh                  # in-kernel self tests + end-to-end checks: JIT, interpreter, JIT on 4 CPUs, admin API signing,
-                           # every QEMU platform (power off/reboot, disks), SPCR console, static address, DHCP renew,
-                           # 16 GiB + 32 vCPUs (TEST_PORT=18090, PLATFORM=, ACCEL=kvm|tcg)
+                           # every QEMU platform and NIC (power off/reboot, disks), SPCR console, static address, DHCP
+                           # renew, watchdogs, UDP console, 16 GiB + 32 vCPUs (TEST_PORT=18090, PLATFORM=, ACCEL=kvm|tcg)
 ./cluster-test.sh          # 2 hosted `k10s node` + 1 k10-metal guest: join, apply, routing, failover, rejoin with a next
                            # cluster key, KV on the guest's NVMe K10S-DATA through a power cut, refused peers (wrong
                            # key, unauthenticated links), leave + power off
@@ -55,12 +59,16 @@ tools/cluster_measure.py   # cluster measurements with a metal member -> out/res
 ```
 
 Kernel command line (`APPEND=` for run.sh): `k10.verbose` (boot banner, ACPI summary, phases, apply log),
-`k10.selftest` (run the in-kernel tests, print `k10-metal selftest: passed` or `FAILED`, power off),
+`k10.selftest` (run the in-kernel tests, print `k10-metal selftest: passed` or `FAILED`, power off;
+`k10.selftest=watchdog` arms the watchdog and hangs, `k10.selftest=panic` panics once the UDP console works: test
+modes),
 `k10.exit_on_ready` (power off once ready), `k10.spin_us=N` (busy-poll window before halting, default 50),
 `k10.engine=jit|interp` (default jit), `k10.smp=N` (use at most N CPUs), `k10.ip=A.B.C.D/PREFIX[,GATEWAY]` (static
-IPv4; default DHCP, `k10.ip=dhcp`), `k10.console=com1|com2|com3|com4|io:0xPORT|mmio:0xADDR|mmio32:0xADDR|none`
-(default: the ACPI SPCR table's UART, else COM1), `k10.panic=N` (seconds before a fatal error reboots, default 10,
-0 = halt), `k10.apic=xapic` (stay in xAPIC mode where the firmware did not hand over in x2APIC mode), `k10.pci=full`
+IPv4; default DHCP, `k10.ip=dhcp`), `k10.console=ITEM[,ITEM…]` with at most one serial port among
+`com1|com2|com3|com4|io:0xPORT|mmio:0xADDR|mmio32:0xADDR|none` (default: the ACPI SPCR table's UART, else COM1),
+`udp:A.B.C.D[:PORT]` (the UDP log console, default port 6666) and `nofb` (no framebuffer console; it is on whenever
+k10boot hands over the screen), `k10.watchdog=SECONDS|on|off` (the hardware watchdog's timeout, default 60; `off`
+leaves it alone), `k10.panic=N` (seconds before a fatal error reboots, default 10, 0 = halt), `k10.apic=xapic` (stay in xAPIC mode where the firmware did not hand over in x2APIC mode), `k10.pci=full`
 (probe every bus of the ECAM windows under a hypervisor too), `virtio_mmio.device=SIZE@BASE:IRQ` (virtio-mmio slots,
 Linux syntax; also read from the ACPI DSDT),
 `k10.jit_indirect=jump|lfence|retpoline` (Spectre v2 hardening of JIT indirect branches, default jump),
@@ -71,8 +79,8 @@ Cluster mode: `k10.join=HOST:PORT[,…]`, `k10.gossip=`, `k10.rpc=`, `k10.http=`
 `k10.gossip_max_skew_s=N` (default 300, at least 1), and `k10.insecure_unauthenticated_cluster` when no cluster key
 is given. Storage and updates: `k10.data=none` (no K10S-DATA: KV in memory), `k10.grow=0` (keep K10S-DATA's size),
 `k10.os_commit_grace=S` (30), `k10.os_trial=S` (600). The advertised addresses default to the interface's (DHCP or static) address. An invalid `k10.spin_us`,
-`k10.engine`, `k10.smp`, `k10.jit_indirect`, `k10.timer_res_us`, `k10.ip`, `k10.console`, `k10.panic` or
-`k10.gossip_max_skew_s` value stops the boot.
+`k10.engine`, `k10.smp`, `k10.jit_indirect`, `k10.timer_res_us`, `k10.ip`, `k10.console`, `k10.watchdog`, `k10.panic`
+or `k10.gossip_max_skew_s` value stops the boot.
 
 Booted by k10boot or GRUB, the kernel also takes these from `k10s.conf` on the disk's `K10S-BOOT` ("Booting").
 
@@ -118,9 +126,12 @@ metal/                    its own cargo workspace (own target dir); path-depends
     src/mem/              memory map (sorted, disjoint), frame allocator (bitmap), kernel heap, instance slots
     src/time.rs           TSC clock (kvmclock / CPUID 0x15 / HPET / PM timer / PIT), wall clock (kvmclock resync), guest
                           clock, preemption flag + JIT preemption word
-    src/pci.rs            config space via ECAM (MCFG) or 0xCF8/0xCFC, bus scan, 64-bit BARs, MSI-X, bridges
+    src/pci.rs            config space via ECAM (MCFG) or 0xCF8/0xCFC, bus scan, 64-bit BARs, MSI and MSI-X, bridges
     src/dev/              NetDevice and BlockDevice traits, DMA regions, device probe, virtio-mmio slots; nvme.rs
-                          (NVMe), ahci.rs (AHCI SATA)
+                          (NVMe), ahci.rs (AHCI SATA); nic.rs: the drivers of metal/drivers behind NetDevice
+                          (registers, DMA, MSI/MSI-X)
+    src/console/          the framebuffer text console (fb.rs, font.rs) and the UDP log console (udp.rs)
+    src/watchdog.rs       the hardware watchdog: found at boot, armed by the main loop, petted every second
     src/virtio/           virtio transports (PCI modern + legacy, MMIO v1 + v2), split virtqueues, net and blk drivers
     src/net.rs            smoltcp interface (DHCPv4 or static), listener pool, HTTP connections, UDP + extra listeners
                           + TCP dial, smoltcp glue for any NetDevice
@@ -134,6 +145,9 @@ metal/                    its own cargo workspace (own target dir); path-depends
                           interfaces it uses, by hand), main.rs (tier, PCI scan, chain-load of systemd-boot),
                           native.rs (which kernel, signature, ELF, start_info, modules, boot counter,
                           ExitBootServices, jump), slots.rs (K10S-DATA's kernel slots through Block I/O)
+  drivers/                k10-drivers (no_std + alloc, host tests against register models of the chips): the NIC
+                          drivers (e1000e.rs, igc.rs, rtl8169.rs; ring.rs, the descriptor rings; ids.rs, the PCI
+                          ids) and the watchdog drivers (watchdog/: wdat.rs, itco.rs, esb.rs)
   bootproto/              k10-bootproto (no_std, host unit tests): what k10boot, the Multiboot2 shim and the kernel
                           agree on: module names, framebuffer and EFI records, k10s.conf, the tier file, the boot
                           counter, E820; devices.rs, the supported-device table
@@ -141,7 +155,8 @@ metal/                    its own cargo workspace (own target dir); path-depends
   tools/                  boottime.py, measure.py, cluster_measure.py, linux-guest (comparison /init),
                           mkinitramfs.py, linux-compare.sh, admin_auth.py (signs admin requests for curl),
                           dhcp_test.py (DHCP client against a scripted server), get-vmms.sh (pinned Firecracker and
-                          Cloud Hypervisor), storage_test.py (K10S-DATA through power cuts)
+                          Cloud Hypervisor), storage_test.py (K10S-DATA through power cuts), wdat.py (an ACPI WDAT
+                          table for q35's TCO watchdog)
   build.sh run.sh test.sh cluster-test.sh vmm-test.sh qemu.sh (the QEMU platforms the scripts share)
 ```
 
@@ -278,7 +293,8 @@ first bus; on bare metal every other bus of the ECAM windows is probed too (othe
 machines), under a hypervisor only with `k10.pci=full` (each absent function costs a VM exit there). BARs are 32- or
 64-bit; a driver maps the ones it uses uncached; unprogrammed ones (qboot) get addresses in the hole below 4 GiB.
 Enabling a device also enables memory, I/O and bus mastering on every bridge above it. MSI-X tables are programmed
-masked-then-unmasked, to the boot CPU (an APIC id above 255 would need interrupt remapping: the driver then polls).
+masked-then-unmasked, MSI capabilities disabled while they change (one message), both to the boot CPU (an APIC id
+above 255 would need interrupt remapping: the driver then polls).
 
 **Devices (dev/, virtio/).** Drivers implement `NetDevice` (numbered queue pairs of receive and transmit halves,
 interrupt switch, counters) or `BlockDevice` (logical block size, capacity, numbered request queues, asynchronous
@@ -314,6 +330,60 @@ MSI-X entry 0 on PCI, the slot's I/O APIC line on MMIO:
 byte) per slot, so nothing is allocated per request; FLUSH when the device has a write cache. The self test reads a
 block the host wrote, writes, flushes and reads back 8 blocks, keeps four requests in flight and checks that a
 request past the end is refused; test.sh then checks the written blocks in the host's image file.
+
+**Real machines: NICs (metal/drivers, dev/nic.rs).** The Ethernet controllers of PCs have their drivers in
+`k10-drivers`, written against small traits (registers, configuration space, delays, DMA memory) so that host tests
+run them against register models of the chips; `dev/nic.rs` maps the memory BAR uncached, routes the interrupt and
+puts each behind `NetDevice`. All use fixed-buffer descriptor rings like virtio-net's (buffer `i` is descriptor `i`,
+2 KiB each, nothing allocated per packet; tail/doorbell writes batched per main-loop iteration), one queue pair, no
+checksum or segmentation offload (smoltcp computes and checks checksums; offload would need per-frame status the
+interface does not carry), the receive interrupt unmasked only when the kernel is about to halt, link state read
+every 500 ms (`net: link up, 1000 Mb/s full duplex`, `net: link down`; when the link comes up DHCP starts over if it
+has no lease yet or after an outage of 3 s or more, which may mean another network; shorter flaps keep the lease),
+bus mastering turned on only after the device's reset:
+* **e1000e** (82574L/82583V; I217/I218; I219 on 100-series and later PCHs; legacy descriptors, one MSI message): on
+  the PCH parts the PHY is shared with the Management Engine and reached over MDIO only with the software
+  semaphore. The driver takes the PHY out of Ultra Low Power (asking the ME through H2ME when its firmware is valid,
+  else toggling LANPHYPC, clearing forced SMBus mode in the PHY and the MAC and the ULP configuration, then a PHY
+  reset), checks the PHY answers (else forces the MAC into SMBus mode, toggles LANPHYPC unless the ME blocks PHY
+  resets, releases SMBus mode again: the SMBus/MDIO handover), resets MAC and PHY, turns K1 off (Kumeran and PHY;
+  Linux does at 1 Gb/s because of packet loss), clears the low-power link settings (PHY_CTRL) and, on the I219,
+  flushes descriptor rings the firmware left running (DESC_RING_STATUS) before the reset and limits transmit
+  requests (TARC0, Sunrise/Kaby Lake errata). The 82574 gets its PCIe completion errata bits (GCR, GCR2).
+* **igb/igc** (82576, I350, I210/I211; I225/I226; advanced descriptors, MSI-X entry 0 for receive and link): reset
+  (DEV_RST on igc), the PHY behind SW_FW_SYNC, Energy-Efficient Ethernet off (I225 link drops), the queue enable bits
+  polled. QEMU's `igb` (82576) runs the shared path; the igc differences (interrupt registers at 0x1500, 2.5 Gb/s)
+  are checked against a register model.
+* **r8169** (RTL8111/8168/8411, RTL8125; Realtek descriptors with OWN/EOR bits, MSI-X or MSI): the chip version
+  (XID) picks the PHY access (PHYAR, or the OCP window from the 8168G on), the PHY PLL is powered up (PMCH), the
+  8125's newer transmit descriptor format is turned off and its address read from MAC0_BKP; short frames are padded
+  in software. The per-revision PHY parameter tables and PHY firmware (`rtl_nic`) of Linux's driver are not applied
+  ("Hardware bring-up").
+
+The PCI ids are in `drivers/src/ids.rs` and, for k10boot's `tier=auto`, in `bootproto/src/devices.rs` (a test keeps
+them equal).
+
+**Consoles (console/).** Everything printed goes to the serial port and to:
+* the **framebuffer console** when k10boot hands over the screen (module `k10s.framebuffer`, the GOP mode the
+  firmware set): an 8×8 public-domain font (font8x8) scaled by an integer factor (2 at 1280×800: 80×40 characters
+  of 16×20 pixels), light grey on black, the framebuffer mapped write-combining (PAT entry 1) and never read back:
+  a copy of the text decides what to draw; past the last row the text jumps up by a quarter of the screen, and only
+  changed cells are redrawn. The boot prints `console: framebuffer WxH, CxR characters of AxB pixels`.
+* the **UDP log console** (`k10.console=udp:A.B.C.D[:PORT]`, default port 6666, like Linux's netconsole): every line
+  from the moment the command line is read is kept in a 32 KiB ring (oldest bytes dropped, the loss reported) and
+  sent from port 6665 as datagrams of whole lines once the interface has an address (`nc -klu 6666`, `socat -u
+  UDP-RECV:6666 -`). A panic or fatal error on CPU 0 sends the rest straight through the NIC, with the headers of the
+  last console datagram (so the collector's or gateway's MAC address is known).
+
+**Watchdog (watchdog.rs, drivers/src/watchdog/).** The first of: an ACPI WDAT table (Microsoft's Watchdog Action
+Table: the firmware's own description of its watchdog as register actions, run without AML; many Intel desktop
+boards and servers have one), the Intel TCO timer (generation 2 through the LPC bridge: ICH6 to 9-series PCHs and
+QEMU's q35, NO_REBOOT in GCS; generation 4 through the SMBus controller and the P2SB sideband on 100/200-series PCHs;
+generation 6 through the SMBus controller, NO_REBOOT in TCO1_CNT, from the 300-series on), the i6300ESB. It is found
+at boot (the line says if it reset the machine before this boot), armed when the main loop starts (60 s,
+`k10.watchdog=`; `watchdog=0` in k10s.conf turns it off), petted by CPU 0's main loop once a second, disarmed before a
+requested power off or reboot and before a halt (`k10.panic=0`). A kernel that hangs is reset; an unhealthy boot
+counts against k10boot's native boots, so the machine falls back to Tier 1.
 
 **TCP/IP and HTTP.** The interface address comes from DHCPv4 (smoltcp's client: renewal by unicast at T1,
 rebinding by broadcast at T2, a NAK or the end of the lease starts over; a lost lease removes the address) or from
@@ -483,6 +553,68 @@ qemu-system-x86_64 … -netdev user,id=n0,hostfwd=tcp:127.0.0.1:19003-:80,hostfw
 k10s status --node 127.0.0.1:19003 --admin-token-file admin.key     # any member, signed with the shared admin key
 ```
 
+## Hardware bring-up
+
+A checklist for a desktop or mini-PC with a screen and keyboard (the first real machine: STATUS.md step 13c). The
+native kernel boots from the `metal` image of a release, the same image as Tier 1 (docs/OS.md, "Tiers"); k10boot
+falls back to Tier 1 by itself after two unhealthy native boots, so nothing here can leave the machine unbootable.
+
+1. **Find the Ethernet controller.** The board's specification, or `lspci -nn | grep -i ethernet` from any Linux
+   live USB, or let k10boot tell you: with `tier=auto` (step 4) it prints `tier auto: e1000e 8086:15bc at … is
+   supported: native kernel` or `tier auto: no supported network adapter (10ec:8126 at …): linux`. Supported:
+   `metal/drivers/src/ids.rs` (Intel 82574L, I217/I218, I219, 82576, I350, I210/I211, I225/I226; Realtek
+   RTL8111/8168/8411, RTL8125). Others boot Tier 1 (its `metal` kernel has Linux's drivers and the NIC firmware).
+2. **Firmware setup.** UEFI boot (CSM off: the screen console needs a UEFI GOP mode), Secure Boot off (or the
+   image signed for it, docs/OS.md "Secure Boot"), USB first in the boot order, "fast boot" off so the firmware sees
+   the stick. A BIOS-only machine boots the native kernel through GRUB with `tier=metal` (no screen console there:
+   use the UDP console).
+3. **Write the image** to a USB stick (every byte of it is replaced):
+   ```sh
+   gh release download --repo bzzdevlabs/k10s --pattern 'k10s-os-*-x86_64-metal.img.xz' --pattern SHA256SUMS
+   sha256sum -c SHA256SUMS --ignore-missing
+   xz -dc k10s-os-*-x86_64-metal.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync    # Linux
+   xz -dc k10s-os-*-x86_64-metal.img.xz | sudo dd of=/dev/rdiskN bs=4m             # macOS (diskutil list)
+   ```
+4. **Configure it** on the stick's `K10S-BOOT` partition (FAT): an admin key and `k10s.conf` as for Tier 1
+   (`k10s keygen -o admin.key`, copy it, `admin-token-file=/boot/admin.key`; `join=…` and `cluster-key-file=…` to
+   join a cluster), then `/k10s/tier` (keep its first line, no blank lines, a newline at the end):
+   ```
+   tier=metal
+   metal_cmdline=k10.verbose k10.panic=0 k10.console=udp:192.168.1.10
+   ```
+   `k10.verbose` prints the boot in detail, `k10.panic=0` keeps a fatal error on the screen instead of rebooting,
+   `k10.console=udp:IP` also sends everything to another machine of the LAN (start `nc -klu 6666` or
+   `socat -u UDP-RECV:6666 -` there first). Boot Tier 1 once first (`tier=linux`) if you want to see the machine
+   serve with Linux's drivers before trying the native kernel.
+5. **Boot.** The screen shows k10boot (`k10boot: tier metal`, `native boot 1 of 2 before Tier 1 is pinned`), then the
+   kernel's framebuffer console: `console: framebuffer …`, the NIC (`e1000e: I219-V 8086:15bc, PHY id …, ME firmware
+   present`, or `igc:`/`r8169:`), `watchdog: …`, `net: link up, 1000 Mb/s full duplex`, `net: DHCP …`,
+   `k10-metal ready … ip=…`, `watchdog: armed, 60 s`. Then from another machine:
+   ```sh
+   curl http://IP/_k10s/health
+   k10s status --node IP:80 --admin-token-file admin.key
+   k10s apply examples/app.k10s --node IP:80 --admin-token-file admin.key && curl http://IP/hello/
+   ```
+   About 15 s after the first frame arrives the kernel clears k10boot's boot counter (`efi: healthy`).
+6. **If it fails, capture** a photo of the screen (all of it: k10boot's lines and the kernel's), the UDP console's
+   output, and the NIC's PCI id. What the lines mean:
+   * Nothing after k10boot's `native boot`: no GOP mode (CSM on, or a GPU without UEFI support): the UDP console, or
+     a serial port (`k10.console=com1,…`) if the board has one.
+   * `no supported NIC` and a PCI list: the controller is not one of the supported ones (send the list).
+   * The NIC line is an error (`PHY unreachable over MDIO`, `reset did not complete`, `registers read as all ones`)
+     or the kernel stops after it: the bring-up sequence needs work on this chip (send the photo).
+   * No `net: link up`: cable, switch port, or the PHY (I219/I225 power states, Realtek PHY firmware); a `link up`
+     but no `DHCP` line: try a static address, `k10.ip=192.168.1.50/24,192.168.1.1`.
+   * The screen freezes: the watchdog resets the machine after 60 s (if the chipset has one), and after two
+     unhealthy boots k10boot boots Tier 1 until `/k10s/tier` is written again.
+   * Back to Tier 1 any time: `tier=linux`.
+
+What only real hardware tells (STATUS.md step 13c): every item of the drivers' "not done" lists — the I219's ULP
+exit, SMBus/MDIO handover and ME interplay on a live ME, K1 off, the descriptor-ring flush; I225/I226 PHY and EEE
+behaviour; Realtek revisions without their PHY tables and firmware; link up/down on a real cable; MSI delivery on
+real chipsets; the GOP framebuffer's format and write-combining on real GPUs; the TCO generations 2/4/6 (NO_REBOOT
+locks, the P2SB sideband) and firmware WDAT tables; booting the stick on real UEFI and BIOS firmware.
+
 ## Dependencies and why
 
 | crate | used by | why |
@@ -577,10 +709,12 @@ and k10boot (UEFI); GRUB's Multiboot2 path boots `/k10s/metal.elf` only.
 * **JIT code is page-granular per module** (W^X forbids appending to an executable page): a 300-byte module takes a
   4 KiB page; modules deployed several times share one copy by code hash.
 * **IPv4 only, no TLS.** No DNS resolver (addresses are given as IPs).
-* **virtio NICs only.** Physical NICs (Intel, Realtek) come next (milestone M4); disks are virtio-blk, NVMe and
-  AHCI. virtio-mmio
-  interrupts are edge-triggered I/O APIC lines; PCI devices need MSI-X (INTx routing would need `_PRT`, which is AML),
-  a virtio-pci device without it is polled.
+* **NICs: virtio, Intel e1000e/igb/igc, Realtek r8169-class; disks: virtio-blk, NVMe and AHCI.** Broadcom tg3, 10 GbE
+  and cloud NICs later (M3, M4). One queue pair, no offloads, no jumbo frames, no VLANs. The Intel and Realtek
+  drivers are tested under QEMU (82574L, 82576) and against register models (I219 with ULP and the ME, I225,
+  RTL8168/8125), not yet on the chips themselves ("Hardware bring-up"). virtio-mmio interrupts are edge-triggered I/O
+  APIC lines; PCI devices need MSI-X or MSI (INTx routing would need `_PRT`, which is AML): a device without them is
+  polled.
 * **ACPI without AML.** `_PTS`, `_PRT`, `_OSC` and every other method are never run: S5 works where `\_S5` is a plain
   package (QEMU's, and most firmware's), the power button and other ACPI events are not handled, devices described
   only in AML other than virtio-mmio slots are not found. Real-firmware quirks (x2APIC handover, broken tables,
@@ -588,7 +722,10 @@ and k10boot (UEFI); GRUB's Multiboot2 path boots `/k10s/metal.elf` only.
 * **Wall-clock accuracy.** Without kvmclock (bare metal), the wall clock runs on the TSC calibrated at boot (20 ms
   against the HPET or PM timer, tens of ppm) from the CMOS RTC; there is no NTP client yet.
 * **Slow serial console.** Logging costs about 15 µs per byte under QEMU (one host `write()` per byte), so boot is
-  quiet unless `k10.verbose` is given.
+  quiet unless `k10.verbose` is given. The framebuffer console has no scrollback and no keyboard; the UDP console
+  loses what a panic prints before its first datagram went out (no destination MAC address yet).
+* **Watchdogs: WDAT, Intel TCO and i6300ESB only.** AMD (SP5100/FCH) and IPMI/BMC watchdogs are not driven; a
+  machine without one of these runs without a watchdog (the boot says nothing unless `k10.verbose`).
 * **No guard pages on coroutine stacks.** A canary is checked at every switch instead, and the call depth is
   bounded.
 * **No guard pages around instance slots.** Slots are contiguous frames in the 2 MiB identity map; a guard would cost

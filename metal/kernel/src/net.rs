@@ -227,7 +227,19 @@ pub struct Net {
     next_gen: u32,
     pub limits: Limits,
     pub stats: Stats,
+    /// The UDP console's socket (bound once there is something to send and an address).
+    console: Option<SocketHandle>,
+    /// Last link state seen, and when to look again (`u64::MAX`: the NIC has no link status).
+    link: Option<crate::dev::Link>,
+    link_at: u64,
+    /// When the link went down after having been up (`None`: up, or never up yet).
+    link_down_since: Option<u64>,
 }
+
+/// How often the link state is read (a register read; a VM exit under QEMU).
+const LINK_POLL_NS: u64 = 500_000_000;
+/// A link that comes back after being down this long may lead to another network: DHCP starts over.
+const LINK_OUTAGE_NS: u64 = 3_000_000_000;
 
 /// smoltcp endpoint of an IPv4 socket address (IPv6 is not configured).
 fn endpoint(a: SocketAddr) -> Option<smoltcp::wire::IpEndpoint> {
@@ -261,6 +273,10 @@ impl Net {
             next_gen: 1,
             limits,
             stats: Stats::default(),
+            console: None,
+            link: None,
+            link_at: 0,
+            link_down_since: None,
         };
         match ip {
             IpConfig::Static { addr, gateway } => net.configure(Some((addr, gateway))),
@@ -478,8 +494,74 @@ impl Net {
         }
     }
 
+    /// Reports link changes. When the link comes up DHCP starts over if it has no lease yet (the DISCOVERs sent
+    /// meanwhile may have been lost), or after an outage of 3 s or more (the cable may now lead to another network);
+    /// shorter flaps keep the lease. NICs without link status (virtio-net) are taken as always up.
+    fn poll_link(&mut self) {
+        if self.link_at == u64::MAX {
+            return;
+        }
+        let t = time::now_ns();
+        if t < self.link_at {
+            return;
+        }
+        let Some(l) = self.dev.link() else {
+            self.link_at = u64::MAX;
+            return;
+        };
+        self.link_at = t + LINK_POLL_NS;
+        let old = self.link.replace(l);
+        if old == Some(l) {
+            return;
+        }
+        if l.up {
+            kprintln!("net: link up, {} Mb/s {} duplex", l.mbps, if l.full_duplex { "full" } else { "half" });
+        } else if old.is_some() {
+            kprintln!("net: link down");
+        }
+        let outage = self.link_down_since.is_some_and(|d| t >= d + LINK_OUTAGE_NS);
+        if l.up && old.is_some_and(|o| !o.up) && (self.addr.is_none() || outage) {
+            if let Some(h) = self.dhcp {
+                self.sockets.get_mut::<dhcpv4::Socket>(h).reset();
+            }
+        }
+        self.link_down_since = match (l.up, old) {
+            (false, Some(o)) if o.up => Some(t),
+            (true, _) => None,
+            _ => self.link_down_since,
+        };
+    }
+
+    /// Sends what the UDP console holds (console/udp.rs) once the interface has an address.
+    pub fn poll_console(&mut self) {
+        use crate::console::udp;
+        let Some(dst) = udp::target() else { return };
+        if self.addr.is_none() || !udp::pending() {
+            return;
+        }
+        let h = match self.console {
+            Some(h) => h,
+            None => match self.udp_bind(udp::LOCAL_PORT, 8, udp::DATAGRAM) {
+                Some(h) => *self.console.insert(h),
+                None => return,
+            },
+        };
+        let mut buf = [0u8; udp::DATAGRAM];
+        for _ in 0..8 {
+            let n = udp::take(&mut buf);
+            if n == 0 {
+                break;
+            }
+            if !self.udp_send(h, SocketAddr::V4(dst), &buf[..n]) {
+                udp::untake(&buf[..n]);
+                break;
+            }
+        }
+    }
+
     /// Processes received packets (one at a time, refilling the listen backlog in between).
     pub fn poll_ingress(&mut self) -> bool {
+        self.poll_link();
         let mut any = false;
         let t = now();
         self.iface.poll_maintenance(t);
@@ -704,7 +786,10 @@ impl smoltcp::phy::RxToken for RxToken<'_> {
 impl smoltcp::phy::TxToken for TxToken<'_> {
     fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
         let (mut f, mut r) = (Some(f), None);
-        self.tx.send(len, &mut |b| r = f.take().map(|f| f(b)));
+        self.tx.send(len, &mut |b| {
+            r = f.take().map(|f| f(b));
+            crate::console::udp::observe_tx(b);
+        });
         r.expect("NetTx::send calls its fill function once")
     }
 }

@@ -30,6 +30,7 @@ pub const CMD_IO: u16 = 1;
 pub const CMD_MEM: u16 = 1 << 1;
 pub const CMD_MASTER: u16 = 1 << 2;
 pub const CMD_INTX_OFF: u16 = 1 << 10;
+const CAP_MSI: u8 = 0x05;
 const CAP_MSIX: u8 = 0x11;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -135,6 +136,16 @@ fn write_narrow(b: Bdf, off: u16, v: u32, bytes: u8) {
     } else {
         crate::arch::outb(0xCFC + (off & 3), v as u8)
     }
+}
+
+/// A 16-bit configuration write (no read-modify-write of the dword).
+pub fn write16(b: Bdf, off: u16, v: u16) {
+    write_narrow(b, off & !1, v as u32, 2)
+}
+
+/// A byte configuration write.
+pub fn write8(b: Bdf, off: u16, v: u8) {
+    write_narrow(b, off, v as u32, 1)
 }
 
 /// A byte write on segment 0, bus 0 (an ACPI register in PCI configuration space, e.g. a reset register).
@@ -275,6 +286,29 @@ impl Device {
         let (io, base) = self.bar((t & 7) as u8);
         let table = base + (t & !7) as u64;
         (!io && base != 0 && crate::arch::paging::map_mmio(table, size as u64 * 16)).then_some(MsiX { table, size, cap })
+    }
+
+    /// Points the MSI capability at `vector` on this CPU (one message, unmasked) and enables it. False without MSI,
+    /// or if this CPU's APIC id does not fit an MSI address.
+    pub fn msi_route(&self, vector: u8) -> bool {
+        let Some((cap, head)) = self.capabilities(CAP_MSI).next() else { return false };
+        let Some((addr, data)) = crate::arch::apic::msi(vector) else { return false };
+        let ctl = (head >> 16) as u16;
+        self.write16(cap + 2, ctl & !1);
+        self.write32(cap + 4, addr as u32);
+        // 64-bit capable: the upper address dword, then the data; per-vector masking: the mask dword after the data.
+        let data_off = if ctl & (1 << 7) != 0 {
+            self.write32(cap + 8, (addr >> 32) as u32);
+            cap + 12
+        } else {
+            cap + 8
+        };
+        self.write16(data_off, data as u16);
+        if ctl & (1 << 8) != 0 {
+            self.write32(data_off + 4, 0);
+        }
+        self.write16(cap + 2, (ctl & !(0x7 << 4)) | 1);
+        true
     }
 
     /// Turns MSI-X on (and the function mask off): entries left masked stay silent.

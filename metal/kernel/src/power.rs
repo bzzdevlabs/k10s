@@ -85,8 +85,11 @@ fn stop_others() -> bool {
     if sent {
         delay_ms(10);
     }
-    // SAFETY: every other CPU is halted (or was never started), so whoever held the console never runs again.
-    unsafe { crate::serial::SERIAL.force_unlock() };
+    // SAFETY: every other CPU is halted (or was never started), so whoever held the consoles never runs again.
+    unsafe {
+        crate::serial::SERIAL.force_unlock();
+        crate::console::force_unlock();
+    }
     true
 }
 
@@ -100,6 +103,7 @@ pub fn off() -> ! {
     if !stop_others() {
         arch::halt_forever();
     }
+    crate::watchdog::disarm();
     kprintln!("k10-metal: power off");
     if firecracker() {
         reset();
@@ -172,6 +176,7 @@ pub fn reboot() -> ! {
     if !stop_others() {
         arch::halt_forever();
     }
+    crate::watchdog::disarm();
     kprintln!("k10-metal: reboot");
     reset()
 }
@@ -210,10 +215,13 @@ pub fn fatal_stop() -> ! {
     }
     let s = PANIC_REBOOT_S.load(Ordering::Relaxed);
     if s == u64::MAX {
+        crate::watchdog::disarm();
         kprintln!("k10-metal: halted (k10.panic=0)");
+        crate::console::udp::panic_flush();
         arch::halt_forever();
     }
     kprintln!("k10-metal: rebooting in {s} s (k10.panic=N to change, 0 to halt)");
+    crate::console::udp::panic_flush();
     delay_ms(s.saturating_mul(1000));
     reset()
 }

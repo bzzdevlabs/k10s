@@ -1,0 +1,12 @@
+[package]
+name = "k10-drivers"
+description = "Hardware logic of the native kernel's drivers (Ethernet controllers, watchdog timers), testable on the host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+bench = false
+
+[dev-dependencies]
+k10-bootproto.workspace = true

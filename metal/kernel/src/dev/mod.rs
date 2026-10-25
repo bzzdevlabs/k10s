@@ -10,11 +10,14 @@
 
 pub mod ahci;
 pub mod mmio;
+pub mod nic;
 pub mod nvme;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
+
+pub use k10_drivers::Link;
 
 use crate::mem::frames::{self, Tag, FRAME};
 use crate::sync::IrqLock;
@@ -116,6 +119,10 @@ pub trait NetDevice {
     fn counters(&self) -> NetCounters;
     /// Bytes of RAM its rings and buffers use.
     fn footprint(&self) -> usize;
+    /// The link as the MAC sees it (`None`: no link status, e.g. virtio-net).
+    fn link(&mut self) -> Option<Link> {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,6 +252,9 @@ pub fn probe(cmdline: &str, nic_bufs: u16) -> Option<Box<dyn NetDevice>> {
             _ => {}
         }
         if d.vendor != crate::virtio::VENDOR {
+            if nic.is_none() {
+                nic = nic::probe(d, nic_bufs);
+            }
             continue;
         }
         match crate::virtio::pci::device_type(d) {

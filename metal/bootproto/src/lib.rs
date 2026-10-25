@@ -610,6 +610,9 @@ mod tests {
     fn device_table() {
         assert_eq!(devices::find(0x1af4, 0x1000).map(|d| d.class), Some(devices::Class::Network));
         assert_eq!(devices::find(0x1af4, 0x1041).map(|d| d.class), Some(devices::Class::Network));
-        assert!(devices::find(0x8086, 0x10d3).is_none());
+        assert_eq!(devices::find(0x8086, 0x10d3).map(|d| d.driver), Some("e1000e"));
+        // QEMU's e1000 (82540EM) and rtl8139 stay Tier 1's.
+        assert!(devices::find(0x8086, 0x100e).is_none());
+        assert!(devices::find(0x10ec, 0x8139).is_none());
     }
 }

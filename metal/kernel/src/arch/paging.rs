@@ -3,7 +3,8 @@
 //!
 //! boot.rs maps the first 4 GiB with 2 MiB pages, all present + writable + executable. [`init`] rebuilds that from
 //! the memory map:
-//! * IA32_PAT is set to its power-on value, so PCD|PWT always selects UC whatever the firmware programmed;
+//! * IA32_PAT is set to the power-on layout except entry 1 (PWT alone), which is write-combining: PCD|PWT always
+//!   selects UC whatever the firmware programmed, PWT alone WC (the framebuffer, [`map_wc`]);
 //! * below 4 GiB, a 2 MiB page that holds any memory (RAM, ACPI tables, ACPI NVS) is write-back, every other one
 //!   (the PCI hole: 32-bit BARs, ECAM, I/O APIC, HPET, local APIC) is uncached; the first 2 MiB are split into 4 KiB
 //!   pages (page 0 not present: null-pointer guard);
@@ -39,8 +40,10 @@ const PWT: u64 = 1 << 3;
 const PCD: u64 = 1 << 4;
 const PS: u64 = 1 << 7;
 const NX: u64 = 1 << 63;
-/// Uncached with the power-on PAT (entry 3).
+/// Uncached (PAT entry 3).
 const UC: u64 = PCD | PWT;
+/// Write-combining (PAT entry 1).
+const WC: u64 = PWT;
 const ADDR: u64 = 0x000F_FFFF_FFFF_F000;
 const LARGE: u64 = 2 << 20;
 const HUGE: u64 = 1 << 30;
@@ -49,8 +52,8 @@ const FOUR_GIB: u64 = 4 << 30;
 const LIMIT: u64 = 1 << 47;
 const IA32_EFER: u32 = 0xC000_0080;
 const IA32_PAT: u32 = 0x277;
-/// WB, WT, UC-, UC, WB, WT, UC-, UC.
-const PAT_DEFAULT: u64 = 0x0007_0406_0007_0406;
+/// WB, WC, UC-, UC, WB, WT, UC-, UC.
+const PAT_DEFAULT: u64 = 0x0007_0406_0007_0106;
 
 extern "C" {
     static mut boot_pd: [u64; 2048];
@@ -89,8 +92,8 @@ fn reload_cr3() {
     }
 }
 
-/// Sets this CPU's PAT to the power-on layout (every CPU, before it uses UC mappings). Firmware almost always leaves
-/// it there; otherwise the change follows the SDM: caches disabled and flushed around the write.
+/// Sets this CPU's PAT to [`PAT_DEFAULT`] (every CPU, before it uses UC or WC mappings), following the SDM: caches
+/// disabled and flushed around the write.
 pub fn init_pat() {
     if rdmsr(IA32_PAT) == PAT_DEFAULT {
         return;
@@ -302,6 +305,20 @@ pub fn map_mmio(paddr: u64, len: u64) -> bool {
     }
     let _g = LOCK.lock();
     let ok = unsafe { map(s, e, P | W | UC | nx()) };
+    reload_cr3();
+    GEN.fetch_add(1, Ordering::Release);
+    ok
+}
+
+/// Maps `[paddr, paddr + len)` write-combining, read+write, non-executable: a framebuffer (the CPU combines writes
+/// into bursts; reads are uncached). False if it cannot be identity-mapped.
+pub fn map_wc(paddr: u64, len: u64) -> bool {
+    let (s, e) = (paddr & !(FRAME - 1), paddr.saturating_add(len).div_ceil(FRAME) * FRAME);
+    if len == 0 || e > LIMIT {
+        return false;
+    }
+    let _g = LOCK.lock();
+    let ok = unsafe { map(s, e, P | W | WC | nx()) };
     reload_cr3();
     GEN.fetch_add(1, Ordering::Release);
     ok

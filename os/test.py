@@ -202,17 +202,32 @@ class Guest:
                     sys.stderr.write(subprocess.run([tool(c[0]), *c[1:]], capture_output=True, text=True, env=env).stdout[:3000])
         fail(f"timeout waiting for: {what or pattern}", self.log)
 
-    def power_button(self):
+    def qmp_command(self, command, arguments=None):
         s = socket.socket(socket.AF_UNIX)
         s.connect(self.qmp)
         f = s.makefile("rw")
         f.readline()
-        for c in ("qmp_capabilities", "system_powerdown"):
-            f.write(json.dumps({"execute": c}) + "\n")
+        for c, args in (("qmp_capabilities", None), (command, arguments)):
+            f.write(json.dumps({"execute": c, **({"arguments": args} if args else {})}) + "\n")
             f.flush()
-            while "return" not in json.loads(f.readline()):
-                pass
+            while True:
+                r = json.loads(f.readline())
+                if "error" in r:
+                    fail(f"QMP {c}: {r['error']}", self.log)
+                if "return" in r:
+                    break
         s.close()
+
+    def power_button(self):
+        self.qmp_command("system_powerdown")
+
+    def screen(self, name):
+        """The display as text: a QMP screendump decoded cell by cell with the native kernel's font, at the geometry
+        its framebuffer console reports on the serial console."""
+        m = self.wait_for(r"console: framebuffer (\d+)x(\d+), (\d+)x(\d+) characters of (\d+)x(\d+) pixels", "framebuffer console")
+        ppm = os.path.join(os.path.dirname(self.log), f"{name}.ppm")
+        self.qmp_command("screendump", {"filename": ppm})
+        return screen_text(ppm, *(int(g) for g in m.groups()))
 
     def kill(self):
         """Power cut."""
@@ -227,6 +242,44 @@ class Guest:
             fail("the guest did not power off", self.log)
         if rc != 0:
             fail(f"QEMU exit status {rc}", self.log)
+
+
+def font8x8():
+    """The native kernel's console font (metal/kernel/src/console/font.rs): 128 glyphs of 8 rows, bit 0 leftmost."""
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "metal", "kernel", "src", "console", "font.rs")).read()
+    rows = re.findall(r"\[((?:0x[0-9A-F]{2}, ){7}0x[0-9A-F]{2})\]", src)
+    return [tuple(int(v, 16) for v in r.split(", ")) for r in rows]
+
+
+def screen_text(ppm, width, height, cols, rows, cw, ch):
+    """Reads the characters of the framebuffer console back from a screendump (P6): each cell's glyph rows are
+    sampled at the middle of every scaled pixel and looked up in the font."""
+    data = open(ppm, "rb").read()
+    magic, dims, _depth, pix = data.split(b"\n", 3)
+    w, h = map(int, dims.split())
+    if magic != b"P6" or (w, h) != (width, height):
+        fail(f"screendump {ppm}: {magic} {w}x{h}, want P6 {width}x{height}")
+    s = cw // 8
+    glyphs = {}
+    for i, g in enumerate(font8x8()):
+        if 0x20 <= i < 0x7F:
+            glyphs.setdefault(g, chr(i))
+    lines = []
+    for r in range(rows):
+        line = []
+        for c in range(cols):
+            g = []
+            for gy in range(8):
+                bits = 0
+                for gx in range(8):
+                    x, y = c * cw + gx * s + s // 2, r * ch + (gy + 1) * s + s // 2
+                    o = (y * w + x) * 3
+                    if sum(pix[o:o + 3]) > 3 * 0x60:
+                        bits |= 1 << gx
+                g.append(bits)
+            line.append(glyphs.get(tuple(g), "?"))
+        lines.append("".join(line).rstrip())
+    return lines
 
 
 def mbr_parts(disk):
@@ -1274,6 +1327,12 @@ def tier_test(a, work):
             g.wait_for(rf"k10-metal: boot loader modules: k10s.conf, {fb}k10s.efi, k10s.image, /boot/admin.key, /boot/cluster.key; ACPI RSDP at 0x[1-9a-f]",
                        "modules from K10S-BOOT")
             g.wait_for(METAL_READY, "native kernel ready")
+            if fb:
+                # The framebuffer console (metal/kernel/src/console/fb.rs) shows the boot, ready line included.
+                text = g.screen(f"metal-{machine}")
+                if not any(re.search(METAL_READY, line) for line in text):
+                    fail("the ready line is not on the screen:\n" + "\n".join(text), g.log)
+                print(f"test.py: tier: framebuffer console on {machine}: {sum(1 for l in text if l)} lines of text: ok", file=sys.stderr)
             if machine == "pc":
                 until("the native kernel did not join the hosted node", lambda: "members: 2 live" in status(hp), g.log)
                 apply(a, t.key, hp, os.path.join(a.examples, "app.k10s"))
@@ -1296,10 +1355,16 @@ def tier_test(a, work):
     g.kill()
     d = t.disk("auto-e1000e", "auto")
     g = t.power_on("auto-e1000e", d, "q35", "e1000e")
-    g.wait_for(r"k10boot: tier auto: no supported network adapter \(8086:10d3 at \S+\): linux", "auto: linux")
+    g.wait_for(r"k10boot: tier auto: e1000e 8086:10d3 at \S+ is supported: native kernel", "auto: e1000e native")
+    g.wait_for(METAL_READY, "native kernel ready (e1000e)")
+    until("GET /_k10s/health", lambda: http(g.port, "/_k10s/health")[0] == 200, g.log)
+    g.kill()
+    d = t.disk("auto-e1000", "auto")
+    g = t.power_on("auto-e1000", d, "q35", "e1000")
+    g.wait_for(r"k10boot: tier auto: no supported network adapter \(8086:100e at \S+\): linux", "auto: linux")
     g.wait_for(TIER1_READY, "Tier 1 ready")
     g.kill()
-    print("test.py: tier: auto: native with a legacy virtio-net, Tier 1 with an e1000e: ok", file=sys.stderr)
+    print("test.py: tier: auto: native with a legacy virtio-net and an e1000e, Tier 1 with an e1000 (82540EM): ok", file=sys.stderr)
 
     d = t.disk("fallback", "metal", "k10.engine=bogus")
     fw = uefi_firmware(work, "fallback")
@@ -1547,6 +1612,30 @@ def mb2_test(a, work):
     print("test.py: mb2: SeaBIOS, GRUB, Multiboot2: the native kernel serves: ok", file=sys.stderr)
 
 
+def usb_test(a, work):
+    """The metal image as a USB stick, its only disk: QEMU usb-storage behind an xHCI controller on q35. UEFI (OVMF):
+    k10boot boots Tier 1 (tier=linux; its kernel has xHCI and USB storage built in and waits for slow disks) and the
+    native kernel (tier=metal); BIOS (SeaBIOS): GRUB from the stick's MBR boots Tier 1, and with tier=metal the
+    native kernel through Multiboot2. The NIC is an e1000e (the native kernel's Intel driver). Each one serves."""
+    t = TierDisks(a, work)
+    for fw_name in ("uefi", "bios"):
+        for tier in ("linux", "metal"):
+            name = f"usb-{fw_name}-{tier}"
+            d = t.disk(name, tier)
+            port = free_port()
+            fw = uefi_firmware(work, name) if fw_name == "uefi" else []
+            g = Guest(work, name, None, None, None, fw + ["-M", "q35", "-device", "qemu-xhci,id=xhci",
+                      "-drive", f"if=none,id=stick,format=raw,file={d}", "-device", "usb-storage,bus=xhci.0,drive=stick,bootindex=0",
+                      "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:80", "-device", "e1000e,netdev=n0,romfile="])
+            if tier == "metal":
+                g.wait_for(METAL_READY, f"native kernel ready ({fw_name}, USB)")
+            else:
+                g.wait_for(TIER1_READY, f"Tier 1 ready ({fw_name}, USB)")
+            until("GET /_k10s/health", lambda: http(port, "/_k10s/health")[0] == 200, g.log)
+            g.kill()
+            print(f"test.py: usb: {fw_name}, tier={tier}: boots from the USB stick and serves: ok", file=sys.stderr)
+
+
 # OVMF and AAVMF with Secure Boot on and Microsoft's keys enrolled (Debian and Ubuntu name them .ms.fd).
 MS_FIRMWARE = {"x86_64": ("/usr/share/OVMF/OVMF_CODE_4M.ms.fd", "/usr/share/OVMF/OVMF_VARS_4M.ms.fd"),
                "aarch64": ("/usr/share/AAVMF/AAVMF_CODE.ms.fd", "/usr/share/AAVMF/AAVMF_VARS.ms.fd")}
@@ -1756,7 +1845,8 @@ def main():
     ap = argparse.ArgumentParser()
     tests = {"boot": boot_test, "dhcp": dhcp_test, "image": image_test, "unsigned": unsigned_test, "boottime": boottime_test,
              "update": update_test, "rollout": rollout_test, "pi": pi_test, "pi3": pi3_test, "mixed": mixed_test,
-             "secureboot": secureboot_test, "tier": tier_test, "mb2": mb2_test, "update-native": native_update_test}
+             "secureboot": secureboot_test, "tier": tier_test, "mb2": mb2_test, "update-native": native_update_test,
+             "usb": usb_test}
     ap.add_argument("test", choices=tests)
     ap.add_argument("--arch", choices=["x86_64", "aarch64", "i686", "armv7"], default="x86_64")
     ap.add_argument("--host-k10s")

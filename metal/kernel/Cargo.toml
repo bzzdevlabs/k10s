@@ -18,6 +18,7 @@ k10-jit.workspace = true
 k10-host.workspace = true
 k10-bootproto.workspace = true
 k10-kvlog.workspace = true
+k10-drivers.workspace = true
 # TCP/IP: the one external dependency (see metal/README.md for why).
 smoltcp = { version = "0.14", default-features = false, features = [
     "alloc",

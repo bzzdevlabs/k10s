@@ -113,7 +113,7 @@ update files:
 | Release file | For | Kernel | Compressed size |
 |---|---|---|---|
 | `k10s-os-V-x86_64-vm.img.xz` | QEMU/KVM guests and clouds | `vm` profile, every driver built in; console on serial; and the native kernel | 4.8 MB |
-| `k10s-os-V-x86_64-metal.img.xz` | PCs, mini-PCs, servers | `metal` profile, signed driver modules, NIC firmware; console on the screen; and the native kernel | 7.2 MB |
+| `k10s-os-V-x86_64-metal.img.xz` | PCs, mini-PCs, servers, from their disk or a USB stick | `metal` profile, signed driver modules, NIC firmware; console on the screen; and the native kernel | 7.2 MB |
 | `k10s-os-V-x86_64-{vm,metal}.efi` | updates (`os` in `k10s apply`), PXE or another UEFI loader | the signed slot-A UKI of the image | 4.2 / 6.6 MB |
 | `k10s-os-V-x86_64-native.elf` | the native kernel (Tier 2, "Tiers") as both x86-64 images carry it | `metal/`, signed (profile `native`) | 1.1 MB |
 | `k10s-os-V-aarch64-vm.img.xz` | QEMU virt (UEFI) and arm64 cloud guests | `arm64`, every driver built in; console on the PL011 serial port | 4.0 MB |
@@ -293,9 +293,11 @@ loader, `\EFI\BOOT\BOOTX64.EFI`:
   kernel starts its other CPUs from (0x8000) out of the firmware's hands, exits boot services (taking the memory map
   again when the firmware changed it meanwhile) and enters the kernel in 32-bit protected mode with paging off.
 - `auto`: it enumerates PCI through the firmware (the PCI I/O protocol) and boots the native kernel if a network
-  adapter is in the kernel's supported-device table (`metal/bootproto/src/devices.rs`: today virtio-net, modern and
-  legacy) and so is the controller of the disk with `K10S-DATA` when there is one (virtio-blk, NVMe and AHCI by class
-  code), else Tier 1. Each decision is printed on the console.
+  adapter is in the kernel's supported-device table (`metal/bootproto/src/devices.rs`: virtio-net, modern and legacy,
+  Intel e1000e — 82574L, I217/I218, I219 —, igb — 82576, I350, I210/I211 —, igc — I225/I226 —, Realtek
+  RTL8111/8168/8411 and RTL8125) and so is the controller of the disk with `K10S-DATA` when there is one
+  (virtio-blk, NVMe and AHCI by class code), else Tier 1. Each decision is printed on the console, with the
+  adapter's PCI id.
 - When the native kernel cannot boot (no kernel file, a signature that does not verify or a signer not trusted, a
   kernel that cannot be placed, the start-up page in firmware memory, the boot counter below or a counter it cannot
   read or write), k10boot says why, wipes the key files it had loaded, and boots Tier 1. UEFI load options that are text (a firmware boot entry's, the UEFI shell's, QEMU's `-kernel
@@ -322,10 +324,12 @@ arguments (metal/README.md has the table): `join`, `backend`, `jit-indirect`, `t
 and `advertise` turns cluster mode on, as on Tier 1, and the addresses it gives peers are the ports of `gossip`, `rpc`
 and `http` (7946, 7947, 80 by default) at `advertise`, else at the configured address unless it is `0.0.0.0`. It
 listens on 7946, 7947 and 80 whatever the ports say. The key files of `admin-token-file`, `cluster-key-file` and
-`cluster-next-key-file` reach it as modules (k10boot reads them from `K10S-BOOT`); it wipes them once parsed. Keys
-of Tier 1 alone (`net`, `ntp`, `watchdog`…) do not concern it (`data=none`, `grow=0`, `os-commit-grace` and
-`os_trial` mean the same for it), and its own arguments
-(`k10.*`) go in `metal_cmdline`, never in `k10s.conf`, where Tier 1 would take them for node flags.
+`cluster-next-key-file` reach it as modules (k10boot reads them from `K10S-BOOT`); it wipes them once parsed.
+`watchdog=0` keeps it from arming the hardware watchdog (Tier 2 arms it unless told not to; Tier 1 only with
+`watchdog=1`). Keys of Tier 1 alone (`net`, `ntp`…) do not concern it (`data=none`, `grow=0`, `os-commit-grace` and
+`os_trial` mean the same for it), and its own arguments (`k10.*`: consoles, the watchdog's timeout…) go in
+`metal_cmdline`, never in `k10s.conf`, where Tier 1 would take them for node flags. metal/README.md, "Hardware
+bring-up", is the checklist for a first machine.
 
 **Data.** Both tiers use `K10S-DATA` in the same format ("Data"): a machine switched between tiers keeps its node
 id, its services' KV data and, in cluster mode, the cluster's desired state, whichever tier wrote them last.
@@ -334,7 +338,7 @@ id, its services' KV data and, in cluster mode, the cluster's desired state, whi
 picks it only where every device it needs is in `devices.rs`. The images still default to Tier 1, because the native
 kernel lacks things Tier 1 gives every machine today: a wall clock disciplined without kvmclock (no SNTP client:
 bare metal runs on the RTC and the calibrated TSC, while signed admin requests and sealed gossip check timestamps),
-ACPI events (the power button), a hardware watchdog (Intel TCO and friends come with 13c), IPv6 and DNS, and a
+ACPI events (the power button), IPv6 and DNS, and a
 single node's `POST /_k10s/apply` kept across reboots outside cluster mode; and it has not run on a real machine or
 a public cloud yet (STATUS, step 13). On the VMs where `auto` would pick it (virtio-net), Tier 1 runs too, at
 0.5 s from power to the first answer. Set `tier=auto` or `tier=metal` to run the native kernel; the default moves
@@ -682,7 +686,9 @@ kernels and images with the release's i686 and armv7 musl k10s.
   device, whose GOP mode reaches the kernel): the native kernel gets `k10s.conf`, the admin and cluster keys from
   `K10S-BOOT`, joins a cluster with a hosted `k10s node` on the host, serves the services applied through it on both
   nodes, answers requests signed with the admin key of `k10s.conf`, and once healthy clears k10boot's boot counter.
-  `tier=auto`: a legacy virtio-net boots the native kernel, an e1000e alone Tier 1. A native kernel that fails (a bad
+  On `q35` the screen is read back (a QMP screendump decoded with the kernel's font): the framebuffer console shows
+  the boot up to the ready line. `tier=auto`: a legacy virtio-net and an e1000e (82574L) boot the native kernel,
+  which serves, an e1000 (82540EM) alone Tier 1. A native kernel that fails (a bad
   `metal_cmdline`, the machine reset after the error) boots twice, then Tier 1 serves; `/k10s/tier` written again gives
   it new boots, which get healthy, and the next boot counts from zero. A kernel signed by an untrusted key, and one
   changed after signing, are refused and Tier 1 serves. The signed kernel file boots as it is through PVH (`-kernel`,
@@ -696,6 +702,9 @@ kernels and images with the release's i686 and armv7 musl k10s.
 - **mb2**: the `vm` image on SeaBIOS with `tier=metal`: GRUB boots the native kernel through Multiboot2 with its
   `metal_cmdline`, `k10s.conf`, the deployment bundle (the release's `bundle.k10b`) and the key files as modules; the
   bundle's services answer and so do requests signed with the admin key.
+- **usb**: the `metal` image (console on serial) as a USB stick, the machine's only disk (`usb-storage` on
+  `qemu-xhci`, q35, an e1000e): OVMF boots Tier 1 through k10boot and, with `tier=metal`, the native kernel; SeaBIOS
+  boots GRUB from the stick's MBR, Tier 1 and, with `tier=metal`, the native kernel through Multiboot2. Each serves.
 - **update-bios, update-uefi**: a single-node cluster on the `vm` image applies a re-signed copy of it (another
   version, so another hash; the test signing key is pinned with `os_key`). On a fresh disk per step, the power is
   cut (QEMU killed within a millisecond of the console line) at every step: image verified, slot written, trial
@@ -808,6 +817,8 @@ Block I/O, and the conversion of a real ext4 `K10S-DATA` written by an older ima
   a signature check, boot counting or kernel updates.
 - A `K10S-DATA` store holds about a quarter of its log as live data (51 MiB on the images' 256 MiB before it grows
   to the disk); an ext4 `K10S-DATA` whose state does not fit `K10S-BOOT`'s free space is kept as ext4.
+- The native kernel's Intel and Realtek drivers are tested under QEMU and against register models, not yet on the
+  chips (metal/README.md, "Hardware bring-up").
 - The image uses 512-byte logical sectors; disks with 4 KiB logical sectors (rare outside servers) need a rebuilt
   image.
 - The arm64 image has the virtio drivers of VMs and the Pi's; arm64 servers need their NIC drivers added. The Pi

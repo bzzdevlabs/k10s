@@ -8,10 +8,12 @@ import Terminal from '~/components/Terminal.astro';
 
 With isolation done by the compiler, a node needs from the OS only memory, a timer, a NIC and a console. So the same
 runtime also boots **as its own kernel**: `k10-metal`. No processes, no system calls, no user/kernel boundary, no
-per-workload page tables: one identity-mapped address space over all of RAM on up to 64 cores, polling virtio queues
-directly. It finds the machine in the ACPI tables (no AML interpreter) and powers off and reboots through ACPI. It
-boots on QEMU (`pc`, `q35`, `microvm`; KVM or TCG), Firecracker and Cloud Hypervisor. In a cloud, where every node
-is already a VM, this deletes the guest Linux.
+per-workload page tables: one identity-mapped address space over all of RAM on up to 64 cores, polling its NIC's
+queues directly. It finds the machine in the ACPI tables (no AML interpreter), powers off and reboots through ACPI
+and arms the hardware watchdog. It boots on QEMU (`pc`, `q35`, `microvm`; KVM or TCG), Firecracker and Cloud
+Hypervisor, and on PCs from the x86-64 disk image (on a disk or a USB stick), with the Intel e1000e (82574L,
+I217/I218, I219), igb (82576, I350, I210/I211) and igc (I225/I226) and Realtek RTL8111/8168/8125 Ethernet
+controllers. In a cloud, where every node is already a VM, this deletes the guest Linux.
 
 | | k10-metal | Linux guest, same QEMU setup |
 |---|---|---|
@@ -67,7 +69,8 @@ is already a VM, this deletes the guest Linux.
 </Steps>
 
 `SMP=4 ./run.sh` boots four CPUs: CPU 0 runs the network, CPU-heavy requests are spread over all four.
-`PLATFORM=q35 ./run.sh` (or `pc-legacy`, `pc-modern`, `microvm`, `microvm-v2`) picks another machine and NIC;
+`PLATFORM=q35 ./run.sh` (or `pc-legacy`, `pc-modern`, `microvm`, `microvm-v2`, `e1000e`, `igb`) picks another
+machine and NIC;
 `DISK=disk.img` adds a virtio-blk disk. `./test.sh` runs the in-kernel self tests and the end-to-end checks on every
 platform, `./vmm-test.sh` the same kernel on Firecracker and Cloud Hypervisor.
 
@@ -122,7 +125,8 @@ from it; a failed RDRAND fails the link).
 |---|---|
 | `k10.verbose` | boot banner, ACPI summary, phases, apply log (serial output costs about 15 µs per byte) |
 | `k10.ip=A.B.C.D/P[,GATEWAY]` | static IPv4 address (default: DHCPv4, `k10.ip=dhcp`) |
-| `k10.console=com1…com4\|io:0xPORT\|mmio:0xADDR\|mmio32:0xADDR\|none` | console UART (default: the ACPI SPCR table's, else COM1) |
+| `k10.console=ITEM,…` | consoles: one UART, `com1…com4\|io:0xPORT\|mmio:0xADDR\|mmio32:0xADDR\|none` (default: the ACPI SPCR table's, else COM1); `udp:A.B.C.D[:PORT]`, a UDP log console (default port 6666; `nc -klu 6666`), which also sends a panic's message; `nofb`, no screen console (on whenever k10boot hands over the screen) |
+| `k10.watchdog=SECONDS\|on\|off` | the hardware watchdog (ACPI WDAT, Intel TCO, i6300ESB): armed while the node runs, timeout 60 s by default |
 | `k10.panic=N` | seconds before a fatal error reboots (default 10; 0 = halt) |
 | `k10.apic=xapic` | keep the local APIC in xAPIC mode (unless the firmware handed over in x2APIC mode) |
 | `k10.pci=full` | probe every PCI bus of the ECAM windows under a hypervisor too |
@@ -136,10 +140,10 @@ from it; a failed RDRAND fails the link).
 | `k10.insecure_unauthenticated_cluster` | cluster mode without a key (isolated test networks only) |
 | `k10.gossip_max_skew_s=N` | clock skew allowed on gossip, seconds (default 300, at least 1) |
 | `k10.node_id=HEX`, `k10.probe_ms=N`, `k10.suspicion_mult=N`, `k10.mem=BYTES`, `k10.host_alias=IP` | identity and tuning (`k10.host_alias`: the address through which the guest reaches host loopback addresses, default `10.0.2.2`) |
-| `k10.selftest`, `k10.exit_on_ready` | test modes (both end in an ACPI power off) |
+| `k10.selftest`, `k10.exit_on_ready` | test modes (both end in an ACPI power off; `k10.selftest=watchdog` and `=panic` test the watchdog and the UDP console) |
 
 An invalid `k10.engine`, `k10.smp`, `k10.spin_us`, `k10.jit_indirect`, `k10.timer_res_us`, `k10.ip`, `k10.console`,
-`k10.panic` or `k10.gossip_max_skew_s` value stops the boot (and reboots after `k10.panic` seconds).
+`k10.watchdog`, `k10.panic` or `k10.gossip_max_skew_s` value stops the boot (and reboots after `k10.panic` seconds).
 
 The bundle comes from QEMU's `-initrd` (or `/k10s/bundle.k10b` on a disk image's boot partition), else from a bundle
 baked in at build time (`EMBED=1`); with neither, the node starts empty and waits for `POST /_k10s/apply`.
@@ -157,21 +161,28 @@ baked in at build time (`EMBED=1`); with neither, the node starts empty and wait
 - **Time:** kvmclock, else the TSC calibrated against the HPET, the ACPI PM timer or the PIT; a tickless one-shot
   LAPIC timer armed only for the next deadline; an idle node takes no timer interrupts. The wall clock (gossip and
   admin request time windows) is re-read from kvmclock every 10 s.
-- **Devices:** PCI through ECAM with 64-bit BARs and MSI-X; virtio-net and virtio-blk over PCI (virtio 1.x and
-  legacy) and MMIO, NVMe and AHCI (SATA) disks, behind `NetDevice`/`BlockDevice` traits with DMA from slot-like
-  regions; fixed buffers (nothing allocated per packet), smoltcp for TCP/IP with DHCPv4, the same HTTP/1.1 ingress
-  and host API as the hosted node.
+- **Devices:** PCI through ECAM with 64-bit BARs, MSI and MSI-X; virtio-net and virtio-blk over PCI (virtio 1.x and
+  legacy) and MMIO, NVMe and AHCI (SATA) disks, and the Intel and Realtek NICs of PCs (drivers tested against
+  register models of the chips: the I219's power states and its PHY shared with the Management Engine, the I225,
+  Realtek's generations), behind `NetDevice`/`BlockDevice` traits with DMA from slot-like regions; fixed buffers
+  (nothing allocated per packet), smoltcp for TCP/IP with DHCPv4 (started over when a link comes back from an outage), the same
+  HTTP/1.1 ingress and host API as the hosted node.
 - **Storage:** on a disk with a `K10S-DATA` partition (the disk images have one) the services' key-value data, the
   node id and the cluster's desired state survive reboots and power cuts, in the format the Linux-based tier uses;
   cluster-rolled kernel updates go to two kernel slots there, tried once and committed when healthy.
+- **Consoles:** serial (the SPCR table's UART), the screen k10boot hands over (a text console on the UEFI GOP
+  framebuffer), and a UDP log stream to another machine.
+- **Watchdog:** the firmware's ACPI WDAT table, else the Intel TCO timer (ICH and PCH chipsets), else the i6300ESB,
+  armed while the main loop runs: a hung kernel is reset, and k10boot falls back to Tier 1 after two unhealthy boots.
 - **Power:** ACPI S5 power off, the FADT reset register (then the 8042, port 0xCF9, a triple fault) for reboots;
   fatal errors reboot after `k10.panic` seconds.
 
 <Aside type="caution" title="Limits">
-	virtio NICs only (Intel and Realtek come next). IPv4 only, no TLS, no NTP client (the wall clock comes from
-	kvmclock, else the RTC). ACPI events (the power button) are not handled and no AML method runs. Tested on
-	QEMU (PVH, and the x86-64 disk images through UEFI or BIOS), Firecracker and Cloud Hypervisor only, not yet on a
-	physical machine. There is no OS layer under the kernel, so the independent
+	NICs: virtio, Intel e1000e/igb/igc, Realtek r8169-class. IPv4 only, no TLS, no NTP client (the wall clock comes
+	from kvmclock, else the RTC). ACPI events (the power button) are not handled and no AML method runs. Tested on
+	QEMU (PVH, and the x86-64 disk images through UEFI or BIOS, from a disk or a USB stick), Firecracker and Cloud
+	Hypervisor, and the NIC and watchdog drivers against register models; not yet on a physical machine:
+	metal/README.md has the bring-up checklist. There is no OS layer under the kernel, so the independent
 	verification of the JIT's output matters most here. Full list:
 	[metal/README.md](https://github.com/bzzdevlabs/k10s/blob/main/metal/README.md).
 </Aside>

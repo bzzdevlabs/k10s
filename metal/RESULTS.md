@@ -25,7 +25,7 @@ same kernel, interleaved on one machine, §10 what M2 (13d) added.
 
 | | k10-metal | Linux guest (same QEMU/slirp setup) |
 |---|---|---|
-| Image | **1,150 KB** ELF incl. JIT, cluster layer, SMP, ACPI, virtio 1.x/MMIO/blk, NVMe, AHCI, the K10S-DATA store, DHCP and the Multiboot2 entry (1,116 KiB in memory incl. .bss; after M1: 997 KB; before Tier 2's M1: 694 KB / 670 KB; v0: 440 KB) + 13 KB bundle (20 services) | 8.2 MB bzImage + 0.9 MB initramfs |
+| Image | **1,150 KB** ELF incl. JIT, cluster layer, SMP, ACPI, virtio 1.x/MMIO/blk, NVMe, AHCI, the K10S-DATA store, the Intel and Realtek NIC drivers, framebuffer and UDP consoles, watchdogs, DHCP and the Multiboot2 entry (1,116 KiB in memory incl. .bss; after M1: 997 KB; before Tier 2's M1: 694 KB / 670 KB; v0: 440 KB) + 13 KB bundle (20 services) | 8.2 MB bzImage + 0.9 MB initramfs |
 | QEMU start → "ready" (median / p10) | **95 ms / 76 ms** (SeaBIOS); qboot 98 / 66 ms | 1,360 ms (boot only) / 1,435 ms (HTTP) |
 | …of which inside the kernel (entry → ready) | **1.7–2.5 ms** (v0); 2.9 ms with 18 services JIT-compiled at boot (2.1 interpreted) | ≈ 1.25 s |
 | QEMU start → first HTTP 200 | **≈ 2 ms after ready** (median 96 ms) | 1,437 ms |
@@ -389,6 +389,27 @@ checkpoints, the node's files) and the kernel updates (osupdate.rs; k10boot's sl
   cluster requests, at 1 and 64 connections). The KV path (`examples/counter.ten`, one `kv_add` per request, 3
   interleaved rounds): 25.1k / 391k req/s (base) against 24.8k / 388k (13d, data directory) and 24.8k / 394k (13d,
   raw store) at 1 / 64 connections.
+
+## 11. x86 bare metal: Intel and Realtek NICs, consoles, watchdog (13c)
+
+Step 13c added the drivers of PC Ethernet controllers (metal/drivers), the framebuffer and UDP consoles and the
+watchdogs. Same setup as §9 (Apple Silicon, Docker Linux VM, QEMU 10.0.13 with TCG, `-smp 1`, 64 MiB, slirp, 19
+test services), `hello` with 64 keep-alive connections for 5 s, interleaved runs:
+
+| | before 13c (56132f2, 13b) | 13c on 56132f2 |
+|---|---|---|
+| `hello`, legacy virtio-net (`pc-legacy`), 8 rounds, median | 25.6k rps | 25.6k rps |
+| `hello`, e1000e (82574L, q35), 3 runs | — | 24.3k–25.7k rps |
+| `hello`, igb (82576, q35), 3 runs | — | 25.0k–25.7k rps |
+| image in memory | 985 KiB | 1,026 KiB |
+| kernel file | 996,608 bytes | 1,055,984 bytes |
+
+* The virtio path does no new work per packet: the link state is never polled on a NIC without one (a first build
+  that read the clock for it on every main-loop iteration measured 1.2 % slower under TCG), the UDP console's hooks
+  are a load and a branch when it is off, the watchdog is petted at most once a second.
+* With an e1000e or igb the ready line comes about 0.5 s later under QEMU: the lease arrives once the link is up,
+  after the PHY's auto-negotiation, which the driver restarts and QEMU models as 500 ms. Real PHYs take 1–3 s.
+* The drivers add 59 KB to the kernel file; the UDP console's 32 KiB ring is allocated only when it is configured.
 
 ## 11. What was not measured / caveats
 

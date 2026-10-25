@@ -10,6 +10,7 @@
 //! |---|---|
 //! | `join`, `backend`, `jit-indirect`, `timer-res-us`, `idle-spin-us`, `probe-ms`, `suspicion-mult`, `gossip-max-skew`, `ip` | `k10.join`, `k10.engine`, `k10.jit_indirect`, `k10.timer_res_us`, `k10.spin_us`, `k10.probe_ms`, `k10.suspicion_mult`, `k10.gossip_max_skew_s`, `k10.ip` (`A.B.C.D/P[,GATEWAY]`; DHCP without it) |
 //! | `insecure-unauthenticated-cluster` | `k10.insecure_unauthenticated_cluster` |
+//! | `watchdog` (`0`/`off`: off, anything else: on; Tier 2 arms it unless told not to) | `k10.watchdog=on\|off` |
 //! | any of `gossip`, `rpc`, `join`, `advertise` (cluster mode, as on Tier 1) | `k10.cluster`, and `k10.gossip`, `k10.rpc`, `k10.http`: the port of `gossip`, `rpc`, `http` (default 7946, 7947, 80) at the address `advertise`, else the one configured unless unspecified, else 0.0.0.0: the interface's address (DHCP or `ip`; a changed lease reboots the node, which then advertises the new one) |
 //!
 //! The kernel listens on 7946, 7947 and 80 whatever the ports: these addresses are what it tells its peers.
@@ -102,6 +103,9 @@ pub fn derive(text: &str, cmdline: &str, out: &mut Args) {
         if let Some(v) = value(text, cmdline, key) {
             put(arg, format_args!("={v}"));
         }
+    }
+    if let Some(v) = value(text, cmdline, "watchdog") {
+        put("k10.watchdog", format_args!("={}", if matches!(v, "0" | "false" | "no" | "off") { "off" } else { "on" }));
     }
     if value(text, cmdline, "insecure-unauthenticated-cluster").is_some_and(|v| !matches!(v, "0" | "false" | "no" | "off")) {
         put("k10.insecure_unauthenticated_cluster", format_args!(""));

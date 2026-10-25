@@ -199,6 +199,8 @@ pub struct Tables {
     /// `\_S5` SLP_TYPa / SLP_TYPb.
     pub s5: Option<(u8, u8)>,
     pub virtio_mmio: Vec<crate::dev::mmio::MmioSlot>,
+    /// The Watchdog Action Table (watchdog.rs).
+    pub wdat: Option<Vec<u8>>,
     pub bad_checksums: usize,
 }
 
@@ -362,6 +364,7 @@ fn parse(rsdp: u64, t: &mut Tables) {
                 t.spcr = Some(Spcr { kind: b[36], base: Gas::parse(&b[40..52]), baud });
             }
             b"SSDT" => ssdts.push(b),
+            b"WDAT" => t.wdat = Some(b.to_vec()),
             _ => {}
         }
     }

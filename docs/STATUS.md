@@ -161,8 +161,31 @@ verified against the key built into k10s; `SHA256SUMS`).
   write acknowledged a second earlier, a clean power off) next to a q35 self test with NVMe and AHCI disks,
   cluster-test.sh (a guest's kv replicas on its NVMe `K10S-DATA` through a power cut), os/test.py boot (ext4
   conversion), image (store grown), update-native (power cuts at every step, a crashing kernel, a trial that cannot
-  commit). The images still ship `tier=linux` (docs/OS.md "Tiers": no SNTP client, power button, watchdog or IPv6
-  on the native kernel, and no real-hardware run yet). Kernel 1.15 MB (+153 KB), k10boot 106 KB (+34 KB).
+  commit). The images still ship `tier=linux` (docs/OS.md "Tiers": no SNTP client, power button or IPv6 on the
+  native kernel, and no real-hardware run yet). Kernel 1.15 MB (+153 KB), k10boot 106 KB (+34 KB).
+- Tier 2 x86 bare metal (13c = M4's first part, metal/README.md "Real machines", "Hardware bring-up"): `metal/drivers`
+  (crate `k10-drivers`, no_std + alloc, host tests against register models of the chips) holds the NIC and watchdog
+  drivers behind small traits; the kernel puts the NICs behind `NetDevice` (dev/nic.rs: memory BAR, DMA regions,
+  MSI-X or MSI — pci.rs gained MSI —, bus mastering after the reset). Intel e1000e (82574L/82583V, I217/I218, I219 on
+  100-series and later PCHs: ULP exit through the ME's H2ME or LANPHYPC, the SMBus/MDIO handover, K1 off, the
+  I219's descriptor-ring flush and TARC0 errata, every PHY access under the software semaphore), igb/igc (82576,
+  I350, I210/I211, I225/I226: SW_FW_SYNC, EEE off, MSI-X vector 0), Realtek r8169-class (RTL8111/8168/8411 and
+  RTL8125: XID-dependent PHYAR/OCP PHY access, PHY PLL power-up, the 8125's old descriptor format and MAC0_BKP);
+  fixed-buffer rings, no offloads; link state every 500 ms (`net: link up …`; DHCP starts over at link up without a
+  lease or after a 3 s outage); their PCI ids in `bootproto/src/devices.rs`, so `tier=auto` boots the native kernel on them. Consoles: the
+  GOP framebuffer k10boot hands over (8×8 public-domain font scaled, write-combining via PAT entry 1, jump scroll),
+  and a UDP log console (`k10.console=…,udp:IP[:PORT]`, 32 KiB ring from the first line, a panic's message sent
+  straight through the NIC). Watchdog: ACPI WDAT, else Intel TCO (generation 2 LPC/RCBA, 4 SMBus + P2SB, 6 SMBus +
+  TCO1_CNT), else i6300ESB; armed when the main loop starts (`k10.watchdog=`, 60 s; k10s.conf `watchdog=0` turns it
+  off), petted every second, disarmed before power off, reboot and halt; the next boot reports a watchdog reset.
+  The x86-64 `metal` image is the USB image (no new artifact). Tests: 27 register-model tests (metal-selftest gate);
+  `qemu.sh` platforms `e1000e` (82574L) and `igb` (82576) in `metal/test.sh` and the metal-selftest gate; watchdog
+  hangs (`k10.selftest=watchdog`) reset by the i6300ESB, q35's TCO and a WDAT table (`tools/wdat.py`, `-acpitable`),
+  the reset reported on the next boot, a serving kernel petting it; the UDP console's boot log and panic
+  (`k10.selftest=panic`) at a host receiver; link flaps and outages on an e1000e (QMP `set_link`); `os/test.sh tier`: `tier=auto` with an e1000e boots the native kernel
+  (an e1000 Tier 1), the q35 screen read back by QMP screendump shows the boot up to the ready line; `os/test.sh
+  usb` (release gate): the metal image as a usb-storage stick on qemu-xhci, OVMF and SeaBIOS, Tier 1 and the native
+  kernel each serve. Throughput on virtio unchanged; kernel file +59 KB (metal/RESULTS.md §11).
 - Releases: SemVer; tag `vX.Y.Z` on main → stable release, every push to main → `vX.Y.Z-dev.N` pre-release.
 - Performance vs 08f2921 (`bench/k10s/ab.py --same`, 4 interleaved rounds, host load ≈ 7 from the benchmark itself;
   medians): single node within ±2.5 %; local ingress −4 %; forwarded requests −5 % at c=1 (CPU per request +7 %) and
@@ -193,9 +216,18 @@ seek privileges on this machine.
       DigitalOcean BIOS) with 13a's images. Not done here: wall-clock discipline without kvmclock (an NTP/SNTP client),
       ACPI events (power button), Firecracker/Cloud Hypervisor secrets (no fw_cfg and no k10boot there: their admin
       API stays closed until keys come through the boot protocol), interrupt remapping (VT-d, M4).
-    - 13c **x86 bare metal** (M4's first part; after 13a and 13b, in parallel with 13d): Intel e1000e (I219 with
-      ME/ULP handling, 82574L) and igc (I225/I226), Realtek r8169-class (8111/8125), GOP text console, UDP log
-      console, watchdog; a USB-bootable image; then bring-up on the user's machine.
+    - 13c **x86 bare metal** (M4's first part) — done (State of main; under QEMU and register models only). Next:
+      bring-up on the user's machine (a desktop, NIC not identified yet: metal/README.md "Hardware bring-up" starts
+      by identifying it). Needs real hardware: the I219's ULP exit with a live ME (H2ME/ULP_CFG_DONE timing),
+      without one (LANPHYPC toggle, CV_SMB_CTRL/FORCE_SMBUS, ULP_CONFIG1), the SMBus/MDIO handover and PHY-reset
+      blocking, K1 off, the DESC_RING_STATUS flush, MSI on PCH LAN; the 82574L on silicon (GCR/GCR2 errata bits);
+      I210/I211/I350 and I225/I226 (PHY address and semaphores, EEE off, 2.5 Gb/s link, the I225-V's link drops);
+      Realtek revisions without Linux's per-revision ephy/PHY tables and `rtl_nic` firmware (link quality, the
+      8125's MAC OCP settings beyond the descriptor format), PHYAR vs OCP by XID, PMCH; link up/down and DHCP
+      restart on a real cable and switch; real autonegotiation times; the GOP framebuffer on real GPUs (pixel
+      formats, write-combining, framebuffers above 4 GiB); the UDP console through a real gateway; TCO generations
+      2/4/6 on real PCHs (NO_REBOOT locks, the P2SB sideband, TCO_BASE_EN off), firmware WDAT tables, AMD and IPMI
+      watchdogs (not driven); booting the stick on real UEFI (USB boot order, fast boot) and BIOS firmware.
     - 13d **M2 storage** — done (State of main; under QEMU only). Needs real hardware (user): NVMe controllers and
       SSDs (MSI-X on real chipsets, MDTS, namespaces with metadata or several namespaces, controllers firmware left
       running, the time a normal shutdown takes), AHCI controllers and SATA disks (BIOS/OS handoff on real firmware,
@@ -246,7 +278,7 @@ seek privileges on this machine.
 | Ten compiler, prelude, examples | `crates/k10-lang`, `examples/` | unit + examples |
 | x86-64 and AArch64 JIT (single pass, SFI masking, safepoints, speculation hardening), A64 decoder and SFI verifier | `crates/k10-jit` | differential soak, red-team, objdump, verifier |
 | Node runtime, sandbox, CLI | `crates/k10-node`, `crates/k10s` | unit, cluster, chaos, soak, abuse, auth |
-| Bare-metal node (PVH, Multiboot2, k10boot UEFI loader and tier selector, virtio-net, smoltcp, JIT, SMP, cluster member) | `metal/` | `test.sh`, `cluster-test.sh`, `os/test.sh tier mb2` |
+| Bare-metal node (PVH, Multiboot2, k10boot UEFI loader and tier selector, virtio, Intel and Realtek NICs, framebuffer and UDP consoles, watchdogs, smoltcp, JIT, SMP, cluster member) | `metal/` | `test.sh`, `cluster-test.sh`, drivers' register-model tests, `os/test.sh tier mb2 usb` |
 | PID 1 mode (Tier 1), A/B updates, Secure Boot flows, k10s kernels (`vm`, `metal`, `arm64`, `i386`, `armv7`), initramfs, firmware and disk image builders (x86-64, i686, armv7, arm64, Raspberry Pi 3/4/5) | `crates/k10s/src/pid1`, `os/` | unit + `os/test.sh [--arch aarch64\|i686\|armv7]` (QEMU) |
 | Baselines (Kubernetes, bare processes), loadgen, k10s harness, A/B driver | `bench/` | — |
 | Editor extension, documentation site | `editors/vscode`, `website/` | — |

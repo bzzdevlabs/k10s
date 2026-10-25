@@ -189,9 +189,19 @@ impl Write for Serial {
     }
 }
 
+/// The serial port and the other consoles (console/).
+struct Tee<'a>(&'a mut Serial);
+
+impl Write for Tee<'_> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        crate::console::write(s);
+        self.0.write_str(s)
+    }
+}
+
 pub fn _print(args: fmt::Arguments) {
     let mut s = SERIAL.lock();
-    let _ = s.write_fmt(args);
+    let _ = Tee(&mut s).write_fmt(args);
     s.flush();
 }
 

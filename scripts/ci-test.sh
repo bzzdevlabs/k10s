@@ -12,8 +12,11 @@
 #                   bounds
 #   campaign        chaos_short + soak_short_* on both backends (minutes long, noise-sensitive)
 #   metal-selftest  kernel self tests (k10.selftest) under QEMU/KVM: pc (1 and 4 CPUs, transitional and legacy
-#                   virtio-net), q35 (ECAM, modern-only NIC), microvm (virtio-mmio); each ends in an ACPI power off;
-#                   the boot protocol's unit tests (metal/bootproto: k10s.conf, the tier file, boot counter, E820)
+#                   virtio-net), q35 (ECAM, modern-only NIC), microvm (virtio-mmio), e1000e and igb NICs; each ends
+#                   in an ACPI power off; the hardware watchdogs (i6300ESB, ICH9 TCO, ACPI WDAT) reset a kernel that
+#                   hangs on purpose; the boot protocol's unit tests (metal/bootproto: k10s.conf, the tier file, boot
+#                   counter, E820) and the drivers' register-model tests (metal/drivers: e1000e/I219, igb/igc,
+#                   r8169/r8125, TCO/ESB/WDAT)
 #   metal           metal/test.sh and metal/cluster-test.sh end-to-end (TEST_PORT, default 18090)
 #   metal-vmm       metal/vmm-test.sh: the kernel on Firecracker and Cloud Hypervisor (pinned downloads; sudo creates
 #                   the tap device the guests use)
@@ -148,6 +151,20 @@ qemu_selftest() { # SMP PLATFORM [QEMU ARGS...]
     }
 }
 
+qemu_watchdog() { # NAME PLATFORM SECONDS EXPECTED_NAME [qemu args]
+    # The kernel arms the watchdog and hangs with interrupts off: the watchdog must reset it (QEMU exits: -no-reboot).
+    local log=metal/out/watchdog-$1.log st=0
+    rm -f "$log"
+    # shellcheck disable=SC2046
+    timeout 60 qemu-system-x86_64 $(k10_accel) $(k10_machine "$2") -m 64M -nodefaults -display none -no-reboot \
+        -kernel metal/out/k10-metal.elf -serial "file:$log" "${@:5}" -append "k10.selftest=watchdog k10.watchdog=$3" || st=$?
+    sed 's/^/    /' "$log"
+    [[ $st == 0 ]] && grep -q "^watchdog: $4" "$log" && grep -q "watchdog selftest: hanging" "$log" || {
+        echo "metal watchdog $1: exit status $st (want 0 after the watchdog's reset)" >&2
+        return 1
+    }
+}
+
 for suite in "$@"; do
     echo "=== $suite"
     case $suite in
@@ -157,7 +174,7 @@ for suite in "$@"; do
     dist) dist ;;
     metal-selftest)
         run env -u CARGO_TARGET_DIR metal/build.sh
-        (cd metal && run env -u CARGO_TARGET_DIR cargo test --release --locked -p k10-bootproto)
+        (cd metal && run env -u CARGO_TARGET_DIR cargo test --release --locked -p k10-bootproto -p k10-drivers)
         . metal/qemu.sh
         qemu_selftest 1 pc
         qemu_selftest 4 pc
@@ -174,6 +191,12 @@ for suite in "$@"; do
             || { echo "metal selftest: the NVMe or AHCI disk was not exercised" >&2; exit 1; }
         run python3 metal/tools/storage_test.py --kernel metal/out/k10-metal.elf --bundle metal/out/bundle.k10b \
             --out metal/out --cycles 4
+        qemu_selftest 2 e1000e
+        qemu_selftest 2 igb
+        metal/tools/wdat.py metal/out/wdat.bin
+        qemu_watchdog esb pc 3 "i6300ESB" -device i6300esb
+        qemu_watchdog tco q35 5 "Intel TCO (ICH/PCH, LPC)"
+        qemu_watchdog wdat q35 5 "ACPI WDAT" -acpitable file=metal/out/wdat.bin
         ;;
     metal)
         run env -u CARGO_TARGET_DIR EMBED=1 metal/build.sh

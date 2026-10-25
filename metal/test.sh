@@ -19,8 +19,12 @@
 #   serves, reboots on a signed `POST /_k10s/power` (`reboot`: the firmware runs again, the kernel boots a second
 #   time) and powers off on another (`off`: QEMU exits 0) — no isa-debug-exit device anywhere; the console moved
 #   to COM2 by an ACPI SPCR table; a static address (k10.ip); the PM timer and PIT clock paths (no HPET); DHCP
-#   renew, rebind and NAK against a scripted server (tools/dhcp_test.py); 16 GiB and 32 vCPUs (BIG=0 skips);
-#   embedded bundle, qboot firmware, no panic in any serial log.
+#   renew, rebind and NAK against a scripted server (tools/dhcp_test.py); the hardware watchdogs (i6300ESB, the
+#   ICH9 TCO of q35, an ACPI WDAT table describing it) reset a kernel that hangs on purpose (k10.selftest=watchdog)
+#   and are reported as the cause on the next boot, and a serving kernel keeps petting them; the UDP log console
+#   (k10.console=udp:…) delivers the boot log and a panic (k10.selftest=panic) to a receiver on the host; link
+#   down and up on an e1000e (QMP set_link): a short flap keeps the DHCP lease, a 5 s outage starts DHCP over;
+#   16 GiB and 32 vCPUs (BIG=0 skips); embedded bundle, qboot firmware, no panic in any serial log.
 # Environment: TEST_PORT (default 18090), MEM (64M), MEM_SMALL (8M), BIOS (firmware, empty = SeaBIOS), ENGINES,
 # PLATFORM, PLATFORMS, ACCEL (qemu.sh), EXTRA_CMDLINE (appended to the engine suites' kernel command line),
 # BOOT_WAIT (seconds for the ready line, default 30), HOG_MS (latency bound during the spin storm; default 50 with
@@ -34,7 +38,7 @@ MEM="${MEM:-64M}"
 MEM_SMALL="${MEM_SMALL:-8M}"
 ENGINES="${ENGINES:-jit interp}"
 PLATFORM="${PLATFORM:-pc}"
-PLATFORMS="${PLATFORMS:-pc pc-legacy pc-legacy-split pc-modern q35 microvm microvm-v2}"
+PLATFORMS="${PLATFORMS:-pc pc-legacy pc-legacy-split pc-modern q35 microvm microvm-v2 e1000e igb}"
 BOOT_WAIT="${BOOT_WAIT:-30}"
 ACCEL_ARGS=$(k10_accel) || exit 1
 [[ $ACCEL_ARGS == *kvm* ]] && HOG_MS="${HOG_MS:-50}" || HOG_MS="${HOG_MS:-1000}"
@@ -452,6 +456,129 @@ if [[ -x tools/dhcp_test.py ]]; then
         ko "DHCP: $(tail -3 "$OUT/dhcp.out")"
     fi
 fi
+
+echo "== hardware watchdogs"
+tools/wdat.py "$OUT/wdat.bin"
+# watchdog_hang NAME PLATFORM SECONDS EXPECTED_NAME [qemu args]: the kernel arms the watchdog and hangs with interrupts
+# off; the watchdog resets the machine (QEMU exits on the reset: -no-reboot) about SECONDS later.
+watchdog_hang() {
+    local name=$1 p=$2 secs=$3 want=$4 log="$OUT/serial-watchdog-$1.log" st t0
+    shift 4
+    rm -f "$log"
+    t0=$(date +%s)
+    # shellcheck disable=SC2046
+    timeout 120 qemu-system-x86_64 $ACCEL_ARGS $(k10_machine "$p") -m "$MEM" -nodefaults -display none -no-reboot \
+        -kernel out/k10-metal.elf -serial "file:$log" "$@" -append "k10.selftest=watchdog k10.watchdog=$secs"
+    st=$?
+    local took=$(($(date +%s) - t0))
+    [[ $st == 0 ]] && grep -aq "^watchdog: $want" "$log" && grep -aq "watchdog selftest: hanging" "$log" \
+        && ! grep -aq "power off" "$log" && ((took < secs + 60)) \
+        && ok "watchdog $name: $want reset the hung kernel after ${took} s" || ko "watchdog $name: exit $st after ${took} s: $(grep -a "^watchdog" "$log" | tr '\n' ' ')"
+}
+watchdog_hang esb pc 3 "i6300ESB" -device i6300esb
+watchdog_hang tco q35 5 "Intel TCO (ICH/PCH, LPC)"
+watchdog_hang wdat q35 5 "ACPI WDAT" -acpitable "file=$OUT/wdat.bin"
+# Rebooting after the reset: the next boot names the watchdog as the cause (TCO2_STS second timeout).
+rm -f "$OUT/serial-watchdog-again.log"
+# shellcheck disable=SC2046
+qemu-system-x86_64 $ACCEL_ARGS $(k10_machine q35) -m "$MEM" -nodefaults -display none -kernel out/k10-metal.elf \
+    -serial "file:$OUT/serial-watchdog-again.log" -append "k10.selftest=watchdog k10.watchdog=5" &
+QPID=$!
+for _ in $(seq 1 120); do grep -aq "it reset the machine before this boot" "$OUT/serial-watchdog-again.log" 2>/dev/null && break; sleep 1; done
+grep -aq "^watchdog: Intel TCO (ICH/PCH, LPC); it reset the machine before this boot" "$OUT/serial-watchdog-again.log" \
+    && ok "watchdog: the next boot reports the reset" || ko "watchdog: no report of the reset on the next boot"
+shutdown
+# A serving kernel pets it: still the first boot after 3 timeouts' worth of time.
+if BOOT_PLATFORM=q35 boot "$MEM" out/bundle.k10b "$OUT/serial-watchdog-serve.log" "k10.watchdog=5"; then
+    sleep 15
+    expect "hello (watchdog armed)" "$U/hello/" 200 '^hello from k10-metal$'
+    [[ $(grep -ac "k10-metal ready" "$OUT/serial-watchdog-serve.log") == 1 ]] && grep -aq "watchdog: armed" "$OUT/serial-watchdog-serve.log" \
+        && ok "watchdog: armed and petted while serving (no reset in 15 s)" || ko "watchdog while serving: $(grep -a "watchdog\|ready" "$OUT/serial-watchdog-serve.log" | tr '\n' ' ')"
+else
+    ko "boot with the watchdog armed"
+fi
+shutdown
+
+echo "== UDP log console"
+# udp_receive PORT FILE SECONDS: collects datagrams sent to 127.0.0.1:PORT (QEMU's 10.0.2.2) into FILE.
+udp_receive() {
+    exec python3 -c '
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(("127.0.0.1", int(sys.argv[1])))
+s.settimeout(float(sys.argv[3]))
+with open(sys.argv[2], "wb") as out:
+    try:
+        while True:
+            out.write(s.recv(65535))
+            out.flush()
+    except socket.timeout:
+        pass' "$@"
+}
+UDP_PORT=$((PORT + 3))
+rm -f "$OUT/udp-serve.out"
+udp_receive "$UDP_PORT" "$OUT/udp-serve.out" 20 &
+recv=$!
+if boot "$MEM" out/bundle.k10b "$OUT/serial-udp.log" "k10.console=udp:10.0.2.2:$UDP_PORT"; then
+    for _ in $(seq 1 15); do grep -aq "k10-metal ready" "$OUT/udp-serve.out" 2>/dev/null && break; sleep 1; done
+    grep -aq "^console: UDP to 10.0.2.2:$UDP_PORT" "$OUT/udp-serve.out" && grep -aq "k10-metal ready" "$OUT/udp-serve.out" \
+        && ok "UDP console: the boot log from its first line, and the ready line" || ko "UDP console: got $(wc -c < "$OUT/udp-serve.out") bytes"
+else
+    ko "boot with the UDP console"
+fi
+shutdown
+kill "$recv" 2>/dev/null
+wait "$recv" 2>/dev/null
+rm -f "$OUT/udp-panic.out"
+udp_receive "$UDP_PORT" "$OUT/udp-panic.out" 60 &
+recv=$!
+# shellcheck disable=SC2046
+timeout 120 qemu-system-x86_64 $(qemu_args "$MEM" pc) -serial "file:$OUT/serial-udp-panic.log" \
+    -append "k10.console=udp:10.0.2.2:$UDP_PORT k10.selftest=panic k10.panic=1"
+st=$?
+kill "$recv" 2>/dev/null
+wait "$recv" 2>/dev/null
+grep -aq "PANIC: panicked at" "$OUT/udp-panic.out" && grep -aq "k10.selftest=panic: a panic reported over the UDP console" "$OUT/udp-panic.out" \
+    && grep -aq "rebooting in 1 s" "$OUT/udp-panic.out" && ok "UDP console: a panic's message, sent straight through the NIC" \
+    || ko "UDP console panic (exit $st): $(tail -c 300 "$OUT/udp-panic.out")"
+mv "$OUT/serial-udp-panic.log" "$OUT/udp-panic.serial"
+
+echo "== link down and up (e1000e, QMP set_link)"
+# qmp_link SOCKET on|off: the cable of the guest's NIC.
+qmp_link() {
+    python3 -c '
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[1])
+f = s.makefile("rw")
+f.readline()
+for c in ({"execute": "qmp_capabilities"}, {"execute": "set_link", "arguments": {"name": "n0", "up": sys.argv[2] == "on"}}):
+    f.write(json.dumps(c) + "\n")
+    f.flush()
+    while "return" not in json.loads(f.readline()):
+        pass' "$@"
+}
+rm -f "$OUT/link.qmp"
+if QEMU_EXTRA="-qmp unix:$OUT/link.qmp,server=on,wait=off" BOOT_PLATFORM=e1000e boot "$MEM" out/bundle.k10b "$OUT/serial-link.log" ""; then
+    for _ in $(seq 1 20); do grep -aq "net: link up" "$OUT/serial-link.log" && break; sleep 0.5; done
+    # A short flap: link down and up again, the lease kept.
+    qmp_link "$OUT/link.qmp" off && sleep 1 && qmp_link "$OUT/link.qmp" on
+    for _ in $(seq 1 20); do [[ $(grep -ac "net: link up" "$OUT/serial-link.log") == 2 ]] && break; sleep 0.5; done
+    [[ $(grep -ac "net: link up" "$OUT/serial-link.log") == 2 ]] && grep -aq "net: link down" "$OUT/serial-link.log" \
+        && ! grep -aq "lease of .* lost" "$OUT/serial-link.log" && ok "link: a 1 s flap is reported, the lease kept" \
+        || ko "link flap: $(grep -a "^net:" "$OUT/serial-link.log" | tr '\n' ' ')"
+    expect "hello (after a link flap)" "$U/hello/" 200 '^hello from k10-metal$'
+    # An outage of 5 s: DHCP starts over when the link is back (the cable may lead elsewhere).
+    qmp_link "$OUT/link.qmp" off && sleep 5 && qmp_link "$OUT/link.qmp" on
+    for _ in $(seq 1 40); do [[ $(grep -ac "net: DHCP 10.0.2.15/24" "$OUT/serial-link.log") == 2 ]] && break; sleep 0.5; done
+    [[ $(grep -ac "net: DHCP 10.0.2.15/24" "$OUT/serial-link.log") == 2 ]] && grep -aq "lease of 10.0.2.15 lost" "$OUT/serial-link.log" \
+        && ok "link: after a 5 s outage DHCP starts over and gets the address again" \
+        || ko "link outage: $(grep -a "^net:" "$OUT/serial-link.log" | tr '\n' ' ')"
+    expect "hello (after a link outage)" "$U/hello/" 200 '^hello from k10-metal$'
+else
+    ko "boot e1000e for the link test"
+fi
+shutdown
 
 if [[ ${BIG:-1} == 1 ]]; then
     echo "== 16 GiB of RAM, 32 vCPUs (q35)"
