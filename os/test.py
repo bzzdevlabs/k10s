@@ -1434,7 +1434,7 @@ def native_update_test(a, work):
     open(payload, "wb").write(unsigned_payload(open(t.kernel, "rb").read()))
 
     def sign(version, src=payload):
-        out = os.path.join(work, f"native-{version}.elf")
+        out = os.path.abspath(os.path.join(work, f"native-{version}.elf"))
         subprocess.run([a.k10s, "image", "sign", "--key", a.image_key, "--arch", "x86_64", "--profile", "native", "--version", version,
                         src, out], check=True, capture_output=True)
         return out

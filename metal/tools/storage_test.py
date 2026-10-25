@@ -89,8 +89,10 @@ class Guest:
                "-display", "none", "-no-reboot", "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{a.port}-:80",
                "-device", "virtio-net-pci,netdev=n0,romfile=", "-fw_cfg", f"name=opt/k10s/admin_key,file={a.admin_key}",
                "-kernel", a.kernel, "-initrd", a.bundle, "-serial", f"file:{self.log}", "-append", ""]
+        self.started = time.time()
         self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.port = a.port
+        self.ready_s = None
 
     def text(self):
         try:
@@ -102,6 +104,7 @@ class Guest:
         t = time.time()
         while time.time() - t < timeout:
             if re.search(r"k10-metal ready .*\r", self.text()):
+                self.ready_s = time.time() - self.started
                 return
             if self.proc.poll() is not None:
                 break
@@ -187,18 +190,21 @@ def run(a, kind):
     gpt_disk(disk, 128, 1, 64)
     g = Guest(a, kind, disk, 0)
     g.wait_ready()
+    first_ready = g.ready_s
     t = g.text()
     if not re.search(r"storage: K10S-DATA grown to 12\d MiB", t) or "is blank: formatting" not in t:
         fail("K10S-DATA not grown and formatted on the first boot", g)
     if not re.search(r"storage: K10S-DATA on (virtio-blk|nvme|ahci)", t):
         fail("no store on the disk", g)
-    print(f"storage_test.py: {kind}: grown, formatted", file=sys.stderr)
+    print(f"storage_test.py: {kind}: grown, formatted (QEMU start to ready {first_ready:.2f} s)", file=sys.stderr)
     nxt, n = 0, 1
     rng = random.Random(a.seed)
+    rates, readies = [], []
     for cycle in range(a.cycles):
         stop, acked = threading.Event(), [nxt, []]
         w = threading.Thread(target=writer, args=(a.port, nxt, stop, acked))
         w.start()
+        t0 = time.time()
         time.sleep(rng.uniform(0.3, 3.0))
         cut = time.time()
         g.kill()
@@ -216,6 +222,8 @@ def run(a, kind):
         except (OSError, RuntimeError, http.client.HTTPException) as e:
             fail(f"cut {cycle}: {e}", g)
         written = acked[0] - nxt
+        rates.append(written / (cut - t0))
+        readies.append(g.ready_s)
         nxt = check_prefix(got, acked[0], durable, f"cut {cycle}", g)
         print(f"storage_test.py: {kind}: cut {cycle + 1}/{a.cycles}: {written} writes acknowledged, store ends at "
               f"{nxt - 1} (acknowledged up to {acked[0] - 1})", file=sys.stderr)
@@ -245,6 +253,9 @@ def run(a, kind):
         fail(f"status: {status[-300:]}", g)
     g.kill()
     print(f"storage_test.py: {kind}: clean power off kept all {acked[0]} writes: ok", file=sys.stderr)
+    med = lambda v: sorted(v)[len(v) // 2] if v else 0
+    print(f"storage_test.py: {kind}: sequential 4 KiB PUTs {med(rates):.0f}/s (median of {len(rates)}), QEMU start to ready "
+          f"after a cut {med(readies):.2f} s (store opened and replayed)", file=sys.stderr)
 
 
 def main():

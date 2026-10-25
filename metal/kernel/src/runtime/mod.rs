@@ -101,6 +101,9 @@ fn rec_size(klen: usize, vlen: usize) -> u64 {
     k10_kvlog::record::size(klen, vlen) as u64
 }
 
+/// [`KvLog`]'s `dirty_at`, readable without the node lock (storage's main-loop check).
+pub static KV_DIRTY_AT: AtomicU64 = AtomicU64::new(0);
+
 impl KvLog {
     fn record(&mut self, svc: &str, op: u8, k: &[u8], v: &[u8]) {
         let buf = match self.pending.get_mut(svc) {
@@ -112,6 +115,7 @@ impl KvLog {
         self.pending_bytes += buf.len() - before;
         if self.dirty_at == 0 {
             self.dirty_at = time::now_ns().max(1);
+            KV_DIRTY_AT.store(self.dirty_at, Ordering::Release);
         }
     }
 }
@@ -1455,6 +1459,7 @@ pub fn kv_take_pending() -> Vec<(String, Vec<u8>)> {
     let mut node = NODE.lock();
     node.kv_log.pending_bytes = 0;
     node.kv_log.dirty_at = 0;
+    KV_DIRTY_AT.store(0, Ordering::Release);
     core::mem::take(&mut node.kv_log.pending).into_iter().collect()
 }
 
@@ -1470,6 +1475,7 @@ pub fn kv_snapshot(ns: &str) -> Vec<u8> {
         node.kv_log.pending_bytes -= p.len();
         if node.kv_log.pending.is_empty() {
             node.kv_log.dirty_at = 0;
+            KV_DIRTY_AT.store(0, Ordering::Release);
         }
     }
     let mut out = Vec::new();

@@ -90,6 +90,7 @@ hosted() { # name http gossip rpc [join [cluster key file]]
 }
 
 guest() { # serial log [next]: secrets as fw_cfg files; `next`: also the next cluster key (rotation)
+    GLOG=$1
     local fw=(-fw_cfg "name=opt/k10s/cluster_key,file=$OUT/cluster.key" -fw_cfg "name=opt/k10s/admin_key,file=$OUT/admin.key")
     [[ "${2:-}" == next ]] && fw+=(-fw_cfg "name=opt/k10s/cluster_next_key,file=$OUT/cluster-next.key")
     # shellcheck disable=SC2046,SC2086
@@ -411,7 +412,7 @@ for _ in $(seq 1 200); do
     kill -0 "$QPID" 2>/dev/null || { wait "$QPID"; st_q=$?; break; }
     sleep 0.05
 done
-[[ $st_q == 0 ]] && grep -aq "k10-metal: power off" "$OUT"/guest2.log && ok "guest powered off through ACPI (QEMU exit 0)" || ko "guest power off: QEMU exit $st_q"
+[[ $st_q == 0 ]] && grep -aq "k10-metal: power off" "$GLOG" && ok "guest powered off through ACPI (QEMU exit 0)" || ko "guest power off: QEMU exit $st_q"
 QPID=
 grep -aq "PANIC\|CPU exception" "$OUT"/guest*.log && ko "kernel panic/exception in guest logs" || ok "no panic or CPU exception in guest logs"
 echo "== timings: join ${JOIN_MS} ms, apply->all applied ${APPLY_MS} ms, rejoin ${REJOIN_MS} ms, rejoin->applied ${RESYNC_MS} ms"

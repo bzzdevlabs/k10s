@@ -147,11 +147,18 @@ pub fn config(bi: &BootInfo) -> Option<Config> {
         .arg("k10.join")
         .map(|v| v.split(',').filter_map(|a| a.parse().ok()).collect())
         .unwrap_or_default();
-    // A node id only needs to be unique, not secret: the TSC is an acceptable fallback.
-    let id = bi
-        .arg("k10.node_id")
-        .and_then(|h| u64::from_str_radix(h, 16).ok())
-        .unwrap_or_else(|| crate::arch::rdrand().unwrap_or_else(crate::arch::rdtsc) | 1);
+    // `k10.node_id`, else the one K10S-DATA keeps (Tier 1's `node-id` file: the same node in both tiers), else a new
+    // one (kept there). An id only needs to be unique, not secret: the TSC is an acceptable fallback.
+    let stored = || crate::storage::file("node-id").and_then(|b| u64::from_str_radix(core::str::from_utf8(&b).ok()?.trim(), 16).ok());
+    let id = bi.arg("k10.node_id").and_then(|h| u64::from_str_radix(h, 16).ok()).or_else(stored).unwrap_or_else(|| {
+        let id = crate::arch::rdrand().unwrap_or_else(crate::arch::rdtsc) | 1;
+        if crate::storage::available() {
+            if let Err(e) = crate::storage::write_files(&[("node-id", Some(alloc::format!("{}\n", NodeId(id)).as_bytes()))]) {
+                kprintln!("cluster: cannot keep the node id: {e}");
+            }
+        }
+        id
+    });
     Some(Config {
         id: NodeId(id),
         gossip: addr("k10.gossip", GOSSIP_PORT),
@@ -467,6 +474,7 @@ pub fn start(mut cfg: Config, net: &mut Net) -> bool {
         os_next: 0,
         cfg,
     };
+    c.load_persisted();
     if !c.cfg.join.is_empty() {
         let seeds = c.cfg.join.clone();
         let out = c.gossip.join(&seeds, now_ms());
@@ -707,6 +715,61 @@ impl Cluster {
         }
     }
 
+    // --- the desired state in K10S-DATA (storage.rs; Tier 1's files) ---------------------------------------------
+
+    /// The desired state this node held before it restarted, with its code: served until the cluster has a newer one.
+    fn load_persisted(&mut self) {
+        let Some(bytes) = crate::storage::file("manifest.k10m") else { return };
+        let Ok(m) = Manifest::decode(&bytes) else {
+            return kprintln!("cluster: the stored manifest does not decode: ignored");
+        };
+        let st = Rc::new(Stored::new(m));
+        for h in st.manifest.services.iter().map(|s| s.code_hash) {
+            if self.store.blobs.contains_key(&h) {
+                continue;
+            }
+            match crate::storage::file(&alloc::format!("blobs/{}", to_hex(&h))) {
+                Some(b) if sha256(&b) == h => {
+                    self.store.blobs.insert(h, b);
+                }
+                _ => {
+                    self.store.blobs.clear();
+                    return kprintln!("cluster: the stored manifest v{} misses code: ignored", st.manifest.version);
+                }
+            }
+        }
+        kprintln!("cluster: stored desired state v{} ({} services) from K10S-DATA", st.manifest.version, st.manifest.services.len());
+        self.store.current = Some(st);
+        let _ = self.apply_current();
+    }
+
+    /// Keeps the current desired state and its code in K10S-DATA (blobs no manifest references any more go).
+    fn persist(&mut self) {
+        let Some(cur) = self.store.current.clone() else { return };
+        if !crate::storage::available() {
+            return;
+        }
+        let have = crate::storage::file_names();
+        let wanted: Vec<alloc::string::String> = cur.manifest.services.iter().map(|s| alloc::format!("blobs/{}", to_hex(&s.code_hash))).collect();
+        let mut changes: Vec<(alloc::string::String, Option<Vec<u8>>)> = Vec::new();
+        for s in &cur.manifest.services {
+            let name = alloc::format!("blobs/{}", to_hex(&s.code_hash));
+            if !have.contains(&name) && !changes.iter().any(|c| c.0 == name) {
+                if let Some(b) = self.store.blobs.get(&s.code_hash) {
+                    changes.push((name, Some(b.clone())));
+                }
+            }
+        }
+        for n in have.iter().filter(|n| n.starts_with("blobs/") && !wanted.contains(n)) {
+            changes.push((n.clone(), None));
+        }
+        changes.push(("manifest.k10m".into(), Some(cur.bytes.clone())));
+        let refs: Vec<(&str, Option<&[u8]>)> = changes.iter().map(|(n, d)| (n.as_str(), d.as_deref())).collect();
+        if let Err(e) = crate::storage::write_files(&refs) {
+            kprintln!("cluster: cannot keep desired state v{}: {e}", cur.manifest.version);
+        }
+    }
+
     // --- OS updates (osupdate.rs) -------------------------------------------------------------------------------
 
     /// The trial kernel may commit: this node holds and applied the cluster's desired state and, if it joins peers,
@@ -884,7 +947,9 @@ impl Cluster {
         self.store.pinned.clear();
         if self.store.current.as_ref().is_none_or(|c| st.key() > c.key()) {
             self.store.current = Some(st);
-            let _ = self.apply_current();
+            if self.apply_current().is_ok() {
+                self.persist();
+            }
             self.store.gc();
         }
     }
@@ -1477,6 +1542,7 @@ impl Cluster {
             self.store.current = prev;
             return err(422, &e);
         }
+        self.persist();
         self.store.gc();
         let out = self.gossip.set_desired(st.manifest.version, st.hash);
         self.absorb(out);

@@ -4,7 +4,9 @@
 //! replayed into memory at boot. Afterwards CPU 0 commits their writes in groups: the first write opens a 2 ms
 //! window, then the batch goes out asynchronously (its writes, then a flush; the device's completion interrupt, or
 //! the idle loop's polling, ends it), the hosted node's durability contract. Compaction (a checkpoint) and the
-//! recovery after a failed write run synchronously. Without K10S-DATA the KV data lives in memory only.
+//! recovery after a failed write run synchronously. The node's own state is in the same store, as Tier 1 keeps it:
+//! files (`k10_kvlog::files`: the node id, the cluster's desired state and its code) and the update agent's
+//! records (`.native`). Without K10S-DATA the KV data lives in memory only.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -13,7 +15,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use k10_kvlog::store::{Disk, IoError, Store, Writes};
-use k10_kvlog::{gpt, layout, record};
+use k10_kvlog::{files, gpt, layout, record};
 
 use crate::dev::{self, BlockDevice, BlockOp, BlockRequest, DmaRegion};
 use crate::kprintln;
@@ -33,6 +35,9 @@ const RETRY_MAX_NS: u64 = 5_000_000_000;
 const TAG_BATCH: u32 = 0x5700_0000;
 /// The kernel's own namespace in the store (osupdate.rs: failed images).
 const NATIVE: &[u8] = b".native";
+
+/// The node's own namespaces (names starting with a dot: [`NATIVE`] and [`files::NS`]), kept here.
+type Own = BTreeMap<Vec<u8>, BTreeMap<Vec<u8>, Vec<u8>>>;
 
 static STORAGE: Global<Option<Storage>> = Global::new(None);
 /// For `/_k10s/status` (any CPU): the store's size and log, whether writes are durable, batches and errors.
@@ -123,8 +128,8 @@ pub struct Storage {
     batch: Option<Batch>,
     failures: u32,
     retry_at: u64,
-    /// The `.native` namespace.
-    native: BTreeMap<Vec<u8>, Vec<u8>>,
+    /// The node's own namespaces.
+    own: Own,
 }
 
 /// `K10S-DATA` on `d`: (first block, blocks, partition number, unique GUID), from the primary GPT.
@@ -235,19 +240,18 @@ pub fn init(data: Option<&str>, allow_grow: bool, want: Option<[u8; 16]>) {
     }
     let mut p = Part { dev: &mut *d, bounce: &mut bounce, base: first, size: blocks * bs };
     let mut replayed = 0u64;
-    let mut native = BTreeMap::new();
+    let mut own = Own::new();
     let opened = Store::open(&mut p, &mut |ns, r| {
-        if ns == NATIVE {
+        if ns.first() == Some(&b'.') {
+            let m = own.entry(ns.to_vec()).or_default();
             if r.op == record::PUT {
-                native.insert(r.key.to_vec(), r.value.to_vec());
+                m.insert(r.key.to_vec(), r.value.to_vec());
             } else {
-                native.remove(r.key);
+                m.remove(r.key);
             }
         } else if let Ok(ns) = core::str::from_utf8(ns) {
-            if !ns.starts_with('.') {
-                crate::runtime::kv_restore(ns, r.op == record::PUT, r.key, r.value);
-                replayed += 1;
-            }
+            crate::runtime::kv_restore(ns, r.op == record::PUT, r.key, r.value);
+            replayed += 1;
         }
     });
     let store = match opened {
@@ -275,7 +279,7 @@ pub fn init(data: Option<&str>, allow_grow: bool, want: Option<[u8; 16]>) {
         store.superblock().size() >> 20,
         live >> 10
     );
-    *STORAGE.borrow_mut() = Some(Storage { dev: d, bounce, base: first, size: blocks * bs, store, batch: None, failures: 0, retry_at: 0, native });
+    *STORAGE.borrow_mut() = Some(Storage { dev: d, bounce, base: first, size: blocks * bs, store, batch: None, failures: 0, retry_at: 0, own });
 }
 
 impl Storage {
@@ -416,13 +420,15 @@ impl Storage {
         let nss = crate::runtime::kv_namespaces();
         let res = (|| {
             self.store.checkpoint_begin()?;
-            let mut own = Vec::new();
-            for (k, v) in &self.native {
-                record::encode(&mut own, record::PUT, k, v);
-            }
-            if !own.is_empty() {
-                let mut p = Part { dev: &mut *self.dev, bounce: &mut self.bounce, base: self.base, size: self.size };
-                self.store.checkpoint_push(&mut p, NATIVE, &own)?;
+            for (ns, m) in &self.own {
+                let mut recs = Vec::new();
+                for (k, v) in m {
+                    record::encode(&mut recs, record::PUT, k, v);
+                }
+                if !recs.is_empty() {
+                    let mut p = Part { dev: &mut *self.dev, bounce: &mut self.bounce, base: self.base, size: self.size };
+                    self.store.checkpoint_push(&mut p, ns, &recs)?;
+                }
             }
             for ns in &nss {
                 let recs = crate::runtime::kv_snapshot(ns);
@@ -478,16 +484,20 @@ impl Storage {
             }
             return;
         }
+        let at = crate::runtime::KV_DIRTY_AT.load(Ordering::Acquire);
+        if at == 0 || !(force || now >= at + WINDOW_NS) {
+            return;
+        }
         let (dirty_at, pending, live) = crate::runtime::kv_log_state();
-        if dirty_at != 0 && (force || now >= dirty_at + WINDOW_NS) {
+        if dirty_at != 0 {
             self.start(live, pending);
         }
     }
 }
 
 impl Storage {
-    /// Writes the `.native` record `key` (`None`: deletes it), committed before it returns.
-    fn set_native(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<(), String> {
+    /// Writes records (PUT/DEL) of own namespace `ns`, committed before it returns.
+    fn write_own(&mut self, ns: &[u8], recs: &[u8]) -> Result<(), String> {
         self.drain();
         if self.failures > 0 {
             self.checkpoint("rewrite");
@@ -495,28 +505,28 @@ impl Storage {
                 return Err("K10S-DATA is not writable".into());
             }
         }
-        let mut rec = Vec::new();
-        match value {
-            Some(v) => record::encode(&mut rec, record::PUT, key, v),
-            None => record::encode(&mut rec, record::DEL, key, &[]),
-        }
-        let res = self.store.push(NATIVE, &rec).and_then(|()| {
+        let res = self.store.push(ns, recs).and_then(|()| {
             let mut p = Part { dev: &mut *self.dev, bounce: &mut self.bounce, base: self.base, size: self.size };
             self.store.commit(&mut p)
         });
-        match res {
-            Ok(()) => {
-                match value {
-                    Some(v) => self.native.insert(key.to_vec(), v.to_vec()),
-                    None => self.native.remove(key),
-                };
-                Ok(())
-            }
-            Err(e) => {
-                self.failed("write", &e);
-                Err(alloc::format!("K10S-DATA: {e}"))
+        if let Err(e) = res {
+            self.failed("write", &e);
+            return Err(alloc::format!("K10S-DATA: {e}"));
+        }
+        let m = self.own.entry(ns.to_vec()).or_default();
+        for (r, _) in record::split(recs, 0) {
+            if r.op == record::PUT {
+                m.insert(r.key.to_vec(), r.value.to_vec());
+            } else {
+                m.remove(r.key);
             }
         }
+        LOG_BYTES.store(self.store.log_bytes(), Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn own_get(&self, ns: &[u8], key: &[u8]) -> Option<&Vec<u8>> {
+        self.own.get(ns)?.get(key)
     }
 }
 
@@ -532,12 +542,52 @@ pub fn superblock() -> Option<layout::Super> {
 
 /// A value of the kernel's own namespace.
 pub fn native_get(key: &[u8]) -> Option<Vec<u8>> {
-    STORAGE.borrow().as_ref()?.native.get(key).cloned()
+    STORAGE.borrow().as_ref()?.own_get(NATIVE, key).cloned()
 }
 
 /// Writes (or with `None` deletes) a value of the kernel's own namespace, durably.
 pub fn native_set(key: &[u8], value: Option<&[u8]>) -> Result<(), String> {
-    STORAGE.borrow_mut().as_mut().ok_or("no K10S-DATA")?.set_native(key, value)
+    let mut rec = Vec::new();
+    match value {
+        Some(v) => record::encode(&mut rec, record::PUT, key, v),
+        None => record::encode(&mut rec, record::DEL, key, &[]),
+    }
+    STORAGE.borrow_mut().as_mut().ok_or("no K10S-DATA")?.write_own(NATIVE, &rec)
+}
+
+/// File `name` of the node's files (Tier 1's names: `node-id`, `manifest.k10m`, `blobs/<sha256 hex>`).
+pub fn file(name: &str) -> Option<Vec<u8>> {
+    let st = STORAGE.borrow();
+    let s = st.as_ref()?;
+    files::read(name.as_bytes(), &mut |k| s.own_get(files::NS, k).cloned())
+}
+
+/// Names of the node's files.
+pub fn file_names() -> Vec<String> {
+    let st = STORAGE.borrow();
+    let Some(m) = st.as_ref().and_then(|s| s.own.get(files::NS)) else { return Vec::new() };
+    m.keys().filter(|k| files::is_header_key(k)).filter_map(|k| String::from_utf8(k.clone()).ok()).collect()
+}
+
+/// Replaces (`Some`) or removes (`None`) files, durably and in one batch.
+pub fn write_files(changes: &[(&str, Option<&[u8]>)]) -> Result<(), String> {
+    let mut st = STORAGE.borrow_mut();
+    let s = st.as_mut().ok_or("no K10S-DATA")?;
+    let mut recs = Vec::new();
+    for (name, data) in changes {
+        let old = s.own_get(files::NS, name.as_bytes()).and_then(|h| files::Header::decode(h));
+        match (data, old) {
+            (Some(d), old) => {
+                files::write(&mut recs, name.as_bytes(), old, d);
+            }
+            (None, Some(old)) => files::delete(&mut recs, name.as_bytes(), old),
+            (None, None) => {}
+        }
+    }
+    if recs.is_empty() {
+        return Ok(());
+    }
+    s.write_own(files::NS, &recs)
 }
 
 /// Writes a signed kernel image into slot `slot` and arms it as the trial (data flushed before the superblock).
@@ -580,8 +630,8 @@ pub fn next_deadline_ns() -> Option<u64> {
     if s.failures > 0 {
         return Some(s.retry_at);
     }
-    let (dirty_at, _, _) = crate::runtime::kv_log_state();
-    (dirty_at != 0).then_some(dirty_at + WINDOW_NS)
+    let at = crate::runtime::KV_DIRTY_AT.load(Ordering::Acquire);
+    (at != 0).then_some(at + WINDOW_NS)
 }
 
 /// Before power off or reboot: every write committed, then the device told (NVMe's normal shutdown).
