@@ -1,4 +1,4 @@
-//! Device interfaces. Drivers (virtio today; Intel/Realtek NICs, NVMe and AHCI next) implement [`NetDevice`] or
+//! Device interfaces. Drivers (virtio, NVMe, AHCI; Intel/Realtek NICs next) implement [`NetDevice`] or
 //! [`BlockDevice`]; the network stack and storage only see these traits, so a driver could also be a TIR module
 //! behind a host interface later (docs/research/native-hardware.md §5.2).
 //!
@@ -8,7 +8,9 @@
 //! Queues are numbered: a NIC has receive/transmit queue pairs, a disk request queues (one each today; network I/O
 //! runs on CPU 0).
 
+pub mod ahci;
 pub mod mmio;
+pub mod nvme;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -164,6 +166,12 @@ pub trait BlockDevice: Send {
     fn submit(&mut self, q: usize, r: BlockRequest) -> Result<(), BlockError>;
     /// Next completion on queue `q`: (tag, result).
     fn poll(&mut self, q: usize) -> Option<(u32, Result<(), BlockError>)>;
+    /// Whether completions raise an interrupt (on CPU 0, vector `VEC_DISK`): else waiters poll.
+    fn has_interrupts(&self) -> bool {
+        false
+    }
+    /// Before power off or reboot, with nothing in flight: tells the device (NVMe's normal shutdown).
+    fn shutdown(&mut self) {}
 }
 
 /// Runs one request on queue 0 and waits for it (up to 10 s; nothing else may be in flight on that queue).
@@ -220,6 +228,22 @@ pub fn net_irq_ack() {
 pub fn probe(cmdline: &str, nic_bufs: u16) -> Option<Box<dyn NetDevice>> {
     let mut nic: Option<Box<dyn NetDevice>> = None;
     for d in crate::pci::devices() {
+        // Storage controllers by class: NVMe (01:08:02) and AHCI (01:06:01).
+        match (d.class, d.subclass, d.read8(0x09)) {
+            (0x01, 0x08, 0x02) => {
+                if let Some(n) = nvme::Nvme::probe(d) {
+                    BLOCK.lock().push(Box::new(n));
+                }
+                continue;
+            }
+            (0x01, 0x06, 0x01) => {
+                for disk in ahci::probe(d) {
+                    BLOCK.lock().push(Box::new(disk));
+                }
+                continue;
+            }
+            _ => {}
+        }
         if d.vendor != crate::virtio::VENDOR {
             continue;
         }

@@ -126,14 +126,17 @@ campaign() {
     done
 }
 
-qemu_selftest() { # SMP PLATFORM
-    # $1 = CPUs, $2 = platform (metal/qemu.sh). The kernel prints its verdict and powers off through ACPI.
-    local log=metal/out/selftest-$2-smp$1.log st=0
+qemu_selftest() { # SMP PLATFORM [QEMU ARGS...]
+    # $1 = CPUs, $2 = platform (metal/qemu.sh), then more devices (disks). The kernel prints its verdict and powers off
+    # through ACPI.
+    local cpus=$1 p=$2 log=metal/out/selftest-$2-smp$1${3:+-disks}.log st=0
+    shift 2
     rm -f "$log"
     # shellcheck disable=SC2046
-    timeout 120 qemu-system-x86_64 $(k10_accel) $(k10_machine "$2") -m 64M -smp "$1" -nodefaults -display none -no-reboot \
-        -netdev user,id=n0 $(k10_nic "$2" n0) \
+    timeout 120 qemu-system-x86_64 $(k10_accel) $(k10_machine "$p") -m 64M -smp "$cpus" -nodefaults -display none -no-reboot \
+        -netdev user,id=n0 $(k10_nic "$p" n0) "$@" \
         -kernel metal/out/k10-metal.elf -serial "file:$log" -append "k10.selftest" || st=$?
+    set -- "$cpus" "$p"
     sed 's/^/    /' "$log"
     if [[ -n ${K10S_VERSION_FULL:-} ]] && ! grep -qF "k10-metal $K10S_VERSION_FULL:" "$log"; then
         echo "metal selftest: the boot banner does not carry version $K10S_VERSION_FULL" >&2
@@ -161,6 +164,16 @@ for suite in "$@"; do
         qemu_selftest 4 pc-legacy
         qemu_selftest 4 q35
         qemu_selftest 2 microvm-v2
+        # The NVMe and AHCI drivers (the self test writes, flushes and reads back every disk), then K10S-DATA on
+        # virtio-blk, NVMe and AHCI through power cuts (metal/tools/storage_test.py).
+        truncate -s 16M metal/out/nvme.img metal/out/sata.img
+        qemu_selftest 2 q35 -drive file=metal/out/nvme.img,if=none,id=nv,format=raw -device nvme,drive=nv,serial=k10s \
+            -drive file=metal/out/sata.img,if=none,id=sa,format=raw -device ide-hd,drive=sa,bus=ide.0
+        grep -q "ok   nvme: 8 blocks written, flushed, read back" metal/out/selftest-q35-smp2-disks.log \
+            && grep -q "ok   ahci: 8 blocks written, flushed, read back" metal/out/selftest-q35-smp2-disks.log \
+            || { echo "metal selftest: the NVMe or AHCI disk was not exercised" >&2; exit 1; }
+        run python3 metal/tools/storage_test.py --kernel metal/out/k10-metal.elf --bundle metal/out/bundle.k10b \
+            --out metal/out --cycles 4
         ;;
     metal)
         run env -u CARGO_TARGET_DIR EMBED=1 metal/build.sh

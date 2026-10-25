@@ -80,7 +80,40 @@ pub struct Node {
     manifest_hash: [u8; 32],
     kv: BTreeMap<String, BTreeMap<Vec<u8>, Vec<u8>>>,
     kv_bytes: usize,
+    kv_log: KvLog,
     logs: BTreeMap<String, VecDeque<String>>,
+}
+
+/// The KV writes on their way to K10S-DATA (crate::storage), when there is one.
+struct KvLog {
+    on: bool,
+    /// Records (`k10_kvlog::record`) not yet handed to the store, by namespace.
+    pending: BTreeMap<String, Vec<u8>>,
+    pending_bytes: usize,
+    /// The store's measure of the live data (records and namespace records), and its limit.
+    live: u64,
+    cap: u64,
+    /// When the oldest pending record was made (ns; 0: none).
+    dirty_at: u64,
+}
+
+fn rec_size(klen: usize, vlen: usize) -> u64 {
+    k10_kvlog::record::size(klen, vlen) as u64
+}
+
+impl KvLog {
+    fn record(&mut self, svc: &str, op: u8, k: &[u8], v: &[u8]) {
+        let buf = match self.pending.get_mut(svc) {
+            Some(b) => b,
+            None => self.pending.entry(svc.to_string()).or_default(),
+        };
+        let before = buf.len();
+        k10_kvlog::record::encode(buf, op, k, v);
+        self.pending_bytes += buf.len() - before;
+        if self.dirty_at == 0 {
+            self.dirty_at = time::now_ns().max(1);
+        }
+    }
 }
 
 pub static NODE: IrqLock<Node> = IrqLock::new(Node {
@@ -89,6 +122,7 @@ pub static NODE: IrqLock<Node> = IrqLock::new(Node {
     manifest_hash: [0; 32],
     kv: BTreeMap::new(),
     kv_bytes: 0,
+    kv_log: KvLog { on: false, pending: BTreeMap::new(), pending_bytes: 0, live: 0, cap: 0, dirty_at: 0 },
     logs: BTreeMap::new(),
 });
 
@@ -101,19 +135,37 @@ impl Node {
         if frames::free_bytes() < (k.len() + v.len()) as u64 + crate::reserve_bytes() {
             return false;
         }
+        if self.kv_log.on {
+            let old = self.kv.get(svc).map(|ns| ns.get(k).map(|o| rec_size(k.len(), o.len())));
+            let add = rec_size(k.len(), v.len()) + if old.is_none() { rec_size(svc.len(), 0) } else { 0 };
+            let live = self.kv_log.live + add - old.flatten().unwrap_or(0);
+            if live > self.kv_log.cap && live > self.kv_log.live {
+                return false;
+            }
+            self.kv_log.live = live;
+            self.kv_log.record(svc, k10_kvlog::record::PUT, k, v);
+        }
         let ns = self.kv.entry(svc.to_string()).or_default();
         let old = ns.insert(k.to_vec(), v.to_vec());
         self.kv_bytes = self.kv_bytes + k.len() + v.len() - old.map_or(0, |o| o.len() + k.len());
         true
     }
     fn kv_del(&mut self, svc: &str, k: &[u8]) -> bool {
-        match self.kv.get_mut(svc).and_then(|ns| ns.remove(k)) {
-            Some(v) => {
-                self.kv_bytes -= k.len() + v.len();
-                true
-            }
-            None => false,
+        let Some(ns) = self.kv.get_mut(svc) else { return false };
+        let Some(v) = ns.remove(k) else { return false };
+        let empty = ns.is_empty();
+        self.kv_bytes -= k.len() + v.len();
+        if self.kv_log.on {
+            self.kv_log.live -= rec_size(k.len(), v.len());
+            self.kv_log.record(svc, k10_kvlog::record::DEL, k, &[]);
         }
+        if empty {
+            self.kv.remove(svc);
+            if self.kv_log.on {
+                self.kv_log.live -= rec_size(svc.len(), 0);
+            }
+        }
+        true
     }
     /// `kv_add`: atomic (under the node lock) add to an 8-byte little-endian integer value (absent = 0);
     /// `delta == 0` only reads.
@@ -128,6 +180,9 @@ impl Node {
         let new = cur.wrapping_add(delta);
         if let Some(v) = self.kv.get_mut(svc).and_then(|ns| ns.get_mut(k)) {
             v.copy_from_slice(&new.to_le_bytes()); // same size: in place
+            if self.kv_log.on {
+                self.kv_log.record(svc, k10_kvlog::record::PUT, k, &new.to_le_bytes());
+            }
         } else if !self.kv_put(svc, k, &new.to_le_bytes()) {
             return Err(KvRefused::NoMemory);
         }
@@ -1361,12 +1416,75 @@ pub fn kv_cas(svc: &str, k: &[u8], exp: Option<&[u8]>, new: Option<&[u8]>) -> Re
     NODE.lock().kv_cas(svc, k, exp, new)
 }
 
+/// Storage (crate::storage): a record replayed from K10S-DATA at boot, before the log is on.
+pub fn kv_restore(ns: &str, put: bool, k: &[u8], v: &[u8]) {
+    let mut node = NODE.lock();
+    if put {
+        let n = node.kv.entry(ns.into()).or_default();
+        let old = n.insert(k.to_vec(), v.to_vec());
+        node.kv_bytes = node.kv_bytes + k.len() + v.len() - old.map_or(0, |o| o.len() + k.len());
+    } else if let Some(n) = node.kv.get_mut(ns) {
+        if let Some(old) = n.remove(k) {
+            let empty = n.is_empty();
+            node.kv_bytes -= k.len() + old.len();
+            if empty {
+                node.kv.remove(ns);
+            }
+        }
+    }
+}
+
+/// Storage: KV writes go to the log from now on; `cap` bounds the live data. Returns the live data.
+pub fn kv_log_on(cap: u64) -> u64 {
+    let mut node = NODE.lock();
+    let live = node.kv.iter().map(|(ns, m)| rec_size(ns.len(), 0) + m.iter().map(|(k, v)| rec_size(k.len(), v.len())).sum::<u64>()).sum();
+    node.kv_log.on = true;
+    node.kv_log.live = live;
+    node.kv_log.cap = cap;
+    live
+}
+
+/// Storage: when the oldest pending record was made (0: none), the pending bytes and the live data.
+pub fn kv_log_state() -> (u64, usize, u64) {
+    let node = NODE.lock();
+    (node.kv_log.dirty_at, node.kv_log.pending_bytes, node.kv_log.live)
+}
+
+/// Storage: the pending records, by namespace.
+pub fn kv_take_pending() -> Vec<(String, Vec<u8>)> {
+    let mut node = NODE.lock();
+    node.kv_log.pending_bytes = 0;
+    node.kv_log.dirty_at = 0;
+    core::mem::take(&mut node.kv_log.pending).into_iter().collect()
+}
+
+/// Storage: the namespaces (for a checkpoint).
+pub fn kv_namespaces() -> Vec<String> {
+    NODE.lock().kv.keys().cloned().collect()
+}
+
+/// Storage: namespace `ns` as PUT records, its pending records dropped with it (the snapshot covers them).
+pub fn kv_snapshot(ns: &str) -> Vec<u8> {
+    let mut node = NODE.lock();
+    if let Some(p) = node.kv_log.pending.remove(ns) {
+        node.kv_log.pending_bytes -= p.len();
+        if node.kv_log.pending.is_empty() {
+            node.kv_log.dirty_at = 0;
+        }
+    }
+    let mut out = Vec::new();
+    for (k, v) in node.kv.get(ns).into_iter().flatten() {
+        k10_kvlog::record::encode(&mut out, k10_kvlog::record::PUT, k, v);
+    }
+    out
+}
+
 /// Why `kv_add` / `kv_cas` stored nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KvRefused {
     /// `kv_add` on a value that is not 8 bytes (trap `Host(4)`).
     NotInt,
-    /// The write would eat into the kernel heap reserve (trap `Host(3)`).
+    /// The write would eat into the kernel heap reserve, or past what K10S-DATA holds (trap `Host(3)`).
     NoMemory,
 }
 
@@ -1550,7 +1668,8 @@ fn status_json() -> String {
             st.cpu_ns
         );
     }
-    s.push(']');
+    s.push_str("],");
+    crate::storage::status_json(&mut s);
     if let Some(c) = crate::cluster::status_json() {
         s.push_str(",\"cluster\":");
         s.push_str(&c);

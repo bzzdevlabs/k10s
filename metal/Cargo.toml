@@ -20,6 +20,7 @@ k10-mesh = { path = "../crates/k10-mesh", default-features = false }
 k10-jit = { path = "../crates/k10-jit", default-features = false }
 k10-host = { path = "../crates/k10-host" }
 k10-bootproto = { path = "bootproto" }
+k10-kvlog = { path = "../crates/k10-kvlog" }
 
 [profile.dev]
 panic = "abort"

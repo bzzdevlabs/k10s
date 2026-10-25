@@ -283,7 +283,7 @@ if boot "$MEM" out/bundle.k10b "$OUT/serial-${E// /-}.log" "$CMD"; then
     expect "older version refused" "$U/_k10s/apply" 400 'older' -X POST --data-binary @out/bundle.k10b
     expect "garbage refused" "$U/_k10s/apply" 400 'apply failed' -X POST --data-binary 'not a bundle'
     "$MKBUNDLE" -o "$OUT/v3.k10b" --version 3 2>/dev/null
-    expect "apply v3 (all services back)" "$U/_k10s/apply" 200 '"version":3,"services":19' -X POST --data-binary "@$OUT/v3.k10b"
+    expect "apply v3 (all services back)" "$U/_k10s/apply" 200 '"version":3,"services":20' -X POST --data-binary "@$OUT/v3.k10b"
     expect "counter state kept across redeploys" "$U/counter" 200 '^3$'
 
     echo "== [$E] call waiting for a busy callee (max_instances = 1)"
@@ -305,7 +305,7 @@ if boot "$MEM" out/bundle.k10b "$OUT/serial-${E// /-}.log" "$CMD"; then
     fi
     expect "spin instance replaced after traps" "$U/_k10s/status" 200 '"name":"spin"[^}]*"instances":0[^}]*"interrupted":2'
     "$MKBUNDLE" -o "$OUT/v5.k10b" --version 5 2>/dev/null
-    expect "apply v5 (back to all services)" "$U/_k10s/apply" 200 '"version":5,"services":19' -X POST --data-binary "@$OUT/v5.k10b"
+    expect "apply v5 (back to all services)" "$U/_k10s/apply" 200 '"version":5,"services":20' -X POST --data-binary "@$OUT/v5.k10b"
 
     if [[ -x $LOADGEN ]]; then
         echo "== [$E] keep-alive load (loadgen, 64 connections, 3 s)"

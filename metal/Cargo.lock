@@ -98,6 +98,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "k10-kvlog"
+version = "0.1.0"
+
+[[package]]
 name = "k10-lang"
 version = "0.1.0"
 dependencies = [
@@ -117,6 +121,7 @@ dependencies = [
  "k10-host",
  "k10-ir",
  "k10-jit",
+ "k10-kvlog",
  "k10-mesh",
  "smoltcp",
 ]

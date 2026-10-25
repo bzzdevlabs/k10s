@@ -13,6 +13,8 @@ pub const VEC_TIMER: u8 = 0x20;
 pub const VEC_NET: u8 = 0x21;
 /// Inter-processor wake-up: work was queued for this CPU (the handler only acknowledges; the point is leaving `hlt`).
 pub const VEC_WAKE: u8 = 0x22;
+/// Disk completions (MSI-X): the handler only acknowledges; the point is leaving `hlt` on CPU 0.
+pub const VEC_DISK: u8 = 0x23;
 pub const VEC_SPURIOUS: u8 = 0xFF;
 /// NMIs that were not the stop NMI, and the last one's NMI status (port 0x61).
 pub static NMIS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);

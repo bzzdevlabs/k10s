@@ -39,6 +39,7 @@ mod power;
 mod pvh;
 mod runtime;
 mod selftest;
+mod storage;
 mod serial;
 mod smp;
 mod sync;
@@ -227,6 +228,8 @@ extern "C" fn kmain() -> ! {
         kprintln!("k10-metal selftest: {}", if ok { "passed" } else { "FAILED" });
         power::off();
     }
+    // K10S-DATA: the KV namespaces come back before any service runs.
+    storage::init(bi.arg("k10.data"), bi.arg("k10.grow") != Some("0"));
 
     if bi.from_loader() {
         let mut names = alloc::string::String::new();
@@ -424,6 +427,7 @@ fn main_loop(net: &mut net::Net, spin_ns: u64, advertised: Option<smoltcp::wire:
                 cluster::leave();
             }
             if time::now_ns() > at + POWER_GRACE_NS {
+                storage::shutdown();
                 if reboot {
                     power::reboot();
                 }
@@ -445,10 +449,11 @@ fn main_loop(net: &mut net::Net, spin_ns: u64, advertised: Option<smoltcp::wire:
         net.poll_egress();
         *net::SNAPSHOT.borrow_mut() = net.snapshot();
         runtime::housekeeping();
+        storage::poll();
         efi::poll_health(net::SNAPSHOT.borrow().rx_packets);
 
         let now = time::now_ns();
-        let busy = runtime::has_work() || net.rx_pending() || net.has_work() || cluster::has_work(net) || leaving;
+        let busy = runtime::has_work() || net.rx_pending() || net.has_work() || cluster::has_work(net) || storage::busy() || leaving;
         if let Some(t) = spin_from.take() {
             POLLING_TSC.fetch_add(arch::rdtsc() - t, Ordering::Relaxed);
         }
@@ -479,6 +484,9 @@ fn idle(net: &mut net::Net) {
         wait_ns = wait_ns.min(t.saturating_sub(time::now_ns()));
     }
     if let Some(t) = cluster::next_deadline_ns() {
+        wait_ns = wait_ns.min(t.saturating_sub(time::now_ns()));
+    }
+    if let Some(t) = storage::next_deadline_ns() {
         wait_ns = wait_ns.min(t.saturating_sub(time::now_ns()));
     }
     // A NIC without interrupts is polled every millisecond.

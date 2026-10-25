@@ -181,6 +181,43 @@ fn counter() -> Module {
     mb.into_module()
 }
 
+/// `/kv/<key>`: GET → the value (404 if absent), PUT or POST → stores the body (up to 64 KiB), DELETE → removes
+/// the key (404 if absent). The storage tests write through it.
+fn kv() -> Module {
+    let mut mb = ModuleBuilder::new();
+    mb.mem_log2(17);
+    let names = ["req_path", "req_method", "input_len", "input_read", "output_write", "output_status", "kv_get", "kv_put", "kv_del"];
+    let h = Host::new(&mut mb, &names);
+    let f = mb.func(0, 0, |f| {
+        let (klen, m, n) = (f.new_local(), f.new_local(), f.new_local());
+        // The key: the path after its leading '/', at 1025.
+        f.const_(1024).const_(256).call(h.f("req_path")).local_set(klen);
+        f.local_get(klen).const_(256).gt_u().local_get(klen).const_(2).lt_u().or().if_();
+        f.const_(400).call(h.f("output_status")).drop().return_();
+        f.end();
+        f.call(h.f("req_method")).local_set(m);
+        f.local_get(m).eqz().if_();
+        f.const_(1025).local_get(klen).const_(1).sub().const_(4096).const_(65536).call(h.f("kv_get")).local_tee(n);
+        f.const_(0).lt_s().if_().const_(404).call(h.f("output_status")).drop().else_();
+        f.const_(4096).local_get(n).call(h.f("output_write")).drop();
+        f.end();
+        f.return_();
+        f.end();
+        f.local_get(m).const_(3).eq().if_();
+        f.const_(1025).local_get(klen).const_(1).sub().call(h.f("kv_del")).eqz().if_();
+        f.const_(404).call(h.f("output_status")).drop();
+        f.end();
+        f.return_();
+        f.end();
+        f.call(h.f("input_len")).local_set(n);
+        f.local_get(n).const_(65536).gt_u().if_().const_(413).call(h.f("output_status")).drop().return_().end();
+        f.const_(4096).const_(0).local_get(n).call(h.f("input_read")).drop();
+        f.const_(1025).local_get(klen).const_(1).sub().const_(4096).local_get(n).call(h.f("kv_put")).drop();
+    });
+    mb.export("handle", f);
+    mb.into_module()
+}
+
 /// Calls `echo/chain` with a body and returns "chain -> <echo's response>".
 fn chain() -> Module {
     call_to(b"echo/chain")
@@ -383,6 +420,7 @@ const DEFS: &[Def] = &[
     Def { name: "echo", build: echo, cpu_ms: 1000, fresh: false, config: b"", calls: &[] },
     Def { name: "compute", build: compute, cpu_ms: 5000, fresh: false, config: b"", calls: &[] },
     Def { name: "counter", build: counter, cpu_ms: 1000, fresh: false, config: b"", calls: &[] },
+    Def { name: "kv", build: kv, cpu_ms: 1000, fresh: false, config: b"", calls: &[] },
     Def { name: "chain", build: chain, cpu_ms: 1000, fresh: false, config: b"", calls: &["echo"] },
     Def { name: "spin", build: spin, cpu_ms: 100, fresh: false, config: b"", calls: &[] },
     Def { name: "callspin", build: callspin, cpu_ms: 1000, fresh: false, config: b"", calls: &["spin"] },

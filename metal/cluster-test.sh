@@ -20,7 +20,10 @@
 #   opt/k10s/cluster_next_key), a shared admin key (hosted: --admin-token-file; guest: opt/k10s/admin_key); every
 #   admin request is signed for the receiving node process's audience (tools/admin_auth.py, bench/k10s/k10s.py); one
 #   signed for another node, or for the guest before its restart, is refused.
-#   8. power off through the admin API: the guest leaves the cluster (the hosted nodes see it leave, not die) and
+#   8. KV on the guest's disk (NVMe, a GPT with K10S-DATA): 12 replicas of the kv service, some placed on the
+#      guest, are written through n1; the guest is killed (a power cut) and restarted: once it hosts them again,
+#      every value is there (the guest's from K10S-DATA);
+#   9. power off through the admin API: the guest leaves the cluster (the hosted nodes see it leave, not die) and
 #      powers off through ACPI (QEMU exits 0).
 # Environment: BASE (port base, default 19400), K10S (hosted binary, default ../target/metal-host/release/k10s, built
 # with `CARGO_TARGET_DIR=target/metal-host cargo build --release -p k10s`), ENGINE (jit|interp, guest), PROBE_MS
@@ -91,6 +94,7 @@ guest() { # serial log [next]: secrets as fw_cfg files; `next`: also the next cl
     [[ "${2:-}" == next ]] && fw+=(-fw_cfg "name=opt/k10s/cluster_next_key,file=$OUT/cluster-next.key")
     # shellcheck disable=SC2046,SC2086
     qemu-system-x86_64 $ACCEL_ARGS $(k10_machine "$PLATFORM") -m "$MEM" -smp "$SMP" -nodefaults -display none -no-reboot \
+        -drive "file=$OUT/guest-disk.img,if=none,id=d0,format=raw" -device nvme,drive=d0,serial=k10s \
         -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$H3-:80,hostfwd=udp:127.0.0.1:$G3-:7946,hostfwd=tcp:127.0.0.1:$R3-:7947" \
         $(k10_nic "$PLATFORM" n0) -kernel out/k10-metal.elf -serial "file:$1" "${fw[@]}" \
         -append "k10.engine=$ENGINE k10.join=127.0.0.1:$G1,127.0.0.1:$G2 k10.gossip=127.0.0.1:$G3 k10.rpc=127.0.0.1:$R3 k10.http=127.0.0.1:$H3 k10.node_id=$GUEST_ID k10.probe_ms=$PROBE_MS k10.suspicion_mult=$SUSP k10.mem=67108864" &
@@ -179,6 +183,7 @@ sleep 0.3
 hosted n2 "$H2" "$G2" "$R2" "127.0.0.1:$G1"
 t=$(wait_for 10 eval 'live_is $H1 2 && live_is $H2 2') && ok "hosted nodes converged (${t} ms)" || ko "hosted nodes did not converge"
 T0=$(now_ms)
+python3 -c 'import sys; sys.path.insert(0, "tools"); import storage_test; storage_test.gpt_disk(sys.argv[1], 128, 1, 64)' "$OUT/guest-disk.img"
 guest "$OUT/guest.log"
 t=$(wait_for 10 grep -qs "k10-metal ready" "$OUT/guest.log") && ok "guest booted: $(grep 'k10-metal ready' "$OUT/guest.log")" || ko "guest boot"
 t=$(wait_for 15 all_live 3)
@@ -330,6 +335,37 @@ done
 
 rej=$(st "$H1" "c['stats']['gossip_rejected'] + c['stats']['link_auth_failures']")$(st "$H3" "c['stats']['gossip_rejected'] + c['stats']['link_auth_failures']")
 [[ "$rej" == 00 ]] && ok "no authentication failures between members" || ko "authentication failures (n1, guest): $rej"
+
+echo "== KV on the guest's K10S-DATA through a power cut (12 kv replicas, some on the guest)"
+"$MKBUNDLE" -o "$OUT/kv.k10b" --version 0 --replicate kv:12 2>/dev/null
+r=$(curl -s -m 10 -H "Authorization: $(sign "$H1" POST /_k10s/apply "@$OUT/kv.k10b")" --data-binary "@$OUT/kv.k10b" "127.0.0.1:$H1/_k10s/apply")
+V3=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['version'])" "$r" 2>/dev/null)
+t=$(wait_for 10 all_applied "$V3") && ok "kv replicas applied as v$V3 (${t} ms)" || ko "v$V3 not applied everywhere: $r"
+KVG=$(st "$H3" "' '.join(s['name'] for s in d['services'] if s.get('placement') == 'local')")
+[[ -n "$KVG" ]] && ok "kv replicas on the guest: $KVG" || ko "no kv replica placed on the guest"
+n=0
+for i in $(seq 0 11); do
+    [[ $(curl -s -m 5 -o /dev/null -w '%{http_code}' -X PUT --data-binary "value $i" "127.0.0.1:$H1/kv-$i/x") == 200 ]] && n=$((n + 1))
+done
+[[ $n == 12 ]] && ok "12 values written through n1" || ko "$n of 12 values written"
+# The group commit's window is 2 ms: then the power goes.
+sleep 0.3
+kill -9 "$QPID"
+wait "$QPID" 2>/dev/null
+QPID=
+t=$(wait_for 15 eval "[[ \"\$(st $H1 \"[m['state'] for m in c['members'] if m['id']=='$GUEST_ID'][0]\")\" == dead ]]")
+guest "$OUT/guest3.log" next
+t=$(wait_for 15 all_live 3) && ok "guest back after the power cut (${t} ms)" || ko "guest did not come back"
+grep -aq "storage: K10S-DATA on nvme" "$OUT/guest3.log" && ok "guest: $(grep -a "storage: K10S-DATA on" "$OUT/guest3.log" | tr -d '\r')" || ko "guest opened no store"
+t=$(wait_for 15 eval "[[ \"\$(st $H3 \"' '.join(s['name'] for s in d['services'] if s.get('placement') == 'local')\")\" == \"$KVG\" ]]") \
+    && ok "guest hosts its kv replicas again" || ko "guest kv replicas after the cut: '$(st "$H3" "' '.join(s['name'] for s in d['services'] if s.get('placement') == 'local')")'"
+kv_all() {
+    local i
+    for i in $(seq 0 11); do
+        [[ $(curl -s -m 5 "127.0.0.1:$H1/kv-$i/x") == "value $i" ]] || return 1
+    done
+}
+t=$(wait_for 15 kv_all) && ok "all 12 values read back through n1 after the guest's power cut" || ko "values after the power cut: $(for i in $(seq 0 11); do curl -s -m 5 "127.0.0.1:$H1/kv-$i/x"; echo -n '|'; done)"
 
 echo "== refused peers"
 H4=$((BASE + 4)) G4=$((BASE + 104)) R4=$((BASE + 204))
