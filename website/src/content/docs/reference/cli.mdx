@@ -19,6 +19,8 @@ Runs a node.
 | `--backend jit\|interp` | `$K10S_BACKEND`, else `jit` | execution engine |
 | `--mem SIZE` | physical RAM | memory for live instances |
 | `--kv-max SIZE` | `256MiB` | key-value live bytes per service; `0` = unlimited |
+| `--store DEV\|FILE` | none | keep the key-value data and the node's state in a k10s store on a device or file (the disk images' `K10S-DATA` format, shared with the native kernel) instead of `--data`, which then only holds scratch files; a missing or empty FILE is created |
+| `--store-size SIZE` | `256MiB` | the size of a FILE that `--store` creates |
 | `--conn-buffer-max SIZE` | `max(--mem/8, 64MiB)` | bytes buffered in HTTP connections, node-wide |
 | `--snapshots fresh\|all` | `fresh` | which services start instances from a snapshot |
 | `--idle-timeout SECS` | `30` | idle instances older than this are reclaimed |

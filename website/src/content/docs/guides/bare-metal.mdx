@@ -158,15 +158,18 @@ baked in at build time (`EMBED=1`); with neither, the node starts empty and wait
   LAPIC timer armed only for the next deadline; an idle node takes no timer interrupts. The wall clock (gossip and
   admin request time windows) is re-read from kvmclock every 10 s.
 - **Devices:** PCI through ECAM with 64-bit BARs and MSI-X; virtio-net and virtio-blk over PCI (virtio 1.x and
-  legacy) and MMIO, behind `NetDevice`/`BlockDevice` traits with DMA from slot-like regions; fixed buffers
-  (nothing allocated per packet), smoltcp for TCP/IP with DHCPv4, the same HTTP/1.1 ingress and host API as the
-  hosted node.
+  legacy) and MMIO, NVMe and AHCI (SATA) disks, behind `NetDevice`/`BlockDevice` traits with DMA from slot-like
+  regions; fixed buffers (nothing allocated per packet), smoltcp for TCP/IP with DHCPv4, the same HTTP/1.1 ingress
+  and host API as the hosted node.
+- **Storage:** on a disk with a `K10S-DATA` partition (the disk images have one) the services' key-value data, the
+  node id and the cluster's desired state survive reboots and power cuts, in the format the Linux-based tier uses;
+  cluster-rolled kernel updates go to two kernel slots there, tried once and committed when healthy.
 - **Power:** ACPI S5 power off, the FADT reset register (then the 8042, port 0xCF9, a triple fault) for reboots;
   fatal errors reboot after `k10.panic` seconds.
 
 <Aside type="caution" title="Limits">
-	virtio only (physical NICs and disks come next); the disk is not used for storage yet, so the key-value store is
-	in memory. IPv4 only, no TLS. ACPI events (the power button) are not handled and no AML method runs. Tested on
+	virtio NICs only (Intel and Realtek come next). IPv4 only, no TLS, no NTP client (the wall clock comes from
+	kvmclock, else the RTC). ACPI events (the power button) are not handled and no AML method runs. Tested on
 	QEMU (PVH, and the x86-64 disk images through UEFI or BIOS), Firecracker and Cloud Hypervisor only, not yet on a
 	physical machine. There is no OS layer under the kernel, so the independent
 	verification of the JIT's output matters most here. Full list:
@@ -177,7 +180,7 @@ baked in at build time (`EMBED=1`); with neither, the node starts empty and wait
 
 Where k10-metal has no driver yet, Linux can be the driver layer and `k10s` the only program of the image: no shell,
 no udev, no systemd. Started by the kernel as `/init`, k10s loads drivers by modalias, reads `k10s.conf` from a
-`K10S-BOOT` partition, mounts `K10S-DATA` for its state (grown to the end of the disk on first boot), runs DHCP and
+`K10S-BOOT` partition, keeps its state in the `K10S-DATA` partition (grown to the end of the disk on first boot), runs DHCP and
 SNTP, and starts the node as a sandboxed child (its own user, no capabilities, Landlock, seccomp), restarting it if it
 exits. The power button drains the node and powers off.
 [docs/OS.md](https://github.com/bzzdevlabs/k10s/blob/main/docs/OS.md) has the boot sequence, the image layout and
@@ -265,8 +268,10 @@ picks: change its `tier=linux` line to `tier=metal` (the native kernel, on UEFI 
 the native kernel when it drives one of the machine's network adapters, else Linux). Both tiers read the same
 `k10s.conf` and key files and join the same clusters. On UEFI the image's loader, k10boot, verifies the native
 kernel's signature and counts its boots: a kernel that fails to get healthy twice in a row hands the machine back to
-the Linux tier until you write `/k10s/tier` again. Until the native kernel has a disk driver its key-value store is
-in memory; a node keeps its Linux-tier state on `K10S-DATA` and finds it again when switched back.
+the Linux tier until you write `/k10s/tier` again. Both tiers keep their state in `K10S-DATA` in the same format, so
+a machine switched between them keeps its node id, its services' data and the cluster's desired state. The images
+ship `tier=linux`: the native kernel still lacks an NTP client, ACPI power-button events, a hardware watchdog and
+IPv6, and has not run on a physical machine yet.
 [docs/OS.md](https://github.com/bzzdevlabs/k10s/blob/main/docs/OS.md#tiers) has the details.
 
 ### Updating the image

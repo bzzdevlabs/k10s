@@ -34,14 +34,18 @@ of a container, `docker run … k10s node`, it keeps its normal command line).
    interface's address; when the address changes, a node that advertises it is restarted. IPv6 addresses come from
    the kernel's SLAAC.
 5. **Hostname:** `name`, else `k10s-` and the last three bytes of the MAC (the node's default name).
-6. **Data:** the partition named `K10S-DATA` (GPT name, or the ext4 label on an MBR disk; or
-   `data=/dev/X[:FSTYPE]`), ext4 by default, on `/data`, handed to the node's user when fresh; without one the node's
-   state lives in RAM. When `K10S-DATA` is the last partition of its disk with free space behind it (an image written
-   to a larger disk), init grows it to the end of the disk first: on GPT the backup GPT is moved to the disk's end and
-   the partition extended to the last 1 MiB boundary (backup table written and synced before the primary); on MBR the
-   partition entry is extended in sector 0 (up to 2^32 sectors, 2 TiB); then `BLKPG_RESIZE_PARTITION`, and the
-   mounted ext4 is grown online (`EXT4_IOC_RESIZE_FS`). A filesystem smaller than its partition (power lost between
-   the two steps) is grown on the next boot. Other partitions are never touched; `grow=0` keeps the size.
+6. **Data:** the partition named `K10S-DATA` (GPT name, or on an MBR disk the partition that holds a k10s store; or
+   `data=/dev/X`) is a k10s store (`crates/k10-kvlog`, "Data" below), the format the native kernel reads too. Init
+   opens it and hands it to the node (`--store-fd 4`); `/data` stays a RAM directory for scratch files. A blank
+   partition becomes a store on the node's first start; anything that is neither a store nor ext4 is left alone and
+   the node's state lives in RAM, as without a partition. An ext4 `K10S-DATA` (images before the store) is converted
+   on the first boot when a copy of its state fits on `K10S-BOOT`, else mounted on `/data` as before ("Data");
+   `data=/dev/X:FSTYPE` mounts a filesystem instead. When `K10S-DATA` is the last partition of its disk with free
+   space behind it (an image written to a larger disk), init grows it to the end of the disk first: on GPT the backup
+   GPT is moved to the disk's end and the partition extended to the last 1 MiB boundary (backup table written and
+   synced before the primary); on MBR the partition entry is extended in sector 0 (up to 2^32 sectors, 2 TiB); then
+   `BLKPG_RESIZE_PARTITION`. The store takes the new space when the node opens it (an ext4 left as is is grown
+   online, `EXT4_IOC_RESIZE_FS`). Other partitions are never touched; `grow=0` keeps the size.
 7. **Time:** an SNTP client (RFC 4330) sets the clock in the background from `ntp`, else the lease's NTP servers,
    else `pool.ntp.org`; offsets of 128 ms or more step the clock, smaller ones slew it, and it polls every 17 minutes.
    A reply must echo the random transmit timestamp of its request (SNTP itself is unauthenticated).
@@ -76,7 +80,7 @@ prefix). Init consumes these keys:
 | `netwait` | seconds to wait for an Ethernet interface, then for its link | 10 |
 | `ntp` | `HOST[:PORT],…`, or `none` | the lease's, else `pool.ntp.org` |
 | `modules` | `none` to skip module loading | load by modalias |
-| `data` | `/dev/X[:FSTYPE]`, or `none` | partition `K10S-DATA`, ext4 |
+| `data` | `/dev/X` (a k10s store), `/dev/X:FSTYPE` (a filesystem on `/data`), or `none` | partition `K10S-DATA` |
 | `bootwait` | milliseconds to wait for `K10S-BOOT` to appear | 0; 30000 on the `metal` and Pi images (USB disks and SD cards appear after init starts) |
 | `grow` | `0` to keep the size of `K10S-DATA` | grow to the end of the disk |
 | `watchdog` | `1` to arm `/dev/watchdog` | off |
@@ -111,7 +115,7 @@ update files:
 | `k10s-os-V-x86_64-vm.img.xz` | QEMU/KVM guests and clouds | `vm` profile, every driver built in; console on serial; and the native kernel | 4.8 MB |
 | `k10s-os-V-x86_64-metal.img.xz` | PCs, mini-PCs, servers | `metal` profile, signed driver modules, NIC firmware; console on the screen; and the native kernel | 7.2 MB |
 | `k10s-os-V-x86_64-{vm,metal}.efi` | updates (`os` in `k10s apply`), PXE or another UEFI loader | the signed slot-A UKI of the image | 4.2 / 6.6 MB |
-| `k10s-os-V-x86_64-native.elf` | the native kernel (Tier 2, "Tiers") as both x86-64 images carry it | `metal/`, signed (profile `native`) | 1.0 MB |
+| `k10s-os-V-x86_64-native.elf` | the native kernel (Tier 2, "Tiers") as both x86-64 images carry it | `metal/`, signed (profile `native`) | 1.1 MB |
 | `k10s-os-V-aarch64-vm.img.xz` | QEMU virt (UEFI) and arm64 cloud guests | `arm64`, every driver built in; console on the PL011 serial port | 4.0 MB |
 | `k10s-os-V-aarch64-vm.efi` | updates, another UEFI loader | the signed slot-A UKI of the image | 9.5 MB |
 | `k10s-os-V-aarch64-pi.img.xz` | Raspberry Pi 3 B and 3 B+, 4 B, 400, CM4 and Pi 5 (SD card, USB or NVMe boot) | `arm64`; console on the serial pins (Pi 3, Pi 4) or the debug UART connector (Pi 5) | 5.3 MB |
@@ -142,7 +146,8 @@ p2   K10S-BOOT   256 MiB  EFI system partition, FAT32:
        /k10s/metal.elf         the native kernel, signed
        /k10s/tier              tier=linux, metal_cmdline= ("Tiers")
        /k10s.conf              node configuration of both tiers (a commented template)
-p3   K10S-DATA   256 MiB  ext4, grown to the end of the disk on first boot
+p3   K10S-DATA   256 MiB  a k10s store ("Data"), both tiers' state and the native kernel's slots; grown to the end
+                          of the disk on first boot
 ```
 
 UEFI firmware starts k10boot, which starts systemd-boot (as shipped, `tier=linux`), which starts the UKI; BIOS starts
@@ -150,8 +155,8 @@ GRUB from the MBR, which reads `grub.cfg` from the ESP of the boot disk; GRUB sh
 prints to the screen and the first serial port. Slot B (`k10s-b.efi`, `/k10s/b/`) appears with the first update. The
 kernel command line is fixed in both (`console=ttyS0,115200 quiet panic=5` for `vm`; `metal` adds `console=tty0`
 last, so init's lines appear on the screen, and `k10s.bootwait=30000`, since a USB disk appears only after init has
-started); everything else is configured in `k10s.conf`. Images are reproducible: fixed GUIDs, volume ids, ext4 hash
-seed, and every timestamp from `SOURCE_DATE_EPOCH` (the commit time).
+started); everything else is configured in `k10s.conf`. Images are reproducible: fixed GUIDs, volume ids, store id,
+and every timestamp from `SOURCE_DATE_EPOCH` (the commit time).
 
 The `aarch64-vm` image has the same layout without the BIOS parts and the native kernel: p1 `K10S-BOOT` (systemd-boot
 as `/EFI/BOOT/BOOTAA64.EFI`, the UKI, `loader.conf`, `k10s.conf`), p2 `K10S-DATA`. UEFI arm64 machines boot it with ACPI
@@ -163,7 +168,7 @@ itself).
 The `i686-metal` image is for BIOS only, on an MBR disk (old BIOSes may not boot a GPT disk): GRUB's boot.img in the
 MBR, its core.img in the sectors before p1, p1 `K10S-BOOT` (FAT32, marked active: `boot/grub/`, `k10s/a/`, the slot's
 signed UKI as `EFI/Linux/k10s-a.efi`, the record of the slot that updates replace, and `k10s.conf`), p2 `K10S-DATA`
-(ext4, grown to the end of the disk). Its kernel needs an i686 CPU with PAE (for the NX bit) and SSE2 (the i686 k10s
+(a k10s store, MBR type `0xda`, grown to the end of the disk). Its kernel needs an i686 CPU with PAE (for the NX bit) and SSE2 (the i686 k10s
 needs it): a Pentium 4, a Pentium M with PAE, a Core, Atom, Athlon 64 or VIA C7, or anything later; its command line is
 that of `metal`.
 
@@ -184,7 +189,7 @@ p2   slot A      128 MiB  the signed slot image: a FAT16 filesystem followed by 
        bcm2711-rpi-cm4-io.dtb, bcm2712-rpi-5-b.dtb, bcm2712d0-rpi-5-b.dtb
        LICENCE.broadcom             the firmware's licence
 p3   slot B      128 MiB  empty until the first update
-p4   K10S-DATA   256 MiB  ext4, grown to the end of the disk on first boot
+p4   K10S-DATA   256 MiB  a k10s store (MBR type 0xda), grown to the end of the disk on first boot
 autoboot.txt:  [all] tryboot_a_b=1 boot_partition=2   [tryboot] boot_partition=3
 ```
 
@@ -203,6 +208,41 @@ is why it is a copy of `config.txt`. Its Ethernet is USB (the LAN9514 of the 3 B
 lan78xx), behind the dwc2 controller: the interface appears a few seconds after boot (`netwait`, 10 s by default,
 covers it).
 
+## Data
+
+`K10S-DATA` holds a node's persistent state in both tiers. It is a k10s store (`crates/k10-kvlog`), not a filesystem:
+the native kernel reads and writes it without filesystem code, and both tiers read the same bytes.
+
+```
+0        superblock, two copies 4 KiB apart (written alternately: one is always whole)
+1 MiB    kernel slot A (16 MiB), then slot B: the native kernel's updates ("Updates")
+33 MiB   the log: 4 MiB segments up to the end of the partition (53 MiB at least)
+```
+
+- **KV.** One namespace per service, holding the records of the hosted node's per-service logs (`len | crc32 | op |
+  klen | key | value`): writes are batched (group commit: an acknowledged write may be lost within 2 ms plus the
+  write), and when the log grows past twice the live data, or free space runs short, a checkpoint rewrites the live
+  data into fresh segments and points the superblock at them. About a quarter of the log may hold live data (a third
+  of its segments, less what a 1 MiB record may leave unused in each); past it a write is refused like an exceeded
+  quota (trap `Host(3)`). After a write error the store is rewritten (with backoff) before writes are durable again.
+- **The node's files** (`node-id`, `incarnation`, `peers`, `manifest.k10m`, `blobs/<sha256>`, a single node's
+  `bundle.k10b`, a generated `admin.key`) are files of the namespace `.files`: chunked records, replaced whole.
+- **Power cuts.** Each segment's records are checksummed with a mask derived from the segment, so bytes left behind by
+  older data never pass for current records; replay stops at the first record that does not check out and seals the
+  log there before anything else is written. After a cut, each namespace holds a prefix of its writes, including
+  every write of a batch whose flush completed (`k10_kvlog`'s crash model and the QEMU power-cut tests).
+- **Both tiers.** The native kernel reads the same namespaces (KV by service name), the node id and the desired state;
+  the files only Tier 1 uses are left as they are.
+- **Images before the store** had an ext4 `K10S-DATA`. Init converts it on the first boot: the state (KV logs as
+  replayed, the node's files) is read from the ext4 mounted read-only into a staging copy written and synced on
+  `K10S-BOOT` (`/k10s/data.migrate`), then the partition becomes a store holding it, and the copy goes. A power cut
+  before the copy is complete leaves the ext4 as it was; after, the next boot finishes from the copy. When the copy
+  does not fit on `K10S-BOOT` (its free space less 1 MiB), or the state does not fit the store, the ext4 stays and is
+  mounted on `/data` as before; that node keeps working, but cannot switch tiers with its state.
+
+A hosted node outside the images keeps its directory (`--data DIR`: `kv/<service>.log` and the files above), or uses
+a store on a device or file of its own with `--store` (docs/NODE.md).
+
 ## Tiers
 
 The x86-64 images boot either tier from the same disk: Tier 1, Linux with k10s as PID 1 (everything above), or Tier
@@ -212,8 +252,8 @@ The x86-64 images boot either tier from the same disk: Tier 1, Linux with k10s a
 | `tier=` | UEFI (k10boot) | BIOS (GRUB) |
 |---|---|---|
 | `linux` (as shipped) | systemd-boot and the A/B UKIs, as above | the slot of `grubenv`, as above |
-| `metal` | the native kernel, `/k10s/metal.elf` | the native kernel, through Multiboot2 |
-| `auto` | the native kernel if it drives one of the machine's network adapters, else Tier 1 | Tier 1 |
+| `metal` | the native kernel: a slot of `K10S-DATA` once an update installed one, else `/k10s/metal.elf` | the native kernel `/k10s/metal.elf`, through Multiboot2 |
+| `auto` | the native kernel if it drives one of the machine's network adapters and the controller of the disk with `K10S-DATA`, else Tier 1 | Tier 1 |
 
 The file is a GRUB environment block, so that GRUB reads it too (`load_env`), and k10boot parses it the way GRUB does:
 
@@ -222,7 +262,8 @@ The file is a GRUB environment block, so that GRUB reads it too (`load_env`), an
 # This machine's tier (docs/OS.md "Tiers"), read by k10boot (UEFI) and GRUB (BIOS):
 #   tier=linux  Tier 1, Linux (the default)
 #   tier=metal  the native kernel, /k10s/metal.elf
-#   tier=auto   UEFI: the native kernel if it drives one of the network adapters, else Tier 1; BIOS: Tier 1
+#   tier=auto   UEFI: the native kernel if it drives one of the network adapters (and K10S-DATA's disk), else
+#               Tier 1; BIOS: Tier 1
 # metal_cmdline= is the native kernel's command line. Edit lines in place: no blank lines, a newline at the end.
 tier=linux
 metal_cmdline=
@@ -239,18 +280,22 @@ loader, `\EFI\BOOT\BOOTX64.EFI`:
 - `linux`: it starts `\EFI\systemd\systemd-bootx64.efi` through the firmware's LoadImage, so Tier 1 boots as
   before: systemd-boot's entry selection and boot counting ("Updates"), and under Secure Boot the firmware's (or the
   shim's) verification of systemd-boot and of each UKI ("Secure Boot").
-- `metal`: it reads `/k10s/metal.elf`, a k10s image (`k10s image sign`, profile `native`) whose payload is the
-  kernel's ELF, and verifies its signature: trusted are the k10s release key and the keys built into k10boot, and with
-  Secure Boot off also the `os_key` keys of `k10s.conf`. It loads the kernel at its physical addresses and hands it a
+- `metal`: it reads the native kernel, a k10s image (`k10s image sign`, profile `native`) whose payload is the
+  kernel's ELF: the trial slot of `K10S-DATA` while the boot counter allows it, else the committed slot, else
+  `/k10s/metal.elf` ("Updates"; it reads `K10S-DATA` through the firmware's Block I/O, the disk of `K10S-BOOT` first).
+  It verifies the signature: trusted are the k10s release key and the keys built into k10boot, and with Secure Boot
+  off also the `os_key` keys of `k10s.conf`; a slot's image must also have the hash `K10S-DATA` records for it. It loads the kernel at its physical addresses and hands it a
   PVH `start_info`, the interface QEMU's `-kernel` uses too: the memory map (UEFI's, as E820 entries, merged), the
   command line, the ACPI RSDP and modules: `k10s.conf`, the optional deployment bundle `/k10s/bundle.k10b`, the key
   files that `k10s.conf` names (`admin-token-file=/boot/admin.key` and so on, Tier 1's paths: `K10S-BOOT` is `/boot`
-  there), the screen's GOP mode (the framebuffer), and where the UEFI runtime services are. It keeps the page the
+  there), the screen's GOP mode (the framebuffer), where the UEFI runtime services are, and which kernel it booted
+  (its source, hash, platform and version, and the keys it trusted, for updates). It keeps the page the
   kernel starts its other CPUs from (0x8000) out of the firmware's hands, exits boot services (taking the memory map
   again when the firmware changed it meanwhile) and enters the kernel in 32-bit protected mode with paging off.
 - `auto`: it enumerates PCI through the firmware (the PCI I/O protocol) and boots the native kernel if a network
-  adapter is in the kernel's supported-device table (`metal/bootproto/src/devices.rs`: today the virtio-net of VMs,
-  with its legacy interface), else Tier 1. Each decision is printed on the console.
+  adapter is in the kernel's supported-device table (`metal/bootproto/src/devices.rs`: today virtio-net, modern and
+  legacy) and so is the controller of the disk with `K10S-DATA` when there is one (virtio-blk, NVMe and AHCI by class
+  code), else Tier 1. Each decision is printed on the console.
 - When the native kernel cannot boot (no kernel file, a signature that does not verify or a signer not trusted, a
   kernel that cannot be placed, the start-up page in firmware memory, the boot counter below or a counter it cannot
   read or write), k10boot says why, wipes the key files it had loaded, and boots Tier 1. UEFI load options that are text (a firmware boot entry's, the UEFI shell's, QEMU's `-kernel
@@ -259,11 +304,13 @@ loader, `\EFI\BOOT\BOOTX64.EFI`:
 **Boot counting.** A native kernel that does not get healthy on two boots in a row pins the machine to Tier 1. k10boot
 counts each native boot in a non-volatile UEFI variable, `K10sNativeBoot-6b10c5a0-0000-4000-8000-0000000000e2`, before
 starting the kernel, and refuses a third boot of the same kernel while the count is 2. The kernel deletes the variable
-through UEFI runtime services once it is healthy: ready for 15 s and at least one frame received from the network.
-The record holds the kernel's hash and the modification time of `/k10s/tier`, so installing another kernel, or
-writing `/k10s/tier` again (even unchanged), gives it two new boots. Why a UEFI variable: the kernel cannot write
-`K10S-BOOT` (it has no FAT code, and no disk driver before M2), while runtime services are there on every UEFI machine
-from the first native boot, and the variable store survives power cuts; a boot that dies anywhere before the
+through UEFI runtime services once it is healthy: ready for 15 s and at least one frame received from the network (a
+trial kernel of an update: once it commits). The record holds the kernel's hash and the modification time of
+`/k10s/tier`, so installing another kernel, or writing `/k10s/tier` again (even unchanged), gives it two new boots;
+it also remembers a trial kernel that used up its two boots, which is never tried again (the committed one boots).
+Why a UEFI variable: the kernel never writes `K10S-BOOT` (it has no FAT code) and k10boot never writes `K10S-DATA`,
+while runtime services are there on every UEFI machine from the first native boot, and the variable store survives
+power cuts; a boot that dies anywhere before the
 deletion (the kernel crashing, hanging until a watchdog or a person resets the machine, losing power) stays counted,
 so the count only goes down on proof of health. A counter that cannot be read or written means Tier 1: an uncounted
 native boot would have no way back. Likewise a Secure Boot state k10boot cannot read counts as on. The kernel calls the firmware on its own page tables (the firmware's
@@ -276,20 +323,29 @@ and `advertise` turns cluster mode on, as on Tier 1, and the addresses it gives 
 and `http` (7946, 7947, 80 by default) at `advertise`, else at the configured address unless it is `0.0.0.0`. It
 listens on 7946, 7947 and 80 whatever the ports say. The key files of `admin-token-file`, `cluster-key-file` and
 `cluster-next-key-file` reach it as modules (k10boot reads them from `K10S-BOOT`); it wipes them once parsed. Keys
-of Tier 1 alone (`net`, `ip`, `ntp`, `data`, `watchdog`, `os_trial`…) do not concern it, and its own arguments
+of Tier 1 alone (`net`, `ntp`, `watchdog`…) do not concern it (`data=none`, `grow=0`, `os-commit-grace` and
+`os_trial` mean the same for it), and its own arguments
 (`k10.*`) go in `metal_cmdline`, never in `k10s.conf`, where Tier 1 would take them for node flags.
 
-**Data.** The native kernel does not use `K10S-DATA` yet: its key-value store is in memory until M2 (STATUS step 13d)
-gives both tiers one `K10S-DATA` format. That is why the images ship `tier=linux`. A node switched to `metal` leaves
-its Tier 1 state untouched on `K10S-DATA` and has it back when switched to `linux` again; in between it serves
-like a fresh node, with the desired state from the cluster.
+**Data.** Both tiers use `K10S-DATA` in the same format ("Data"): a machine switched between tiers keeps its node
+id, its services' KV data and, in cluster mode, the cluster's desired state, whichever tier wrote them last.
+
+**Why the images ship `tier=linux`.** With `K10S-DATA` the native kernel keeps its state durably (13d), and `auto`
+picks it only where every device it needs is in `devices.rs`. The images still default to Tier 1, because the native
+kernel lacks things Tier 1 gives every machine today: a wall clock disciplined without kvmclock (no SNTP client:
+bare metal runs on the RTC and the calibrated TSC, while signed admin requests and sealed gossip check timestamps),
+ACPI events (the power button), a hardware watchdog (Intel TCO and friends come with 13c), IPv6 and DNS, and a
+single node's `POST /_k10s/apply` kept across reboots outside cluster mode; and it has not run on a real machine or
+a public cloud yet (STATUS, step 13). On the VMs where `auto` would pick it (virtio-net), Tier 1 runs too, at
+0.5 s from power to the first answer. Set `tier=auto` or `tier=metal` to run the native kernel; the default moves
+to `auto` once those gaps are closed and it has run on real hardware and clouds.
 
 **BIOS.** GRUB reads `/k10s/tier` with `load_env`; with `tier=metal` it boots `/k10s/metal.elf` through Multiboot2
 (the kernel's own Multiboot2 entry turns GRUB's information into the same `start_info`), with `metal_cmdline` as the
 command line and as modules `k10s.conf`, `/k10s/bundle.k10b` and the key files `admin.key`, `cluster.key` and
 `cluster-next.key` of the partition's root (so on BIOS the key files must have these names, `k10s.conf` naming them
-`/boot/admin.key` and so on). GRUB checks no signature (nothing is verified on BIOS, GRUB included) and counts no
-boots (the kernel cannot reset a counter before it has a disk driver), and `tier=auto` boots Tier 1. If the native
+`/boot/admin.key` and so on). GRUB checks no signature (nothing is verified on BIOS, GRUB included), counts no boots
+and reads no kernel slot (updates of the native kernel need UEFI), and `tier=auto` boots Tier 1. If the native
 kernel cannot be loaded, GRUB goes on with Tier 1.
 
 **Without a disk image.** `/k10s/metal.elf`, signed, is still a PVH ELF: `qemu-system-x86_64 -kernel` boots it as it
@@ -372,6 +428,12 @@ in `K10S-BOOT/k10s/failed` (the node reports it, so the rollout stops), removes 
 loaders at itself. On a Pi the commit rewrites `autoboot.txt` (`[all]` the new slot, `[tryboot]` the other) and
 removes `k10s/trying`; a committed boot that finds `k10s/trying` reboots into the trial again (3 tries in all, like
 the boot counters above), then records the image as failed.
+
+**The native kernel** (platform `x86_64-native`, "Tiers") follows the same rollout without init: it writes the image
+into the kernel slot of `K10S-DATA` it does not run and arms it as the trial there, k10boot boots the trial (two
+boots) or falls back to the committed slot, and the kernel commits once healthy as above or abandons the trial after
+`os_trial` seconds, recording failed images in `K10S-DATA` (metal/README.md, "Updates"). `K10S-BOOT` is never written:
+`/k10s/metal.elf` stays the kernel the image was installed with, booted only while no slot is committed.
 
 ### Kernels
 
@@ -580,8 +642,8 @@ expect:
 
 The kernel builds need make, gcc (or `aarch64-linux-gnu-gcc`, `i686-linux-gnu-gcc`, `arm-linux-gnueabihf-gcc` for
 another architecture than the host's), flex, bison, bc, openssl,
-patch, depmod and the libelf and libssl headers; the images need sfdisk, mkfs.fat, mtools, mkfs.ext4, dpkg-deb, zstd
-and xz; the Secure Boot tests `sbsign` (sbsigntool), `virt-fw-vars` (virt-firmware), openssl and the firmware builds
+patch, depmod and the libelf and libssl headers; the images need sfdisk, mkfs.fat, mtools, dpkg-deb, zstd and xz
+(the tests also mkfs.ext4, for an ext4 `K10S-DATA` of an older image); the Secure Boot tests `sbsign` (sbsigntool), `virt-fw-vars` (virt-firmware), openssl and the firmware builds
 with Microsoft's keys (`OVMF_CODE_4M.ms.fd`, `AAVMF_CODE.ms.fd` and their variable stores).
 
 ## Testing
@@ -595,18 +657,19 @@ suite `os-legacy`, a release gate, on an x86-64 runner: i686 guests with KVM, ar
 kernels and images with the release's i686 and armv7 musl k10s.
 
 - **boot-debian, boot-k10s**: kernel and initramfs on a GPT disk with `K10S-BOOT` (`k10s.conf`, the admin key) and
-  `K10S-DATA` (ext4); the guest RTC starts in 2001, so the signed `k10s apply` only succeeds after SNTP (a host-side
-  server) set the clock. Checks the drivers, config, DHCP lease (QEMU user networking), data partition, watchdog,
-  the node's sandbox line, readiness, serving, and a power-button shutdown with the node drained; a second boot
-  serves the applied services and continues their KV state.
+  `K10S-DATA` as older images made it (ext4); the guest RTC starts in 2001, so the signed `k10s apply` only succeeds
+  after SNTP (a host-side server) set the clock. Checks the drivers, config, DHCP lease (QEMU user networking), data
+  partition, watchdog, the node's sandbox line, readiness, serving, and a power-button shutdown with the node
+  drained. The first boot keeps the ext4 (`k10s.data=/dev/vda2:ext4`); the second converts it to a k10s store and
+  serves the applied services, continuing their KV state, as does the third from the store.
 - **dhcp** on the k10s kernel: a scripted DHCP server on a QEMU socket netdev hands out 6 s leases; the client must
   renew by unicast, rebind by broadcast when renewals go unanswered, and take a new address after a NAK; the node,
   in cluster mode without `advertise`, is restarted to advertise it.
 - **image-bios, image-uefi**: the `vm` image on SeaBIOS and on OVMF, written to a 4 GiB disk, configured the way an
   operator does it (`k10s.conf` and the admin key copied to `K10S-BOOT` with mtools). The first boot grows
-  `K10S-DATA` and its ext4 to the end of the disk (checked on the host afterwards: both GPT headers and the entry
-  array valid, the backup in the last sector, ext4 filling the partition), applies and serves as above; the second
-  boot keeps the state and grows nothing.
+  `K10S-DATA` and its store to the end of the disk (checked on the host afterwards: both GPT headers and the entry
+  array valid, the backup in the last sector, the store's superblock covering the partition), applies and serves as
+  above; the second boot keeps the state and grows nothing.
 - **image-metal**: the same on the `metal` image (with the console on serial for the test) on OVMF `q35`, booting
   from NVMe; its only NIC (e1000e) and watchdog (Intel TCO behind `lpc_ich`) are signed modules.
 - **unsigned**: the `metal` kernel with an initramfs whose e1000e lost its signature refuses it ("Key was rejected by
@@ -624,6 +687,12 @@ kernels and images with the release's i686 and armv7 musl k10s.
   it new boots, which get healthy, and the next boot counts from zero. A kernel signed by an untrusted key, and one
   changed after signing, are refused and Tier 1 serves. The signed kernel file boots as it is through PVH (`-kernel`,
   SeaBIOS).
+- **update-native**: the native kernel's cluster-rolled updates ("Updates") on the `vm` image under OVMF with
+  `tier=metal`, a hosted `k10s node` on the host: a re-signed kernel goes into slot A of `K10S-DATA`; power cuts
+  while the slot is written, once the trial is armed, during the first trial boot and right after the commit; each
+  boot runs the committed kernel or the trial, the second trial boot commits, and the node's own KV counter keeps
+  counting. A kernel that crashes at its entry gets two trial boots, then k10boot boots the committed slot, which
+  records it as failed and reports the rollout stopped; a trial whose only peer is gone is abandoned after `os_trial`.
 - **mb2**: the `vm` image on SeaBIOS with `tier=metal`: GRUB boots the native kernel through Multiboot2 with its
   `metal_cmdline`, `k10s.conf`, the deployment bundle (the release's `bundle.k10b`) and the key files as modules; the
   bundle's services answer and so do requests signed with the admin key.
@@ -724,7 +793,10 @@ entries, firmware that uses the page at 0x8000 or the kernel's addresses at 1 Mi
 runtime services on SMM-protected flash, other CPUs left in x2APIC mode), the boot counter's variable writes on real
 flash, GRUB's Multiboot2 loading on a real BIOS, clouds (a Hetzner or Vultr VM with virtio: UEFI or BIOS; a
 DigitalOcean droplet: BIOS only, through GRUB and Multiboot2; they need modern virtio-net, the native kernel's driver
-of step 13b) and real machines (their NICs: steps 13c and M4).
+of step 13b) and real machines (their NICs: steps 13c and M4). For `K10S-DATA` (step 13d): real NVMe and SATA
+controllers and disks (volatile write caches honoring flushes, power loss on a real disk mid-write, 4 KiB-sector
+disks, firmware that leaves controllers running, AHCI BIOS handoff), k10boot reading slots through real firmware's
+Block I/O, and the conversion of a real ext4 `K10S-DATA` written by an older image.
 
 ## Limits
 
@@ -732,8 +804,10 @@ of step 13b) and real machines (their NICs: steps 13c and M4).
 - A rollback is an update to the older image (signed images of any version install); the cluster key is the trust
   boundary for which signed image a cluster runs.
 - The images are not signed for Secure Boot: turn it off, or sign them with your own keys or a MOK ("Secure Boot").
-- The native kernel keeps its key-value store in memory until M2 (STATUS step 13d), so the images ship `tier=linux`;
-  on BIOS it boots only with `tier=metal`, without a signature check or boot counting ("Tiers").
+- The images ship `tier=linux` ("Tiers" says why); on BIOS the native kernel boots only with `tier=metal`, without
+  a signature check, boot counting or kernel updates.
+- A `K10S-DATA` store holds about a quarter of its log as live data (51 MiB on the images' 256 MiB before it grows
+  to the disk); an ext4 `K10S-DATA` whose state does not fit `K10S-BOOT`'s free space is kept as ext4.
 - The image uses 512-byte logical sectors; disks with 4 KiB logical sectors (rare outside servers) need a rebuilt
   image.
 - The arm64 image has the virtio drivers of VMs and the Pi's; arm64 servers need their NIC drivers added. The Pi

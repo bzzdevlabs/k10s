@@ -135,6 +135,34 @@ verified against the key built into k10s; `SHA256SUMS`).
   leave + power off; `vmm-test.sh` runs Firecracker v1.17.0 and Cloud Hypervisor v53.0 (pinned, CI's metal-e2e job);
   the metal-selftest gate runs pc, pc-legacy, q35 and microvm. Same throughput as before, 3 MiB guests place 16
   services instead of 9, image +100 KiB (metal/RESULTS.md §9).
+- Tier 2 M2 storage (13d, docs/OS.md "Data", metal/README.md "Storage" and "Updates"): `K10S-DATA` has one format for
+  both tiers, `crates/k10-kvlog` (no_std): the hosted node's record codec, GPT parsing and growth, and a store of a
+  superblock pair, two 16 MiB native kernel slots and a log of 4 MiB segments of namespaced records (checksums masked
+  per segment, SEAL links, batches of whole 4 KiB units, checkpoints for compaction and after write errors, sequence
+  numbers reserved in the superblock, a replay that seals where it stopped): after a power cut each namespace holds a
+  prefix of its writes with every flushed batch (a crash model with volatile caches, torn sectors and reordering
+  over many lives; mutating the flush order, the masks or the reservations fails it). The hosted node takes such a
+  store (`--store DEV|FILE`, init's `--store-fd`): KV and its files there, about a quarter of the log live at most;
+  plain `--data` directories are unchanged. Tier 1 hands `K10S-DATA` to its node as a store (the images carry it
+  pre-formatted: own GPT type `6b10c5a0-da7a-…`, MBR type 0xda) and converts an older ext4 `K10S-DATA` on first boot
+  through a synced staging copy on `K10S-BOOT` (ext4 kept when the copy does not fit). The native kernel drives NVMe
+  (admin + one I/O queue pair, PRP lists, MSI-X wake-ups, flush, normal shutdown) and AHCI (handoff, HBA reset, DMA
+  commands in 32 slots, FLUSH CACHE EXT) next to virtio-blk, grows and opens `K10S-DATA`, replays KV before any
+  service runs, group-commits asynchronously from CPU 0 (2 ms window), and keeps its node id and the cluster's
+  desired state there under Tier 1's file names: a machine switched between tiers keeps its id, KV and desired
+  state, and an all-native cluster serves again after losing power. Kernel updates: k10boot boots the trial slot of
+  `K10S-DATA` (two counted boots), else the committed one, else `/k10s/metal.elf`, and remembers a failed trial in
+  its counter (record version 2); the kernel (module `k10s.image`) reports `x86_64-native` in gossip and follows
+  `k10_mesh::rollout`: verifies the image against the keys k10boot trusted, writes the other slot, commits after
+  `os-commit-grace`, abandons after `os_trial` or a fallback, records failures (the rollout stops). `tier=auto` also
+  needs `K10S-DATA`'s controller in devices.rs (NVMe, AHCI by class code). Tests: the kvlog crash model, hosted
+  raw-store unit, node and cluster (SIGKILL) tests, `metal/tools/storage_test.py` in the metal-selftest gate
+  (virtio-blk, NVMe, AHCI: growth, power cuts during a write stream with checkpoints, prefix checks including every
+  write acknowledged a second earlier, a clean power off) next to a q35 self test with NVMe and AHCI disks,
+  cluster-test.sh (a guest's kv replicas on its NVMe `K10S-DATA` through a power cut), os/test.py boot (ext4
+  conversion), image (store grown), update-native (power cuts at every step, a crashing kernel, a trial that cannot
+  commit). The images still ship `tier=linux` (docs/OS.md "Tiers": no SNTP client, power button, watchdog or IPv6
+  on the native kernel, and no real-hardware run yet). Kernel 1.15 MB (+153 KB), k10boot 106 KB (+34 KB).
 - Releases: SemVer; tag `vX.Y.Z` on main → stable release, every push to main → `vX.Y.Z-dev.N` pre-release.
 - Performance vs 08f2921 (`bench/k10s/ab.py --same`, 4 interleaved rounds, host load ≈ 7 from the benchmark itself;
   medians): single node within ±2.5 %; local ingress −4 %; forwarded requests −5 % at c=1 (CPU per request +7 %) and
@@ -168,9 +196,17 @@ seek privileges on this machine.
     - 13c **x86 bare metal** (M4's first part; after 13a and 13b, in parallel with 13d): Intel e1000e (I219 with
       ME/ULP handling, 82574L) and igc (I225/I226), Realtek r8169-class (8111/8125), GOP text console, UDP log
       console, watchdog; a USB-bootable image; then bring-up on the user's machine.
-    - 13d **M2 storage** (after 13b, in parallel with 13c): NVMe, virtio-blk, AHCI, GPT `K10S-DATA`, the segmented KV
-      log shared with the hosted node (`no_std` record codec; Tier 1 moves from ext4 to it), raw A/B kernel slots
-      read by the loader, crash-injection tests.
+    - 13d **M2 storage** — done (State of main; under QEMU only). Needs real hardware (user): NVMe controllers and
+      SSDs (MSI-X on real chipsets, MDTS, namespaces with metadata or several namespaces, controllers firmware left
+      running, the time a normal shutdown takes), AHCI controllers and SATA disks (BIOS/OS handoff on real firmware,
+      staggered spin-up, 512e/4Kn sector sizes, task-file error recovery, a 32-bit-only HBA on a machine with memory
+      above 4 GiB, port multipliers: unsupported), volatile write caches that must honor flushes and power lost on a
+      real disk during writes, checkpoints and slot installs (QEMU kills lose only what the guest had not written),
+      k10boot reading slots through real firmware's Block I/O (alignment, slow USB media) and its counter writes on
+      real flash, GPT growth by the native kernel on real disks, the conversion of a real ext4 `K10S-DATA` written by
+      an older image, `tier=auto` against real storage controllers' device paths. Not done here: NCQ, one I/O queue per
+      CPU, storage I/O off CPU 0 (a checkpoint of a large store stalls CPU 0's network loop), single-node (non-cluster)
+      native applies kept across reboots, and the move to `tier=auto` in the images (docs/OS.md "Tiers").
     - Then M3 big-cloud NICs (ENA, VMBus, gVNIC; needs cloud accounts), the rest of M4 (tg3, IOMMU, HWP, a hardware
       CI rack), M5 arm64 arch layer, M6's metal half (the arm64 JIT from U4 on metal: I-cache sync and cross-CPU
       synchronization of its own), M7 Pi 4/5.

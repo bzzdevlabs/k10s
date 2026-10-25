@@ -185,8 +185,9 @@ status ≥ 0, −1 unknown service, −2 unavailable (crash backoff with nothing
   slots used, slot bytes, reserved, snapshot-mapped; HTTP, execution and KV counters; per shard), `GET metrics`
   (Prometheus text), `GET logs/<svc>`, `GET health`, `POST apply`.
 - **Admin access** (`admin::gate`, decided on the request head before any body is read or reserved; a refusal
-  closes the connection): every node has an admin key (`--admin-token-file FILE`, else `DATA/admin.key`, or
-  `admin.key` in the state directory without `--data`, created with mode 0600 on first start; started as root with
+  closes the connection): every node has an admin key (`--admin-token-file FILE`, else `DATA/admin.key` (with
+  `--store`: `admin.key` in the store), or `admin.key` in the state directory without `--data`, created with mode
+  0600 on first start; started as root with
   `--user`, the data directory and a created key belong to that user). Requests are signed (`k10_mesh::admin_auth`):
   `Authorization: K10s-HMAC a=<audience>,t=<unix ms>,n=<32 hex>,h=<sha256(body) hex>,sig=<hex>`, where `sig` =
   HMAC-SHA256(admin key, `K10s-HMAC\n<a>\n<method>\n<target>\n<t>\n<n>\n<h>`). The audience is 16 random bytes per
@@ -243,6 +244,17 @@ status ≥ 0, −1 unknown service, −2 unavailable (crash backoff with nothing
   `kv_put` that would push a namespace past its live-bytes quota (default 256 MiB, `--kv-max`, 0 = unlimited) traps
   `Host(3)` and stores nothing, so one service cannot fill the node's memory/disk (it bounds live bytes; the log is
   then bounded at ~2× that by compaction). Deleting entries frees room.
+- **Raw store** (`--store DEV|FILE`, or `--store-fd N` from init on the disk images): every KV namespace and the
+  node's own files (`node-id`, `incarnation`, `peers`, `manifest.k10m`, `blobs/<sha256>`, `bundle.k10b`, a
+  generated `admin.key`) go to one `k10_kvlog` store, the `K10S-DATA` format both tiers share (docs/OS.md, "Data"),
+  through `pread`/`pwrite` and `fdatasync`; `--data` is then scratch space only (an OS image handed to init). A blank
+  device is formatted, anything else that is not a store is refused; a missing or empty FILE is created at
+  `--store-size` (256 MiB). The same records go to one segmented log: group commit as above (one batch for every
+  namespace), compaction by checkpoints of the whole store (when the log exceeds twice the live data and 1 MiB, or
+  free space runs low), the store degraded and rewritten with backoff after an I/O error; a restart recovers a
+  prefix of each namespace's writes. The store holds about a quarter of its log as live data (namespaces reserve it
+  in 64 KiB steps): past it a `kv_put` traps `Host(3)` like the quota. The store is opened (and replayed) before the
+  sandbox, as root if need be; its flusher thread starts inside it.
 - `log`: per-service ring (1000 lines / 256 KiB, lines ≤ 4 KiB), optionally echoed to stderr (`--log-stderr`).
 
 ## Process sandbox (`k10s node` only; `crates/k10-node/src/sandbox/`, SECURITY.md "Defense in depth")

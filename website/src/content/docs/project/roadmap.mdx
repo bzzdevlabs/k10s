@@ -50,9 +50,10 @@ import { Aside } from '@astrojs/starlight/components';
 1. **Native bare metal (next):** the native kernel boots from the shared x86-64 image through UEFI or BIOS (done:
    its loader picks the tier, verifies the kernel and falls back to the Linux-based tier), reads ACPI, maps all
    memory, starts up to 64 CPUs, powers off and reboots through ACPI and drives modern, legacy and MMIO virtio (net
-   and disk; done); next the Intel and Realtek NICs of common x86 machines, then NVMe and a durable key-value log,
-   serving in a cluster next to hosted and Linux-based nodes; then cloud NICs, arm64 and the Raspberry Pi. The
-   Linux-based tier is in maintenance meanwhile.
+   and disk; done), keeps its key-value data, identity and desired state on NVMe, SATA or virtio disks in the
+   format the Linux-based tier shares, and updates itself through two kernel slots (done); next the Intel and
+   Realtek NICs of common x86 machines, serving in a cluster next to hosted and Linux-based nodes; then cloud NICs,
+   arm64 and the Raspberry Pi. The Linux-based tier is in maintenance meanwhile.
 2. **Cluster security:** per-node identity and signed bundles, on top of today's authenticated and encrypted gossip
    and peer links.
 3. **Replicated state:** a replicated key-value store per service (Raft per shard group) and leases for singletons.

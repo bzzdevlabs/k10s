@@ -21,11 +21,11 @@ paths alike). Its HTTP fast path is unchanged (test.sh's and §8's loadgen runs 
 ## Summary
 
 The other figures of this table predate Tier 2's milestone M1 (13a, 13b); §9 measures what M1 changed against the
-same kernel, interleaved on one machine.
+same kernel, interleaved on one machine, §10 what M2 (13d) added.
 
 | | k10-metal | Linux guest (same QEMU/slirp setup) |
 |---|---|---|
-| Image | **997 KB** ELF incl. JIT, cluster layer, SMP, ACPI, virtio 1.x/MMIO/blk, DHCP and the Multiboot2 entry (985 KiB in memory incl. .bss; before Tier 2's M1: 694 KB / 670 KB; v0: 440 KB) + 13 KB bundle (19 services) | 8.2 MB bzImage + 0.9 MB initramfs |
+| Image | **1,150 KB** ELF incl. JIT, cluster layer, SMP, ACPI, virtio 1.x/MMIO/blk, NVMe, AHCI, the K10S-DATA store, DHCP and the Multiboot2 entry (1,116 KiB in memory incl. .bss; after M1: 997 KB; before Tier 2's M1: 694 KB / 670 KB; v0: 440 KB) + 13 KB bundle (20 services) | 8.2 MB bzImage + 0.9 MB initramfs |
 | QEMU start → "ready" (median / p10) | **95 ms / 76 ms** (SeaBIOS); qboot 98 / 66 ms | 1,360 ms (boot only) / 1,435 ms (HTTP) |
 | …of which inside the kernel (entry → ready) | **1.7–2.5 ms** (v0); 2.9 ms with 18 services JIT-compiled at boot (2.1 interpreted) | ≈ 1.25 s |
 | QEMU start → first HTTP 200 | **≈ 2 ms after ready** (median 96 ms) | 1,437 ms |
@@ -367,7 +367,30 @@ request), and the others:
 | `pc` + SPCR table (COM2) | SeaBIOS | | full | | console on COM2 |
 | Firecracker v1.17.0, Cloud Hypervisor v53.0 | PVH | virtio-mmio v2 / virtio-pci modern | | kvmclock | `vmm-test.sh`, CI (KVM) |
 
-## 10. What was not measured / caveats
+## 10. M2 storage: K10S-DATA, NVMe, AHCI, kernel slots (13d)
+
+Step 13d added the `K10S-DATA` store (crates/k10-kvlog), the NVMe and AHCI drivers, storage.rs (group commit,
+checkpoints, the node's files) and the kernel updates (osupdate.rs; k10boot's slots.rs).
+
+| | 13b (dev.153) | 13d |
+|---|---|---|
+| kernel ELF | 996,977 bytes | 1,150,264 bytes (+150 KiB: the store, NVMe, AHCI, GPT, storage, updates with Ed25519 verification) |
+| k10boot | 72,192 bytes | 106,496 bytes (+33 KiB: GPT and superblock parsing, Block I/O, the kernel choice) |
+| QEMU start → ready with a 128 MiB disk (CI, KVM, `pc`/`q35`) | — | 0.10–0.15 s, the first boot formatting and growing `K10S-DATA` included; the same after a power cut (replay and the recovery seal) |
+
+* **Power cuts** (`tools/storage_test.py`, CI with KVM, the metal-selftest gate): a client PUTs 4 KiB values to 64
+  keys in sequence (about 1,900 to 2,000 a second through slirp, the same on virtio-blk, NVMe and AHCI: the HTTP
+  round trip bounds it, not the disk) while QEMU is killed at random moments, 4 times per controller; each reboot
+  finds the store at the last 0–6 acknowledged writes (the 2 ms group commit window and the batch in flight), every
+  key at its value of that prefix, then a clean power off keeps all of them (about 15,000 to 23,000 writes per
+  controller, the log checkpointed every few hundred).
+* **Hosted node** (`bench/k10s/ab.py --same`, base 56132f2 and 13d, 4 interleaved rounds on an arm64 Linux VM: the
+  base of the STATUS figures, 08f2921, has no arm64 JIT): every case within ±2 % (single node, local and forwarded
+  cluster requests, at 1 and 64 connections). The KV path (`examples/counter.ten`, one `kv_add` per request, 3
+  interleaved rounds): 25.1k / 391k req/s (base) against 24.8k / 388k (13d, data directory) and 24.8k / 394k (13d,
+  raw store) at 1 / 64 connections.
+
+## 11. What was not measured / caveats
 
 * **slirp ceiling.** Throughput is capped by slirp (single-threaded, in QEMU's main loop). k10-metal's own
   capacity, extrapolated from its busy time, is well above the 54k rps observed; measuring it needs a tap +

@@ -72,6 +72,9 @@ fn append(key: str, b: i64) {
 - **Self-healing log.** Each namespace is an append-only, checksummed log, compacted when it exceeds twice the live
   size. After an I/O error the namespace is marked degraded (`kv_durable: false` in status) and rewritten from
   memory with backoff until the disk accepts it again.
+- **The same data in both tiers.** On the disk images the store is the `K10S-DATA` partition itself, read and written
+  by the Linux-based node and by the native kernel alike: a machine switched between them keeps its services' data.
+  A node of your own can use such a store too (`k10s node --store /dev/sdX3`, or a file).
 
 ## Limits
 

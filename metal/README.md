@@ -9,8 +9,10 @@ platform in the ACPI tables, without an AML interpreter, and powers off and rebo
 
 It boots with PVH (`-kernel`) on QEMU (`pc` and `q35` with SeaBIOS or qboot, `microvm`), Firecracker and Cloud
 Hypervisor, under KVM or TCG, and from the x86-64 disk images of `os/` through its UEFI loader k10boot or through
-GRUB and Multiboot2 on BIOS ("Booting"; docs/OS.md, "Tiers"); NICs and disks are virtio (PCI modern and legacy,
-MMIO). It deploys a `k10_mesh::Bundle` (manifest + TIR blobs) and serves HTTP/1.1 on port 80 with the same routing
+GRUB and Multiboot2 on BIOS ("Booting"; docs/OS.md, "Tiers"); NICs are virtio (PCI modern and legacy, MMIO), disks
+virtio-blk, NVMe or AHCI. On a disk with a `K10S-DATA` partition it keeps the services' KV data, its node id and the
+cluster's desired state, in the format Tier 1 uses (crates/k10-kvlog), and installs cluster-rolled kernel updates
+into the partition's two kernel slots ("Storage", "Updates"). It deploys a `k10_mesh::Bundle` (manifest + TIR blobs) and serves HTTP/1.1 on port 80 with the same routing
 and host API as the hosted node (docs/NODE.md, docs/HOSTAPI.md). Services run as
 machine code from `k10-jit` (the default) or on the `k10-ir` interpreter. With `k10.join=…` the guest joins a k10s
 cluster as a full member next to Linux-hosted `k10s node` processes: gossip membership, desired state fetched from
@@ -20,7 +22,7 @@ Measurements: [RESULTS.md](RESULTS.md).
 ## Quick start
 
 ```sh
-./build.sh                 # out/k10-metal.elf (kernel), out/k10boot.efi (UEFI loader), out/bundle.k10b (19 test
+./build.sh                 # out/k10-metal.elf (kernel), out/k10boot.efi (UEFI loader), out/bundle.k10b (20 test
                            # services, 4 of them compiled from ../examples/*.ten); EMBED=1 also bakes the bundle in
 k10s keygen -o admin.key   # admin key (mode 0600); without one the admin API serves only /_k10s/health
 ADMIN_KEY=admin.key ./run.sh # QEMU (KVM, else TCG), serial on stdout, host 127.0.0.1:8090 -> guest :80 (PORT=, MEM=,
@@ -41,7 +43,10 @@ SMP=4 ./run.sh             # four CPUs: CPU 0 runs the network, CPU-heavy reques
                            # every QEMU platform (power off/reboot, disks), SPCR console, static address, DHCP renew,
                            # 16 GiB + 32 vCPUs (TEST_PORT=18090, PLATFORM=, ACCEL=kvm|tcg)
 ./cluster-test.sh          # 2 hosted `k10s node` + 1 k10-metal guest: join, apply, routing, failover, rejoin with a next
-                           # cluster key, refused peers (wrong key, unauthenticated links), leave + power off
+                           # cluster key, KV on the guest's NVMe K10S-DATA through a power cut, refused peers (wrong
+                           # key, unauthenticated links), leave + power off
+tools/storage_test.py --kernel out/k10-metal.elf --bundle out/bundle.k10b   # K10S-DATA on virtio-blk, NVMe and AHCI:
+                           # growth, power cuts during a write stream (prefix checks), clean power off
 ./vmm-test.sh              # Firecracker and Cloud Hypervisor (KVM, a tap device; tools/get-vmms.sh downloads them)
 tools/linux-compare.sh     # builds the Linux comparison guest (host kernel + tiny initramfs)
 tools/measure.py           # measurements -> out/results/*.json (see RESULTS.md); `engines` = JIT vs interpreter,
@@ -64,7 +69,8 @@ RDRAND for its key; SECURITY.md),
 Cluster mode: `k10.join=HOST:PORT[,…]`, `k10.gossip=`, `k10.rpc=`, `k10.http=` (advertised addresses),
 `k10.node_id=HEX`, `k10.probe_ms=N`, `k10.suspicion_mult=N`, `k10.mem=BYTES`, `k10.host_alias=IP`,
 `k10.gossip_max_skew_s=N` (default 300, at least 1), and `k10.insecure_unauthenticated_cluster` when no cluster key
-is given. The advertised addresses default to the interface's (DHCP or static) address. An invalid `k10.spin_us`,
+is given. Storage and updates: `k10.data=none` (no K10S-DATA: KV in memory), `k10.grow=0` (keep K10S-DATA's size),
+`k10.os_commit_grace=S` (30), `k10.os_trial=S` (600). The advertised addresses default to the interface's (DHCP or static) address. An invalid `k10.spin_us`,
 `k10.engine`, `k10.smp`, `k10.jit_indirect`, `k10.timer_res_us`, `k10.ip`, `k10.console`, `k10.panic` or
 `k10.gossip_max_skew_s` value stops the boot.
 
@@ -103,13 +109,18 @@ metal/                    its own cargo workspace (own target dir); path-depends
     src/smp.rs            application processors from the MADT: real-mode trampoline, targeted INIT-SIPI-SIPI, AP entry
     src/pvh.rs            hvm_start_info: E820 map (merged), command line, ACPI RSDP, named modules
     src/bootcfg.rs        k10s.conf → boot arguments, key files and the bundle from the loader's modules
-    src/efi.rs            UEFI runtime services: clears k10boot's boot counter once the node is healthy
+    src/efi.rs            UEFI runtime services: clears k10boot's boot counter once the node is healthy (a trial
+                          kernel: once it commits)
+    src/storage.rs        K10S-DATA: GPT, growth, the k10_kvlog store, KV replay, asynchronous group commit,
+                          checkpoints, the node's own files
+    src/osupdate.rs       cluster-rolled kernel updates: the gossip report, install into a slot, trial commit/abandon
     src/fw_cfg.rs         QEMU fw_cfg over I/O ports: named files (secrets under -kernel)
     src/mem/              memory map (sorted, disjoint), frame allocator (bitmap), kernel heap, instance slots
     src/time.rs           TSC clock (kvmclock / CPUID 0x15 / HPET / PM timer / PIT), wall clock (kvmclock resync), guest
                           clock, preemption flag + JIT preemption word
     src/pci.rs            config space via ECAM (MCFG) or 0xCF8/0xCFC, bus scan, 64-bit BARs, MSI-X, bridges
-    src/dev/              NetDevice and BlockDevice traits, DMA regions, device probe, virtio-mmio slots
+    src/dev/              NetDevice and BlockDevice traits, DMA regions, device probe, virtio-mmio slots; nvme.rs
+                          (NVMe), ahci.rs (AHCI SATA)
     src/virtio/           virtio transports (PCI modern + legacy, MMIO v1 + v2), split virtqueues, net and blk drivers
     src/net.rs            smoltcp interface (DHCPv4 or static), listener pool, HTTP connections, UDP + extra listeners
                           + TCP dial, smoltcp glue for any NetDevice
@@ -121,7 +132,8 @@ metal/                    its own cargo workspace (own target dir); path-depends
     src/selftest.rs       in-kernel tests (k10.selftest)
   boot/                   k10boot, the UEFI loader and tier selector (x86_64-unknown-uefi): efi.rs (the UEFI
                           interfaces it uses, by hand), main.rs (tier, PCI scan, chain-load of systemd-boot),
-                          native.rs (signature, ELF, start_info, modules, boot counter, ExitBootServices, jump)
+                          native.rs (which kernel, signature, ELF, start_info, modules, boot counter,
+                          ExitBootServices, jump), slots.rs (K10S-DATA's kernel slots through Block I/O)
   bootproto/              k10-bootproto (no_std, host unit tests): what k10boot, the Multiboot2 shim and the kernel
                           agree on: module names, framebuffer and EFI records, k10s.conf, the tier file, the boot
                           counter, E820; devices.rs, the supported-device table
@@ -129,7 +141,7 @@ metal/                    its own cargo workspace (own target dir); path-depends
   tools/                  boottime.py, measure.py, cluster_measure.py, linux-guest (comparison /init),
                           mkinitramfs.py, linux-compare.sh, admin_auth.py (signs admin requests for curl),
                           dhcp_test.py (DHCP client against a scripted server), get-vmms.sh (pinned Firecracker and
-                          Cloud Hypervisor)
+                          Cloud Hypervisor), storage_test.py (K10S-DATA through power cuts)
   build.sh run.sh test.sh cluster-test.sh vmm-test.sh qemu.sh (the QEMU platforms the scripts share)
 ```
 
@@ -181,8 +193,11 @@ their `K10S-BOOT` partition, signed as a k10s image (`k10s image sign --profile 
 trailer, which ELF loaders ignore), and `/k10s/tier` says which tier boots (docs/OS.md, "Tiers"). PVH stays the one
 entry interface; two loaders build its `start_info`:
 * **k10boot** (`boot/`, UEFI, `\EFI\BOOT\BOOTX64.EFI`; with an SBAT section, so that shim starts it under Secure
-  Boot) verifies the signature (the release key and keys built in
-  with `K10BOOT_KEYS`, plus `os_key` of k10s.conf when Secure Boot is off), allocates the segments' physical range
+  Boot) picks the kernel: the trial slot of `K10S-DATA` (read through the firmware's Block I/O, the disk of
+  `K10S-BOOT` first) while the boot counter allows it, else the committed slot, else `/k10s/metal.elf` ("Updates").
+  It verifies the signature (the release key and keys built in
+  with `K10BOOT_KEYS`, plus `os_key` of k10s.conf when Secure Boot is off; a slot's image must also have the hash
+  its superblock records), allocates the segments' physical range
   (`AllocatePages` at 1 MiB) and copies them, takes the firmware's memory map as E820 entries (merged), the ACPI
   RSDP from the configuration table, the command line from its load options or `metal_cmdline` of `/k10s/tier`, and
   reserves page 0x8000 (the application processors' trampoline, smp.rs; a firmware that keeps it is refused). Then
@@ -196,8 +211,9 @@ entry interface; two loaders build its `start_info`:
 
 Loaders name their PVH modules (`hvm_modlist_entry.cmdline_paddr`; `bootproto/src/lib.rs`): `k10s.bundle` (an unnamed
 module is QEMU's `-initrd`), `k10s.conf`, a key file under the path k10s.conf gives it (`/boot/admin.key`),
-`k10s.framebuffer` (the GOP mode: base, size, resolution, stride, pixel format) and `k10s.efi` (the UEFI system
-table, runtime services and their memory regions). Booted by a loader, the kernel takes secrets only from modules,
+`k10s.framebuffer` (the GOP mode: base, size, resolution, stride, pixel format), `k10s.efi` (the UEFI system
+table, runtime services and their memory regions) and `k10s.image` (which kernel: K10S-BOOT's or a slot, on trial or
+not, its hash, platform and version, the keys k10boot trusted, the K10S-DATA partition it read). Booted by a loader, the kernel takes secrets only from modules,
 never from fw_cfg (whose I/O ports mean nothing on real machines), and k10s.conf, the configuration both tiers read,
 sets the kernel's arguments whose meaning it shares (bootcfg.rs; the command line wins):
 
@@ -206,10 +222,11 @@ sets the kernel's arguments whose meaning it shares (bootcfg.rs; the command lin
 | `join`, `backend`, `jit-indirect`, `timer-res-us`, `idle-spin-us`, `probe-ms`, `suspicion-mult`, `gossip-max-skew` | `k10.join`, `k10.engine`, `k10.jit_indirect`, `k10.timer_res_us`, `k10.spin_us`, `k10.probe_ms`, `k10.suspicion_mult`, `k10.gossip_max_skew_s` |
 | `insecure-unauthenticated-cluster` | `k10.insecure_unauthenticated_cluster` |
 | any of `gossip`, `rpc`, `join`, `advertise` | `k10.cluster`; `k10.gossip`, `k10.rpc`, `k10.http`: the port of `gossip`, `rpc`, `http` (7946, 7947, 80) at `advertise`, else at the address given unless unspecified, else the node's own |
+| `data` (`none`), `grow`, `os-commit-grace`, `os_trial` | `k10.data`, `k10.grow`, `k10.os_commit_grace`, `k10.os_trial` |
 
 `k10s.KEY=VALUE` on the command line overrides the file, as on Tier 1. The kernel listens on 7946, 7947 and 80 in
 any case; the addresses are what it gives its peers (forwarded ports under QEMU). Once the node is healthy (ready for
-15 s, at least one frame received), efi.rs deletes k10boot's boot counter: a call to `SetVariable` on page tables of
+15 s, at least one frame received; a trial kernel: once it commits), efi.rs deletes k10boot's boot counter: a call to `SetVariable` on page tables of
 its own (the first 4 GiB and the firmware's runtime regions identity-mapped, executable), switched in on CPU 0 with
 interrupts off for the call only. Two counted native boots in a row that never get there make k10boot boot Tier 1
 (docs/OS.md, "Tiers").
@@ -268,7 +285,14 @@ interrupt switch, counters) or `BlockDevice` (logical block size, capacity, numb
 `submit` with a tag and polled completions, `block_sync` for one request). DMA memory is a `DmaRegion`: contiguous,
 zeroed, page-aligned frames, like an instance slot — the shape a driver written as a TIR module would get later.
 The network stack and the disk users see only the traits. The first NIC is used, every disk is kept in `dev::BLOCK`
-(the storage of milestone M2 builds on it). virtio devices come from PCI (modern `1af4:1041`/`1af4:1042`,
+(storage.rs takes the one with K10S-DATA). NVMe controllers (class 01:08:02) get the admin queue and one I/O queue
+pair (storage runs on CPU 0), the first active namespace (512-byte or 4 KiB blocks, no metadata), a PRP list page
+per request slot, completions that raise MSI-X entry 0 on CPU 0 (vector `VEC_DISK`: it only wakes `hlt`), Flush
+when the controller reports a volatile write cache, and a normal shutdown (CC.SHN) before power off and reboot. AHCI
+controllers (01:06:01) are taken from the firmware (BIOS/OS handoff, HBA reset, staggered spin-up); each port with an
+ATA disk is a device: READ/WRITE DMA EXT and FLUSH CACHE EXT (when its write cache is on) in up to 32 command slots,
+which the HBA runs in order (no NCQ), one PRD entry per request, completions polled, a port restarted after a task
+file error. virtio devices come from PCI (modern `1af4:1041`/`1af4:1042`,
 transitional `1af4:1000`/`1af4:1001` driven as virtio 1.x when they offer the modern capabilities, legacy when they
 do not) and from virtio-mmio slots (command line and DSDT; version 2, and version 1, which QEMU microvm defaults to).
 The transports share split virtqueues: one zeroed region per queue (descriptors, available ring, used ring on the next
@@ -319,8 +343,9 @@ HTTP/1.1 supports keep-alive, pipelining (one request in flight per connection),
 * All 19 host functions of docs/HOSTAPI.md are implemented (`k10_host`, shared with the hosted node; the selftest
   runs its conformance cases). `log` writes to the serial console and a ring buffer. `now_ns`/`time_ms` use the
   kernel's `GuestClock`, keyed by RDRAND at boot.
-  The KV store is per service and in memory, and survives redeploys. Every `kv_*` call runs under the node lock,
-  so `kv_add` and `kv_cas` are atomic across CPUs; a write that would eat into the heap reserve traps `Host(3)`. `call` runs a local service in the caller's
+  The KV store is per service, in memory and, with `K10S-DATA`, on disk ("Storage"); it survives redeploys and
+  reboots. Every `kv_*` call runs under the node lock, so `kv_add` and `kv_cas` are atomic across CPUs; a write that
+  would eat into the heap reserve, or past what the store holds, traps `Host(3)`. `call` runs a local service in the caller's
   coroutine, or (cluster mode) forwards to the node it is placed on.
 
 Apply validates every module, resolves imports by name and parameter count, and checks the `handle`/`init`
@@ -422,7 +447,9 @@ cluster, speaking the hosted node's protocols (docs/NODE.md "Cluster mode", crat
   main-loop iteration, 200 ms…5 s dial backoff, 1 s connect timeout.
 * *Desired state*: a newer `DesiredState` from gossip is fetched (`GetManifest`, then the missing blobs with
   `GetBlob`, pipelined; the origin first, then the other live members; 10 s without progress → next one), checked
-  with SHA-256 and kept in memory (no disk). `POST /_k10s/apply` on the guest works like on a hosted node: version
+  with SHA-256 and kept in memory, and in `K10S-DATA` when there is one (`manifest.k10m` and `blobs/<sha256>`, as on
+  a Tier 1 node): a rebooted node serves it before it rejoins, a cluster whose nodes all lost power serves again
+  without an operator. `POST /_k10s/apply` on the guest works like on a hosted node: version
   0 = highest known + 1, install locally first (validates), then `set_desired`; peers fetch from the guest.
 * *Placement*: `k10_mesh::place(manifest, live members)` on every desired-state change and, debounced 50 ms, on
   every change of the live member set. All services are installed (any node may run any service) with `Local` or
@@ -477,6 +504,52 @@ Deliberately *not* used:
 * An allocator crate. The heap is about 140 lines with exact per-tag accounting and grows from the same frames as
   the instance slots, so there is no fixed heap size. That is what makes 3–4 MiB guests possible.
 
+## Storage
+
+`K10S-DATA` is the partition of a GPT disk with its type (`6b10c5a0-da7a-4000-8000-000000000001`) or its name, as
+Tier 1 finds it; the images carry one (docs/OS.md). At boot storage.rs takes the disk that has it (the one k10boot
+read, if several do), grows the partition to the end of the disk when it is the last one (backup GPT written and
+flushed first, then the primary: the old table stays valid until the end; `k10.grow=0` keeps it), and opens the store
+of `crates/k10-kvlog` on it, formatting a blank partition (anything else that is not a store is left alone, KV then
+stays in memory). The store is the one Tier 1's node writes (docs/OS.md, "Data"), so a machine moved between tiers
+keeps its KV data, its node id and the cluster's desired state:
+
+* **Layout.** A superblock pair (alternate generations, each a sector-atomic write), two 16 MiB kernel slots, then a
+  log of 4 MiB segments: namespaced records with the hosted node's record codec (`len | crc32 | op | klen | key |
+  value`), each segment's checksums masked by its sequence number, segments linked by SEAL records.
+* **Recovery.** Replay follows the segments from the superblock's oldest one and stops at the first record that does
+  not check out; the unit where it stopped is written back unchanged followed by a SEAL to a segment with a fresh
+  sequence number (reserved in the superblock beforehand), so nothing a crashed write left behind is ever read again.
+  Each namespace comes back as a prefix of its writes, with every write of a batch whose flush completed.
+* **Group commit.** KV writes go to per-namespace pending records under the node lock (as on hosted nodes). CPU 0's
+  main loop opens a 2 ms window at the first one, then writes the batch (whole 4 KiB units, padded) and flushes it
+  asynchronously through `BlockDevice` (MSI-X on NVMe wakes the idle CPU; otherwise the idle loop polls every 50 µs
+  while a batch is in flight). An acknowledged write can be lost within that window plus the I/O time, the hosted
+  node's contract. Power off and reboot drain it.
+* **Checkpoints.** When the log is over twice the live data (and 1 MiB), or free segments run short, CPU 0 writes the
+  whole live state into fresh segments, flushes, and points the superblock at them (synchronously; the old segments stay
+  the store until then). About a quarter of the log may hold live data (the node's own files count); past it `kv_put`
+  traps `Host(3)`. After a failed write the store is not durable until such a rewrite succeeds (retried with backoff);
+  `/_k10s/status` reports `"storage":{"durable":…}`.
+* **The node's own files** use Tier 1's names in the store's `.files` namespace: `node-id` (when `k10.node_id` is not
+  given), `manifest.k10m` and `blobs/<sha256>` (cluster mode); the update agent keeps the images that failed in
+  `.native`.
+
+## Updates
+
+Cluster-rolled OS updates (docs/OS.md, "Updates") reach native nodes through `K10S-DATA`'s kernel slots rather than
+`K10S-BOOT`, which the native kernel never writes. k10boot hands over which kernel it booted (`k10s.image`); the node
+reports it in its gossip record (platform `x86_64-native`, updatable when it has `K10S-DATA`), fetches and keeps the
+image the manifest's OS plan gives its platform, and follows `k10_mesh::rollout` like a Tier 1 node: when its wave
+comes it verifies the image against the keys k10boot trusted, writes it into the slot it does not run (data
+flushed, then the superblock arms the trial), leaves the cluster and reboots. k10boot boots the trial while the boot
+counter allows (two boots), else the committed slot. The trial commits (superblock, then the boot counter cleared)
+once the node holds and applied the cluster's desired state and, if it has peers, sees one, for
+`k10.os_commit_grace` seconds; it is abandoned after `k10.os_trial` seconds, and when k10boot fell back. An abandoned
+or refused image is recorded as failed, which halts the rollout cluster-wide. Power cuts at any step leave the
+committed kernel booting or the armed trial being counted (`os/test.py update-native`). Updates need cluster mode
+and k10boot (UEFI); GRUB's Multiboot2 path boots `/k10s/metal.elf` only.
+
 ## Limitations (v0)
 
 * **SMP is simple**: CPU 0 does all network I/O (one NIC queue), dispatch is decided once per request (no work
@@ -490,10 +563,13 @@ Deliberately *not* used:
   one instance per placed service, `docs/NODE.md`); placement, shared with hosted nodes, charges each replica
   `2^memory` + 4 KiB against the guest's capacity, so placed services fit, but a busy service can take the frames
   another one needs for its first instance.
-* **KV is in memory only.** virtio-blk works (reads, writes, flush) but nothing stores on it yet (milestone M2).
-* **Cluster mode is volatile.** The desired state lives in memory: a rebooted guest fetches it again from its
-  peers (a guest alone keeps nothing). A guest that is killed rather than powered off is detected as failed. KV is
-  node-local, as on hosted nodes. The keys are files on `K10S-BOOT` (readable by whoever reads the disk, as on Tier
+* **Storage needs `K10S-DATA`.** Without it (or with `k10.data=none`) KV, the node id and the desired state live in
+  memory: a rebooted node fetches the desired state again from its peers. A single node outside cluster mode keeps
+  KV but not what `POST /_k10s/apply` installed (its bundle comes from the loader at each boot). Storage I/O and
+  checkpoints run on CPU 0 (a checkpoint of a large store stalls its network loop meanwhile); NVMe uses one I/O
+  queue, AHCI no NCQ. Volatile write caches, firmware quirks and power loss on real disks are untested (QEMU only).
+* **Cluster mode.** A guest that is killed rather than powered off is detected as failed. KV is node-local, as on
+  hosted nodes. The keys are files on `K10S-BOOT` (readable by whoever reads the disk, as on Tier
   1) or QEMU's fw_cfg (readable by whoever controls the hypervisor, as the guest's memory is); Firecracker and Cloud
   Hypervisor have neither, so no keys reach a guest there yet. No separate admin listener and no `/_k10s/metrics`.
   A member advertising the interface's address reboots when DHCP changes it (Tier 1 restarts its node), after
@@ -501,7 +577,8 @@ Deliberately *not* used:
 * **JIT code is page-granular per module** (W^X forbids appending to an executable page): a 300-byte module takes a
   4 KiB page; modules deployed several times share one copy by code hash.
 * **IPv4 only, no TLS.** No DNS resolver (addresses are given as IPs).
-* **virtio only.** Physical NICs and disks (Intel, Realtek, NVMe, AHCI) come next (milestones M2, M4). virtio-mmio
+* **virtio NICs only.** Physical NICs (Intel, Realtek) come next (milestone M4); disks are virtio-blk, NVMe and
+  AHCI. virtio-mmio
   interrupts are edge-triggered I/O APIC lines; PCI devices need MSI-X (INTx routing would need `_PRT`, which is AML),
   a virtio-pci device without it is polled.
 * **ACPI without AML.** `_PTS`, `_PRT`, `_OSC` and every other method are never run: S5 works where `\_S5` is a plain
