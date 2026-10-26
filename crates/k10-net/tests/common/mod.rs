@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod peer;
+
 use k10_net::sim::{fill_stream, stream_byte, Host, Link, Sim};
 use k10_net::{Instant, ListenerConfig, TcpConfig, TcpHandle, TcpState, ViewId};
 use std::net::{IpAddr, SocketAddr};
