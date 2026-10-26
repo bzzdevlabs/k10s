@@ -217,7 +217,16 @@ updated with every change and written as the current state, no perf regression b
 security features (`bench/k10s/ab.py --same` vs 08f2921), no stable tag without the user, never create namespaces or
 seek privileges on this machine.
 
-13. **Tier 2: k10s on its own kernel, on QEMU and on real x86 machines** — NEXT (docs/TASK-native-hardware.md, plan
+17. **OCI images on the native kernel** — NEXT (design and session plan: docs/research/oci.md, verdicts in §0,
+    sessions in §14). Ring-3 processes under a Linux personality (`k10-lx`, safe Rust) in the native kernel next to
+    the SFI native services; images converted by the CLI to `K10I` (file-level dedupe, Merkle-verified pages) and
+    carried as chunked objects; per-container socket views in the kernel (no veth, bridge or NAT), ingress handing
+    accepted connections to the container, `calls` checked by the kernel; manifest format 4, `EXT_CAPS`, placement
+    v3; packages (`k10-pkg`) and importers (compose, Kubernetes, `helm template` output). Phase 4 replaces smoltcp
+    with a k10s-owned per-CPU TCP/IP stack (SACK, window scaling, timestamps, congestion control) that native
+    services use too. The step ends with M1 (stateless images), M2 (JVM), M3 (volumes, postgres), KPTI/IBRS for the
+    CPUs that need them and the CLI's TLS registry client. Phases 0, 5 and 6 run alongside the kernel phases.
+13. **Tier 2: k10s on its own kernel, on QEMU and on real x86 machines** — done under QEMU (docs/TASK-native-hardware.md, plan
     in docs/research/native-hardware.md §9, decisions in docs/REPORT.md §9; the prototype branches no longer exist).
     Goal: the `metal/` kernel boots from the shared image (universal-os.md §8.4) on VMs and on a real x86 machine and
     serves in a k10s cluster with hosted and Tier 1 nodes. One session each, in this order:
