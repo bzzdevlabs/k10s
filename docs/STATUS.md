@@ -242,6 +242,13 @@ seek privileges on this machine.
       distribution server (`os/tools/registry.py`); CI's unit suite runs `table.py --check` and the registry self-test.
     - P5.1 done: manifest format 4, `EXT_CAPS`, placement v3 ("State of main"); releases (§11.4) come with packages
       (P6.3) as a later format.
+    - P3.1 storage-format half done: `K10S-DATA` format version 2 (`k10_kvlog::store::objects`, docs/OS.md "Data"):
+      content-addressed objects in 4 KiB-unit extents, leaves verified as they arrive, data and leaf hashes flushed
+      before the index entry is logged, deleted units reused once the delete is durable, page-granular reads; the log
+      keeps `3×(KV+index)+2` segments, the object area the rest; version 1 stores upgrade in place (`Store::upgrade`),
+      version 1 builds refuse version 2; the crash model covers objects and the upgrade. Kernel text +17.8 KB.
+      Software SHA-256 bounds verified object I/O (≈120 MiB/s): SHA-NI/ARMv8 SHA2 paths are due before images are
+      served from it.
 13. **Tier 2: k10s on its own kernel, on QEMU and on real x86 machines** — done under QEMU (docs/TASK-native-hardware.md, plan
     in docs/research/native-hardware.md §9, decisions in docs/REPORT.md §9; the prototype branches no longer exist).
     Goal: the `metal/` kernel boots from the shared image (universal-os.md §8.4) on VMs and on a real x86 machine and

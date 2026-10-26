@@ -702,7 +702,9 @@ keeps its KV data, its node id and the cluster's desired state:
 
 * **Layout.** A superblock pair (alternate generations, each a sector-atomic write), two 16 MiB kernel slots, then a
   log of 4 MiB segments: namespaced records with the hosted node's record codec (`len | crc32 | op | klen | key |
-  value`), each segment's checksums masked by its sequence number, segments linked by SEAL records.
+  value`), each segment's checksums masked by its sequence number, segments linked by SEAL records. In format version
+  2 the object area's segments follow the log's; the kernel replays its index and carries it through its checkpoints
+  (docs/OS.md, "Data").
 * **Recovery.** Replay follows the segments from the superblock's oldest one and stops at the first record that does
   not check out; the unit where it stopped is written back unchanged followed by a SEAL to a segment with a fresh
   sequence number (reserved in the superblock beforehand), so nothing a crashed write left behind is ever read again.
@@ -714,7 +716,7 @@ keeps its KV data, its node id and the cluster's desired state:
   node's contract. Power off and reboot drain it.
 * **Checkpoints.** When the log is over twice the live data (and 1 MiB), or free segments run short, CPU 0 writes the
   whole live state into fresh segments, flushes, and points the superblock at them (synchronously; the old segments stay
-  the store until then). About a quarter of the log may hold live data (the node's own files count); past it `kv_put`
+  the store until then). About a quarter of the log (format version 2: its KV share) may hold live data (the node's own files count); past it `kv_put`
   traps `Host(3)`. After a failed write the store is not durable until such a rewrite succeeds (retried with backoff);
   `/_k10s/status` reports `"storage":{"durable":…}`.
 * **The node's own files** use Tier 1's names in the store's `.files` namespace: `node-id` (when `k10.node_id` is not
