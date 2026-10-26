@@ -133,11 +133,20 @@ pub struct UdpBinding {
 }
 
 /// The immutable port table every instance shares.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct PortTable {
     listeners: Vec<Arc<Listener>>,
     udp: Vec<UdpBinding>,
     pub generation: u64,
+    /// Ephemeral port range (`PortsConfig`), for outgoing connections too.
+    pub ephemeral: (u16, u16),
+}
+
+impl Default for PortTable {
+    fn default() -> Self {
+        let c = PortsConfig::default();
+        PortTable { listeners: Vec::new(), udp: Vec::new(), generation: 0, ephemeral: (c.ephemeral_min, c.ephemeral_max) }
+    }
 }
 
 impl PortTable {
@@ -230,7 +239,8 @@ fn overlaps(a: Option<IpAddr>, b: Option<IpAddr>) -> bool {
 impl Ports {
     pub fn new(cfg: PortsConfig, node_secret: &[u8; 32]) -> Ports {
         let key = Key::from_bytes(&node_secret[..16].try_into().unwrap()).derive(b"udp-ports");
-        Ports { cfg, table: PortTable::default(), next_id: 1, key, counter: 0 }
+        let table = PortTable { ephemeral: (cfg.ephemeral_min, cfg.ephemeral_max), ..Default::default() };
+        Ports { cfg, table, next_id: 1, key, counter: 0 }
     }
 
     pub fn config(&self) -> &PortsConfig {

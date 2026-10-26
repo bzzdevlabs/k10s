@@ -1443,7 +1443,7 @@ impl Stack {
     }
 
     fn pick_port(&mut self, local: IpAddr, remote: IpAddr, rport: u16) -> Result<u16, Error> {
-        let (min, max) = (49152u32, 65535u32);
+        let (min, max) = (self.ports.ephemeral.0 as u32, self.ports.ephemeral.1 as u32);
         let n = max - min + 1;
         let probe = FlowKey { local, remote, lport: 0, rport };
         let (offset, idx) = self.secrets.port_hashes(&probe);
