@@ -19,12 +19,20 @@ fn peer4() -> IpAddr {
 #[test]
 fn arp_reply_and_icmp_echo() {
     let mut b = Bench::new(|_| {});
-    let a = ethernet::Arp { op: ethernet::ARP_REQUEST, sha: mac(PEER), spa: Host::ip(PEER), tha: Mac::ZERO, tpa: Host::ip(1) };
+    let a = ethernet::Arp {
+        op: ethernet::ARP_REQUEST,
+        sha: mac(PEER),
+        spa: Host::ip(PEER),
+        tha: Mac::ZERO,
+        tpa: Host::ip(1),
+    };
     let mut p = vec![0u8; ethernet::ARP_LEN];
     ethernet::emit_arp(&mut p, &a);
     b.frame(&eth(Mac::BROADCAST, mac(PEER), ethernet::ETHERTYPE_ARP, &p));
     match &b.flush()[..] {
-        [Out::Arp(r)] => assert!(r.op == ethernet::ARP_REPLY && r.sha == mac(1) && r.tpa == Host::ip(PEER) && r.tha == mac(PEER)),
+        [Out::Arp(r)] => {
+            assert!(r.op == ethernet::ARP_REPLY && r.sha == mac(1) && r.tpa == Host::ip(PEER) && r.tha == mac(PEER))
+        }
         o => panic!("{o:?}"),
     }
     let mut m = vec![0u8; 8 + 32];
@@ -33,7 +41,9 @@ fn arp_reply_and_icmp_echo() {
     icmp::finish_v4(&mut m);
     b.ip4(ipv4::PROTO_ICMP, &m);
     match &b.flush()[..] {
-        [Out::Icmp4 { ty, body, dst, .. }] => assert!(*ty == icmp::V4_ECHO_REPLY && body == &[0x5a; 32] && *dst == Host::ip(PEER)),
+        [Out::Icmp4 { ty, body, dst, .. }] => {
+            assert!(*ty == icmp::V4_ECHO_REPLY && body == &[0x5a; 32] && *dst == Host::ip(PEER))
+        }
         o => panic!("{o:?}"),
     }
     // Broadcast echo requests are not answered.
@@ -109,14 +119,23 @@ fn icmp_frag_needed_lowers_the_segment_size() {
     let s = b.segs().pop().unwrap();
     assert_eq!(s.data.len(), 1460);
     // The router quotes our packet's IP header and the first 8 bytes of TCP.
-    let ours = ipv4_packet(Host::ip(1), Host::ip(PEER), ipv4::PROTO_TCP, &tcp_bytes(IpAddr::V4(Host::ip(1)), peer4(), &hdr(80, 5000, s.seq, s.ack, ACK, 1), &[0; 8]));
+    let ours = ipv4_packet(
+        Host::ip(1),
+        Host::ip(PEER),
+        ipv4::PROTO_TCP,
+        &tcp_bytes(IpAddr::V4(Host::ip(1)), peer4(), &hdr(80, 5000, s.seq, s.ack, ACK, 1), &[0; 8]),
+    );
     let mut m = vec![0u8; 8 + 28];
     icmp::emit_header(&mut m, icmp::V4_DEST_UNREACH, icmp::V4_CODE_FRAG_NEEDED, [0, 0, 0x03, 0xe8]);
     m[8..].copy_from_slice(&ours[..28]);
     icmp::finish_v4(&mut m);
     b.ip4(ipv4::PROTO_ICMP, &m);
     let s = b.segs();
-    assert!(!s.is_empty() && s.iter().all(|x| x.data.len() <= 960), "{:?}", s.iter().map(|x| x.data.len()).collect::<Vec<_>>());
+    assert!(
+        !s.is_empty() && s.iter().all(|x| x.data.len() <= 960),
+        "{:?}",
+        s.iter().map(|x| x.data.len()).collect::<Vec<_>>()
+    );
     assert_eq!(b.h.stack.tcp_info(h).unwrap().mss, 960);
     assert_eq!(b.h.stack.stats.pmtu_updates, 1);
 }
@@ -138,7 +157,8 @@ fn dhcp_style_broadcast_before_an_address() {
     }
     // The offer goes to the address being offered, on our MAC.
     let offered = Ipv4Addr::new(10, 0, 0, 77);
-    let pk = ipv4_packet(Host::ip(PEER), offered, ipv4::PROTO_UDP, &udp_bytes(peer4(), offered.into(), 67, 68, b"OFFER"));
+    let pk =
+        ipv4_packet(Host::ip(PEER), offered, ipv4::PROTO_UDP, &udp_bytes(peer4(), offered.into(), 67, 68, b"OFFER"));
     b.frame(&eth(mac(1), mac(PEER), ethernet::ETHERTYPE_IPV4, &pk));
     let mut got = Vec::new();
     assert!(b.h.stack.udp_recv_from(u, |d, _, _| got = d.to_vec()).unwrap());
@@ -172,7 +192,9 @@ fn send6(b: &mut Bench, src: Ipv6Addr, dst: Ipv6Addr, msg: &[u8]) {
     b.frame(&eth(dst_mac, mac(PEER), ethernet::ETHERTYPE_IPV6, &pk));
 }
 
-fn icmp6_out(o: &[Out]) -> Vec<(Ipv6Addr, Ipv6Addr, u8, [u8; 4], Vec<u8>)> {
+type Icmp6 = (Ipv6Addr, Ipv6Addr, u8, [u8; 4], Vec<u8>);
+
+fn icmp6_out(o: &[Out]) -> Vec<Icmp6> {
     o.iter()
         .filter_map(|x| match x {
             Out::Icmp6 { src, dst, ty, rest, body, .. } => Some((*src, *dst, *ty, *rest, body.clone())),
@@ -211,7 +233,12 @@ fn slaac_dad_router_advertisement_and_neighbor_discovery() {
     let dns: Ipv6Addr = "2001:db8:1::53".parse().unwrap();
     ra.extend_from_slice(&[25, 3, 0, 0, 0, 0, 0x0e, 0x10]);
     ra.extend_from_slice(&dns.octets());
-    send6(&mut b, ll(PEER), ipv6::ALL_NODES, &icmp6(ll(PEER), ipv6::ALL_NODES, icmp::V6_ROUTER_ADVERT, [64, 0, 0x07, 0x08], &ra));
+    send6(
+        &mut b,
+        ll(PEER),
+        ipv6::ALL_NODES,
+        &icmp6(ll(PEER), ipv6::ALL_NODES, icmp::V6_ROUTER_ADVERT, [64, 0, 0x07, 0x08], &ra),
+    );
     let global: Ipv6Addr = "2001:db8:1::5054:ff:fe00:1".parse().unwrap();
     assert!(b.h.stack.iface().is_tentative_v6(&global));
     let c = b.h.stack.iface().clone();
@@ -226,7 +253,12 @@ fn slaac_dad_router_advertisement_and_neighbor_discovery() {
     ns.extend_from_slice(&[1, 1, 0x52, 0x54, 0, 0, 0, PEER]);
     let peer_g: Ipv6Addr = "2001:db8:1::9".parse().unwrap();
     b.flush();
-    send6(&mut b, peer_g, ipv6::solicited_node(&global), &icmp6(peer_g, ipv6::solicited_node(&global), icmp::V6_NEIGHBOR_SOLICIT, [0; 4], &ns));
+    send6(
+        &mut b,
+        peer_g,
+        ipv6::solicited_node(&global),
+        &icmp6(peer_g, ipv6::solicited_node(&global), icmp::V6_NEIGHBOR_SOLICIT, [0; 4], &ns),
+    );
     let o = icmp6_out(&b.flush());
     let na = o.iter().find(|m| m.2 == icmp::V6_NEIGHBOR_ADVERT).unwrap();
     assert_eq!((na.0, na.1), (global, peer_g));
@@ -251,7 +283,18 @@ fn dad_detects_a_duplicate() {
     b.h.stack.poll(b.now);
     b.flush();
     let target = ll(1);
-    send6(&mut b, Ipv6Addr::UNSPECIFIED, ipv6::solicited_node(&target), &icmp6(Ipv6Addr::UNSPECIFIED, ipv6::solicited_node(&target), icmp::V6_NEIGHBOR_SOLICIT, [0; 4], &target.octets()));
+    send6(
+        &mut b,
+        Ipv6Addr::UNSPECIFIED,
+        ipv6::solicited_node(&target),
+        &icmp6(
+            Ipv6Addr::UNSPECIFIED,
+            ipv6::solicited_node(&target),
+            icmp::V6_NEIGHBOR_SOLICIT,
+            [0; 4],
+            &target.octets(),
+        ),
+    );
     let c = b.h.stack.iface().clone();
     assert!(c.ipv6.iter().any(|a| a.addr == target && a.state == AddrState::Duplicate));
     b.advance(Duration::from_secs(2));
@@ -260,7 +303,13 @@ fn dad_detects_a_duplicate() {
     let mut b = Bench::new(|c| c.ipv6 = true);
     b.h.stack.poll(b.now);
     b.flush();
-    let m = icmp6(Ipv6Addr::UNSPECIFIED, ipv6::solicited_node(&target), icmp::V6_NEIGHBOR_SOLICIT, [0; 4], &target.octets());
+    let m = icmp6(
+        Ipv6Addr::UNSPECIFIED,
+        ipv6::solicited_node(&target),
+        icmp::V6_NEIGHBOR_SOLICIT,
+        [0; 4],
+        &target.octets(),
+    );
     let pk = ipv6_packet(Ipv6Addr::UNSPECIFIED, ipv6::solicited_node(&target), ipv6::NEXT_ICMPV6, 64, &m);
     b.frame(&eth(Mac::ipv6_multicast(&ipv6::solicited_node(&target)), mac(PEER), ethernet::ETHERTYPE_IPV6, &pk));
     assert!(b.h.stack.iface().is_tentative_v6(&target));

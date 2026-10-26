@@ -19,7 +19,13 @@ pub struct Quota {
 
 impl Quota {
     pub const fn new(max_bytes: usize, max_sockets: usize) -> Quota {
-        Quota { max_bytes, max_sockets, bytes: AtomicUsize::new(0), sockets: AtomicUsize::new(0), refused: AtomicU64::new(0) }
+        Quota {
+            max_bytes,
+            max_sockets,
+            bytes: AtomicUsize::new(0),
+            sockets: AtomicUsize::new(0),
+            refused: AtomicU64::new(0),
+        }
     }
     pub fn bytes(&self) -> usize {
         self.bytes.load(Ordering::Relaxed)
@@ -267,11 +273,11 @@ impl Assembler {
         self.ranges.iter().copied().find(|&(s, e)| s <= off && off < e)
     }
 
-    /// Records `[off, off + len)`; returns how far the in-order point advances. Fails (recording nothing) when
+    /// Records `[off, off + len)`; returns how far the in-order point advances, or `None` (recording nothing) when
     /// a new range would exceed `max` ranges.
-    pub fn add(&mut self, off: u32, len: u32, max: usize) -> Result<u32, ()> {
+    pub fn add(&mut self, off: u32, len: u32, max: usize) -> Option<u32> {
         if len == 0 {
-            return Ok(0);
+            return Some(0);
         }
         let (mut s, mut e) = (off, off + len);
         let first = self.ranges.partition_point(|&(_, re)| re < s);
@@ -282,7 +288,7 @@ impl Assembler {
             last += 1;
         }
         if first == last && s != 0 && self.ranges.len() >= max {
-            return Err(());
+            return None;
         }
         self.ranges.splice(first..last, core::iter::once((s, e)));
         if self.ranges[0].0 == 0 {
@@ -291,9 +297,9 @@ impl Assembler {
                 r.0 -= adv;
                 r.1 -= adv;
             }
-            return Ok(adv);
+            return Some(adv);
         }
-        Ok(0)
+        Some(0)
     }
 }
 
@@ -373,15 +379,15 @@ mod tests {
     #[test]
     fn assembler_merges_and_caps() {
         let mut a = Assembler::default();
-        assert_eq!(a.add(10, 5, 4), Ok(0));
-        assert_eq!(a.add(20, 5, 4), Ok(0));
-        assert_eq!(a.add(14, 6, 4), Ok(0));
+        assert_eq!(a.add(10, 5, 4), Some(0));
+        assert_eq!(a.add(20, 5, 4), Some(0));
+        assert_eq!(a.add(14, 6, 4), Some(0));
         assert_eq!(a.ranges(), &[(10, 25)]);
-        assert_eq!(a.add(30, 1, 4), Ok(0));
-        assert_eq!(a.add(40, 1, 4), Ok(0));
-        assert_eq!(a.add(50, 1, 4), Ok(0));
-        assert_eq!(a.add(60, 1, 4), Err(()));
-        assert_eq!(a.add(0, 10, 4), Ok(25));
+        assert_eq!(a.add(30, 1, 4), Some(0));
+        assert_eq!(a.add(40, 1, 4), Some(0));
+        assert_eq!(a.add(50, 1, 4), Some(0));
+        assert_eq!(a.add(60, 1, 4), None);
+        assert_eq!(a.add(0, 10, 4), Some(25));
         assert_eq!(a.ranges(), &[(5, 6), (15, 16), (25, 26)]);
         assert!(a.contains(15, 1) && !a.contains(14, 2));
     }

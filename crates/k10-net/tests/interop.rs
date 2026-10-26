@@ -64,32 +64,25 @@ impl Net {
     fn step(&mut self) {
         let now = self.now();
         let next = self.host.stack.poll_at(now).unwrap_or(Instant(now.0 + 20_000_000));
-        let wait = Duration::from_nanos(next.0.saturating_sub(now.0)).clamp(Duration::from_micros(50), Duration::from_millis(20));
+        let wait = Duration::from_nanos(next.0.saturating_sub(now.0))
+            .clamp(Duration::from_micros(50), Duration::from_millis(20));
         self.sock.set_read_timeout(Some(wait)).unwrap();
         let mut buf = [0u8; 2048];
-        let mut first = true;
-        loop {
-            match self.sock.recv_from(&mut buf) {
-                Ok((n, _)) => {
-                    let f = &buf[..n];
-                    self.c.rx += 1;
-                    if let Some((sack, flags)) = tcp_of(f) {
-                        self.c.sack_in += (sack > 0) as u64;
-                        self.c.rst_in += (flags & tcp::RST != 0) as u64;
-                        if self.drop_in > 0.0 && self.rng.f64() < self.drop_in {
-                            self.c.dropped_in += 1;
-                            continue;
-                        }
-                    }
-                    let now = self.now();
-                    self.host.stack.receive(now, f);
+        // Wait for the first frame, then take whatever else is queued.
+        while let Ok((n, _)) = self.sock.recv_from(&mut buf) {
+            self.sock.set_nonblocking(true).unwrap();
+            let f = &buf[..n];
+            self.c.rx += 1;
+            if let Some((sack, flags)) = tcp_of(f) {
+                self.c.sack_in += (sack > 0) as u64;
+                self.c.rst_in += (flags & tcp::RST != 0) as u64;
+                if self.drop_in > 0.0 && self.rng.f64() < self.drop_in {
+                    self.c.dropped_in += 1;
+                    continue;
                 }
-                Err(_) => break,
             }
-            if first {
-                first = false;
-                self.sock.set_nonblocking(true).unwrap();
-            }
+            let now = self.now();
+            self.host.stack.receive(now, f);
         }
         self.sock.set_nonblocking(false).unwrap();
         let mut out: Vec<Vec<u8>> = Vec::new();
@@ -127,7 +120,17 @@ impl Net {
 }
 
 /// Sends `len` bytes of `seed`'s stream (after `prefix`) while reading what comes back into `got`.
-fn stream(net: &mut Net, h: TcpHandle, prefix: &[u8], seed: u64, len: u64, got: &mut Vec<u8>, shut: bool, limit: Duration) {
+#[allow(clippy::too_many_arguments)]
+fn stream(
+    net: &mut Net,
+    h: TcpHandle,
+    prefix: &[u8],
+    seed: u64,
+    len: u64,
+    got: &mut Vec<u8>,
+    shut: bool,
+    limit: Duration,
+) {
     let mut sent_prefix = 0;
     let mut off = 0u64;
     let mut shut_done = false;
@@ -180,7 +183,10 @@ fn bulk_to_linux(net: &mut Net, to: IpAddr, len: u64, loss: f64) {
     stream(net, h, &hdr, 99, len, &mut reply, true, Duration::from_secs(120));
     assert_eq!(String::from_utf8_lossy(&reply), format!("OK {len}\n"));
     let i = net.host.stack.tcp_info(h).unwrap();
-    println!("to {to}: {len} bytes, {loss} loss: {} retransmits, {} recoveries, {} timeouts, {} TLP", i.retransmits, i.fast_recoveries, i.timeouts, i.tlp_probes);
+    println!(
+        "to {to}: {len} bytes, {loss} loss: {} retransmits, {} recoveries, {} timeouts, {} TLP",
+        i.retransmits, i.fast_recoveries, i.timeouts, i.tlp_probes
+    );
     if loss > 0.0 {
         assert!(i.retransmits > 0 && i.fast_recoveries > 0, "{i:?}");
     }

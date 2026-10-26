@@ -100,7 +100,14 @@ impl Stack {
     }
 
     /// Sends with an explicit source address (`0.0.0.0` only towards a broadcast, as a DHCP client does).
-    pub fn udp_send_from(&mut self, now: Instant, h: UdpHandle, src: IpAddr, dst: SocketAddr, data: &[u8]) -> Result<(), Error> {
+    pub fn udp_send_from(
+        &mut self,
+        now: Instant,
+        h: UdpHandle,
+        src: IpAddr,
+        dst: SocketAddr,
+        data: &[u8],
+    ) -> Result<(), Error> {
         let b = self.udp_sock(h)?.binding.unwrap();
         let v6 = dst.is_ipv6();
         if src.is_ipv6() != v6 || dst.port() == 0 {
@@ -170,7 +177,8 @@ impl Stack {
             self.stats.rx_dropped += 1;
             return;
         };
-        let mut binding = if local || bcast { self.ports.udp_for(ViewId::NODE, dst, d.dst_port).copied() } else { None };
+        let mut binding =
+            if local || bcast { self.ports.udp_for(ViewId::NODE, dst, d.dst_port).copied() } else { None };
         if binding.is_none() && dst.is_ipv4() {
             binding = self.ports.udp_any_destination(ViewId::NODE, d.dst_port).copied();
         }
@@ -306,7 +314,14 @@ pub(crate) fn write_udp_frame(
         (IpAddr::V6(s), IpAddr::V6(d)) => {
             ipv6::emit(
                 ip,
-                &ipv6::Header { src: s, dst: d, next: ipv6::NEXT_UDP, hop_limit: hop, flow_label: 0, payload_len: ulen },
+                &ipv6::Header {
+                    src: s,
+                    dst: d,
+                    next: ipv6::NEXT_UDP,
+                    hop_limit: hop,
+                    flow_label: 0,
+                    payload_len: ulen,
+                },
             );
             (checksum::pseudo_v6(&s, &d, ipv6::NEXT_UDP, ulen), ipv6::HEADER_LEN)
         }

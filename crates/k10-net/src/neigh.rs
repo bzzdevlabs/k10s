@@ -175,7 +175,10 @@ impl Neighbors {
                     return (Vec::new(), false);
                 }
                 changed = true;
-                self.map.insert(ip, Entry { mac, state: if confirmed { reach } else { State::Stale }, pending: Vec::new() });
+                self.map.insert(
+                    ip,
+                    Entry { mac, state: if confirmed { reach } else { State::Stale }, pending: Vec::new() },
+                );
             }
         }
         for f in out.iter_mut() {

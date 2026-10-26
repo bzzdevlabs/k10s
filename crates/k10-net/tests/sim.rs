@@ -29,7 +29,14 @@ fn clean_transfer_and_close() {
 
 #[test]
 fn bidirectional_with_loss() {
-    let t = transfer(Spec { a_to_b: 3 << 20, b_to_a: 2 << 20, ab: lossy(0.02), ba: lossy(0.02), seed: 7, ..Default::default() });
+    let t = transfer(Spec {
+        a_to_b: 3 << 20,
+        b_to_a: 2 << 20,
+        ab: lossy(0.02),
+        ba: lossy(0.02),
+        seed: 7,
+        ..Default::default()
+    });
     let ia = t.sim.nodes[0].stack.tcp_info(t.a).unwrap();
     assert!(ia.retransmits > 0 && ia.fast_recoveries > 0, "{ia:?}");
 }
@@ -46,7 +53,8 @@ fn heavy_loss_reorder_duplicates() {
         rate_bps: 50_000_000,
         queue_bytes: 128 * 1024,
     };
-    let t = transfer(Spec { a_to_b: 2 << 20, b_to_a: 1 << 20, ab: link.clone(), ba: link, seed: 11, ..Default::default() });
+    let t =
+        transfer(Spec { a_to_b: 2 << 20, b_to_a: 1 << 20, ab: link.clone(), ba: link, seed: 11, ..Default::default() });
     let ia = t.sim.nodes[0].stack.tcp_info(t.a).unwrap();
     assert!(ia.dsacks > 0 || ia.retransmits > 0);
 }
@@ -61,7 +69,15 @@ fn newreno_without_sack_or_timestamps() {
 
 #[test]
 fn ipv6_transfer() {
-    let t = transfer(Spec { a_to_b: 1 << 20, b_to_a: 1 << 20, ab: lossy(0.01), ba: lossy(0.01), v6: true, seed: 5, ..Default::default() });
+    let t = transfer(Spec {
+        a_to_b: 1 << 20,
+        b_to_a: 1 << 20,
+        ab: lossy(0.01),
+        ba: lossy(0.01),
+        v6: true,
+        seed: 5,
+        ..Default::default()
+    });
     let (l, r) = t.sim.nodes[0].stack.tcp_endpoints(t.a).unwrap();
     assert!(l.is_ipv6() && r.is_ipv6());
 }
@@ -69,7 +85,8 @@ fn ipv6_transfer() {
 #[test]
 fn bandwidth_limited_link_is_filled() {
     // 100 Mbit/s, 20 ms RTT: the transfer should run close to the line rate after slow start.
-    let link = Link { delay: Duration::from_millis(10), rate_bps: 100_000_000, queue_bytes: 512 * 1024, ..Default::default() };
+    let link =
+        Link { delay: Duration::from_millis(10), rate_bps: 100_000_000, queue_bytes: 512 * 1024, ..Default::default() };
     let n = 32u64 << 20;
     let t = transfer(Spec { a_to_b: n, ab: link.clone(), ba: link, ..Default::default() });
     let secs = (t.done_at.unwrap().0 - 1_000_000) as f64 / 1e9;

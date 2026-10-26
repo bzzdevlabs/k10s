@@ -126,11 +126,14 @@ impl Endpoint for Stack {
     }
 }
 
+type InFlight = (Instant, u64, usize, Vec<u8>);
+
 pub struct Sim<E: Endpoint> {
     pub now: Instant,
     pub nodes: [E; 2],
     links: [LinkState; 2],
-    heap: BinaryHeap<Reverse<(Instant, u64, usize, Vec<u8>)>>,
+    /// (arrival, tie-break, destination node, frame).
+    heap: BinaryHeap<Reverse<InFlight>>,
     seq: u64,
     rng: Rng,
     out: Vec<Vec<u8>>,
@@ -138,7 +141,12 @@ pub struct Sim<E: Endpoint> {
 
 impl<E: Endpoint> Sim<E> {
     pub fn new(a: E, b: E, ab: Link, ba: Link, seed: u64) -> Sim<E> {
-        let ls = |cfg| LinkState { cfg, busy_until: Instant::ZERO, last_arrival: Instant::ZERO, stats: LinkStats::default() };
+        let ls = |cfg| LinkState {
+            cfg,
+            busy_until: Instant::ZERO,
+            last_arrival: Instant::ZERO,
+            stats: LinkStats::default(),
+        };
         Sim {
             now: Instant::from_millis(1),
             nodes: [a, b],

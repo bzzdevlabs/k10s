@@ -139,12 +139,12 @@ impl Endpoint for Smol {
 }
 
 struct Result {
+    /// Bytes delivered (all of them unless the virtual-time limit stopped the transfer).
     bytes: u64,
+    done: bool,
     virtual_s: f64,
     cpu: Duration,
     retransmits: Option<u64>,
-    split: Option<(Duration, Duration, Duration)>,
-    frames: (u64, u64),
 }
 
 impl Result {
@@ -157,11 +157,12 @@ impl Result {
             mbps,
             ns,
             8.0 / ns,
-            self.retransmits.map_or(String::new(), |r| format!("{r} rtx"))
+            match (self.done, self.retransmits) {
+                (false, _) => "(stopped at the time limit)".to_string(),
+                (true, Some(r)) => format!("{r} rtx"),
+                (true, None) => String::new(),
+            }
         );
-        if let Some((a, b, c)) = self.split {
-            println!("    sender {:?} receiver {:?} app {:?} frames {:?}", a, b, c, self.frames);
-        }
     }
 }
 
@@ -174,9 +175,19 @@ fn k10_bulk(link: &Link, bytes: u64, cc: k10_net::tcp::CcAlgo) -> Result {
     let a = Host::new(1, ca);
     let mut b = Host::new(2, cb);
     let l = b.listen(80, ListenerConfig { tcp, ..Default::default() });
-    let mut sim = Sim::new(Timed { e: a, spent: Duration::ZERO }, Timed { e: b, spent: Duration::ZERO }, link.clone(), link.clone(), 1);
+    let mut sim = Sim::new(
+        Timed { e: a, spent: Duration::ZERO },
+        Timed { e: b, spent: Duration::ZERO },
+        link.clone(),
+        link.clone(),
+        1,
+    );
     let start = sim.now;
-    let h = sim.nodes[0].e.stack.tcp_connect(start, ViewId::NODE, None, SocketAddr::new(IpAddr::V4(Host::ip(2)), 80), None).unwrap();
+    let h = sim.nodes[0]
+        .e
+        .stack
+        .tcp_connect(start, ViewId::NODE, None, SocketAddr::new(IpAddr::V4(Host::ip(2)), 80), None)
+        .unwrap();
     let p = pattern();
     let (mut sent, mut recv) = (0u64, 0u64);
     let mut hb = None;
@@ -221,15 +232,13 @@ fn k10_bulk(link: &Link, bytes: u64, cc: k10_net::tcp::CcAlgo) -> Result {
         app += t.elapsed();
         recv == bytes
     });
-    assert!(ok, "k10-net transfer stalled at {recv}");
     let retransmits = sim.nodes[0].e.stack.tcp_info(h).unwrap().retransmits;
     Result {
-        bytes,
+        bytes: recv,
+        done: ok,
         virtual_s: (sim.now.0 - start.0) as f64 / 1e9,
         cpu: sim.nodes[0].spent + sim.nodes[1].spent + app,
         retransmits: Some(retransmits),
-        split: Some((sim.nodes[0].spent, sim.nodes[1].spent, app)),
-        frames: (sim.link_stats(0).frames, sim.link_stats(1).frames),
     }
 }
 
@@ -237,7 +246,13 @@ fn smol_bulk(link: &Link, bytes: u64, cc: tcp::CongestionControl) -> Result {
     let a = Smol::new(1, cc);
     let mut b = Smol::new(2, cc);
     b.sock().listen(80).unwrap();
-    let mut sim = Sim::new(Timed { e: a, spent: Duration::ZERO }, Timed { e: b, spent: Duration::ZERO }, link.clone(), link.clone(), 1);
+    let mut sim = Sim::new(
+        Timed { e: a, spent: Duration::ZERO },
+        Timed { e: b, spent: Duration::ZERO },
+        link.clone(),
+        link.clone(),
+        1,
+    );
     let start = sim.now;
     {
         let n = &mut sim.nodes[0].e;
@@ -284,17 +299,51 @@ fn smol_bulk(link: &Link, bytes: u64, cc: tcp::CongestionControl) -> Result {
         app += t.elapsed();
         recv == bytes
     });
-    assert!(ok, "smoltcp transfer stalled at {recv}");
-    Result { bytes, virtual_s: (sim.now.0 - start.0) as f64 / 1e9, cpu: sim.nodes[0].spent + sim.nodes[1].spent + app, retransmits: None, split: Some((sim.nodes[0].spent, sim.nodes[1].spent, app)), frames: (sim.link_stats(0).frames, sim.link_stats(1).frames) }
+    Result {
+        bytes: recv,
+        done: ok,
+        virtual_s: (sim.now.0 - start.0) as f64 / 1e9,
+        cpu: sim.nodes[0].spent + sim.nodes[1].spent + app,
+        retransmits: None,
+    }
 }
 
 fn main() {
     let quick = std::env::args().any(|a| a == "quick");
     let mib = |n: u64| if quick { (n / 8).max(4) << 20 } else { n << 20 };
     let scenarios = [
-        ("lan", Link { delay: Duration::from_micros(50), rate_bps: 10_000_000_000, queue_bytes: 4 << 20, ..Default::default() }, mib(256)),
-        ("lan-1%", Link { loss: 0.01, delay: Duration::from_micros(50), rate_bps: 10_000_000_000, queue_bytes: 4 << 20, ..Default::default() }, mib(64)),
-        ("wan-0.1%", Link { loss: 0.001, delay: Duration::from_millis(10), rate_bps: 1_000_000_000, queue_bytes: 4 << 20, ..Default::default() }, mib(64)),
+        (
+            "lan",
+            Link {
+                delay: Duration::from_micros(50),
+                rate_bps: 10_000_000_000,
+                queue_bytes: 4 << 20,
+                ..Default::default()
+            },
+            mib(256),
+        ),
+        (
+            "lan-1%",
+            Link {
+                loss: 0.01,
+                delay: Duration::from_micros(50),
+                rate_bps: 10_000_000_000,
+                queue_bytes: 4 << 20,
+                ..Default::default()
+            },
+            mib(64),
+        ),
+        (
+            "wan-0.1%",
+            Link {
+                loss: 0.001,
+                delay: Duration::from_millis(10),
+                rate_bps: 1_000_000_000,
+                queue_bytes: 4 << 20,
+                ..Default::default()
+            },
+            mib(64),
+        ),
     ];
     for (name, link, bytes) in &scenarios {
         k10_bulk(link, *bytes, k10_net::tcp::CcAlgo::Cubic).print("k10-net cubic", name);

@@ -4,13 +4,11 @@ use core::net::{Ipv4Addr, Ipv6Addr};
 
 /// Adds `data` (as big-endian 16-bit words, odd length padded with zero) to the running sum `acc`.
 pub fn add(mut acc: u64, data: &[u8]) -> u64 {
-    let mut chunks = data.chunks_exact(8);
-    for c in &mut chunks {
-        let w = u64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
-        let (s, carry) = acc.overflowing_add(w);
+    let (chunks, rest) = data.as_chunks::<8>();
+    for c in chunks {
+        let (s, carry) = acc.overflowing_add(u64::from_be_bytes(*c));
         acc = s + carry as u64;
     }
-    let rest = chunks.remainder();
     let mut i = 0;
     while i + 1 < rest.len() {
         let (s, carry) = acc.overflowing_add(u16::from_be_bytes([rest[i], rest[i + 1]]) as u64);

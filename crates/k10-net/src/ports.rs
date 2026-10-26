@@ -270,11 +270,8 @@ impl Ports {
         if self.table.listeners.len() >= self.cfg.max_listeners {
             return Err(Error::TableFull);
         }
-        let port = if port == 0 {
-            self.random_port(|t, p| t.tcp_port_used(view, p)).ok_or(Error::NoPorts)?
-        } else {
-            port
-        };
+        let port =
+            if port == 0 { self.random_port(|t, p| t.tcp_port_used(view, p)).ok_or(Error::NoPorts)? } else { port };
         if self.table.listeners.iter().any(|l| l.view == view && l.port == port && overlaps(l.addr, addr)) {
             return Err(Error::AddrInUse);
         }
@@ -319,7 +316,8 @@ impl Ports {
         if self.table.udp.len() >= self.cfg.max_udp {
             return Err(Error::TableFull);
         }
-        let taken = |t: &PortTable, p: u16| t.udp.iter().any(|b| b.view == view && b.port == p && overlaps(b.addr, addr));
+        let taken =
+            |t: &PortTable, p: u16| t.udp.iter().any(|b| b.view == view && b.port == p && overlaps(b.addr, addr));
         let port = if port == 0 {
             self.random_port(taken).ok_or(Error::NoPorts)?
         } else {
@@ -380,7 +378,8 @@ mod tests {
 
     #[test]
     fn udp_ephemeral_ports_are_random_and_free() {
-        let mut p = Ports::new(PortsConfig { ephemeral_min: 50000, ephemeral_max: 50003, ..Default::default() }, &[2; 32]);
+        let mut p =
+            Ports::new(PortsConfig { ephemeral_min: 50000, ephemeral_max: 50003, ..Default::default() }, &[2; 32]);
         let mut got = Vec::new();
         for _ in 0..4 {
             got.push(p.bind_udp(ViewId::NODE, None, 0, 0, UdpOptions::default()).unwrap().port);
@@ -388,7 +387,8 @@ mod tests {
         got.sort();
         assert_eq!(got, [50000, 50001, 50002, 50003]);
         assert_eq!(p.bind_udp(ViewId::NODE, None, 0, 0, UdpOptions::default()).err(), Some(Error::NoPorts));
-        let b = p.bind_udp(ViewId::NODE, None, 68, 0, UdpOptions { any_destination: true, ..Default::default() }).unwrap();
+        let b =
+            p.bind_udp(ViewId::NODE, None, 68, 0, UdpOptions { any_destination: true, ..Default::default() }).unwrap();
         let t = p.snapshot();
         assert_eq!(t.udp_any_destination(ViewId::NODE, 68).unwrap().id, b.id);
         assert_eq!(t.udp_for(ViewId::NODE, "10.0.0.1".parse().unwrap(), 68).unwrap().id, b.id);

@@ -23,7 +23,14 @@ fn main() {
     }
     load_modules();
     configure();
-    for (port, f) in [(7001u16, echo as fn(TcpStream)), (7002, sink), (7003, source), (7004, reset), (7005, half_close), (7008, control)] {
+    for (port, f) in [
+        (7001u16, echo as fn(TcpStream)),
+        (7002, sink),
+        (7003, source),
+        (7004, reset),
+        (7005, half_close),
+        (7008, control),
+    ] {
         let l = TcpListener::bind(SocketAddr::from(([0u16; 8], port))).expect("bind");
         thread::spawn(move || {
             for s in l.incoming().flatten() {
@@ -45,7 +52,8 @@ fn main() {
 }
 
 fn load_modules() {
-    let mut mods: Vec<_> = std::fs::read_dir("/lib").map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+    let mut mods: Vec<_> =
+        std::fs::read_dir("/lib").map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
     mods.sort();
     for m in mods {
         let f = std::fs::File::open(&m).expect("module");
@@ -228,7 +236,9 @@ fn control(s: TcpStream) {
 }
 
 fn connect_back(addr: &str, port: &str, seed: &str, len: &str) -> String {
-    let (Ok(ip), Ok(port), Ok(seed), Ok(len)) = (addr.parse::<std::net::IpAddr>(), port.parse::<u16>(), seed.parse::<u64>(), len.parse::<u64>()) else {
+    let (Ok(ip), Ok(port), Ok(seed), Ok(len)) =
+        (addr.parse::<std::net::IpAddr>(), port.parse::<u16>(), seed.parse::<u64>(), len.parse::<u64>())
+    else {
         return "ERR\n".into();
     };
     let mut s = match TcpStream::connect((ip, port)) {

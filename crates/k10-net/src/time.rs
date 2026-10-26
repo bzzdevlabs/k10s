@@ -24,18 +24,19 @@ impl Instant {
     pub fn since(self, earlier: Instant) -> Duration {
         Duration::from_nanos(self.0.saturating_sub(earlier.0))
     }
-    pub fn add(self, d: Duration) -> Instant {
-        Instant(self.0.saturating_add(d.as_nanos().min(u64::MAX as u128) as u64))
-    }
-    pub fn sub(self, d: Duration) -> Instant {
-        Instant(self.0.saturating_sub(d.as_nanos().min(u64::MAX as u128) as u64))
-    }
 }
 
 impl core::ops::Add<Duration> for Instant {
     type Output = Instant;
     fn add(self, d: Duration) -> Instant {
-        Instant::add(self, d)
+        Instant(self.0.saturating_add(d.as_nanos().min(u64::MAX as u128) as u64))
+    }
+}
+
+impl core::ops::Sub<Duration> for Instant {
+    type Output = Instant;
+    fn sub(self, d: Duration) -> Instant {
+        Instant(self.0.saturating_sub(d.as_nanos().min(u64::MAX as u128) as u64))
     }
 }
 

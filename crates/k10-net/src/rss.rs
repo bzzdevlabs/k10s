@@ -117,8 +117,8 @@ impl Rss {
             },
             _ => return 0,
         };
-        let ports = (!frag && l4.len() >= 4)
-            .then(|| (u16::from_be_bytes([l4[0], l4[1]]), u16::from_be_bytes([l4[2], l4[3]])));
+        let ports =
+            (!frag && l4.len() >= 4).then(|| (u16::from_be_bytes([l4[0], l4[1]]), u16::from_be_bytes([l4[2], l4[3]])));
         match (proto, ports) {
             (6, Some((s, d))) => self.tcp_queue(src, dst, s, d),
             (17, Some((s, d))) => self.udp_queue(src, dst, s, d),

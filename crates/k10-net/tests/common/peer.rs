@@ -47,7 +47,10 @@ pub fn parse_out(f: &[u8]) -> Out {
             let p = ipv4::parse(e.payload).unwrap();
             match p.proto {
                 ipv4::PROTO_TCP => {
-                    assert!(checksum::valid(checksum::add(checksum::pseudo_v4(p.src, p.dst, 6, p.payload.len()), p.payload)));
+                    assert!(checksum::valid(checksum::add(
+                        checksum::pseudo_v4(p.src, p.dst, 6, p.payload.len()),
+                        p.payload
+                    )));
                     let s = tcp::parse(p.payload).unwrap();
                     Out::Tcp(seg(IpAddr::V4(p.src), IpAddr::V4(p.dst), &s))
                 }
@@ -74,7 +77,10 @@ pub fn parse_out(f: &[u8]) -> Out {
             let p = ipv6::parse(e.payload).unwrap();
             match p.next {
                 ipv6::NEXT_TCP => {
-                    assert!(checksum::valid(checksum::add(checksum::pseudo_v6(&p.src, &p.dst, 6, p.payload.len()), p.payload)));
+                    assert!(checksum::valid(checksum::add(
+                        checksum::pseudo_v6(&p.src, &p.dst, 6, p.payload.len()),
+                        p.payload
+                    )));
                     Out::Tcp(seg(IpAddr::V6(p.src), IpAddr::V6(p.dst), &tcp::parse(p.payload).unwrap()))
                 }
                 ipv6::NEXT_ICMPV6 => {
@@ -226,7 +232,8 @@ impl Bench {
         for x in &o {
             if let Out::Arp(a) = x {
                 if a.op == ethernet::ARP_REQUEST && a.tpa == Host::ip(PEER) {
-                    let r = ethernet::Arp { op: ethernet::ARP_REPLY, sha: mac(PEER), spa: a.tpa, tha: a.sha, tpa: a.spa };
+                    let r =
+                        ethernet::Arp { op: ethernet::ARP_REPLY, sha: mac(PEER), spa: a.tpa, tha: a.sha, tpa: a.spa };
                     let mut p = vec![0u8; ethernet::ARP_LEN];
                     ethernet::emit_arp(&mut p, &r);
                     self.frame(&eth(a.sha, mac(PEER), ethernet::ETHERTYPE_ARP, &p));

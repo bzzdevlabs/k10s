@@ -3,7 +3,9 @@
 //! MLDv2 reports for the solicited-node groups (RFC 3810), echo replies and packet-too-big. Router
 //! advertisements and DAD run on the control instance (queue 0); the others forward them there.
 
-use crate::iface::{prefix_match, Addr6, AddrState, Origin, Prefix6, Router6, MAX_ADDRS6, MAX_DNS6, MAX_PREFIXES6, MAX_ROUTERS6};
+use crate::iface::{
+    prefix_match, Addr6, AddrState, Origin, Prefix6, Router6, MAX_ADDRS6, MAX_DNS6, MAX_PREFIXES6, MAX_ROUTERS6,
+};
 use crate::stack::{Event, Stack};
 use crate::time::{earliest, Instant};
 use crate::wire::{checksum, ethernet, icmp, ipv6, Mac};
@@ -35,12 +37,27 @@ impl Stack {
         self.start_dad(now, addr, prefix_len, Origin::Static, None, None);
     }
 
-    fn start_dad(&mut self, now: Instant, addr: Ipv6Addr, prefix_len: u8, origin: Origin, valid: Option<Instant>, pref: Option<Instant>) {
+    fn start_dad(
+        &mut self,
+        now: Instant,
+        addr: Ipv6Addr,
+        prefix_len: u8,
+        origin: Origin,
+        valid: Option<Instant>,
+        pref: Option<Instant>,
+    ) {
         let mut c = (**self.iface()).clone();
         if c.ipv6.len() >= MAX_ADDRS6 || c.ipv6.iter().any(|a| a.addr == addr) {
             return;
         }
-        c.ipv6.push(Addr6 { addr, prefix_len, state: AddrState::Tentative, origin, valid_until: valid, preferred_until: pref });
+        c.ipv6.push(Addr6 {
+            addr,
+            prefix_len,
+            state: AddrState::Tentative,
+            origin,
+            valid_until: valid,
+            preferred_until: pref,
+        });
         let retrans = c.retrans_timer;
         self.publish_iface(c);
         self.slaac.dad.push((addr, now + retrans));
@@ -148,7 +165,11 @@ impl Stack {
         let Some(m) = icmp::parse(p.payload) else { return };
         let nd = matches!(
             m.ty,
-            icmp::V6_ROUTER_SOLICIT | icmp::V6_ROUTER_ADVERT | icmp::V6_NEIGHBOR_SOLICIT | icmp::V6_NEIGHBOR_ADVERT | icmp::V6_REDIRECT
+            icmp::V6_ROUTER_SOLICIT
+                | icmp::V6_ROUTER_ADVERT
+                | icmp::V6_NEIGHBOR_SOLICIT
+                | icmp::V6_NEIGHBOR_ADVERT
+                | icmp::V6_REDIRECT
         );
         if nd && (p.hop_limit != 255 || m.code != 0 || frame.is_none()) {
             return;
@@ -252,7 +273,15 @@ impl Stack {
         } else {
             (p.src, opts.source_lla.unwrap_or(src_mac), icmp::NA_SOLICITED | icmp::NA_OVERRIDE)
         };
-        self.send_nd(dst_mac, target, dst, icmp::V6_NEIGHBOR_ADVERT, [flags, 0, 0, 0], Some(target), icmp::OPT_TARGET_LLA);
+        self.send_nd(
+            dst_mac,
+            target,
+            dst,
+            icmp::V6_NEIGHBOR_ADVERT,
+            [flags, 0, 0, 0],
+            Some(target),
+            icmp::OPT_TARGET_LLA,
+        );
     }
 
     fn rx_na(&mut self, now: Instant, p: &ipv6::Packet, m: &icmp::Message, frame: &[u8]) {
@@ -344,7 +373,9 @@ impl Stack {
                         a.state = AddrState::Preferred;
                     }
                 }
-                None if pi.valid_s > 0 && prefix_match(&addr, &pi.prefix, 64) => dad.push((addr, secs(now, pi.valid_s), pref)),
+                None if pi.valid_s > 0 && prefix_match(&addr, &pi.prefix, 64) => {
+                    dad.push((addr, secs(now, pi.valid_s), pref))
+                }
                 None => {}
             }
         }
@@ -397,7 +428,16 @@ impl Stack {
     /// A neighbor-discovery message: optional target address, then our link-layer address option (omitted when
     /// the source is unspecified).
     #[allow(clippy::too_many_arguments)]
-    fn send_nd(&mut self, dst_mac: Mac, src: Ipv6Addr, dst: Ipv6Addr, ty: u8, rest: [u8; 4], target: Option<Ipv6Addr>, lla: u8) {
+    fn send_nd(
+        &mut self,
+        dst_mac: Mac,
+        src: Ipv6Addr,
+        dst: Ipv6Addr,
+        ty: u8,
+        rest: [u8; 4],
+        target: Option<Ipv6Addr>,
+        lla: u8,
+    ) {
         let lla_len = if src.is_unspecified() { 0 } else { 8 };
         let body = target.map_or(0, |_| 16) + lla_len;
         let len = ethernet::HEADER_LEN + ipv6::HEADER_LEN + 8 + body;
@@ -449,7 +489,14 @@ impl Stack {
         ethernet::emit(&mut f, Mac::ipv6_multicast(&dst), c.mac, ethernet::ETHERTYPE_IPV6);
         ipv6::emit(
             &mut f[ethernet::HEADER_LEN..],
-            &ipv6::Header { src, dst, next: ipv6::NEXT_HOP_BY_HOP, hop_limit: 1, flow_label: 0, payload_len: 8 + mld_len },
+            &ipv6::Header {
+                src,
+                dst,
+                next: ipv6::NEXT_HOP_BY_HOP,
+                hop_limit: 1,
+                flow_label: 0,
+                payload_len: 8 + mld_len,
+            },
         );
         let h = ethernet::HEADER_LEN + ipv6::HEADER_LEN;
         // Hop-by-hop: router alert (MLD), then PadN.

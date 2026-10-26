@@ -73,7 +73,10 @@ fn pump(stack: &mut k10_net::Stack, now: Instant, h: TcpHandle, side: &mut Side,
             Ok(n) => side.sent += n as u64,
         }
     }
-    if side.sent == total && !side.shut && stack.tcp_state(h).is_ok_and(|s| s == TcpState::Established || s == TcpState::CloseWait) {
+    if side.sent == total
+        && !side.shut
+        && stack.tcp_state(h).is_ok_and(|s| s == TcpState::Established || s == TcpState::CloseWait)
+    {
         stack.tcp_shutdown(now, h).unwrap();
         side.shut = true;
     }
@@ -138,7 +141,13 @@ pub fn transfer(spec: Spec) -> Transfer {
     });
     t.b = hb;
     t.sides = sides;
-    assert!(ok, "transfer did not finish: {:?}, a {:?}, b {:?}", sides, t.sim.nodes[0].stack.tcp_info(ha), hb.map(|h| t.sim.nodes[1].stack.tcp_info(h)));
+    assert!(
+        ok,
+        "transfer did not finish: {:?}, a {:?}, b {:?}",
+        sides,
+        t.sim.nodes[0].stack.tcp_info(ha),
+        hb.map(|h| t.sim.nodes[1].stack.tcp_info(h))
+    );
     assert_eq!(sides[1].received, n_ab);
     assert_eq!(sides[0].received, n_ba);
     t.done_at = Some(t.sim.now);

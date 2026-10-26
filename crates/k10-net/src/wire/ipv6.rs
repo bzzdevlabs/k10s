@@ -83,8 +83,16 @@ fn upper_min(next: u8) -> Option<usize> {
     }
 }
 
+/// Upper protocol, offset of its data, and the fragment header (offset, fields) when one was met.
+type Walked = (u8, usize, Option<(usize, Fragment)>);
+
 /// Walks extension headers starting at `next` over `b`; returns (upper protocol, offset of its data).
-fn walk(mut next: u8, b: &[u8], mut count: usize, first: bool) -> Result<(u8, usize, Option<(usize, Fragment)>), Error> {
+fn walk(
+    mut next: u8,
+    b: &[u8],
+    mut count: usize,
+    first: bool,
+) -> Result<Walked, Error> {
     let mut off = 0;
     loop {
         match next {

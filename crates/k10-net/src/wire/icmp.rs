@@ -160,11 +160,11 @@ pub fn parse_nd_options(mut b: &[u8]) -> Option<NdOptions> {
                     prefix: Ipv6Addr::from(<[u8; 16]>::try_from(&v[16..32]).ok()?),
                 });
             }
-            OPT_RDNSS if len >= 24 && (len - 8) % 16 == 0 => {
+            OPT_RDNSS if len >= 24 && (len - 8).is_multiple_of(16) => {
                 let life = u32::from_be_bytes([v[4], v[5], v[6], v[7]]);
                 let mut servers = heaplessish::Vec4::default();
-                for s in v[8..].chunks_exact(16) {
-                    servers.push(Ipv6Addr::from(<[u8; 16]>::try_from(s).ok()?));
+                for s in v[8..].as_chunks::<16>().0 {
+                    servers.push(Ipv6Addr::from(*s));
                 }
                 o.rdnss = Some((life, servers));
             }

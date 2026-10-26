@@ -22,9 +22,7 @@ pub struct Secrets {
 
 impl Secrets {
     pub fn new(node_secret: &[u8; 32]) -> Secrets {
-        let k = Key::from_bytes(&node_secret[..16].try_into().unwrap())
-            .derive(&node_secret[16..])
-            .derive(b"k10-net");
+        let k = Key::from_bytes(&node_secret[..16].try_into().unwrap()).derive(&node_secret[16..]).derive(b"k10-net");
         Secrets {
             isn: k.derive(b"isn"),
             ts: k.derive(b"ts"),

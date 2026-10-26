@@ -124,8 +124,8 @@ pub fn parse_options(mut b: &[u8]) -> Options {
             (2, 4) => o.mss = Some(u16::from_be_bytes([v[0], v[1]])),
             (3, 3) => o.wscale = Some(v[0].min(MAX_WSCALE)),
             (4, 2) => o.sack_perm = true,
-            (5, l) if l >= 10 && (l - 2) % 8 == 0 && l <= 34 => {
-                for (k, blk) in v.chunks_exact(8).enumerate() {
+            (5, l) if l >= 10 && (l - 2).is_multiple_of(8) && l <= 34 => {
+                for (k, blk) in v.as_chunks::<8>().0.iter().enumerate() {
                     o.sack[k] = (
                         u32::from_be_bytes([blk[0], blk[1], blk[2], blk[3]]),
                         u32::from_be_bytes([blk[4], blk[5], blk[6], blk[7]]),
@@ -134,10 +134,8 @@ pub fn parse_options(mut b: &[u8]) -> Options {
                 o.sack_len = ((l - 2) / 8) as u8;
             }
             (8, 10) => {
-                o.ts = Some((
-                    u32::from_be_bytes([v[0], v[1], v[2], v[3]]),
-                    u32::from_be_bytes([v[4], v[5], v[6], v[7]]),
-                ))
+                o.ts =
+                    Some((u32::from_be_bytes([v[0], v[1], v[2], v[3]]), u32::from_be_bytes([v[4], v[5], v[6], v[7]])))
             }
             _ => {}
         }

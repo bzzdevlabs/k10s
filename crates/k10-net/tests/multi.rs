@@ -32,7 +32,10 @@ fn pump(m: &mut Multi, now: k10_net::Instant, h: TcpHandle, f: &mut Flow, total:
             _ => break,
         }
     }
-    if f.sent == total && !f.shut && s.tcp_state(h).is_ok_and(|st| st == TcpState::Established || st == TcpState::CloseWait) {
+    if f.sent == total
+        && !f.shut
+        && s.tcp_state(h).is_ok_and(|st| st == TcpState::Established || st == TcpState::CloseWait)
+    {
         s.tcp_shutdown(now, h).unwrap();
         f.shut = true;
     }
@@ -83,7 +86,9 @@ fn many_connections(client_queues: u16, server_queues: u16, conns: usize, bytes:
         for (&port, (h, f)) in server.iter_mut() {
             pump(&mut s.nodes[1], now, *h, f, bytes, port as u64 + 1_000_000, port as u64);
         }
-        client.values().all(|(_, f)| f.eof && f.recv == bytes) && server.len() == conns && server.values().all(|(_, f)| f.eof && f.recv == bytes)
+        client.values().all(|(_, f)| f.eof && f.recv == bytes)
+            && server.len() == conns
+            && server.values().all(|(_, f)| f.eof && f.recv == bytes)
     });
     assert!(ok, "transfers did not finish");
     (sim, client.values().map(|(h, _)| *h).collect())

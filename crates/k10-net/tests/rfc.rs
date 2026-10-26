@@ -149,7 +149,8 @@ fn out_of_order_data_is_sacked_and_duplicates_dsacked() {
 #[test]
 fn delayed_ack_every_second_segment_or_timer() {
     let mut b = Bench::new(|c| c.tcp.quickack = 0);
-    let l = listen(&mut b, ListenerConfig { tcp: TcpConfig { quickack: 0, ..Default::default() }, ..Default::default() });
+    let l =
+        listen(&mut b, ListenerConfig { tcp: TcpConfig { quickack: 0, ..Default::default() }, ..Default::default() });
     let mut c = open(&mut b, l, 5000, None);
     b.tcp(data_hdr(&c, 5000, ACK), &[0u8; 1460]);
     c.pseq += 1460;

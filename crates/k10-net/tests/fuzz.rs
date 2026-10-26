@@ -152,7 +152,7 @@ fn assembler_matches_a_bitmap() {
             let len = r.below(120) as u32 + 1;
             let before = a.clone();
             match a.add(off, len, 8) {
-                Ok(adv) => {
+                Some(adv) => {
                     for i in off..off + len {
                         have[base + i as usize] = true;
                     }
@@ -163,7 +163,7 @@ fn assembler_matches_a_bitmap() {
                     assert_eq!(adv as usize, contiguous);
                     base += contiguous;
                 }
-                Err(()) => {
+                None => {
                     assert_eq!(before.ranges(), a.ranges(), "a refused add changes nothing");
                     assert!(a.ranges().len() >= 8);
                 }
@@ -239,16 +239,29 @@ fn corpus(b: &mut Bench) -> Vec<Vec<u8>> {
     let me4 = IpAddr::V4(Host::ip(1));
     let mut v = Vec::new();
     let mut arp = vec![0u8; 28];
-    ethernet::emit_arp(&mut arp, &ethernet::Arp { op: 1, sha: mac(PEER), spa: Host::ip(PEER), tha: Mac::ZERO, tpa: Host::ip(1) });
+    ethernet::emit_arp(
+        &mut arp,
+        &ethernet::Arp { op: 1, sha: mac(PEER), spa: Host::ip(PEER), tha: Mac::ZERO, tpa: Host::ip(1) },
+    );
     v.push(eth(Mac::BROADCAST, mac(PEER), ethernet::ETHERTYPE_ARP, &arp));
     let mut ping = vec![0u8; 16];
     icmp::emit_header(&mut ping, 8, 0, [0, 1, 0, 1]);
     icmp::finish_v4(&mut ping);
     v.push(eth(mac(1), mac(PEER), 0x0800, &ipv4_packet(Host::ip(PEER), Host::ip(1), 1, &ping)));
-    v.push(eth(mac(1), mac(PEER), 0x0800, &ipv4_packet(Host::ip(PEER), Host::ip(1), 17, &udp_bytes(p4, me4, 4000, 53, b"q"))));
+    v.push(eth(
+        mac(1),
+        mac(PEER),
+        0x0800,
+        &ipv4_packet(Host::ip(PEER), Host::ip(1), 17, &udp_bytes(p4, me4, 4000, 53, b"q")),
+    ));
     for (flags, data) in [(SYN, &b""[..]), (ACK, b"data"), (ACK | FIN, b""), (RST, b""), (ACK | PSH, b"more")] {
         let h = Header { opts: syn_opts(Some(5)), ..hdr(5000, 80, 1000, 1, flags, 1000) };
-        v.push(eth(mac(1), mac(PEER), 0x0800, &ipv4_packet(Host::ip(PEER), Host::ip(1), 6, &tcp_bytes(p4, me4, &h, data))));
+        v.push(eth(
+            mac(1),
+            mac(PEER),
+            0x0800,
+            &ipv4_packet(Host::ip(PEER), Host::ip(1), 6, &tcp_bytes(p4, me4, &h, data)),
+        ));
     }
     let ll9: Ipv6Addr = "fe80::5054:ff:fe00:9".parse().unwrap();
     let ll1 = b.h.stack.iface().link_local();
@@ -268,10 +281,21 @@ fn corpus(b: &mut Bench) -> Vec<Vec<u8>> {
     ra[24..28].copy_from_slice(&600u32.to_be_bytes());
     ra[32..48].copy_from_slice(&"2001:db8::".parse::<Ipv6Addr>().unwrap().octets());
     icmp::finish_v6(&mut ra, &ll9, &ipv6::ALL_NODES);
-    v.push(eth(Mac::ipv6_multicast(&ipv6::ALL_NODES), mac(PEER), 0x86dd, &ipv6_packet(ll9, ipv6::ALL_NODES, 58, 255, &ra)));
+    v.push(eth(
+        Mac::ipv6_multicast(&ipv6::ALL_NODES),
+        mac(PEER),
+        0x86dd,
+        &ipv6_packet(ll9, ipv6::ALL_NODES, 58, 255, &ra),
+    ));
     let h6 = hdr(5000, 80, 9, 0, SYN, 1000);
     v.push(eth(mac(1), mac(PEER), 0x86dd, &ipv6_packet(ll9, ll1, 6, 64, &tcp_bytes(ll9.into(), ll1.into(), &h6, b""))));
-    let mut frag = ipv6_packet(ll9, ll1, 44, 64, &[17, 0, 0, 1, 0, 0, 0, 7, 0x0f, 0xa0, 0, 53, 0, 20, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    let mut frag = ipv6_packet(
+        ll9,
+        ll1,
+        44,
+        64,
+        &[17, 0, 0, 1, 0, 0, 0, 7, 0x0f, 0xa0, 0, 53, 0, 20, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8],
+    );
     frag[6] = 44;
     v.push(eth(mac(1), mac(PEER), 0x86dd, &frag));
     v
@@ -360,7 +384,12 @@ fn receive_path_survives_mutated_frames() {
             h.opts.ts = Some((7, sa.opts.ts.unwrap().0));
             h.opts.sack[0] = (sa.seq + 1, sa.seq + 50);
             h.opts.sack_len = 1;
-            base.push(eth(mac(1), mac(PEER), 0x0800, &ipv4_packet(Host::ip(PEER), Host::ip(1), 6, &tcp_bytes(p4, me4, &h, &[k as u8; 100]))));
+            base.push(eth(
+                mac(1),
+                mac(PEER),
+                0x0800,
+                &ipv4_packet(Host::ip(PEER), Host::ip(1), 6, &tcp_bytes(p4, me4, &h, &[k as u8; 100])),
+            ));
         }
     }
     let mut r = Rng(7);
@@ -419,5 +448,8 @@ fn receive_path_survives_mutated_frames() {
     assert_eq!(b.h.quota.bytes(), 0);
     // The mutations reached the deeper layers.
     let s = b.h.stack.stats;
-    assert!(s.tcp_rst_sent > 0 && s.syn_cookies_sent > 0 && s.udp_rx > 0 && b.h.stack.reassembly().stats.dropped > 0, "{s:?}");
+    assert!(
+        s.tcp_rst_sent > 0 && s.syn_cookies_sent > 0 && s.udp_rx > 0 && b.h.stack.reassembly().stats.dropped > 0,
+        "{s:?}"
+    );
 }

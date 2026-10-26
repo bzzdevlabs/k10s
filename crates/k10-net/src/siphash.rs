@@ -45,16 +45,15 @@ fn sip<const C: usize, const D: usize>(k: &Key, m: &[u8]) -> u64 {
         k.0 ^ 0x6c79_6765_6e65_7261,
         k.1 ^ 0x7465_6462_7974_6573,
     ];
-    let mut chunks = m.chunks_exact(8);
-    for c in &mut chunks {
-        let w = u64::from_le_bytes(c.try_into().unwrap());
+    let (chunks, rest) = m.as_chunks::<8>();
+    for c in chunks {
+        let w = u64::from_le_bytes(*c);
         v[3] ^= w;
         for _ in 0..C {
             round(&mut v);
         }
         v[0] ^= w;
     }
-    let rest = chunks.remainder();
     let mut last = [0u8; 8];
     last[..rest.len()].copy_from_slice(rest);
     let w = u64::from_le_bytes(last) | ((m.len() as u64 & 0xff) << 56);

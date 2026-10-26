@@ -18,7 +18,7 @@ namespaces are each judged on evidence, as everything else in k10s was).
 |---|---|
 | Running unmodified OCI images on the native kernel | **Feasible, and the largest effort in the project.** It is a Linux-compatible OS personality: user address spaces, demand paging, CoW fork, threads, signals, a VFS with a page cache, pipes, sockets, epoll, procfs, an ELF loader. Estimate 50–80 kLoC of kernel code (the kernel is 16.9 kLoC today) plus as much test code: 28 planned sessions (§14), 30–45 once the large ones split. Compatibility is reached image by image against a corpus, never "all of Docker Hub". Precedents bound the risk both ways: gVisor and Asterinas run real server software through a reimplemented Linux ABI; WSL1 shipped the same idea and was replaced by a real Linux kernel (WSL2) because of compatibility and file-system performance gaps. |
 | Execution model | **A (ring-3 processes with a Linux personality) for execution, C's migration half for tenants.** B (binary translation into SFI code) is rejected for unmodified images: §2. |
-| "A fraction of Kubernetes/Docker resources" | **Holds for platform overhead, not for the application's own memory.** Node fixed overhead (native kernel idle: ≈ 3–4 MiB vs 583 MiB for a kind node, REPORT.md §3), per-container overhead (no containerd/shim/pause/runc/veth/conntrack: target ≤ 256 KiB vs several MiB), cold start (target < 5 ms vs 0.3–5 s) and image bytes (file-level dedupe) can be 10–100× smaller. A JVM heap or a Python interpreter costs what it costs; file-level page-cache sharing helps density, nothing more. Network throughput is a risk: the native kernel's single smoltcp stack on CPU 0 (metal/README.md "Limitations") is below Linux for bulk traffic until the stack is per-CPU (§8.6). |
+| "A fraction of Kubernetes/Docker resources" | **Holds for platform overhead, not for the application's own memory.** Node fixed overhead (native kernel idle: ≈ 3–4 MiB vs 583 MiB for a kind node, REPORT.md §3), per-container overhead (no containerd/shim/pause/runc/veth/conntrack: target ≤ 256 KiB vs several MiB), cold start (target < 5 ms vs 0.3–5 s) and image bytes (file-level dedupe) can be 10–100× smaller. A JVM heap or a Python interpreter costs what it costs; file-level page-cache sharing helps density, nothing more. Network throughput is a risk: the native kernel's single smoltcp stack on CPU 0 (metal/README.md "Limitations") is below Linux for bulk traffic until the kernel runs the per-CPU `k10-net` (§8.6). |
 | Security | **Changes the threat model.** Native services run code our compiler emits (masked, no `rdtsc`, fuzzy clock). OCI tenants run arbitrary machine code: every transient-execution attack applies (Meltdown, Spectre v2/BHI, Retbleed/SRSO, MDS/TAA/RFDS/TSA, GDS) and a new 50–80 kLoC kernel surface is reachable from attacker code. Answers: a CPU-gated mitigation set (§5), a safe-Rust personality with fallible allocation and no panicking paths (§9), a syscall surface without mount/bpf/io_uring/ptrace/raw sockets/modules, differential testing and fuzzing (§13), and **one tenant per node by default** (DESIGN.md §1 already says a hardware boundary per tenant is the real answer; placement enforces it, §10.3). |
 | Stateless services (HTTP/TCP app tier, workers) | **First production milestone (M1).** Static and dynamic musl/glibc programs, shells and scripts, nginx, redis (fork for BGSAVE included), Python, Node.js, Go binaries. |
 | JVM | **M2.** Needs huge `PROT_NONE` reservations, `mprotect` storms, SIGSEGV-based safepoints with exact `ucontext`, `/sys/fs/cgroup` and `/proc` sizing files: all in the M1 subsystems, but conformance breadth takes a milestone of its own. |
@@ -220,7 +220,7 @@ EPOLLONESHOT, EPOLLEXCLUSIVE), poll and select.
 ### 4.9 Code size and boot cost
 Estimated additions to the native kernel: address spaces, entry and mitigations 6–9 kLoC; MM and page cache 8–12;
 scheduler/threads/signals/futex 5–8; VFS, image fs, scratch, procfs/sysfs/devfs 10–15; pipes/unix/epoll/events 4–6;
-sockets over smoltcp and the in-kernel service fabric 8–12; ELF/vDSO/exec 2–3; volumes 8–12 (M3). Kernel file
+socket views over `k10-net` and the in-kernel service fabric 8–12; ELF/vDSO/exec 2–3; volumes 8–12 (M3). Kernel file
 1.3 MB → an estimated 2.3–3.0 MB for an OCI-capable build. Builds without OCI (a cargo feature of `k10-metal`) stay
 byte-identical in behavior and size. Boot time is unchanged: nothing runs until a container is placed.
 
@@ -385,8 +385,8 @@ over the node's single stack.
 ### 8.2 Ingress
 - HTTP routes: `routes = ["api.example.com", "example.com/api"]` (host, optional path prefix) for image services
   (and native ones, as a bonus). The kernel parses the request head (it does today), picks the service, and for a
-  local replica **hands the connection itself** — the smoltcp socket plus the bytes already read — to one of the
-  container's accepted-connection queues for its `http` port. The container then owns the TCP connection: no proxy,
+  local replica **hands the connection itself** — the `k10-net` connection plus the bytes already read
+  (`tcp_hand_off`) — to one of the container's accepted-connection queues for its `http` port. The container then owns the TCP connection: no proxy,
   no copy, no second connection. The route decision is per connection (an HTTP/1.1 connection carrying another
   Host later stays with the same container; browsers keep separate connections per origin).
 - Remote replica: the node streams the connection to the hosting node over the peer link (§8.4), which hands it to
@@ -420,16 +420,20 @@ existing sealed links; no overlay network.
 
 ### 8.5 Egress
 `egress = ["0.0.0.0/0:443", "10.1.2.0/24:5432", "dns"]` (default: none). Outgoing connections to allowed
-destinations use the node's address and a port from the node's ephemeral range, through smoltcp; nothing else
-leaves. No NAT table: the stack is the node's.
+destinations use the node's address and a port from the node's ephemeral range, through the node's stack;
+nothing else leaves. No NAT table: the stack is the node's.
 
 ### 8.6 Network stack capacity
-smoltcp runs on CPU 0 with one NIC queue. Container socket calls from other CPUs become batched messages to CPU 0
-(as dispatch does today); that bounds throughput per node to what one core moves (expected a few Gbit/s, to be
-measured). Plan: multi-queue NICs (virtio-net MQ, igb/igc/e1000e RSS where available) with one stack instance per
-queue/CPU, flows steered by RSS hash, the listener and route tables shared read-mostly; the native services' ingress
-benefits as well. Until then, M1's network targets are per-request latency and small-response throughput, not bulk
-bandwidth.
+The node's stack is `k10-net` ([crates/k10-net](../../crates/k10-net/README.md)): sans-IO and `no_std`, one
+instance per NIC queue and CPU. A flow belongs to the instance its RSS hash names: in hardware on multi-queue NICs
+(virtio-net MQ, igb/igc/e1000e where available), by software steering on one queue otherwise. Outgoing connections
+take ephemeral ports that hash back to the connecting CPU. Listeners, UDP bindings and the interface configuration
+are read-mostly snapshots shared by all instances, and backlog and memory caps are atomics, so they hold node-wide.
+Container socket calls go to the instance that owns the connection; socket views and the ingress handoff are part
+of its API. In the simulator it costs about what smoltcp costs per byte and moves 4.6× more on a clean 10 Gbit/s
+link and 74× more at 1 % loss (SACK, RACK-TLP, CUBIC, PRR); it interoperates with Linux's stack (QEMU tests).
+`metal/` runs smoltcp on CPU 0 with one NIC queue (P4.4 replaces it); until then M1's network targets are
+per-request latency and small-response throughput, not bulk bandwidth.
 
 ## 9. Code structure and `unsafe`
 
@@ -683,10 +687,11 @@ equivalent in behavior until an OCI feature is enabled.
 - P3.3 Synthetic `/proc`, `/sys`, `/dev`, generated `/etc` files; busybox shell scripts and musl libc-test pass.
 
 **Phase 4 — network**
-- P4.1 Socket views over smoltcp (TCP/UDP, both families), container loopback, NETLINK_ROUTE subset.
+- P4.1 Socket views over `k10-net` (TCP/UDP, both families), container loopback, NETLINK_ROUTE subset.
 - P4.2 Ingress handoff (HTTP routes, SNI passthrough, public TCP ports), in-kernel streams, native ↔ image bridging.
 - P4.3 Peer-link streams, egress allowlists, stub resolver.
-- P4.4 Multi-queue NICs and per-CPU stacks (also for native services).
+- P4.4 `k10-net` in the kernel in place of smoltcp: one instance per CPU over multi-queue NICs (also for native
+  services), DHCP/DNS/SNTP clients on its UDP sockets.
 
 **Phase 5 — control plane** (crates/k10-mesh, crates/k10-node, CLI; parallel with Phases 1–4)
 - P5.1 Manifest format 4 (image services, routes, exact memory), `EXT_CAPS`, placement v3 (fixes the 32-bit item).
@@ -773,7 +778,7 @@ REPORT.md.
 ## 18. Open questions
 
 - The CPU gate's coverage of the fleet (which machines would need KPTI or retpolines first).
-- smoltcp's suitability for many long-lived container connections (memory per socket, SACK absence on loss); a
-  per-CPU stack may need TCP features smoltcp lacks.
+- `k10-net` uses no NIC offloads (checksums, segmentation): whether its simulated CPU cost per byte holds on
+  10 GbE hardware, or `NetDevice` needs per-frame offload status.
 - Whether stateful tenants accept M3's node-local volumes, or need replicated volumes (out of scope today).
 - io_uring: refused; libuv and some databases fall back today, a future runtime may not.

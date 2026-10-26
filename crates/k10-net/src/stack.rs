@@ -237,7 +237,13 @@ fn ip_header_len(v6: bool) -> usize {
 
 impl Stack {
     /// A new instance. `global` is the node-wide memory budget shared by every instance.
-    pub fn new(cfg: StackConfig, rss: Rss, iface: Arc<IfaceConfig>, ports: Arc<PortTable>, global: Arc<Quota>) -> Stack {
+    pub fn new(
+        cfg: StackConfig,
+        rss: Rss,
+        iface: Arc<IfaceConfig>,
+        ports: Arc<PortTable>,
+        global: Arc<Quota>,
+    ) -> Stack {
         let secrets = Secrets::new(&cfg.node_secret);
         let flows = FlowMap::new(secrets.flow, cfg.max_tcp);
         Stack {
@@ -338,7 +344,8 @@ impl Stack {
     pub fn set_ports(&mut self, ports: Arc<PortTable>) {
         self.ports = ports;
         // Connections waiting for a listener that is gone are reset.
-        let gone: Vec<ListenerId> = self.accept.keys().copied().filter(|id| self.ports.listener(*id).is_none()).collect();
+        let gone: Vec<ListenerId> =
+            self.accept.keys().copied().filter(|id| self.ports.listener(*id).is_none()).collect();
         for id in gone {
             if let Some(q) = self.accept.remove(&id) {
                 for slot in q {
@@ -353,7 +360,8 @@ impl Stack {
         }
         for slot in 0..self.slots.len() as u32 {
             let stale = self.slots[slot as usize].tcb.as_ref().is_some_and(|t| {
-                t.state == State::SynReceived && t.listener.as_ref().is_some_and(|l| self.ports.listener(l.id).is_none())
+                t.state == State::SynReceived
+                    && t.listener.as_ref().is_some_and(|l| self.ports.listener(l.id).is_none())
             });
             if stale {
                 if let Some(t) = self.slots[slot as usize].tcb.as_mut() {
@@ -497,7 +505,8 @@ impl Stack {
             self.stats.rx_dropped += 1;
             return;
         };
-        let to_us = eth.dst == self.iface.mac || eth.dst.is_broadcast() || (eth.dst.0[0] == 0x33 && eth.dst.0[1] == 0x33);
+        let to_us =
+            eth.dst == self.iface.mac || eth.dst.is_broadcast() || (eth.dst.0[0] == 0x33 && eth.dst.0[1] == 0x33);
         if !to_us || !eth.src.is_unicast() {
             self.stats.rx_dropped += 1;
             return;
@@ -572,7 +581,15 @@ impl Stack {
         self.rx_ipv4_packet(now, src_mac, dst_mac, &p, Some(frame), b);
     }
 
-    fn rx_ipv4_packet(&mut self, now: Instant, src_mac: Mac, dst_mac: Mac, p: &ipv4::Packet, frame: Option<&[u8]>, ip: &[u8]) {
+    fn rx_ipv4_packet(
+        &mut self,
+        now: Instant,
+        src_mac: Mac,
+        dst_mac: Mac,
+        p: &ipv4::Packet,
+        frame: Option<&[u8]>,
+        ip: &[u8],
+    ) {
         let local = self.iface.is_local_v4(p.dst);
         let bcast = self.iface.is_broadcast_v4(p.dst) || dst_mac.is_broadcast();
         if p.src.is_unspecified() && p.proto != ipv4::PROTO_UDP {
@@ -691,7 +708,8 @@ impl Stack {
                 self.rx_tcp(now, src, dst, p.payload, src_mac, ethernet::ETHERTYPE_IPV6, frame, ip);
             }
             ipv6::NEXT_UDP if local && !p.src.is_unspecified() => {
-                if !checksum::valid(checksum::add(checksum::pseudo_v6(&p.src, &p.dst, 17, p.payload.len()), p.payload)) {
+                if !checksum::valid(checksum::add(checksum::pseudo_v6(&p.src, &p.dst, 17, p.payload.len()), p.payload))
+                {
                     self.stats.rx_bad_checksum += 1;
                     return;
                 }
@@ -708,7 +726,15 @@ impl Stack {
         }
     }
 
-    pub(crate) fn pmtu(&mut self, now: Instant, local: IpAddr, remote: IpAddr, tcp: &[u8], mtu: usize, frame: Option<&[u8]>) {
+    pub(crate) fn pmtu(
+        &mut self,
+        now: Instant,
+        local: IpAddr,
+        remote: IpAddr,
+        tcp: &[u8],
+        mtu: usize,
+        frame: Option<&[u8]>,
+    ) {
         if tcp.len() < 8 {
             return;
         }
@@ -917,7 +943,11 @@ impl Stack {
     }
 
     fn send_cookie(&mut self, now: Instant, l: &Arc<Listener>, key: &FlowKey, syn: &Segment) {
-        let our_mss = (if key.is_v6() { self.iface.mtu_v6() } else { self.iface.mtu }).saturating_sub(if key.is_v6() { 60 } else { 40 });
+        let our_mss = (if key.is_v6() { self.iface.mtu_v6() } else { self.iface.mtu }).saturating_sub(if key.is_v6() {
+            60
+        } else {
+            40
+        });
         let peer_mss = syn.opts.mss.unwrap_or(if key.is_v6() { 1220 } else { 536 });
         let (cookie, mss) = self.secrets.syn_cookie(now, key, syn.seq, peer_mss.min(our_mss as u16));
         let cfg = &l.cfg.tcp;
@@ -1299,7 +1329,9 @@ impl Stack {
                                 refused = true;
                                 return false;
                             }
-                            tx.send(len, &mut |b| write_tcp_frame(b, mac, dst, &key, &o.hdr, data, ttl, hop, id, label));
+                            tx.send(len, &mut |b| {
+                                write_tcp_frame(b, mac, dst, &key, &o.hdr, data, ttl, hop, id, label)
+                            });
                         }
                         Route::Hold(ip) => {
                             let mut f = pool.get();
@@ -1451,7 +1483,12 @@ impl Stack {
     }
 
     /// Writes into the transmit ring in place (`f` gets one contiguous free piece, returns bytes written).
-    pub fn tcp_send_with(&mut self, h: TcpHandle, want: usize, f: impl FnOnce(&mut [u8]) -> usize) -> Result<usize, Error> {
+    pub fn tcp_send_with(
+        &mut self,
+        h: TcpHandle,
+        want: usize,
+        f: impl FnOnce(&mut [u8]) -> usize,
+    ) -> Result<usize, Error> {
         let n = self.tcb_mut(h)?.send_with(want, f)?;
         self.touch(h.slot);
         Ok(n)
@@ -1469,7 +1506,12 @@ impl Stack {
     }
 
     /// Reads in place: `f` sees the received bytes (two slices) and returns how many it consumed (0: peek).
-    pub fn tcp_recv_with(&mut self, now: Instant, h: TcpHandle, f: impl FnOnce(&[u8], &[u8]) -> usize) -> Result<usize, Error> {
+    pub fn tcp_recv_with(
+        &mut self,
+        now: Instant,
+        h: TcpHandle,
+        f: impl FnOnce(&[u8], &[u8]) -> usize,
+    ) -> Result<usize, Error> {
         let n = self.tcb_mut(h)?.recv_with(now, f)?;
         self.touch(h.slot);
         Ok(n)
@@ -1675,4 +1717,3 @@ pub(crate) fn write_tcp_frame(
     let c = checksum::finish(checksum::add(pseudo, seg));
     seg[16..18].copy_from_slice(&c.to_be_bytes());
 }
-

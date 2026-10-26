@@ -158,6 +158,7 @@ Then set the next version (`scripts/set-version.sh X.Y.(Z+1)`, or a minor or maj
 | [crates/k10-lang](crates/k10-lang) | Ten compiler and prelude |
 | [crates/k10-jit](crates/k10-jit) | single-pass TIR → x86-64 and AArch64 compiler (the isolation boundary) |
 | [crates/k10-mesh](crates/k10-mesh) | gossip membership, manifests, bundles, placement, wire protocol |
+| [crates/k10-net](crates/k10-net) | TCP/IP stack for the native kernel, one instance per CPU (sans-IO, `no_std`): IPv4/IPv6, NDP/SLAAC, UDP, TCP with SACK, RACK-TLP, CUBIC; simulator, Linux interop |
 | [crates/k10-node](crates/k10-node), [crates/k10s](crates/k10s) | node runtime and the `k10s` binary (also PID 1 of a Linux image) |
 | [metal/](metal/) | the node as a bare-metal kernel (PVH, Multiboot2 and its UEFI loader k10boot, ACPI, virtio net and blk over PCI and MMIO, Intel and Realtek NICs, screen and UDP consoles, watchdogs, SMP, JIT, cluster member) |
 | [os/](os/) | the k10s Linux kernels (`vm`, `metal`), initramfs, firmware and disk image builders, PID 1 and image tests under QEMU ([docs/OS.md](docs/OS.md)) |

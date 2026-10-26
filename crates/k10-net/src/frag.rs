@@ -199,7 +199,7 @@ impl Reassembler {
     /// Adds an IPv4 fragment; returns the whole datagram (header without fragment fields + data) when complete.
     pub fn add_v4(&mut self, now: Instant, p: &ipv4::Packet) -> Option<Vec<u8>> {
         let len = p.payload.len();
-        if (p.more_frags && (len % 8 != 0 || len == 0)) || p.frag_offset + len > 65535 - p.header_len {
+        if (p.more_frags && (!len.is_multiple_of(8) || len == 0)) || p.frag_offset + len > 65535 - p.header_len {
             self.stats.dropped += 1;
             return None;
         }
@@ -237,7 +237,7 @@ impl Reassembler {
     pub fn add_v6(&mut self, now: Instant, p: &ipv6::Packet) -> Option<Vec<u8>> {
         let f = p.frag?;
         let len = p.payload.len();
-        if (f.more && (len % 8 != 0 || len == 0)) || f.offset + len > 65535 {
+        if (f.more && (!len.is_multiple_of(8) || len == 0)) || f.offset + len > 65535 {
             self.stats.dropped += 1;
             return None;
         }

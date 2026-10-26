@@ -312,7 +312,15 @@ impl SentQueue {
 
     /// Applies SACK blocks within (snd_una, snd_max]; returns the sequence space newly SACKed. Ranges reported
     /// by the previous ACK are skipped (they stay marked), so a long-lived block costs only its growth.
-    pub fn sack(&mut self, blocks: &[(u32, u32)], snd_una: u32, snd_max: u32, now: Instant, rack: &mut Rack, min_rtt_ns: u64) -> u32 {
+    pub fn sack(
+        &mut self,
+        blocks: &[(u32, u32)],
+        snd_una: u32,
+        snd_max: u32,
+        now: Instant,
+        rack: &mut Rack,
+        min_rtt_ns: u64,
+    ) -> u32 {
         let mut newly = 0;
         let seen = self.sack_seen;
         let seen_n = self.sack_seen_n;

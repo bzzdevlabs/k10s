@@ -29,7 +29,10 @@ pub(crate) struct OutSeg {
 pub(crate) enum Input {
     None,
     /// Send a reset (no connection state change).
-    Rst { seq: u32, ack: Option<u32> },
+    Rst {
+        seq: u32,
+        ack: Option<u32>,
+    },
     /// A passive open completed: the connection goes to its listener's accept queue.
     Established,
     /// The connection is closed (free it when orphaned).
@@ -295,7 +298,14 @@ impl Tcb {
 
     /// A connection completed by a valid SYN cookie in `ack`: established right away.
     #[allow(clippy::too_many_arguments)]
-    pub fn accept_cookie(&mut self, now: Instant, ack: &Segment, mss: u16, wscale: Option<u8>, sack: bool) -> Result<(), Error> {
+    pub fn accept_cookie(
+        &mut self,
+        now: Instant,
+        ack: &Segment,
+        mss: u16,
+        wscale: Option<u8>,
+        sack: bool,
+    ) -> Result<(), Error> {
         self.state = State::Established;
         self.irs = ack.seq.wrapping_sub(1);
         self.rcv_nxt = ack.seq;
@@ -451,7 +461,7 @@ impl Tcb {
             if seg.has(RST) {
                 return Input::None;
             }
-            if seg.payload.len() > 0 && seq::lt(seg.seq, self.rcv_nxt) && self.sack_ok {
+            if !seg.payload.is_empty() && seq::lt(seg.seq, self.rcv_nxt) && self.sack_ok {
                 let end = seg.seq.wrapping_add(seg.payload.len() as u32);
                 self.dsack = Some((seg.seq, seq::min(end, self.rcv_nxt)));
             }
@@ -929,8 +939,8 @@ impl Tcb {
             return;
         }
         let adv = match self.asm.add(off as u32, n as u32, self.cfg.max_ooo_ranges) {
-            Ok(a) => a,
-            Err(()) => {
+            Some(a) => a,
+            None => {
                 self.ack_now = true;
                 return;
             }
@@ -1015,7 +1025,8 @@ impl Tcb {
     // ---- application side ----
 
     pub fn can_send(&self) -> bool {
-        matches!(self.state, State::SynSent | State::SynReceived | State::Established | State::CloseWait) && !self.fin_queued
+        matches!(self.state, State::SynSent | State::SynReceived | State::Established | State::CloseWait)
+            && !self.fin_queued
     }
 
     fn tx_target(&self) -> usize {
@@ -1047,14 +1058,7 @@ impl Tcb {
             b[..n].copy_from_slice(&data[..n]);
             n
         })
-        .and_then(|first| {
-            if first < data.len() {
-                let more = self.tx.push(&data[first..]);
-                Ok(first + more)
-            } else {
-                Ok(first)
-            }
-        })
+        .map(|first| if first < data.len() { first + self.tx.push(&data[first..]) } else { first })
     }
 
     /// Lets `f` write up to `want` bytes straight into the transmit ring (one contiguous piece).
@@ -1264,7 +1268,8 @@ impl Tcb {
         }
         let rto = now + Duration::from_nanos(self.rto_ns());
         self.t_rtx = Some(rto);
-        self.t_pto = if self.tlp_eligible() { Some((now + Duration::from_nanos(self.pto_ns())).min(rto)) } else { None };
+        self.t_pto =
+            if self.tlp_eligible() { Some((now + Duration::from_nanos(self.pto_ns())).min(rto)) } else { None };
     }
 
     fn tlp_eligible(&self) -> bool {
@@ -1434,11 +1439,8 @@ impl Tcb {
 
     fn header(&self, now: Instant, seq_: u32, flags: u8, data_len: usize) -> Header {
         let syn = flags & SYN != 0;
-        let window = if syn {
-            self.rcv_window_raw().min(65535)
-        } else {
-            (self.rcv_window() >> self.rcv_wscale).min(65535)
-        };
+        let window =
+            if syn { self.rcv_window_raw().min(65535) } else { (self.rcv_window() >> self.rcv_wscale).min(65535) };
         Header {
             src_port: self.key.lport,
             dst_port: self.key.rport,
@@ -1672,7 +1674,12 @@ impl Tcb {
             }
         }
         // Zero window with data waiting and nothing in flight: probe it.
-        if self.snd_wnd == 0 && self.unsent() > 0 && self.sendq.is_empty() && self.t_persist.is_none() && self.probe == Probe::None {
+        if self.snd_wnd == 0
+            && self.unsent() > 0
+            && self.sendq.is_empty()
+            && self.t_persist.is_none()
+            && self.probe == Probe::None
+        {
             let d = self.rtt.rto_ns().saturating_mul(1 << self.persist_backoff.min(16)).min(MAX_PERSIST_NS);
             self.t_persist = Some(now + Duration::from_nanos(d));
         }
