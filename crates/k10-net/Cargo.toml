@@ -1,0 +1,22 @@
+[package]
+name = "k10-net"
+description = "Sans-IO per-CPU TCP/IP stack: Ethernet, ARP, IPv4/IPv6, ICMP, NDP/SLAAC, UDP, TCP"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["std"]
+# `std` adds the deterministic network simulator and the multi-instance harness.
+std = []
+
+[dependencies]
+
+# Comparison baseline for the benchmark only (never linked into the stack).
+[dev-dependencies]
+smoltcp = { version = "0.14", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "socket-tcp"] }
+
+[[bench]]
+name = "throughput"
+harness = false
+required-features = ["std"]
