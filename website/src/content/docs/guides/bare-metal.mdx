@@ -154,32 +154,36 @@ baked in at build time (`EMBED=1`); with neither, the node starts empty and wait
   disk images: k10boot, its UEFI loader, which verifies the kernel's signature, or GRUB through the kernel's
   Multiboot2 entry on BIOS ([below](#choosing-the-tier)).
 - **Platform:** ACPI tables without AML — CPUs, I/O APICs and overrides (MADT), power and reset registers (FADT),
-  `\_S5` and virtio-mmio slots by a DSDT scan, ECAM windows (MCFG), the HPET, the console UART (SPCR); an MP table
+  `\_S5`, virtio-mmio slots and power button events by a DSDT scan, ECAM windows (MCFG), the HPET, the console UART
+  (SPCR); an MP table
   where there is no ACPI. x2APIC (or xAPIC), CPUs started one by one from the MADT, never by broadcast.
 - **Memory:** every byte of RAM identity-mapped, above 4 GiB too; device ranges uncached; a tagged frame allocator
   shared by the heap and the instance slots; NX everywhere, the kernel and JIT code W^X, page 0 unmapped.
 - **Time:** kvmclock, else the TSC calibrated against the HPET, the ACPI PM timer or the PIT; a tickless one-shot
   LAPIC timer armed only for the next deadline; an idle node takes no timer interrupts. The wall clock (gossip and
-  admin request time windows) is re-read from kvmclock every 10 s.
+  admin request time windows) is re-read from kvmclock every 10 s; without kvmclock an SNTP client sets it (the
+  `ntp` servers of `k10s.conf`, else the DHCP lease's, else `pool.ntp.org`), as the Linux-based tier does.
 - **Devices:** PCI through ECAM with 64-bit BARs, MSI and MSI-X; virtio-net and virtio-blk over PCI (virtio 1.x and
   legacy) and MMIO, NVMe and AHCI (SATA) disks, and the Intel and Realtek NICs of PCs (drivers tested against
   register models of the chips: the I219's power states and its PHY shared with the Management Engine, the I225,
   Realtek's generations), behind `NetDevice`/`BlockDevice` traits with DMA from slot-like regions; fixed buffers
-  (nothing allocated per packet), smoltcp for TCP/IP with DHCPv4 (started over when a link comes back from an outage), the same
-  HTTP/1.1 ingress and host API as the hosted node.
+  (nothing allocated per packet), smoltcp for TCP/IP with DHCPv4 (started over when a link comes back from an outage),
+  IPv6 by SLAAC, a DNS client, the same HTTP/1.1 ingress and host API as the hosted node.
 - **Storage:** on a disk with a `K10S-DATA` partition (the disk images have one) the services' key-value data, the
-  node id and the cluster's desired state survive reboots and power cuts, in the format the Linux-based tier uses;
+  node id, the cluster's desired state and a single node's applied bundle survive reboots and power cuts, in the
+  format the Linux-based tier uses;
   cluster-rolled kernel updates go to two kernel slots there, tried once and committed when healthy.
 - **Consoles:** serial (the SPCR table's UART), the screen k10boot hands over (a text console on the UEFI GOP
   framebuffer), and a UDP log stream to another machine.
 - **Watchdog:** the firmware's ACPI WDAT table, else the Intel TCO timer (ICH and PCH chipsets), else the i6300ESB,
   armed while the main loop runs: a hung kernel is reset, and k10boot falls back to Tier 1 after two unhealthy boots.
 - **Power:** ACPI S5 power off, the FADT reset register (then the 8042, port 0xCF9, a triple fault) for reboots;
-  fatal errors reboot after `k10.panic` seconds.
+  the power button (fixed-feature, or a control-method one whose GPE the tables show) leaves the cluster, then
+  powers off; fatal errors reboot after `k10.panic` seconds.
 
 <Aside type="caution" title="Limits">
-	NICs: virtio, Intel e1000e/igb/igc, Realtek r8169-class. IPv4 only, no TLS, no NTP client (the wall clock comes
-	from kvmclock, else the RTC). ACPI events (the power button) are not handled and no AML method runs. Tested on
+	NICs: virtio, Intel e1000e/igb/igc, Realtek r8169-class. No TLS; IPv6 by SLAAC only (no DHCPv6), IPv4 cluster
+	addresses. No AML method runs: of the ACPI events only the power button is handled. Tested on
 	QEMU (PVH, and the x86-64 disk images through UEFI or BIOS, from a disk or a USB stick), Firecracker and Cloud
 	Hypervisor, and the NIC and watchdog drivers against register models; not yet on a physical machine:
 	metal/README.md has the bring-up checklist. There is no OS layer under the kernel, so the independent
@@ -274,15 +278,16 @@ same disk and network, and `/usr/share/AAVMF/AAVMF32_CODE.fd` and `AAVMF32_VARS.
 
 ### Choosing the tier
 
-The x86-64 images boot either the Linux-based tier (as shipped) or the native kernel. `/k10s/tier` on `K10S-BOOT`
-picks: change its `tier=linux` line to `tier=metal` (the native kernel, on UEFI and on BIOS) or `tier=auto` (UEFI:
-the native kernel when it drives one of the machine's network adapters, else Linux). Both tiers read the same
+The x86-64 images boot either the Linux-based tier or the native kernel. `/k10s/tier` on `K10S-BOOT` picks; the images
+ship `tier=auto`: on UEFI, the native kernel when it drives one of the machine's network adapters and the disk
+controller of `K10S-DATA`, else Linux; on BIOS, Linux. Change the line to `tier=linux` to stay on Linux, or to
+`tier=metal` for the native kernel without the device check (on UEFI and on BIOS). Both tiers read the same
 `k10s.conf` and key files and join the same clusters. On UEFI the image's loader, k10boot, verifies the native
 kernel's signature and counts its boots: a kernel that fails to get healthy twice in a row hands the machine back to
 the Linux tier until you write `/k10s/tier` again. Both tiers keep their state in `K10S-DATA` in the same format, so
-a machine switched between them keeps its node id, its services' data and the cluster's desired state. The images
-ship `tier=linux`: the native kernel still lacks an NTP client, ACPI power-button events, a hardware watchdog and
-IPv6, and has not run on a physical machine yet.
+a machine switched between them keeps its node id, its services' data and the cluster's desired state. Updates never
+rewrite `/k10s/tier`: a machine installed from an earlier image (`tier=linux`) stays on Linux until you change it.
+The native kernel has not run on a physical machine yet.
 [docs/OS.md](https://github.com/bzzdevlabs/k10s/blob/main/docs/OS.md#tiers) has the details.
 
 ### Updating the image

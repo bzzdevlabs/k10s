@@ -144,13 +144,14 @@ p2   K10S-BOOT   256 MiB  EFI system partition, FAT32:
        /boot/grub/grubenv      k10s_slot=a
        /k10s/a/                vmlinuz, initrd, boot.cfg: the payload of the UKI and GRUB's lines for it
        /k10s/metal.elf         the native kernel, signed
-       /k10s/tier              tier=linux, metal_cmdline= ("Tiers")
+       /k10s/tier              tier=auto, metal_cmdline= ("Tiers")
        /k10s.conf              node configuration of both tiers (a commented template)
 p3   K10S-DATA   256 MiB  a k10s store ("Data"), both tiers' state and the native kernel's slots; grown to the end
                           of the disk on first boot
 ```
 
-UEFI firmware starts k10boot, which starts systemd-boot (as shipped, `tier=linux`), which starts the UKI; BIOS starts
+UEFI firmware starts k10boot, which starts the native kernel or systemd-boot (as shipped, `tier=auto` decides:
+"Tiers"), which starts the UKI; BIOS starts
 GRUB from the MBR, which reads `grub.cfg` from the ESP of the boot disk; GRUB shows nothing unless it fails, and then
 prints to the screen and the first serial port. Slot B (`k10s-b.efi`, `/k10s/b/`) appears with the first update. The
 kernel command line is fixed in both (`console=ttyS0,115200 quiet panic=5` for `vm`; `metal` adds `console=tty0`
@@ -251,21 +252,21 @@ The x86-64 images boot either tier from the same disk: Tier 1, Linux with k10s a
 
 | `tier=` | UEFI (k10boot) | BIOS (GRUB) |
 |---|---|---|
-| `linux` (as shipped) | systemd-boot and the A/B UKIs, as above | the slot of `grubenv`, as above |
+| `auto` (as shipped) | the native kernel if it drives one of the machine's network adapters and the controller of the disk with `K10S-DATA`, else Tier 1 | Tier 1 |
+| `linux` | systemd-boot and the A/B UKIs, as above | the slot of `grubenv`, as above |
 | `metal` | the native kernel: a slot of `K10S-DATA` once an update installed one, else `/k10s/metal.elf` | the native kernel `/k10s/metal.elf`, through Multiboot2 |
-| `auto` | the native kernel if it drives one of the machine's network adapters and the controller of the disk with `K10S-DATA`, else Tier 1 | Tier 1 |
 
 The file is a GRUB environment block, so that GRUB reads it too (`load_env`), and k10boot parses it the way GRUB does:
 
 ```
 # GRUB Environment Block
 # This machine's tier (docs/OS.md "Tiers"), read by k10boot (UEFI) and GRUB (BIOS):
-#   tier=linux  Tier 1, Linux (the default)
+#   tier=auto   UEFI: the native kernel if it drives one of the network adapters and K10S-DATA's disk, else
+#               Tier 1; BIOS: Tier 1 (as shipped)
+#   tier=linux  Tier 1, Linux
 #   tier=metal  the native kernel, /k10s/metal.elf
-#   tier=auto   UEFI: the native kernel if it drives one of the network adapters (and K10S-DATA's disk), else
-#               Tier 1; BIOS: Tier 1
 # metal_cmdline= is the native kernel's command line. Edit lines in place: no blank lines, a newline at the end.
-tier=linux
+tier=auto
 metal_cmdline=
 ```
 
@@ -320,29 +321,34 @@ runtime regions mapped executable for that call only, on one CPU with interrupts
 
 **Configuration of both tiers.** The native kernel reads `k10s.conf` too. Keys that mean the same for it become its
 arguments (metal/README.md has the table): `join`, `backend`, `jit-indirect`, `timer-res-us`, `idle-spin-us`,
-`probe-ms`, `suspicion-mult`, `gossip-max-skew` and `insecure-unauthenticated-cluster`; any of `gossip`, `rpc`, `join`
+`probe-ms`, `suspicion-mult`, `gossip-max-skew`, `insecure-unauthenticated-cluster`, `ip`, `ntp` and `dns` (its
+SNTP client and name servers work as Tier 1's, without kvmclock: with it the hypervisor's clock is followed); any of
+`gossip`, `rpc`, `join`
 and `advertise` turns cluster mode on, as on Tier 1, and the addresses it gives peers are the ports of `gossip`, `rpc`
 and `http` (7946, 7947, 80 by default) at `advertise`, else at the configured address unless it is `0.0.0.0`. It
 listens on 7946, 7947 and 80 whatever the ports say. The key files of `admin-token-file`, `cluster-key-file` and
 `cluster-next-key-file` reach it as modules (k10boot reads them from `K10S-BOOT`); it wipes them once parsed.
 `watchdog=0` keeps it from arming the hardware watchdog (Tier 2 arms it unless told not to; Tier 1 only with
-`watchdog=1`). Keys of Tier 1 alone (`net`, `ntp`…) do not concern it (`data=none`, `grow=0`, `os-commit-grace` and
+`watchdog=1`). Keys of Tier 1 alone (`net`, `iface`, `modules`…) do not concern it (`data=none`, `grow=0`, `os-commit-grace` and
 `os_trial` mean the same for it), and its own arguments (`k10.*`: consoles, the watchdog's timeout…) go in
 `metal_cmdline`, never in `k10s.conf`, where Tier 1 would take them for node flags. metal/README.md, "Hardware
 bring-up", is the checklist for a first machine.
 
 **Data.** Both tiers use `K10S-DATA` in the same format ("Data"): a machine switched between tiers keeps its node
-id, its services' KV data and, in cluster mode, the cluster's desired state, whichever tier wrote them last.
+id, its services' KV data and, in cluster mode, the cluster's desired state (a single node: its last applied
+bundle), whichever tier wrote them last.
 
-**Why the images ship `tier=linux`.** With `K10S-DATA` the native kernel keeps its state durably (13d), and `auto`
-picks it only where every device it needs is in `devices.rs`. The images still default to Tier 1, because the native
-kernel lacks things Tier 1 gives every machine today: a wall clock disciplined without kvmclock (no SNTP client:
-bare metal runs on the RTC and the calibrated TSC, while signed admin requests and sealed gossip check timestamps),
-ACPI events (the power button), IPv6 and DNS, and a
-single node's `POST /_k10s/apply` kept across reboots outside cluster mode; and it has not run on a real machine or
-a public cloud yet (STATUS, step 13). On the VMs where `auto` would pick it (virtio-net), Tier 1 runs too, at
-0.5 s from power to the first answer. Set `tier=auto` or `tier=metal` to run the native kernel; the default moves
-to `auto` once those gaps are closed and it has run on real hardware and clouds.
+**Why `auto`.** The images ship `tier=auto`: a UEFI machine whose network adapter and `K10S-DATA` disk controller
+are in `devices.rs` (virtio, Intel e1000e/igb/igc, Realtek r8169-class; virtio-blk, NVMe, AHCI) boots the native
+kernel, every other machine, and every BIOS boot, Tier 1. The native kernel does what Tier 1 does for a node: DHCP
+and a static address, IPv6 by SLAAC, an SNTP client (`ntp`), name servers (`dns`), the power button (leave the
+cluster, then power off), a hardware watchdog, `K10S-DATA` for KV, the node's files, the cluster's desired state and
+a single node's applied bundle, signed A/B updates; without Linux underneath (metal/README.md). Its differences are
+in metal/README.md, "Limitations": no TLS, IPv6 by SLAAC only, ACPI events other than the power button, and real
+hardware and public clouds not yet run (STATUS, step 13). A native kernel that does not get healthy twice pins Tier
+1 (boot counting, above). Machines installed from earlier images keep their `/k10s/tier` (`tier=linux`): updates
+write the slots, never the tier file. Set `tier=linux` to keep a machine on Tier 1, `tier=metal` to boot the native
+kernel without the device check.
 
 **BIOS.** GRUB reads `/k10s/tier` with `load_env`; with `tier=metal` it boots `/k10s/metal.elf` through Multiboot2
 (the kernel's own Multiboot2 entry turns GRUB's information into the same `start_info`), with `metal_cmdline` as the
@@ -682,13 +688,17 @@ kernels and images with the release's i686 and armv7 musl k10s.
   each time), median of 5 below 1 s (measured 0.50–0.54 s).
 - **repro**: the same image built twice is bit-identical, UKI included.
 - **tier**: the tiers of the `vm` image through k10boot ("Tiers"), on OVMF; every other UEFI test of the x86-64 images
-  boots Tier 1 through it (`tier=linux`), the A/B updates included. `tier=metal` on `pc` and on `q35` (with a VGA
+  boots Tier 1 through it (`tier=linux` written to the tier file, as an operator keeping Tier 1 does), the A/B
+  updates included: the updated image's boots stay on Tier 1 and the tier file is left as it was. `tier=metal` on `pc` and on `q35` (with a VGA
   device, whose GOP mode reaches the kernel): the native kernel gets `k10s.conf`, the admin and cluster keys from
   `K10S-BOOT`, joins a cluster with a hosted `k10s node` on the host, serves the services applied through it on both
   nodes, answers requests signed with the admin key of `k10s.conf`, and once healthy clears k10boot's boot counter.
   On `q35` the screen is read back (a QMP screendump decoded with the kernel's font): the framebuffer console shows
-  the boot up to the ready line. `tier=auto`: a legacy virtio-net and an e1000e (82574L) boot the native kernel,
-  which serves, an e1000 (82540EM) alone Tier 1. A native kernel that fails (a bad
+  the boot up to the ready line. Then the power button (QMP `system_powerdown`): the native kernel leaves the
+  cluster (the hosted node sees it `left`) and powers off. The image as shipped (`tier=auto`): a legacy virtio-net
+  with virtio-blk (`pc`), an e1000e (82574L) with NVMe and a virtio-net with AHCI (`q35`) boot the native kernel,
+  which serves from its `K10S-DATA` on that controller; an e1000 (82540EM), or `K10S-DATA` on IDE (`pc`), Tier 1.
+  A native kernel that fails (a bad
   `metal_cmdline`, the machine reset after the error) boots twice, then Tier 1 serves; `/k10s/tier` written again gives
   it new boots, which get healthy, and the next boot counts from zero. A kernel signed by an untrusted key, and one
   changed after signing, are refused and Tier 1 serves. The signed kernel file boots as it is through PVH (`-kernel`,
@@ -813,8 +823,8 @@ Block I/O, and the conversion of a real ext4 `K10S-DATA` written by an older ima
 - A rollback is an update to the older image (signed images of any version install); the cluster key is the trust
   boundary for which signed image a cluster runs.
 - The images are not signed for Secure Boot: turn it off, or sign them with your own keys or a MOK ("Secure Boot").
-- The images ship `tier=linux` ("Tiers" says why); on BIOS the native kernel boots only with `tier=metal`, without
-  a signature check, boot counting or kernel updates.
+- The images ship `tier=auto` ("Tiers"): on UEFI the native kernel boots where it drives the NIC and the data disk;
+  on BIOS only with `tier=metal`, without a signature check, boot counting or kernel updates.
 - A `K10S-DATA` store holds about a quarter of its log as live data (51 MiB on the images' 256 MiB before it grows
   to the disk); an ext4 `K10S-DATA` whose state does not fit `K10S-BOOT`'s free space is kept as ext4.
 - The native kernel's Intel and Realtek drivers are tested under QEMU and against register models, not yet on the

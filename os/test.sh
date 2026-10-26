@@ -13,12 +13,14 @@
 #   boottime                the vm image on BIOS: QEMU start → first HTTP 200, median of 5 below 1 s
 #   repro                   the vm image built twice is bit-identical
 #   update-bios, update-uefi  A/B update with a power cut at every step, an image that panics, one that never
-#                           commits (single node; the update images are signed with a test key pinned by os_key)
+#                           commits (single node; the update images are signed with a test key pinned by os_key);
+#                           UEFI on a tier=linux disk: every boot stays on Tier 1, the tier file unchanged
 #   rollout                 20 BIOS VMs: a bad image stops after the first wave, a good one rolls out in waves
 #   tier                    the tiers of the vm image under OVMF, through k10boot (docs/OS.md "Tiers"): tier=metal on pc
 #                           and q35 (the native kernel joins a hosted node and serves, k10s.conf and keys from
-#                           K10S-BOOT, boot counter cleared once healthy), tier=auto (virtio-net: native, e1000e: Tier
-#                           1), a failing native kernel (2 boots, then Tier 1), refused signatures, PVH -kernel
+#                           K10S-BOOT, boot counter cleared once healthy, the power button leaves and powers off), the
+#                           shipped tier=auto (native: virtio-net + virtio-blk, e1000e + NVMe, virtio-net + AHCI; Tier
+#                           1: e1000, IDE), a failing native kernel (2 boots, then Tier 1), refused signatures, PVH
 #   update-native           the native kernel updated through K10S-DATA's slots (cluster rollout, power cuts, a
 #                           crashing kernel, a trial that cannot commit)
 #   mb2                     the vm image on SeaBIOS with tier=metal: GRUB, Multiboot2, the native kernel serves

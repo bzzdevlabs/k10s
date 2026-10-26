@@ -14,7 +14,9 @@ and, for the DHCP test, a host-side DHCP server on a QEMU socket netdev. os/test
       A disk image (os/mkimage.py) on a 4 GiB disk, configured like an operator would: k10s.conf and the admin key
       copied to K10S-BOOT. Boot 1 grows K10S-DATA and its store to the end of the disk, applies and serves; boot 2
       keeps the state and grows nothing. --metal: q35, NVMe, e1000e and the Intel TCO watchdog (signed modules). On i686:
-      the MBR image on SeaBIOS, an Atom N270, an IDE disk and an RTL8139 (8139too, a signed module).
+      the MBR image on SeaBIOS, an Atom N270, an IDE disk and an RTL8139 (8139too, a signed module). x86-64 UEFI
+      boots pin tier=linux in /k10s/tier, as an operator keeping Tier 1 does (the shipped tier=auto would boot the
+      native kernel on these devices: test.py tier).
   test.py unsigned --kernel K --kmods DIR --k10s K10S --work DIR
       The metal kernel refuses e1000e once its signature is stripped (no network).
   test.py boottime --image IMG [--runs N]
@@ -24,7 +26,8 @@ and, for the DHCP test, a host-side DHCP server on a QEMU socket netdev. os/test
       written, armed, trial boot, commit request, committed): each boot serves on a good image and the KV state
       survives. Then an image that panics (the loaders fall back after 3 boots) and one that never commits (init
       falls back after os_trial); both are recorded as failed. On i686 (BIOS): an IDE disk and an e1000 (a signed
-      module).
+      module). x86-64 UEFI: the disk says tier=linux, as on a machine installed from an image that shipped it: every
+      boot, the updated image's included, stays on Tier 1 and the tier file is left as it was.
   test.py rollout --image IMG --uki EFI --image-key KEY --boot DIR --k10s K10S --examples DIR [--nodes 20]
       A cluster of BIOS VMs: an image that panics stops after the first wave (one node), then a good image rolls
       through every node in waves of 1, 2, 4, … with each wave committed before the next starts.
@@ -48,9 +51,11 @@ and, for the DHCP test, a host-side DHCP server on a QEMU socket netdev. os/test
       Boot commits, and one signed by k10s only is refused by the firmware 3 times and rolled back.
   test.py tier --image IMG --image-key KEY --k10s K10S --examples DIR
       The tiers of the x86-64 image through k10boot (docs/OS.md "Tiers"), OVMF: tier=metal on pc and q35 (the native
-      kernel, its k10s.conf and keys from K10S-BOOT, joins a hosted node on the host, serves, clears the boot counter),
-      tier=auto (legacy virtio-net: native; e1000e: Tier 1), a failing native kernel (2 boots, then Tier 1 until the
-      tier file is written again), kernels with an untrusted or broken signature refused, the signed kernel on PVH.
+      kernel, its k10s.conf and keys from K10S-BOOT, joins a hosted node on the host, serves, clears the boot counter;
+      its power button makes it leave the cluster, then power off), the image as shipped (tier=auto): the native
+      kernel with a legacy virtio-net and virtio-blk, an e1000e and NVMe, a virtio-net and AHCI; Tier 1 with an
+      e1000 (82540EM) or with K10S-DATA on IDE; a failing native kernel (2 boots, then Tier 1 until the tier file is
+      written again), kernels with an untrusted or broken signature refused, the signed kernel on PVH.
   test.py update-native --image IMG --image-key KEY --k10s K10S --examples DIR
       Cluster-rolled updates of the native kernel through K10S-DATA's kernel slots (OVMF, tier=metal, a hosted node on
       the host): power cuts while slot A is written, after the trial is armed, during the trial boot and after the
@@ -686,6 +691,8 @@ def image_test(a, work):
     with open(conf, "w") as f:
         f.write(f"# image test node\nadmin-token-file=/boot/admin.key\nwatchdog=1\nntp=10.0.2.2:{ntp}\n")
     mtools("mcopy", disk, boot_offset(disk), "-o", conf, key, "::/")
+    if a.uefi and ARCH == "x86_64":
+        set_tier(work, disk, "linux")
     if a.metal:
         dev, nic = "nvme0n1p", "e1000e"
         hw = ["-M", "q35", "-drive", f"file={disk},if=none,id=d0,format=raw", "-device", "nvme,drive=d0,serial=k10s"]
@@ -912,6 +919,7 @@ def update_test(a, work, pi=False, pi3=False):
     disk = os.path.join(work, "disk.img")
     fw_args = uefi_firmware(work) if a.uefi else []
     runs = [0]
+    tier1_file = a.uefi and ARCH == "x86_64" and not pi
     # The Pi 3 has no RTC: its clock (and with it the signed admin requests) waits for SNTP. QEMU's raspi3b resets as soon
     # as the watchdog is armed (it models the reset configuration, not the countdown): no watchdog there.
     ntp, watchdog = "ntp=none", "watchdog=1"
@@ -927,6 +935,9 @@ def update_test(a, work, pi=False, pi3=False):
         configure(disk, work, a.k10s, ["admin-token-file=/boot/admin.key", "cluster-key-file=/boot/cluster.key",
                                        "gossip=0.0.0.0:7946", ntp, watchdog, f"os_key={im.pub}", "os_trial=40",
                                        "os-commit-grace=3"])
+        if tier1_file:
+            # Installed from an image that shipped tier=linux (or kept on Tier 1 by its operator).
+            set_tier(work, disk, "linux")
 
     def power_on(cut=None):
         runs[0] += 1
@@ -948,6 +959,8 @@ def update_test(a, work, pi=False, pi3=False):
 
     def serving(g, since=0, path="/hello/"):
         """The boot after `since` comes up on a good image (A or B, as committed or trial) and serves."""
+        if tier1_file:
+            since = g.wait_for(r"k10boot: tier linux \(from /k10s/tier\)", "k10boot keeps Tier 1", since).end()
         m = g.wait_for(BOOTED, "booted slot", since)
         if m.group(2) not in (im.ids["a"][:8], im.ids["b"][:8]):
             fail(f"booted an unknown image {m.group(2)}", g.log)
@@ -1038,6 +1051,8 @@ def update_test(a, work, pi=False, pi3=False):
         g.power_button()
         g.wait_for(r"powering off", "power off")
         g.wait_exit()
+    if tier1_file and "\ntier=linux\n" not in mtools("mtype", disk, boot_offset(disk), "::/k10s/tier", capture_output=True, text=True).stdout:
+        fail("the updates changed /k10s/tier", g.log)
     print(f"test.py: update ({'pi3' if pi3 else 'pi' if pi else 'uefi' if a.uefi else 'bios'}): ok", file=sys.stderr)
 
 
@@ -1237,6 +1252,14 @@ def tier_file(path, tier, cmdline=""):
     return path
 
 
+def set_tier(work, d, tier, cmdline=""):
+    """/k10s/tier of disk `d` rewritten as an editor writes it: with the current time (mtools stamps files with
+    SOURCE_DATE_EPOCH when set; k10boot's boot counter tells a rewritten tier file by its modification time)."""
+    env = {k: v for k, v in os.environ.items() if k != "SOURCE_DATE_EPOCH"}
+    subprocess.run([tool("mcopy"), "-i", f"{d}@@{boot_offset(d)}", "-o", tier_file(os.path.join(work, "set-tier"), tier, cmdline),
+                    "::/k10s/tier"], check=True, env=dict(env, MTOOLS_SKIP_CHECK="1"))
+
+
 class TierDisks:
     """Fresh copies of the x86-64 image with a tier, k10s.conf, the admin and cluster keys, the native kernel's
     signing key pinned (os_key: in releases the image's kernel is signed by the release key, here maybe by the test
@@ -1250,28 +1273,31 @@ class TierDisks:
         mtools("mcopy", a.image, boot_offset(a.image), "-o", "::/k10s/metal.elf", self.kernel)
 
     def disk(self, name, tier, cmdline="", conf=(), files=()):
+        """`tier` None: the tier file as shipped."""
         d = os.path.join(self.work, f"{name}.img")
         subprocess.run(["cp", "--sparse=always", self.a.image, d], check=True)
         with open(d, "r+b") as f:
             f.truncate(2 << 30)
         configure(d, self.work, self.a.k10s, ["admin-token-file=/boot/admin.key", "ntp=none", f"os_key={self.pub}", *conf], name)
-        self.set_tier(d, tier, cmdline)
+        if tier:
+            self.set_tier(d, tier, cmdline)
         for src, dst in files:
             mtools("mcopy", d, boot_offset(d), "-o", src, f"::/{dst}")
         return d
 
     def set_tier(self, d, tier, cmdline=""):
-        # As an editor writes it: with the current time (mtools stamps files with SOURCE_DATE_EPOCH when set; k10boot's
-        # boot counter tells a rewritten tier file by its modification time).
-        env = {k: v for k, v in os.environ.items() if k != "SOURCE_DATE_EPOCH"}
-        subprocess.run([tool("mcopy"), "-i", f"{d}@@{boot_offset(d)}", "-o", tier_file(os.path.join(self.work, "tier"), tier, cmdline),
-                        "::/k10s/tier"], check=True, env=dict(env, MTOOLS_SKIP_CHECK="1"))
+        set_tier(self.work, d, tier, cmdline)
 
-    def power_on(self, name, d, machine="pc", nic="virtio-net-pci,disable-modern=on", fwd="", fw=None, port=None, extra=()):
-        """UEFI (OVMF, Secure Boot off) unless `fw` says otherwise ([] for SeaBIOS); HTTP forwarded from `port`."""
+    def power_on(self, name, d, machine="pc", nic="virtio-net-pci,disable-modern=on", fwd="", fw=None, port=None, extra=(),
+                 disk="virtio"):
+        """UEFI (OVMF, Secure Boot off) unless `fw` says otherwise ([] for SeaBIOS); HTTP forwarded from `port`; the disk
+        on virtio-blk, NVMe, AHCI (q35's) or IDE (pc's)."""
         port = port or free_port()
         fw = uefi_firmware(self.work, name) if fw is None else fw
-        g = Guest(self.work, name, None, None, None, fw + ["-M", machine, "-drive", f"file={d},if=virtio,format=raw",
+        drive = {"virtio": [f"file={d},if=virtio,format=raw"], "ide": [f"file={d},if=ide,format=raw"],
+                 "nvme": [f"file={d},if=none,id=d0,format=raw", "-device", "nvme,drive=d0,serial=k10s"],
+                 "ahci": [f"file={d},if=none,id=d0,format=raw", "-device", "ide-hd,drive=d0,bus=ide.0"]}[disk]
+        g = Guest(self.work, name, None, None, None, fw + ["-M", machine, "-drive", *drive,
                   "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:80{fwd}", "-device", f"{nic},netdev=n0,romfile=", *extra])
         g.port = port
         return g
@@ -1342,29 +1368,43 @@ def tier_test(a, work):
             if "k10-metal" not in status(g.port):
                 fail("the native kernel does not answer requests signed with the admin key of k10s.conf", g.log)
             g.wait_for(r"efi: healthy: k10boot's boot counter cleared", "boot counter cleared", timeout=240)
-            g.kill()
-            print(f"test.py: tier: metal on {machine}: joins the hosted node, serves, clears the boot counter: ok", file=sys.stderr)
+            # The power button, as on Tier 1: the node leaves the cluster (the hosted node sees it left, not dead),
+            # then powers off.
+            g.power_button()
+            g.wait_for(r"power: button pressed \(fixed-feature\): leaving the cluster, then powering off", "power button")
+            until("the hosted node does not see the native kernel leave", lambda: re.search(r"\bleft\b", status(hp)), g.log)
+            g.wait_exit()
+            print(f"test.py: tier: metal on {machine}: joins the hosted node, serves, clears the boot counter; the power "
+                  "button: leaves the cluster, powers off: ok", file=sys.stderr)
     finally:
         host.kill()
 
-    d = t.disk("auto-virtio", "auto")
-    g = t.power_on("auto-virtio", d, "pc")
-    g.wait_for(r"k10boot: tier auto: virtio-net 1af4:1000 at \S+ is supported: native kernel", "auto: native")
-    g.wait_for(METAL_READY, "native kernel ready")
-    until("GET /_k10s/health", lambda: http(g.port, "/_k10s/health")[0] == 200, g.log)
-    g.kill()
-    d = t.disk("auto-e1000e", "auto")
-    g = t.power_on("auto-e1000e", d, "q35", "e1000e")
-    g.wait_for(r"k10boot: tier auto: e1000e 8086:10d3 at \S+ is supported: native kernel", "auto: e1000e native")
-    g.wait_for(METAL_READY, "native kernel ready (e1000e)")
-    until("GET /_k10s/health", lambda: http(g.port, "/_k10s/health")[0] == 200, g.log)
-    g.kill()
-    d = t.disk("auto-e1000", "auto")
+    # The image as shipped: tier=auto.
+    native = (("virtio", "pc", "virtio-net-pci,disable-modern=on", "virtio", r"virtio-net 1af4:1000", "virtio-blk"),
+              ("nvme", "q35", "e1000e", "nvme", r"e1000e 8086:10d3", "nvme"),
+              ("ahci", "q35", "virtio-net-pci", "ahci", r"virtio-net[^:]* 1af4:10(00|41)", "ahci"))
+    for name, machine, nic, disk, adapter, controller in native:
+        d = t.disk(f"auto-{name}", None)
+        g = t.power_on(f"auto-{name}", d, machine, nic, disk=disk)
+        g.wait_for(r"k10boot: tier auto \(from /k10s/tier\)", "the image ships tier=auto")
+        g.wait_for(rf"k10boot: tier auto: {adapter} at \S+ is supported: native kernel", f"auto: {name}: the adapter")
+        g.wait_for(rf"k10boot: tier auto: K10S-DATA's controller \S+ is supported \({controller}\)", f"auto: {name}: the disk")
+        g.wait_for(METAL_READY, f"native kernel ready ({name})")
+        until("GET /_k10s/health", lambda: http(g.port, "/_k10s/health")[0] == 200, g.log)
+        g.wait_for(rf"storage: K10S-DATA on {controller}", f"K10S-DATA on {controller}")
+        g.kill()
+    d = t.disk("auto-e1000", None)
     g = t.power_on("auto-e1000", d, "q35", "e1000")
     g.wait_for(r"k10boot: tier auto: no supported network adapter \(8086:100e at \S+\): linux", "auto: linux")
     g.wait_for(TIER1_READY, "Tier 1 ready")
     g.kill()
-    print("test.py: tier: auto: native with a legacy virtio-net and an e1000e, Tier 1 with an e1000 (82540EM): ok", file=sys.stderr)
+    d = t.disk("auto-ide", None)
+    g = t.power_on("auto-ide", d, "pc", disk="ide")
+    g.wait_for(r"k10boot: tier auto: K10S-DATA's controller 8086:7010 \(class 0101\w\w\) is not supported: linux", "auto: IDE: linux")
+    g.wait_for(r"k10s-init\[ *[\d.]+\]: k10s \S+ as PID 1", "Tier 1 started")
+    g.kill()
+    print("test.py: tier: as shipped (tier=auto): native with virtio-net + virtio-blk, e1000e + NVMe, virtio-net + AHCI; "
+          "Tier 1 with an e1000 (82540EM), and with K10S-DATA on IDE: ok", file=sys.stderr)
 
     d = t.disk("fallback", "metal", "k10.engine=bogus")
     fw = uefi_firmware(work, "fallback")
@@ -1699,6 +1739,8 @@ def secureboot_test(a, work):
         with open(d, "r+b") as f:
             f.truncate(2 << 30)
         configure(d, work, a.k10s, ["admin-token-file=/boot/admin.key", "ntp=none", *conf], name)
+        if ARCH == "x86_64" and "k10s/tier" not in (dst for _, dst in files):
+            set_tier(work, d, "linux")
         for src, dst in files:
             mtools("mcopy", d, 2 << 20, "-o", src, f"::/{dst}")
         return d

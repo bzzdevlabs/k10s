@@ -29,7 +29,7 @@ EFI/Linux/k10s-a.efi, the image's record of the slot), p2 K10S-DATA:
          /boot/grub/grubenv      k10s_slot=a
          /k10s/a/                vmlinuz, initrd and boot.cfg (GRUB's linux/initrd lines): the UKI's payload
          /k10s/metal.elf         the native kernel (--metal)
-         /k10s/tier              tier=linux and metal_cmdline=, a GRUB environment block (k10boot reads it too)
+         /k10s/tier              tier=auto and metal_cmdline=, a GRUB environment block (k10boot reads it too)
          /k10s.conf              node configuration, for both tiers
   p3   K10S-DATA, a k10s store (crates/k10-kvlog: the node's KV and files, the native kernel's A/B slots), shared
        by both tiers; it grows to the end of the disk on first boot
@@ -117,11 +117,12 @@ GRUB_SLOTS = "load_env\nset slot=\"${k10s_slot}\"\n" + "".join(
 # /k10s/tier: a GRUB environment block (GRUB reads it on BIOS, k10boot on UEFI; k10-bootproto `tier`).
 TIER = """# GRUB Environment Block
 # This machine's tier (docs/OS.md "Tiers"), read by k10boot (UEFI) and GRUB (BIOS):
-#   tier=linux  Tier 1, Linux (the default)
+#   tier=auto   UEFI: the native kernel if it drives one of the network adapters and K10S-DATA's disk, else
+#               Tier 1; BIOS: Tier 1 (as shipped)
+#   tier=linux  Tier 1, Linux
 #   tier=metal  the native kernel, /k10s/metal.elf
-#   tier=auto   UEFI: the native kernel if it drives one of the network adapters, else Tier 1; BIOS: Tier 1
 # metal_cmdline= is the native kernel's command line. Edit lines in place: no blank lines, a newline at the end.
-tier=linux
+tier=auto
 metal_cmdline=
 """
 
