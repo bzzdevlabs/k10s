@@ -292,6 +292,10 @@ impl Stack {
     pub fn time_wait_count(&self) -> usize {
         self.time_wait
     }
+    /// This instance's connections: (flow, state, view, has an application handle).
+    pub fn tcp_connections(&self) -> impl Iterator<Item = (FlowKey, State, ViewId, bool)> + '_ {
+        self.slots.iter().filter_map(|s| s.tcb.as_ref()).map(|t| (t.key, t.state, t.view, !t.orphan))
+    }
     pub fn reassembly(&self) -> &Reassembler {
         &self.frag
     }

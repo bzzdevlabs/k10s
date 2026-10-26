@@ -8,6 +8,8 @@ mod error;
 mod flows;
 pub mod frag;
 pub mod iface;
+#[cfg(feature = "std")]
+pub mod multi;
 mod ndp;
 pub mod neigh;
 pub mod ports;
