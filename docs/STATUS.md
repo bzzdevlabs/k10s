@@ -254,6 +254,12 @@ seek privileges on this machine.
       `PHYS_OFFSET`; every physical↔virtual conversion goes through `PhysAddr`/`VirtAddr`
       (metal/kernel/src/mem/addr.rs) and nothing below 2^47 is mapped once booted (the AP trampoline and UEFI runtime
       calls use page tables of their own sharing the kernel's upper half); layout in metal/README.md, "Virtual memory".
+    - P4 foundation done: `crates/k10-net`, a sans-IO `no_std` TCP/IP stack built per CPU (RSS-owned flows, a shared
+      port table, socket views, ingress handoff; SACK, RACK-TLP, CUBIC, timestamps, window scaling, SYN cookies,
+      explicit caps charged to node and view quotas). Tests: `cargo test -p k10-net`; Linux interop
+      `crates/k10-net/interop/run.sh` (needs a readable host kernel, not in CI); smoltcp comparison
+      `crates/k10-net/bench` (10 Gbit/s simulated link: 7.9 vs 1.7 Gbit/s, at 1 % loss 1.5 Gbit/s vs 20 Mbit/s).
+      Not yet used by `metal/` (P4.4); HyStart++ and NIC offloads are not implemented.
 13. **Tier 2: k10s on its own kernel, on QEMU and on real x86 machines** — done under QEMU (docs/TASK-native-hardware.md, plan
     in docs/research/native-hardware.md §9, decisions in docs/REPORT.md §9; the prototype branches no longer exist).
     Goal: the `metal/` kernel boots from the shared image (universal-os.md §8.4) on VMs and on a real x86 machine and
