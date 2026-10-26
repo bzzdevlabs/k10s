@@ -2,10 +2,10 @@
 
 PROJECT STATE: HARDENING
 
-Last updated: 2026-10-25. This file is the single place to learn where the project stands and what comes next.
+Last updated: 2026-10-26. This file is the single place to learn where the project stands and what comes next.
 
 ## State of `main`
-`main` is pushed; every push publishes a dev pre-release (v0.1.0-dev.167 = a0dffc5, steps 13a, 13b, 13c and 13d: release
+`main` is pushed; every push publishes a dev pre-release (v0.1.0-dev.170 = 7697de0, steps 13a–13e: release
 and pages workflows green; the `unit`, `musl`, `i686`, `arm64` (JIT and interpreter), `armv7`, `dist`, `os`, `os-arm64` and
 `os-legacy` suites gate the release; glibc, musl (x86-64, aarch64, i686, armv7), metal, bench, examples and source
 archives; disk images x86-64 `vm` 5.0 MB and `metal` 7.4 MB (13a added k10boot and the native kernel),
@@ -112,7 +112,7 @@ verified against the key built into k10s; `SHA256SUMS`).
   frame received; own page tables for the call); 2 unhealthy boots pin Tier 1 until `/k10s/tier` is rewritten or
   the kernel changes. k10s.conf keys shared with Tier 1 become kernel arguments (bootcfg.rs). Multiboot2 header +
   32-bit shim in boot.rs: BIOS boots the native kernel through GRUB when `tier=metal` (no signature check, no
-  counting). The images ship `tier=linux` (KV state: step 13d); releases sign and publish
+  counting). The images ship `tier=auto` (13e); releases sign and publish
   `k10s-os-V-x86_64-native.elf`. `os/test.sh` tier (OVMF pc/q35: native joins a hosted node and serves, auto,
   fallback, refused signatures, PVH), mb2 (SeaBIOS → GRUB → Multiboot2) and secureboot (k10boot in front, MOK through
   shim's LoadImage, os_key refused under Secure Boot) gate releases; every other UEFI test boots Tier 1 through
@@ -161,8 +161,7 @@ verified against the key built into k10s; `SHA256SUMS`).
   write acknowledged a second earlier, a clean power off) next to a q35 self test with NVMe and AHCI disks,
   cluster-test.sh (a guest's kv replicas on its NVMe `K10S-DATA` through a power cut), os/test.py boot (ext4
   conversion), image (store grown), update-native (power cuts at every step, a crashing kernel, a trial that cannot
-  commit). The images still ship `tier=linux` (docs/OS.md "Tiers": no SNTP client, power button or IPv6 on the
-  native kernel, and no real-hardware run yet). Kernel 1.15 MB (+153 KB), k10boot 106 KB (+34 KB).
+  commit). Kernel 1.15 MB (+153 KB), k10boot 106 KB (+34 KB).
 - Tier 2 x86 bare metal (13c = M4's first part, metal/README.md "Real machines", "Hardware bring-up"): `metal/drivers`
   (crate `k10-drivers`, no_std + alloc, host tests against register models of the chips) holds the NIC and watchdog
   drivers behind small traits; the kernel puts the NICs behind `NetDevice` (dev/nic.rs: memory BAR, DMA regions,
@@ -186,6 +185,26 @@ verified against the key built into k10s; `SHA256SUMS`).
   (an e1000 Tier 1), the q35 screen read back by QMP screendump shows the boot up to the ready line; `os/test.sh
   usb` (release gate): the metal image as a usb-storage stick on qemu-xhci, OVMF and SeaBIOS, Tier 1 and the native
   kernel each serve. Throughput on virtio unchanged; kernel file +59 KB (metal/RESULTS.md §11).
+- Tier 2 platform services and `tier=auto` (13e, metal/README.md "How it works", docs/OS.md "Tiers"): the native
+  kernel does what Tier 1 does for a node. SNTP (sntp.rs, Tier 1's client and keys: `ntp` servers, else the DHCP
+  lease's option 42, else `pool.ntp.org`; step at 128 ms, slew at 500 ppm below; replies from the server asked,
+  echoing the random transmit timestamp) whenever there is no kvmclock; a DNS client (smoltcp's, A records; `dns`, else
+  the lease's option 6). The ACPI power button: the fixed-feature one and control-method ones whose `\_GPE._Lxx/_Exx`
+  method notifies a PNP0C0C device (`k10_drivers::power_button`, an AML scan) are the only SCI sources enabled; a press
+  leaves the cluster, then powers off. A single node keeps its last applied bundle in `K10S-DATA` (`bundle.k10b`,
+  Tier 1's file), written before the 200, installed first at the next boot (a boot bundle goes on top like an apply).
+  IPv6 as Tier 1's kernel: link-local EUI-64 and SLAAC, listeners in both families, echo replies; the Intel and
+  Realtek drivers receive all multicast. The x86-64 images ship `tier=auto`: on UEFI the native kernel where it
+  drives a NIC and `K10S-DATA`'s controller, Tier 1 elsewhere and on BIOS; updates never rewrite `/k10s/tier`, so
+  machines installed with `tier=linux` stay there. Tests: `metal/tools/platform_test.py` in the metal-selftest gate
+  (a scripted LAN over a socket netdev: DHCP options, DNS, NTP with forged replies, RA/NDP, NTP and HTTP over IPv6,
+  ping; the clock stepped from an RTC at 2001 before signed requests pass; the power button on pc, q35 and through a
+  GPE of an SSDT; applies kept through a power cut and a clean power off), the AML scan's host tests; `os/test.sh
+  tier`: the image as shipped boots the native kernel with virtio-net + virtio-blk, e1000e + NVMe, virtio-net + AHCI,
+  Tier 1 with an e1000 or `K10S-DATA` on IDE, and the native power button leaves a hosted node's cluster; `update`
+  (UEFI) runs on a `tier=linux` disk and checks each boot stays on Tier 1 and the tier file is unchanged; the other
+  Tier 1 UEFI tests write `tier=linux`. Native kernel 1.30 MB signed (+86 KB: SNTP/DNS about 23 KB, IPv6 the rest);
+  images unchanged at 5.0 MB (`vm`) and 7.4 MB (`metal`).
 - Releases: SemVer; tag `vX.Y.Z` on main → stable release, every push to main → `vX.Y.Z-dev.N` pre-release.
 - Performance vs 08f2921 (`bench/k10s/ab.py --same`, 4 interleaved rounds, host load ≈ 7 from the benchmark itself;
   medians): single node within ±2.5 %; local ingress −4 %; forwarded requests −5 % at c=1 (CPU per request +7 %) and
@@ -213,9 +232,9 @@ seek privileges on this machine.
       write-back MTRRs, large real memory maps (UEFI, overlapping entries), multi-socket root buses found by the bare
       metal ECAM brute-force scan, TSC calibration against real HPET/PM timers (and TSC sync across sockets), the
       8042/0xCF9 reset fallbacks, BMC serial consoles through SPCR; cloud VMs (Hetzner/Vultr modern virtio,
-      DigitalOcean BIOS) with 13a's images. Not done here: wall-clock discipline without kvmclock (an NTP/SNTP client),
-      ACPI events (power button), Firecracker/Cloud Hypervisor secrets (no fw_cfg and no k10boot there: their admin
-      API stays closed until keys come through the boot protocol), interrupt remapping (VT-d, M4).
+      DigitalOcean BIOS) with 13a's images. Not done here: Firecracker/Cloud Hypervisor secrets (no fw_cfg and no
+      k10boot there: their admin API stays closed until keys come through the boot protocol), interrupt remapping
+      (VT-d, M4); SNTP and the power button came in 13e.
     - 13c **x86 bare metal** (M4's first part) — done (State of main; under QEMU and register models only). Next:
       bring-up on the user's machine (a desktop, NIC not identified yet: metal/README.md "Hardware bring-up" starts
       by identifying it). Needs real hardware: the I219's ULP exit with a live ME (H2ME/ULP_CFG_DONE timing),
@@ -237,8 +256,18 @@ seek privileges on this machine.
       k10boot reading slots through real firmware's Block I/O (alignment, slow USB media) and its counter writes on
       real flash, GPT growth by the native kernel on real disks, the conversion of a real ext4 `K10S-DATA` written by
       an older image, `tier=auto` against real storage controllers' device paths. Not done here: NCQ, one I/O queue per
-      CPU, storage I/O off CPU 0 (a checkpoint of a large store stalls CPU 0's network loop), single-node (non-cluster)
-      native applies kept across reboots, and the move to `tier=auto` in the images (docs/OS.md "Tiers").
+      CPU, storage I/O off CPU 0 (a checkpoint of a large store stalls CPU 0's network loop); single-node applies
+      kept and `tier=auto` came in 13e.
+    - 13e **platform services and `tier=auto`** — done (State of main; under QEMU only). Needs real hardware or
+      clouds: the fixed-feature power button after the switch to ACPI mode on real firmware (SMI_CMD/ACPI_ENABLE,
+      SCI routing through real interrupt overrides), control-method buttons whose GPE methods notify directly (and
+      how many desktops route theirs through Super I/O methods or an EC instead), SNTP against real NTP pools and
+      DHCP option 42 from real servers, the TSC's drift between polls on real crystals, IPv6 SLAAC from real
+      routers (RA timing, several prefixes: one is used), all-multicast on the I219/I225 and Realtek chips, `tier=auto`
+      on real UEFI firmware's PCI I/O enumeration and Block I/O device paths (NVMe, AHCI, USB sticks booting Tier 1).
+      Not done here: power button on hardware-reduced platforms (the Generic Event Device's `_EVT`: microvm, Cloud
+      Hypervisor) and through EC queries (laptops), DHCPv6 and RDNSS, AAAA names and IPv6 cluster addresses on the
+      native kernel, SNTP with kvmclock present (the hypervisor's clock is followed).
     - Then M3 big-cloud NICs (ENA, VMBus, gVNIC; needs cloud accounts), the rest of M4 (tg3, IOMMU, HWP, a hardware
       CI rack), M5 arm64 arch layer, M6's metal half (the arm64 JIT from U4 on metal: I-cache sync and cross-CPU
       synchronization of its own), M7 Pi 4/5.
