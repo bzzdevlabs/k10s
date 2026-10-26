@@ -255,7 +255,8 @@ status ≥ 0, −1 unknown service, −2 unavailable (crash backoff with nothing
   namespace), compaction by checkpoints of the whole store (when the log exceeds twice the live data and 1 MiB, or
   free space runs low), the store degraded and rewritten with backoff after an I/O error; a restart recovers a
   prefix of each namespace's writes. The store holds about a quarter of its log as live data (namespaces reserve it
-  in 64 KiB steps): past it a `kv_put` traps `Host(3)` like the quota. The store is opened (and replayed) before the
+  in 64 KiB steps; a store of format version 2, with an object area, its KV share: docs/OS.md, "Data"): past it a
+  `kv_put` traps `Host(3)` like the quota. The store is opened (and replayed) before the
   sandbox, as root if need be; its flusher thread starts inside it.
 - `log`: per-service ring (1000 lines / 256 KiB, lines ≤ 4 KiB), optionally echoed to stderr (`--log-stderr`).
 

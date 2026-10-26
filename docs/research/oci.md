@@ -333,14 +333,19 @@ everything dropped (devices, unsupported xattrs, refused features).
 
 ### 7.3 Where bytes live on the native kernel
 K10S-DATA is a k10-kvlog store whose log is compacted by checkpoints that rewrite live data: hundreds of MiB of
-immutable objects must not live in the log. **Store layout version 2** adds an object area: the store's 4 MiB
-segments are either log segments or object segments; objects are written as extents of 4 KiB units into object
-segments (data first, flushed), then their index record (root → extents, size, leaf hashes' location, refcount) is
-appended to the log in a batch. A crash leaves either an indexed whole object or unreferenced extents, which replay
-reclaims. Compaction of object segments moves live extents out of sparse segments in the background, rate-limited,
-off CPU 0 (§14 P3.1). Version 1 stores open unchanged; the first object write upgrades the superblock (the native
-kernel and hosted nodes both read version 2; Tier 1 nodes never write objects). The same layout serves hosted
-nodes' `--store` files.
+immutable objects must not live in the log. **Store layout version 2** (`k10_kvlog::store::objects`, docs/OS.md
+"Data") adds an object area: the store's 4 MiB segments are free, log segments or object segments. The superblock
+gives the log `3 × (KV + index) + 2` segments (the KV share, a 32nd of the segments within 16–1024; the object
+index, 16 KiB per object segment) and the object area the rest, so KV quotas never depend on objects. An object's
+units (data, then its leaf hashes) are reserved whole when it starts, as extents of 4 KiB units (whole free segments
+for the bulk, the first free run for the rest); each leaf is verified as it arrives and written in place; data and
+leaf hashes are flushed, then the index record (root → size, references, extents) is appended to the log in a batch.
+A crash leaves either an indexed whole object or unreferenced units, which replay leaves free; a deleted object's
+units are reused once its DEL is durable. Moving live extents out of sparse segments (fewer extents per object,
+rate-limited, off CPU 0) belongs to the kernel half of §14 P3.1: an index record rewritten with new extents, the
+old units freed once it is durable. Version 1 stores open unchanged; an upgrade (one superblock write) makes them
+version 2 before their first object (the native kernel and hosted nodes both read version 2; Tier 1 nodes never
+write objects). The same layout serves hosted nodes' `--store` files.
 
 ### 7.4 Writable scratch
 Copy-up overlay per container: files written by the container live in a scratch filesystem, memory-backed and

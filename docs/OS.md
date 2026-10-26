@@ -217,21 +217,38 @@ the native kernel reads and writes it without filesystem code, and both tiers re
 ```
 0        superblock, two copies 4 KiB apart (written alternately: one is always whole)
 1 MiB    kernel slot A (16 MiB), then slot B: the native kernel's updates ("Updates")
-33 MiB   the log: 4 MiB segments up to the end of the partition (53 MiB at least)
+33 MiB   4 MiB segments up to the end of the partition (53 MiB at least): the log's, and in format version 2 the
+         object area's
 ```
 
 - **KV.** One namespace per service, holding the records of the hosted node's per-service logs (`len | crc32 | op |
   klen | key | value`): writes are batched (group commit: an acknowledged write may be lost within 2 ms plus the
   write), and when the log grows past twice the live data, or free space runs short, a checkpoint rewrites the live
   data into fresh segments and points the superblock at them. About a quarter of the log may hold live data (a third
-  of its segments, less what a 1 MiB record may leave unused in each); past it a write is refused like an exceeded
-  quota (trap `Host(3)`). After a write error the store is rewritten (with backoff) before writes are durable again.
+  of its segments, less what a 1 MiB record may leave unused in each; in format version 2, the KV share below); past
+  it a write is refused like an exceeded quota (trap `Host(3)`). After a write error the store is rewritten (with backoff) before writes are durable again.
 - **The node's files** (`node-id`, `incarnation`, `peers`, `manifest.k10m`, `blobs/<sha256>`, a single node's
   `bundle.k10b`, a generated `admin.key`) are files of the namespace `.files`: chunked records, replaced whole.
 - **Power cuts.** Each segment's records are checksummed with a mask derived from the segment, so bytes left behind by
   older data never pass for current records; replay stops at the first record that does not check out and seals the
   log there before anything else is written. After a cut, each namespace holds a prefix of its writes, including
   every write of a batch whose flush completed (`k10_kvlog`'s crash model and the QEMU power-cut tests).
+- **Objects** (format version 2). Large immutable objects, named by the root of their hash tree (the files of OCI
+  images converted to `K10I`, docs/research/oci.md §7), live in an object area of 4 KiB units. The superblock gives
+  the log `3 × (KV + index) + 2` segments: room for the KV share (a 32nd of the segments, 16 to 1024 of them: 48 MiB
+  to 3 GiB of live data, or what KV held when the store became version 2 if that is more), for the object index
+  (16 KiB per object segment), for appends and for a checkpoint; the object area has the rest, about 90 % of a large
+  disk. Neither takes the other's room. An object arrives in chunks, in any order: its leaf hashes are checked
+  against its root first, then each 4 KiB leaf against its hash before it is written in place; once whole, its leaf
+  hashes are written after it, the disk flushed, and its index entry (root, size, references, extents) appended to
+  the log in a batch, in a namespace of the store's own that replay and checkpoints carry. After a power cut an
+  object is indexed and whole, or its units are free again; a deleted object's units are reused only once its
+  deletion is durable. Reads are page-granular (any run of 4 KiB units, verified against the leaf hashes on
+  request), and a page cache can ask for a unit's disk offset and read it itself.
+- **Format versions.** A store is formatted as version 1 (all log) and becomes version 2 in place, with one
+  superblock write, before its first object; both tiers and k10boot read both versions. A build that reads only
+  version 1 refuses a version 2 store (a store "of format version 2"; the node keeps its state in memory) instead of
+  writing to it.
 - **Both tiers.** The native kernel reads the same namespaces (KV by service name), the node id and the desired state;
   the files only Tier 1 uses are left as they are.
 - **Images before the store** had an ext4 `K10S-DATA`. Init converts it on the first boot: the state (KV logs as
@@ -826,7 +843,7 @@ Block I/O, and the conversion of a real ext4 `K10S-DATA` written by an older ima
 - The images ship `tier=auto` ("Tiers"): on UEFI the native kernel boots where it drives the NIC and the data disk;
   on BIOS only with `tier=metal`, without a signature check, boot counting or kernel updates.
 - A `K10S-DATA` store holds about a quarter of its log as live data (51 MiB on the images' 256 MiB before it grows
-  to the disk); an ext4 `K10S-DATA` whose state does not fit `K10S-BOOT`'s free space is kept as ext4.
+  to the disk; in format version 2, its KV share); an ext4 `K10S-DATA` whose state does not fit `K10S-BOOT`'s free space is kept as ext4.
 - The native kernel's Intel and Realtek drivers are tested under QEMU and against register models, not yet on the
   chips (metal/README.md, "Hardware bring-up").
 - The image uses 512-byte logical sectors; disks with 4 KiB logical sectors (rare outside servers) need a rebuilt

@@ -20,6 +20,8 @@
 //!   store. A third of the segments may hold live data, less what the largest record may leave unused in each
 //!   ([`Store::max_live`], about a quarter of the log); the rest keeps room for appends between checkpoints and for
 //!   the checkpoint itself. Appends leave that room free whatever the caller does ([`Error::Full`]).
+//! * **Objects** (version 2, [`objects`]): an object area in segments the log does not count on, indexed by records
+//!   of the reserved namespace [`objects::NS`], which the store replays, checkpoints and accounts for itself.
 
 use alloc::collections::VecDeque;
 use alloc::vec;
@@ -28,6 +30,8 @@ use core::fmt;
 
 use crate::layout::{self, Slot, Super, LOG_OFFSET, MAX_SEGMENTS, MIN_SIZE, SEG_BYTES, SLOT_BYTES, SUPER_AT, SUPER_LEN, UNIT};
 use crate::record::{self, Next, Rec, BODY_MIN, HDR};
+
+pub mod objects;
 
 /// The device under a store: byte offsets from the start of the partition, whole aligned [`UNIT`]s.
 pub trait Disk {
@@ -64,6 +68,16 @@ pub enum Error {
     TooLarge,
     /// A write failed earlier: only a checkpoint can write until one succeeds.
     Degraded,
+    /// A version 1 store: no object area until [`Store::upgrade`].
+    NoObjects,
+    /// The object is stored, or being uploaded, already.
+    Exists,
+    /// No such object, upload or range of an object.
+    Missing,
+    /// Bytes or hashes that do not match the object's root.
+    Mismatch,
+    /// An upload with leaves not written yet.
+    Incomplete,
 }
 
 impl From<IoError> for Error {
@@ -78,13 +92,18 @@ impl fmt::Display for Error {
             Error::Io => f.write_str("I/O error"),
             Error::Blank => f.write_str("no store (blank partition)"),
             Error::Foreign => f.write_str("not a k10s store"),
-            Error::Newer(v) => write!(f, "a store of format version {v} (this build reads version {})", layout::VERSION),
+            Error::Newer(v) => write!(f, "a store of format version {v} (this build reads versions up to {})", layout::VERSION),
             Error::Corrupt(what) => write!(f, "corrupt store ({what})"),
             Error::TooSmall => write!(f, "partition smaller than {} MiB", MIN_SIZE >> 20),
             Error::Shrunk => f.write_str("partition smaller than its store"),
             Error::Full => f.write_str("store full"),
             Error::TooLarge => f.write_str("too large for the store"),
             Error::Degraded => f.write_str("store degraded by a failed write"),
+            Error::NoObjects => f.write_str("store without an object area (format version 1)"),
+            Error::Exists => f.write_str("object already stored"),
+            Error::Missing => f.write_str("no such object or range"),
+            Error::Mismatch => f.write_str("object data does not match its hashes"),
+            Error::Incomplete => f.write_str("object upload incomplete"),
         }
     }
 }
@@ -125,7 +144,7 @@ pub fn mask(id: &[u8; 16], seq: u64) -> u32 {
     crate::crc::update(crate::crc32(id), &seq.to_le_bytes())
 }
 
-fn seg_offset(index: u32) -> u64 {
+pub(crate) fn seg_offset(index: u32) -> u64 {
     LOG_OFFSET + index as u64 * SEG_BYTES
 }
 
@@ -171,6 +190,9 @@ impl Bits {
     }
     fn get(&self, i: u32) -> bool {
         self.0[i as usize / 64] & 1 << (i % 64) != 0
+    }
+    fn count(&self) -> u32 {
+        self.0.iter().map(|w| w.count_ones()).sum()
     }
     fn set(&mut self, i: u32, v: bool) {
         let w = &mut self.0[i as usize / 64];
@@ -252,6 +274,8 @@ pub struct Writes {
     pub runs: Vec<(u64, Vec<u8>)>,
     /// The superblock's generation and sequence reservation, when `first` is one.
     generation: Option<(u64, u64)>,
+    /// The batch's number: object units its DEL records free are reused once it is durable.
+    batch: u64,
 }
 
 impl Writes {
@@ -294,6 +318,9 @@ pub struct Store {
     /// Segments of an abandoned checkpoint that a superblock write of unknown outcome may name: freed after the
     /// next superblock written whole.
     limbo: Vec<u32>,
+    /// Batches handed out by [`Store::take_writes`].
+    batches: u64,
+    area: objects::Area,
 }
 
 /// A position in the log: the segment, the offset, and the bytes of that unit before it.
@@ -320,6 +347,7 @@ impl Store {
         }
         let segments = ((size - LOG_OFFSET) / SEG_BYTES).min(MAX_SEGMENTS as u64) as u32;
         let sb = Super {
+            version: 1,
             generation: 0,
             id,
             segments,
@@ -329,6 +357,8 @@ impl Store {
             slots: [Slot::default(); 2],
             committed: None,
             trial: None,
+            kv_segments: 0,
+            index_segments: 0,
         };
         let mut st = Store::empty(sb, 0);
         st.chain.push_back((0, 1));
@@ -360,11 +390,13 @@ impl Store {
             degraded: false,
             checkpoint: None,
             limbo: Vec::new(),
+            batches: 0,
+            area: objects::Area::new(sb.segments),
         }
     }
 
-    /// Opens the store: replays the log into `apply` (namespace, record), seals where it ended, and grows the store
-    /// to the partition.
+    /// Opens the store: replays the log into `apply` (namespace, record; the object index excepted), seals where it
+    /// ended, and grows the store to the partition.
     pub fn open(d: &mut dyn Disk, apply: &mut dyn FnMut(&[u8], Rec<'_>)) -> Result<Store, Error> {
         let sb = read_super(d)?;
         if d.size() < sb.size() {
@@ -372,13 +404,14 @@ impl Store {
         }
         let mut st = Store::empty(sb, sb.generation);
         let stop = st.replay(d, apply)?;
+        st.load_objects()?;
         st.cursor = (stop.end.index + 1) % sb.segments;
         st.seal_end(d, stop)?;
         st.grow(d)?;
         Ok(st)
     }
 
-    /// Replays the chain from the superblock's tail.
+    /// Replays the chain from the superblock's tail (the object index into the object area).
     fn replay(&mut self, d: &mut dyn Disk, apply: &mut dyn FnMut(&[u8], Rec<'_>)) -> Result<Stop, Error> {
         let id = self.sb.id;
         let (mut i, mut s) = (self.sb.tail_index, self.sb.tail_seq);
@@ -403,7 +436,18 @@ impl Store {
                 let Next::Rec(r, n) = record::next(bytes, m) else { break None };
                 match r.op {
                     record::PUT | record::DEL if have_ns => {
-                        apply(&ns, r);
+                        if ns == objects::NS {
+                            if r.key.len() != 32 || (r.op == record::PUT && !objects::entry_ok(r.value)) {
+                                return Err(Error::Corrupt("object index"));
+                            }
+                            if r.op == record::PUT {
+                                self.area.index.insert(r.key.to_vec(), r.value.to_vec());
+                            } else {
+                                self.area.index.remove(r.key);
+                            }
+                        } else {
+                            apply(&ns, r);
+                        }
                         empty = false;
                     }
                     record::NS => {
@@ -479,14 +523,22 @@ impl Store {
         Ok(())
     }
 
-    /// Takes in more of the partition when it grew (a first boot on a larger disk).
+    /// Takes in more of the partition when it grew (a first boot on a larger disk): the log keeps its KV share, the
+    /// object area takes the new segments and the index its share of them.
     fn grow(&mut self, d: &mut dyn Disk) -> Result<(), Error> {
         let want = ((d.size() - LOG_OFFSET) / SEG_BYTES).min(MAX_SEGMENTS as u64) as u32;
         if want > self.sb.segments {
             let mut sb = self.sb;
             sb.segments = want;
+            if sb.version >= 2 {
+                let index = objects::index_segments(want, sb.kv_segments).max(sb.index_segments);
+                if 3 * (sb.kv_segments + index) + 2 + self.area.segs <= want {
+                    sb.index_segments = index;
+                }
+            }
             self.store_super(d, sb)?;
             self.used.grow(want);
+            self.area.grow(want);
         }
         Ok(())
     }
@@ -504,9 +556,9 @@ impl Store {
         (self.chain.len() as u64).saturating_sub(1) * SEG_BYTES + self.head.pos
     }
 
+    /// Segments the log may still take.
     pub fn free_segments(&self) -> u32 {
-        let used: u32 = self.used.0.iter().map(|w| w.count_ones()).sum();
-        self.sb.segments - used
+        self.sb.log_segments().saturating_sub(self.used.count() - self.area.segs)
     }
 
     /// Segments `bytes` of records take (plus the namespaces' NS records, which callers count in `bytes`).
@@ -514,19 +566,25 @@ impl Store {
         bytes.div_ceil(PAYLOAD) as u32
     }
 
+    /// Live data the log keeps room for: the callers' and (version 2) the object index's.
     fn max_live_segments(&self) -> u32 {
-        (self.sb.segments - 2) / 3
+        (self.sb.log_segments() - 2) / 3
     }
 
-    /// The most live data (record bytes, NS records included) the store takes.
+    /// The most live data (record bytes, NS records included) the callers' namespaces take.
     pub fn max_live(&self) -> u64 {
-        self.max_live_segments() as u64 * PAYLOAD
+        if self.sb.version >= 2 {
+            self.sb.kv_segments as u64 * PAYLOAD
+        } else {
+            self.max_live_segments() as u64 * PAYLOAD
+        }
     }
 
     /// Whether the next batch, of `pending` bytes, should be a checkpoint instead: to compact (the log is over
-    /// twice the live data and over `compact_min`), or to keep room for a checkpoint after it (appends that would
-    /// not fail with [`Error::Full`]).
+    /// twice the live data, the callers' `live` and the object index, and over `compact_min`), or to keep room for
+    /// a checkpoint after it (appends that would not fail with [`Error::Full`]).
     pub fn wants_checkpoint(&self, live: u64, pending: u64, compact_min: u64) -> bool {
+        let live = live + self.area.live;
         let log = self.log_bytes() + pending;
         (log > compact_min && log > 2 * live)
             || self.free_segments() < Store::segments_for(pending) + self.max_live_segments() + 2
@@ -541,6 +599,7 @@ impl Store {
         self.degraded = true;
         self.runs.clear();
         self.run_open = false;
+        self.area.batch_failed();
     }
 
     /// A free segment and a fresh sequence number for it, leaving `keep` free.
@@ -626,6 +685,13 @@ impl Store {
 
     /// Adds whole records (encoded unmasked, as [`record::encode`] does) of namespace `ns` to the batch.
     pub fn push(&mut self, ns: &[u8], records: &[u8]) -> Result<(), Error> {
+        if ns == objects::NS {
+            return Err(Error::Corrupt("records of the object index"));
+        }
+        self.append(ns, records)
+    }
+
+    fn append(&mut self, ns: &[u8], records: &[u8]) -> Result<(), Error> {
         if self.degraded && self.checkpoint.is_none() {
             return Err(Error::Degraded);
         }
@@ -669,6 +735,10 @@ impl Store {
     /// Ends the batch and hands its writes to the caller.
     pub fn take_writes(&mut self) -> Writes {
         self.pad();
+        self.batches += 1;
+        if !self.degraded {
+            self.area.batch_taken(self.batches);
+        }
         let (first, generation) = if self.super_due {
             let g = self.written + 1;
             let mut sb = self.sb;
@@ -679,7 +749,7 @@ impl Store {
         } else {
             (None, None)
         };
-        Writes { first, runs: self.runs.drain(..).map(|r| (r.offset, r.buf)).collect(), generation }
+        Writes { first, runs: self.runs.drain(..).map(|r| (r.offset, r.buf)).collect(), generation, batch: self.batches }
     }
 
     /// The caller wrote and flushed `w.first` (the runs may still fail: the superblock is on disk regardless).
@@ -694,6 +764,7 @@ impl Store {
     /// The caller wrote and flushed `w`.
     pub fn writes_done(&mut self, w: &Writes) {
         self.first_done(w);
+        self.release_freed(Some(w.batch));
     }
 
     fn superblock_written(&mut self, g: u64, next_seq: u64) {
@@ -783,7 +854,14 @@ impl Store {
 
     /// [`Store::push`] within a checkpoint; writes as the runs fill (flushed at the end).
     pub fn checkpoint_push(&mut self, d: &mut dyn Disk, ns: &[u8], records: &[u8]) -> Result<(), Error> {
-        self.push(ns, records)?;
+        if ns == objects::NS {
+            return Err(Error::Corrupt("records of the object index"));
+        }
+        self.checkpoint_append(d, ns, records)
+    }
+
+    fn checkpoint_append(&mut self, d: &mut dyn Disk, ns: &[u8], records: &[u8]) -> Result<(), Error> {
+        self.append(ns, records)?;
         if self.runs.iter().map(|r| r.buf.len()).sum::<usize>() >= RUN_MAX {
             let open = self.run_open;
             let tail = if open { self.runs.pop() } else { None };
@@ -801,8 +879,9 @@ impl Store {
         Ok(())
     }
 
-    /// Completes the checkpoint: writes and flushes the new chain, then points the superblock at it.
+    /// Completes the checkpoint: writes the object index and flushes the new chain, then points the superblock at it.
     pub fn checkpoint_end(&mut self, d: &mut dyn Disk) -> Result<(), Error> {
+        self.checkpoint_index(d)?;
         self.pad();
         self.write_runs(d)?;
         d.flush()?;
@@ -818,6 +897,7 @@ impl Store {
             self.used.set(i, false);
         }
         self.degraded = false;
+        self.release_freed(None);
         Ok(())
     }
 

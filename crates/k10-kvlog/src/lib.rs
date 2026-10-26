@@ -4,7 +4,8 @@
 //!   per-service log files (`DATA/kv/<service>.log`) are plain sequences of these records.
 //! * [`store`] — `K10S-DATA`, the raw data partition both tiers use: a superblock pair, two kernel slots and a
 //!   segmented log of the same records, namespaced, with checkpoints (compaction) and recovery that keeps exactly a
-//!   prefix of each namespace's writes after a power cut. [`layout`] holds its on-disk structures.
+//!   prefix of each namespace's writes after a power cut; in format version 2, an object area beside the log for
+//!   large content-addressed objects ([`store::objects`]). [`layout`] holds its on-disk structures.
 //! * [`files`] — whole files (blobs, the manifest, node identity) as chunked records of a reserved namespace.
 //! * [`gpt`] — GUID partition tables: finding `K10S-DATA`, growing it to the end of its disk.
 //!

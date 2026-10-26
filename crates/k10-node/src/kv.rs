@@ -10,6 +10,8 @@
 //!   or corrupt tail is truncated at the last good record). A raw store (`--store`: Tier 1's `K10S-DATA`
 //!   partition, which the native kernel reads too) keeps every namespace, and the node's files ([`KvNs::put_file`]),
 //!   in one segmented log (`k10_kvlog::store`): same records, per-namespace prefix guarantee after a power cut.
+//!   With [`KvConfig::objects`] the store is format version 2 and also holds content-addressed objects
+//!   ([`KvStore::object_begin`]: image files, verified leaf by leaf as they arrive) beside KV.
 //! * **Group commit**: `kv_put`/`kv_del` return as soon as the record is in `pending`. A single flusher thread wakes on
 //!   the first dirty namespace, waits `flush_interval` to batch, writes every namespace's pending bytes and
 //!   syncs (`fdatasync` of the files, or one batch of the store). **Durability window**: an acknowledged write can
@@ -40,7 +42,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use k10_kvlog::store::{Disk, IoError, Store as RawLog};
+use k10_kvlog::store::objects::{self, Hasher, Object, Space, Upload};
+use k10_kvlog::store::{Disk, Error as StoreError, IoError, Store as RawLog};
 use k10_kvlog::{files, record};
 
 pub use k10_host::{MAX_KEY, MAX_VALUE};
@@ -68,6 +71,9 @@ pub struct KvConfig {
     /// namespace past it is refused (trap `Host(3)`), so one service cannot fill the node's memory and disk. 0
     /// disables the quota.
     pub max_bytes: u64,
+    /// A raw store gets an object area (format version 2, upgraded in place at open): KV keeps
+    /// `k10_kvlog::store::objects::kv_share` of the store, or what it holds if that is more.
+    pub objects: bool,
 }
 
 /// Default per-service KV quota (256 MiB of live data). Generous for real workloads (the examples use kilobytes),
@@ -76,7 +82,7 @@ pub const DEFAULT_KV_MAX_BYTES: u64 = 256 << 20;
 
 impl Default for KvConfig {
     fn default() -> Self {
-        KvConfig { flush_interval: Duration::from_millis(2), compact_min: 1 << 20, max_bytes: DEFAULT_KV_MAX_BYTES }
+        KvConfig { flush_interval: Duration::from_millis(2), compact_min: 1 << 20, max_bytes: DEFAULT_KV_MAX_BYTES, objects: false }
     }
 }
 
@@ -558,7 +564,10 @@ impl KvStore {
     pub fn format_raw(mut disk: Box<dyn Disk + Send>, name: &str, cfg: KvConfig) -> io::Result<KvStore> {
         let mut id = [0u8; 16];
         crate::sys::fill_random(&mut id)?;
-        let log = RawLog::format(&mut *disk, id).map_err(|e| io::Error::other(format!("kv store {name}: {e}")))?;
+        let mut log = RawLog::format(&mut *disk, id).map_err(|e| io::Error::other(format!("kv store {name}: {e}")))?;
+        if cfg.objects {
+            enable_objects(&mut *disk, &mut log, 0, name)?;
+        }
         Ok(KvStore::raw(disk, log, HashMap::new(), name, cfg))
     }
 
@@ -583,7 +592,7 @@ impl KvStore {
                 }
             }
         };
-        let log = match RawLog::open(&mut *disk, apply) {
+        let mut log = match RawLog::open(&mut *disk, apply) {
             Err(k10_kvlog::store::Error::Blank) => {
                 let mut id = [0u8; 16];
                 crate::sys::fill_random(&mut id)?;
@@ -593,6 +602,10 @@ impl KvStore {
             r => r,
         }
         .map_err(|e| io::Error::other(format!("kv store {name}: {e}")))?;
+        if cfg.objects {
+            let live = maps.iter().filter(|(_, g)| !g.map.is_empty()).map(|(ns, g)| g.live_bytes + rec_size(ns.len(), 0)).sum();
+            enable_objects(&mut *disk, &mut log, live, name)?;
+        }
         let store = KvStore::raw(disk, log, maps, name, cfg);
         let st = store.stats();
         eprintln!("k10s: data store {name}: {} MiB, {} keys in {} namespaces", store.size() >> 20, st.keys, st.namespaces);
@@ -639,6 +652,84 @@ impl KvStore {
     /// Whether this is a raw store.
     pub fn is_raw(&self) -> bool {
         matches!(self.shared.backend, Backend::Raw(_))
+    }
+
+    fn raw_lock(&self) -> io::Result<std::sync::MutexGuard<'_, Raw>> {
+        match &self.shared.backend {
+            Backend::Raw(r) => Ok(r.lock().unwrap_or_else(|e| e.into_inner())),
+            _ => Err(io::Error::new(io::ErrorKind::Unsupported, "objects need a raw store")),
+        }
+    }
+
+    /// Starts writing an object (`k10_kvlog::store::objects`): its leaf hashes are checked against `root`, its
+    /// room reserved.
+    pub fn object_begin(&self, root: [u8; 32], size: u64, leaves: &[u8], h: &mut dyn Hasher) -> io::Result<Upload> {
+        self.raw_lock()?.log.object_begin(root, size, leaves, h).map_err(object_error)
+    }
+
+    /// Verifies whole leaves of an upload at `offset` (without holding the store) and writes them (durable with its
+    /// commit).
+    pub fn object_write(&self, up: &mut Upload, offset: u64, data: &[u8], h: &mut dyn Hasher) -> io::Result<()> {
+        let v = up.verify(offset, data, h).map_err(object_error)?;
+        up.write_verified(&mut *self.raw_lock()?.disk, v).map_err(object_error)
+    }
+
+    /// Makes a whole upload durable and indexes it with `refs` references.
+    pub fn object_commit(&self, up: &mut Upload, refs: u32) -> io::Result<()> {
+        self.index_op(|r| r.log.object_commit(&mut *r.disk, up, refs))
+    }
+
+    pub fn object_abort(&self, up: Upload) {
+        if let Ok(mut r) = self.raw_lock() {
+            r.log.object_abort(up);
+        }
+    }
+
+    pub fn object_set_refs(&self, root: &[u8; 32], refs: u32) -> io::Result<()> {
+        self.index_op(|r| r.log.object_set_refs(root, refs).and_then(|()| r.log.commit(&mut *r.disk)))
+    }
+
+    /// Deletes an object; its room is reused once the deletion is durable.
+    pub fn object_delete(&self, root: &[u8; 32]) -> io::Result<()> {
+        self.index_op(|r| r.log.object_delete(root).and_then(|()| r.log.commit(&mut *r.disk)))
+    }
+
+    pub fn object(&self, root: &[u8; 32]) -> Option<Object> {
+        self.raw_lock().ok()?.log.object(root)
+    }
+
+    /// The object area's room and use (a raw store's; zeros for format version 1).
+    pub fn object_space(&self) -> Option<Space> {
+        Some(self.raw_lock().ok()?.log.object_space())
+    }
+
+    /// Reads whole 4 KiB units `first..` of an object, verified against its leaf hashes with `verify`.
+    pub fn object_read(&self, root: &[u8; 32], first: u64, buf: &mut [u8], verify: Option<&mut dyn Hasher>) -> io::Result<()> {
+        let mut g = self.raw_lock()?;
+        let r = &mut *g;
+        r.log.object_read(&mut *r.disk, root, first, buf, verify).map_err(object_error)
+    }
+
+    /// An object index change under the store's lock: a checkpoint first when the log has no room for it; a failed
+    /// batch degrades the store like a failed flush.
+    fn index_op(&self, mut op: impl FnMut(&mut Raw) -> Result<(), StoreError>) -> io::Result<()> {
+        let mut g = self.raw_lock()?;
+        let r = &mut *g;
+        let mut res = op(r);
+        if res == Err(StoreError::Full) && r.failures == 0 {
+            let nss = namespaces(&self.shared);
+            res = checkpoint(r, &nss).and_then(|()| {
+                self.shared.compactions.fetch_add(1, Ordering::Relaxed);
+                op(r)
+            });
+        }
+        match res {
+            Err(e) if r.log.degraded() && r.failures == 0 => {
+                degrade_raw(&self.shared, r, &namespaces(&self.shared), "object index", e);
+                Err(object_error(e))
+            }
+            res => res.map_err(object_error),
+        }
     }
 
     /// The namespace of `service` (created on first use).
@@ -1043,6 +1134,30 @@ fn checkpoint(r: &mut Raw, nss: &[Arc<KvNs>]) -> Result<(), k10_kvlog::store::Er
         r.log.checkpoint_abort();
     }
     res
+}
+
+/// Upgrades a raw store to format version 2 for its object area.
+fn enable_objects(disk: &mut dyn Disk, log: &mut RawLog, live: u64, name: &str) -> io::Result<()> {
+    match log.upgrade(disk, live.max(objects::kv_share(log.segments()))) {
+        Ok(()) => Ok(()),
+        Err(StoreError::Full) => {
+            eprintln!("k10s: kv store {name}: too small for an object area");
+            Ok(())
+        }
+        Err(e) => Err(io::Error::other(format!("kv store {name}: {e}"))),
+    }
+}
+
+fn object_error(e: StoreError) -> io::Error {
+    let kind = match e {
+        StoreError::Missing => io::ErrorKind::NotFound,
+        StoreError::Exists => io::ErrorKind::AlreadyExists,
+        StoreError::Mismatch | StoreError::Incomplete => io::ErrorKind::InvalidData,
+        StoreError::Full | StoreError::TooLarge => io::ErrorKind::StorageFull,
+        StoreError::NoObjects => io::ErrorKind::Unsupported,
+        _ => io::ErrorKind::Other,
+    };
+    io::Error::new(kind, e.to_string())
 }
 
 /// Marks the raw store degraded after `what` failed (every namespace), and schedules the next rewrite.
@@ -1704,6 +1819,125 @@ mod tests {
         f.write_all_at(&[0x53, 0xEF], 1080).unwrap();
         let err = KvStore::open_raw(Box::new(FileDisk::new(f, "x").unwrap()), "x", KvConfig::default()).err().unwrap();
         assert!(err.to_string().contains("not a k10s store"), "{err}");
+        let _ = fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    /// A SHA-256 tree of one level (tests: `k10-image` defines the real one).
+    struct Flat;
+
+    impl Hasher for Flat {
+        fn leaf(&mut self, data: &[u8]) -> [u8; 32] {
+            let mut h = k10_mesh::sha256::Sha256::new();
+            h.update(&[0]);
+            h.update(data);
+            h.finalize()
+        }
+        fn root(&mut self, leaves: &[u8]) -> [u8; 32] {
+            let mut h = k10_mesh::sha256::Sha256::new();
+            h.update(&[1]);
+            h.update(leaves);
+            h.finalize()
+        }
+    }
+
+    fn test_object(seed: u32, size: usize) -> (Vec<u8>, Vec<u8>, [u8; 32]) {
+        let data: Vec<u8> = (0..size as u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 13 ^ seed) as u8).collect();
+        let leaves: Vec<u8> = data.chunks(4096).flat_map(|c| Flat.leaf(c)).collect();
+        let root = Flat.root(&leaves);
+        (data, leaves, root)
+    }
+
+    fn put_test_object(s: &KvStore, seed: u32, size: usize) -> [u8; 32] {
+        let (data, leaves, root) = test_object(seed, size);
+        let mut up = s.object_begin(root, size as u64, &leaves, &mut Flat).unwrap();
+        // Out of order, as ranges arrive from several peers.
+        for (k, c) in data.chunks(256 << 10).enumerate().rev() {
+            s.object_write(&mut up, (k << 18) as u64, c, &mut Flat).unwrap();
+        }
+        s.object_commit(&mut up, 1).unwrap();
+        root
+    }
+
+    /// Objects of a raw store (format version 2) live beside KV and the node's files, survive a restart and read
+    /// back verified, page by page.
+    #[test]
+    fn raw_objects_beside_kv() {
+        let p = raw_file("raw-objects", 1024);
+        let cfg = KvConfig { objects: true, flush_interval: Duration::from_millis(1), ..KvConfig::default() };
+        let size = 1_500_000;
+        let (data, leaves, root) = test_object(1, size);
+        {
+            let s = open_raw_at(&p, cfg.clone());
+            assert!(s.ns("svc").put(b"k", b"v"));
+            s.files().put_file("node-id", b"42\n").unwrap();
+            let space = s.object_space().unwrap();
+            assert!(space.bytes >= 700 << 20 && space.used == 0, "{space:?}");
+            assert_eq!(put_test_object(&s, 1, size), root);
+            let err = s.object_begin(root, size as u64, &leaves, &mut Flat).err().unwrap();
+            assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+            let (other, other_leaves, other_root) = test_object(2, 10_000);
+            let mut up = s.object_begin(other_root, 10_000, &other_leaves, &mut Flat).unwrap();
+            let mut bad = other[..4096].to_vec();
+            bad[9] ^= 1;
+            assert_eq!(s.object_write(&mut up, 0, &bad, &mut Flat).unwrap_err().kind(), io::ErrorKind::InvalidData);
+            assert_eq!(s.object_commit(&mut up, 0).unwrap_err().kind(), io::ErrorKind::InvalidData);
+            s.object_abort(up);
+            s.shutdown();
+        }
+        let s = open_raw_at(&p, KvConfig::default());
+        assert_eq!(s.ns("svc").get(b"k"), Some(b"v".to_vec()));
+        assert_eq!(s.files().file("node-id").as_deref(), Some(&b"42\n"[..]));
+        assert_eq!(s.object(&root), Some(Object { size: size as u64, refs: 1 }));
+        let mut page = vec![0u8; 3 * 4096];
+        s.object_read(&root, 100, &mut page, Some(&mut Flat)).unwrap();
+        assert!(page == data[100 * 4096..103 * 4096]);
+        let mut all = vec![0u8; size.div_ceil(4096) * 4096];
+        s.object_read(&root, 0, &mut all, Some(&mut Flat)).unwrap();
+        assert!(all[..size] == data[..] && all[size..].iter().all(|&b| b == 0));
+        assert_eq!(s.object_read(&root, 400, &mut page, None).unwrap_err().kind(), io::ErrorKind::NotFound);
+        s.object_set_refs(&root, 0).unwrap();
+        s.object_delete(&root).unwrap();
+        assert_eq!(s.object_space().unwrap().used, 0);
+        drop(s);
+        let s = open_raw_at(&p, KvConfig::default());
+        assert_eq!(s.object(&root), None);
+        assert_eq!(s.ns("svc").get(b"k"), Some(b"v".to_vec()));
+        drop(s);
+        let _ = fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    /// A raw store written without objects (format version 1) takes them after a restart, its KV intact and still
+    /// writable up to its capacity.
+    #[test]
+    fn raw_store_upgrades_in_place() {
+        let p = raw_file("raw-upgrade", 512);
+        let value = vec![7u8; 30_000];
+        {
+            let s = open_raw_at(&p, KvConfig::default());
+            for i in 0..2000u32 {
+                assert!(s.ns("big").put(format!("k{i}").as_bytes(), &value));
+            }
+            s.files().put_file("node-id", b"7\n").unwrap();
+            s.shutdown();
+        }
+        {
+            let s = open_raw_at(&p, KvConfig::default());
+            let (_, leaves, root) = test_object(3, 5000);
+            assert_eq!(s.object_begin(root, 5000, &leaves, &mut Flat).err().unwrap().kind(), io::ErrorKind::Unsupported);
+            assert_eq!(s.object_space(), Some(Space::default()));
+        }
+        let s = open_raw_at(&p, KvConfig { objects: true, ..KvConfig::default() });
+        assert_eq!(s.ns("big").len(), 2000);
+        assert_eq!(s.files().file("node-id").as_deref(), Some(&b"7\n"[..]));
+        // KV holds about 60 MiB, more than the default share: the log keeps room for it.
+        assert!(s.ns("big").put(b"one-more", &value));
+        assert!(s.object_space().unwrap().bytes > 0);
+        let root = put_test_object(&s, 3, 700_000);
+        drop(s);
+        let s = open_raw_at(&p, KvConfig::default());
+        assert_eq!(s.ns("big").len(), 2001);
+        assert_eq!(s.object(&root).map(|o| o.size), Some(700_000));
+        drop(s);
         let _ = fs::remove_dir_all(p.parent().unwrap());
     }
 }

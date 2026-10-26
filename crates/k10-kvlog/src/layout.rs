@@ -5,12 +5,17 @@
 //! 4 KiB    superblock copy 1
 //! 1 MiB    kernel slot A (16 MiB): a signed native kernel image (`k10s image sign`, profile `native`)
 //! 17 MiB   kernel slot B
-//! 33 MiB   the log: segments of 4 MiB up to the end of the partition
+//! 33 MiB   segments of 4 MiB up to the end of the partition: the log's, and (version 2) the object area's
 //! ```
 //!
 //! The two superblock copies are written alternately (by generation), each in its own sector-sized write, so one of
 //! them is always whole. The superblock names the oldest live segment (where replay starts), the sequence numbers
 //! that may already be on disk, the kernel slots' contents, and which slot is committed or on trial.
+//!
+//! Version 2 adds the log's share of the segments (`kv_segments` of live KV data and `index_segments` of object
+//! index: the log takes `3 × (kv + index) + 2` segments, the object area the rest). A version 1 store is all log; it
+//! becomes version 2 in place (one superblock write) before its first object. A version 1 reader takes a version 2
+//! copy for a later format ([`Decode::Newer`]) and refuses the store.
 
 /// I/O unit of the store: every write is whole, aligned units.
 pub const UNIT: u64 = 4096;
@@ -27,7 +32,8 @@ pub const MIN_SIZE: u64 = LOG_OFFSET + MIN_SEGMENTS as u64 * SEG_BYTES;
 /// 16 TiB of log.
 pub const MAX_SEGMENTS: u32 = 1 << 22;
 pub const MAGIC: [u8; 8] = *b"K10SDATA";
-pub const VERSION: u32 = 1;
+/// The latest format version (this build reads 1 and 2).
+pub const VERSION: u32 = 2;
 
 /// A kernel slot: the length and SHA-256 of the signed image in it (`len == 0`: empty).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -38,6 +44,8 @@ pub struct Slot {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Super {
+    /// 1 (all log) or 2 (log and object area).
+    pub version: u32,
     pub generation: u64,
     /// Random at format: ties the log's records to this store.
     pub id: [u8; 16],
@@ -52,6 +60,9 @@ pub struct Super {
     pub committed: Option<u8>,
     /// A slot on trial: the loader boots it while the boot counter allows, else `committed`.
     pub trial: Option<u8>,
+    /// Version 2: segments of live KV data the log keeps room for, and of object index (0 in version 1).
+    pub kv_segments: u32,
+    pub index_segments: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,7 +100,7 @@ impl Super {
         let mut b = [0u8; SUPER_LEN];
         let mut put = |o: usize, v: &[u8]| b[o..o + v.len()].copy_from_slice(v);
         put(0, &MAGIC);
-        put(8, &VERSION.to_le_bytes());
+        put(8, &self.version.to_le_bytes());
         put(12, &(SUPER_LEN as u32).to_le_bytes());
         put(16, &self.generation.to_le_bytes());
         put(24, &self.id);
@@ -106,6 +117,10 @@ impl Super {
             put(104 + 40 * i, &s.sha256);
         }
         put(176, &[slot_byte(self.committed), slot_byte(self.trial)]);
+        if self.version >= 2 {
+            put(180, &self.kv_segments.to_le_bytes());
+            put(184, &self.index_segments.to_le_bytes());
+        }
         let crc = crate::crc32(&b[..SUPER_LEN - 4]);
         b[SUPER_LEN - 4..].copy_from_slice(&crc.to_le_bytes());
         b
@@ -126,8 +141,12 @@ impl Super {
         if !(24..=b.len()).contains(&len) || crate::crc32(&b[..len - 4]) != u32_at(b, len - 4) {
             return Err(Decode::Foreign);
         }
-        if u32_at(head, 8) != VERSION {
-            return Err(Decode::Newer(u32_at(head, 8)));
+        let version = u32_at(head, 8);
+        if version > VERSION {
+            return Err(Decode::Newer(version));
+        }
+        if version == 0 {
+            return Err(Decode::Foreign);
         }
         if len != SUPER_LEN {
             return Err(Decode::Foreign);
@@ -142,6 +161,10 @@ impl Super {
         {
             return Err(Decode::Foreign);
         }
+        let (kv_segments, index_segments) = if version >= 2 { (u32_at(b, 180), u32_at(b, 184)) } else { (0, 0) };
+        if version >= 2 && (kv_segments == 0 || 3 * (kv_segments as u64 + index_segments as u64) + 2 > segments as u64) {
+            return Err(Decode::Foreign);
+        }
         let mut slots = [Slot::default(); 2];
         for (i, s) in slots.iter_mut().enumerate() {
             s.len = u64_at(b, 96 + 40 * i);
@@ -151,6 +174,7 @@ impl Super {
             }
         }
         Ok(Super {
+            version,
             generation: u64_at(b, 16),
             id: b[24..40].try_into().unwrap(),
             segments,
@@ -160,12 +184,28 @@ impl Super {
             slots,
             committed: byte_slot(b[176])?,
             trial: byte_slot(b[177])?,
+            kv_segments,
+            index_segments,
         })
     }
 
     /// Bytes of the partition the store covers.
     pub fn size(&self) -> u64 {
         LOG_OFFSET + self.segments as u64 * SEG_BYTES
+    }
+
+    /// Segments the log may take (version 1: all of them).
+    pub fn log_segments(&self) -> u32 {
+        if self.version >= 2 {
+            3 * (self.kv_segments + self.index_segments) + 2
+        } else {
+            self.segments
+        }
+    }
+
+    /// Segments of the object area.
+    pub fn object_segments(&self) -> u32 {
+        self.segments - self.log_segments()
     }
 }
 
@@ -202,6 +242,7 @@ mod tests {
 
     fn sample() -> Super {
         Super {
+            version: 1,
             generation: 7,
             id: [9; 16],
             segments: 100,
@@ -211,6 +252,8 @@ mod tests {
             slots: [Slot { len: 1_000_000, sha256: [1; 32] }, Slot::default()],
             committed: Some(0),
             trial: None,
+            kv_segments: 0,
+            index_segments: 0,
         }
     }
 
@@ -231,20 +274,56 @@ mod tests {
         let mut ext4 = [0u8; 512];
         ext4[56] = 0x53;
         assert_eq!(pick(&[0; 512], &ext4), Err(Decode::Foreign));
-        let mut v2 = e;
-        v2[8] = 2;
-        assert_eq!(Super::decode(&v2), Err(Decode::Foreign), "a version byte flipped by a torn write");
-        let crc = crate::crc32(&v2[..SUPER_LEN - 4]);
-        v2[SUPER_LEN - 4..].copy_from_slice(&crc.to_le_bytes());
-        assert_eq!(Super::decode(&v2), Err(Decode::Newer(2)));
-        assert_eq!(pick(&newer.encode(), &v2), Err(Decode::Newer(2)), "a converted copy wins over an older one");
+        let mut v3 = e;
+        v3[8] = 3;
+        assert_eq!(Super::decode(&v3), Err(Decode::Foreign), "a version byte flipped by a torn write");
+        let crc = crate::crc32(&v3[..SUPER_LEN - 4]);
+        v3[SUPER_LEN - 4..].copy_from_slice(&crc.to_le_bytes());
+        assert_eq!(Super::decode(&v3), Err(Decode::Newer(3)));
+        assert_eq!(pick(&newer.encode(), &v3), Err(Decode::Newer(3)), "a converted copy wins over an older one");
         // A later version may checksum more of the unit.
         let mut unit = [0u8; UNIT as usize];
-        unit[..SUPER_LEN].copy_from_slice(&v2);
+        unit[..SUPER_LEN].copy_from_slice(&v3);
         unit[12..16].copy_from_slice(&1024u32.to_le_bytes());
         let crc = crate::crc32(&unit[..1020]);
         unit[1020..1024].copy_from_slice(&crc.to_le_bytes());
-        assert_eq!(pick(&unit, &[0; UNIT as usize]), Err(Decode::Newer(2)));
+        assert_eq!(pick(&unit, &[0; UNIT as usize]), Err(Decode::Newer(3)));
+    }
+
+    /// Version 1's decoder, as version 1 builds run it.
+    fn decode_v1(b: &[u8]) -> Result<(), Decode> {
+        let head = &b[..SUPER_LEN];
+        if head.iter().all(|&x| x == 0) {
+            return Err(Decode::Blank);
+        }
+        let len = u32_at(head, 12) as usize;
+        if head[..8] != MAGIC || !(24..=b.len()).contains(&len) || crate::crc32(&b[..len - 4]) != u32_at(b, len - 4) {
+            return Err(Decode::Foreign);
+        }
+        match u32_at(head, 8) {
+            1 => Ok(()),
+            v => Err(Decode::Newer(v)),
+        }
+    }
+
+    #[test]
+    fn version_2() {
+        let v1 = sample();
+        assert_eq!((v1.log_segments(), v1.object_segments()), (100, 0));
+        let v2 = Super { version: 2, generation: 8, kv_segments: 16, index_segments: 2, ..v1 };
+        let e = v2.encode();
+        assert_eq!(Super::decode(&e), Ok(v2));
+        assert_eq!((v2.log_segments(), v2.object_segments()), (56, 44));
+        assert_eq!(pick(&v1.encode(), &e), Ok(v2), "the upgrade's copy is the later generation");
+        let mut torn = e;
+        torn[200] ^= 1;
+        assert_eq!(pick(&v1.encode(), &torn), Ok(v1), "a torn upgrade leaves version 1");
+        assert_eq!(decode_v1(&v1.encode()), Ok(()));
+        assert_eq!(decode_v1(&e), Err(Decode::Newer(2)), "version 1 builds refuse a version 2 store");
+        for (kv, index) in [(0, 0), (33, 0), (16, 17)] {
+            let bad = Super { kv_segments: kv, index_segments: index, ..v2 };
+            assert_eq!(Super::decode(&bad.encode()), Err(Decode::Foreign), "{kv} + {index}");
+        }
     }
 
     #[test]

@@ -15,3 +15,7 @@ libc = { workspace = true }
 # interpreter.
 [target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
 k10-jit = { workspace = true }
+
+[[bench]]
+name = "objects"
+harness = false
