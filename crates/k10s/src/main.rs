@@ -14,7 +14,7 @@
 //!             disk images (docs/OS.md): [--os-commit-grace SECS], and `--os-agent-fd N`, `--store-fd N` from init
 //! k10s keygen [-o FILE]
 //! k10s image  pubkey KEY | sign --key KEY --arch A --profile P --version V IN OUT | verify FILE [--trust PUB,…]
-//! k10s apply  FILE.k10s [--node HOST:PORT] [--admin-token-file FILE]
+//! k10s apply  FILE.k10s [--node HOST:PORT] [--admin-token-file FILE] [--cluster-key-file FILE]
 //! k10s build  FILE.ten [-o FILE.k10]
 //! k10s run    FILE.ten|FILE.k10 [--path /p?q=1] [--method GET|POST|PUT|DELETE] [--body STR|@FILE]
 //!             [--backend jit|interp] [--memory SIZE] [--config STR] [--cpu-ms N]
@@ -78,6 +78,8 @@ const USAGE: &str = "usage:
   k10s image payload IN OUT                       (the UKI or Pi slot of an OS image without its signature: to
                                                    sign for Secure Boot, then again with image sign)
   k10s apply  FILE.k10s [--node HOST:PORT]        (code = \"x.ten\" sources are compiled, \"x.k10\" sent as is;
+              [--cluster-key-file FILE]           images = { x86_64 = \"sha256:…\" } declares an image service, whose
+                                                   secrets are sealed with the cluster key;
                                                    os { images = [\"x.efi\"] } rolls out OS images)
   k10s build  FILE.ten [-o FILE.k10]              (compile Ten to TIR)
   k10s run    FILE.ten|FILE.k10 [--path /p?q=1] [--method GET|POST|PUT|DELETE] [--body STR|@FILE]
@@ -912,10 +914,32 @@ fn admin_request(a: &Args, method: &str, path: &str, body: &[u8], timeout: Durat
     Ok(r)
 }
 
+/// The value of an image service secret: the file's bytes without one trailing newline, wiped on drop.
+fn read_secret_value(path: &Path) -> Result<Secret, String> {
+    let err = |e: &dyn std::fmt::Display| format!("secret {}: {e}", path.display());
+    let len = std::fs::metadata(path).map_err(|e| err(&e))?.len();
+    if len > 64 << 10 {
+        return Err(err(&"larger than 64 KiB"));
+    }
+    let mut s = Secret(Vec::with_capacity(len as usize + 1));
+    std::io::Read::read_to_end(&mut std::fs::File::open(path).map_err(|e| err(&e))?, &mut s.0).map_err(|e| err(&e))?;
+    if s.0.ends_with(b"\n") {
+        s.0.pop();
+        if s.0.ends_with(b"\r") {
+            s.0.pop();
+        }
+    }
+    if s.0.contains(&0) {
+        return Err(err(&"contains a NUL byte (not usable as an environment variable)"));
+    }
+    Ok(s)
+}
+
 fn cmd_apply(args: &[String]) -> Result<(), String> {
     let a = Args::parse(args, &[])?;
-    a.check_known(&["node", "admin-token-file"])?;
-    let [file] = a.positional.as_slice() else { return Err("usage: k10s apply FILE.k10s [--node HOST:PORT]".into()) };
+    a.check_known(&["node", "admin-token-file", "cluster-key-file"])?;
+    let usage = "usage: k10s apply FILE.k10s [--node HOST:PORT] [--cluster-key-file FILE]";
+    let [file] = a.positional.as_slice() else { return Err(usage.into()) };
     let path = Path::new(file);
     let src = std::fs::read_to_string(path).map_err(|e| format!("{file}: {e}"))?;
     let doc = parse_document(&src).map_err(|e| format!("{file}: {e}"))?;
@@ -947,8 +971,24 @@ fn cmd_apply(args: &[String]) -> Result<(), String> {
             blobs.push(blob);
         }
     }
+    let key = a.get("cluster-key-file").map(|f| load_cluster_key("cluster-key-file", f)).transpose()?;
+    let mut image_services = Vec::new();
+    for d in &doc.images {
+        let mut spec = d.spec.clone();
+        for (var, secret) in &d.secret_files {
+            let Some(key) = &key else {
+                return Err(format!("{file}: line {}: secrets are sealed with the cluster key: pass --cluster-key-file FILE", d.line));
+            };
+            let value = read_secret_value(&base.join(secret))?;
+            spec.secrets.push((var.clone(), key.seal_secret(&spec.name, var, &value.0)));
+        }
+        spec.canonicalize();
+        image_services.push(spec);
+    }
     // Version 0: the node assigns current + 1.
-    let bundle = Bundle::new(Manifest { version: 0, services, os }, blobs);
+    let manifest = Manifest { version: 0, services, image_services, os };
+    manifest.validate().map_err(|e| format!("{file}: {e}"))?;
+    let bundle = Bundle::new(manifest, blobs);
     let bytes = bundle.encode();
     let r = admin_request(&a, "POST", "/_k10s/apply", &bytes, Duration::from_secs(60))?;
     println!("{}", r.text());

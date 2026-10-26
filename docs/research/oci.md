@@ -450,10 +450,13 @@ bandwidth.
 ## 10. Manifest, placement, lifecycle
 
 ### 10.1 Manifest format 4
-Text form (the CLI resolves `image` to a K10I hash per arch, uploading objects first):
+Text form (`images` names `K10I` digests per architecture; from P5.3 the CLI also resolves `image` to them,
+uploading objects first; a block with `images` (or, from P5.3, `image`) is an image service, keys of native services
+are errors there):
 ```text
 service api {
-  image = "oci:ghcr.io/acme/api@sha256:…"      # or "oci-archive:api.tar", "oci-layout:dir:tag"
+  image = "oci:ghcr.io/acme/api@sha256:…"      # P5.3; or "oci-archive:api.tar", "oci-layout:dir:tag"
+  images = { x86_64 = "sha256:…" }             # what `image` resolves to, accepted as is
   replicas = 3
   memory = 384MiB                              # exact limit (4 KiB granularity) for images
   cpu = 0.5                                    # cores: quota per period; optional
@@ -467,16 +470,24 @@ service api {
   egress = ["0.0.0.0/0:443", "dns"]
   health = "http:8080/healthz"                 # or "tcp:8080", "exec:/bin/check", default: process alive
   stop_grace = 10s
-  scratch = 64MiB
+  scratch = 64MiB                              # default memory/4
+  restart = always                             # or on-failure, never
   init = false
+  workdir = "/srv"                             # user = "app:app"; both default to the image's
+  pids_max = 1024                              # fds_max = 4096
+  tenant = "acme"                              # default none (§10.3)
 }
 ```
-Binary: format 4 = format 3 plus, per service, `kind:u8` (0 native: existing fields; 1 image: `images:[(arch:u8,
-hash:[32])]` sorted by arch, `mem_bytes:varint`, `cpu_milli:varint`, `pids_max`, `fds_max`, entrypoint/args lists
-(order kept), env and secrets sorted by key (duplicates rejected), `http`, routes sorted, public ports sorted,
-egress sorted, health, stop grace, scratch, flags), plus releases (§11.4). The encoder emits format 4 only when a
-manifest uses it, so existing manifests keep their hashes (the rule formats 1–3 follow). `calls` stays index-based
-and applies to both kinds.
+Binary: format 4 = format 3 with native and image services in one name order, each `name | kind:u8 | body` (0
+native: the existing fields; 1 image: `images:[(arch:u8, hash:[32])]` sorted by arch, `replicas`, memory in 4 KiB
+pages, `cpu_milli`, `pids_max`, `fds_max`, flags (entrypoint set, args set, init, calls any), restart, the
+entrypoint and args lists (order kept), workdir, user, env and secrets sorted by name, `http`, routes sorted, public
+ports sorted, egress rules sorted, health, stop grace (ms), scratch (pages), tenant, `calls` indices), then the OS
+plan, which may be empty. Lists are canonical in memory too (`ImageService::canonicalize`; `validate` refuses any
+other order or a duplicate), so the decoder accepts exactly one encoding per manifest. Routes and public ports are
+claimed by one service each. The encoder emits format 4 only when a manifest has image services, so existing
+manifests keep their hashes (the rule formats 1–3 follow). `calls` stays index-based and applies to both kinds.
+Releases (§11.4) come with packages (P6.3) as a later format.
 
 ### 10.2 Lifecycle
 - Start: the kernel builds the container (address space, VFS tree, socket view, ledger entry), execs Entrypoint+Cmd
@@ -499,13 +510,18 @@ and applies to both kinds.
   opt-in per service and documented as such.
 
 ### 10.3 Capabilities and placement
-- Gossip member extension record `EXT_CAPS` (sent only to extension-capable members, like `EXT_OS`): arch, word size,
-  largest slot (`max_mem_log2`), flags (`oci`, `jit`), image-cache and object-area capacity, tenant id, and the
-  reason a node is not `oci` (CPU gate, build without the feature).
+- Gossip member extension record `EXT_CAPS` (sent only to extension-capable members, like `EXT_OS`; nodes that
+  predate it skip it): arch, word size, largest slot (`max_mem_log2`), JIT flag, Linux-personality level (0: no image
+  services, 1 M1, 2 M2, 3 M3) and the reason it is 0 (hosted node, kernel built without the personality, CPU gate,
+  architecture), image-cache and object-area capacity, and the tenant the node is dedicated to. Hosted and Tier 1
+  nodes announce level 0 ("hosted node"); the native kernel announces level 0 ("without the Linux personality")
+  until Phases 1–4 land.
 - Placement version 3: a service is eligible on a node only if the node satisfies its requirements (image arch
-  present in `images`, `oci` flag, `mem_log2 ≤ max_mem_log2` for native services — **this fixes the 32-bit open
+  present in `images`, Linux-personality level ≥ 1, `mem_log2 ≤ max_mem_log2` for native services — **this fixes the 32-bit open
   item: a 32-bit node is never given a service it cannot host, instead of refusing the whole desired state**),
-  tenant match (§1), public-port conflicts; image services charge `mem_bytes + 256 KiB` (kernel structures) against
+  tenant match (§1: an image service of tenant T only on nodes dedicated to T, one without a tenant only on nodes
+  without one), public-port conflicts (a node whose own peer or HTTP port is one of the service's public ports is not
+  eligible; two services never claim the same public port); image services charge `mem_bytes + 256 KiB` (kernel structures) against
   the same `mem_bytes` capacity native slots use. A manifest using format 4 is accepted only when every live member
   announces placement version 3 (otherwise 409 with the members to upgrade), so mixed clusters never disagree on
   placement.
@@ -518,8 +534,11 @@ and applies to both kinds.
   Ed25519 key (the `osimage` signature code); nodes trust keys from `k10s.conf` `oci_key` (and the release key for
   k10s-published packages). The kernel verifies before it starts a container: a node process compromised through the
   network can neither start nor alter code (the precedent: Tier 1 init verifies OS images itself).
-- Secrets: values sealed (ChaCha20-Poly1305) with a key derived from the cluster key (HKDF, label "k10s secrets"),
-  decrypted only when a container starts; never in status, logs or gossip. Exposure equals the cluster key's.
+- Secrets: values sealed by the CLI (`k10s apply --cluster-key-file`) with XChaCha20-Poly1305 under a key derived from
+  the cluster key (HKDF, label "k10s secrets v1"), bound to the service and variable, as `key id | nonce | ciphertext |
+  tag` with the nonce a keyed hash of the inputs (SIV: an unchanged manifest keeps its hash, only equality of two
+  values of one variable shows); nodes refuse (422) a secret sealed with a key they do not hold; decrypted only when a
+  container starts; never in status, logs or gossip. Exposure equals the cluster key's.
 
 ## 11. Packages (Helm-like, k10s-native)
 
@@ -567,7 +586,7 @@ Ed25519 over the package blob; trust lists in `k10s.conf` (`pkg_key`), checked b
 Packages embed the image hashes, so signing a package signs its images.
 
 ### 11.4 Releases in the desired state
-- Manifest format 4 groups services into releases: `release = name | package hash | values hash | revision |
+- A manifest format after 4 (with packages, P6.3) groups services into releases: `release = name | package hash | values hash | revision |
   services`. A service is identified by `(release, name)`; inside a release `calls`, routes and hosts files use the
   bare name, across releases `release/name` (exports make the common case bare); ingress `/<service>/…` keeps
   addressing release `default`.

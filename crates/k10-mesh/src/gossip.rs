@@ -1013,10 +1013,14 @@ impl Gossip {
         }
         if let Some(e) = self.members.get_mut(&id) {
             // The same record with its extensions, after a copy without them (relayed by an older node, or sent
-            // before the sender knew we decode them).
-            if m.incarnation == e.m.incarnation && e.m.is_live() && !e.m.os_known && m.os_known {
-                e.m.os = m.os;
-                e.m.os_known = true;
+            // before the sender knew we decode them); capabilities are fixed for an incarnation.
+            let more_ext = (!e.m.ext_known && m.ext_known) || (e.m.caps.is_none() && m.caps.is_some());
+            if m.incarnation == e.m.incarnation && e.m.is_live() && more_ext {
+                if !e.m.ext_known {
+                    e.m.os = m.os;
+                    e.m.ext_known = true;
+                }
+                e.m.caps = e.m.caps.take().or(m.caps);
                 let snapshot = e.m.clone();
                 out.events.push(Event::MemberUpdated(snapshot.clone()));
                 self.queue(Item::Alive(snapshot));
@@ -1034,7 +1038,8 @@ impl Gossip {
                 || e.m.placement != m.placement
                 || e.m.ext != m.ext
                 || e.m.os != m.os
-                || e.m.os_known != m.os_known;
+                || e.m.caps != m.caps
+                || e.m.ext_known != m.ext_known;
             e.m = Member { state: MemberState::Alive, ..m };
             e.susp = None;
             let snapshot = e.m.clone();
@@ -1504,7 +1509,7 @@ mod tests {
                     if let Body::Sync { records, .. } = &pkt.body {
                         members.extend(records.iter());
                     }
-                    assert!(members.iter().all(|m| m.os.is_none() && !m.os_known), "extension sent to a node without them");
+                    assert!(members.iter().all(|m| m.os.is_none() && !m.ext_known), "extension sent to a node without them");
                     to_old += members.iter().filter(|m| m.id == NodeId(1001)).count();
                 }
                 let out = gs[j].on_packet(addr(from), &p, now);
@@ -1524,6 +1529,39 @@ mod tests {
         let mut out = Output::default();
         gs[2].on_alive(plain, true, now, &mut out);
         assert_eq!(gs[2].member(NodeId(1001)).and_then(|m| m.os.clone()), Some(os));
+    }
+
+    #[test]
+    fn caps_spread_to_extension_nodes_and_survive_relays() {
+        let cfg = Config { probe_interval_ms: 100, probe_timeout_ms: 40, sync_interval_ms: 1000, ..Config::default() };
+        let caps = |i: u64| crate::caps::NodeCaps { lx: (i == 1) as u8, ..crate::caps::NodeCaps::this_build(27 + i as u8, true, crate::caps::lx_gap::HOSTED) };
+        // Node 2 predates extensions; nodes 1 and 3 announce their capabilities from the start.
+        let mut gs: Vec<Gossip> =
+            (1..=3).map(|i| Gossip::new(Member { ext: i != 2, caps: (i != 2).then(|| caps(i)), ..node(i) }, cfg.clone(), i)).collect();
+        let mut now = 0;
+        for j in [1, 2] {
+            gs[j].join(&[node(1).gossip], now);
+        }
+        let mut seen = Vec::new();
+        run(&mut gs, &[], &mut now, 8000, &mut seen);
+        assert_eq!(gs[2].member(NodeId(1001)).and_then(|m| m.caps.clone()), Some(caps(1)));
+        assert_eq!(gs[0].member(NodeId(1003)).and_then(|m| m.caps.clone()), Some(caps(3)));
+        let at_old = gs[1].member(NodeId(1001)).unwrap();
+        assert!(at_old.caps.is_none() && !at_old.ext_known, "no extension record reaches a node without them");
+        // A copy relayed by a node that decodes extensions but predates EXT_CAPS lacks the record: the full copy
+        // of the same incarnation adds it, and a later relayed copy does not erase it.
+        let full = gs[2].member(NodeId(1001)).unwrap().clone();
+        let relayed = Member { caps: None, ..full.clone() };
+        let mut g = Gossip::new(Member { caps: Some(caps(4)), ..node(4) }, cfg.clone(), 4);
+        let mut out = Output::default();
+        g.on_alive(relayed.clone(), true, now, &mut out);
+        assert!(g.member(NodeId(1001)).unwrap().caps.is_none());
+        let mut out = Output::default();
+        g.on_alive(full.clone(), true, now, &mut out);
+        assert_eq!(g.member(NodeId(1001)).unwrap().caps, full.caps);
+        assert!(out.events.iter().any(|e| matches!(e, Event::MemberUpdated(m) if m.caps.is_some())), "placement is recomputed");
+        g.on_alive(relayed, true, now, &mut Output::default());
+        assert_eq!(g.member(NodeId(1001)).unwrap().caps, full.caps);
     }
 
     #[test]

@@ -147,6 +147,8 @@ pub struct ApplyView {
     pub applied: Option<(u64, [u8; 32])>,
     pub placement: BTreeMap<String, Vec<NodeId>>,
     pub unplaced: u64,
+    /// Image services that are not placed, or placed here although this node cannot run them, and why.
+    pub image_notes: Vec<String>,
     pub last_error: Option<String>,
     pub placed_at_ns: u64,
 }
@@ -223,7 +225,7 @@ impl ClusterShared {
         let p = place(&st.manifest, &members);
         let bundle = self.store.bundle(st).ok_or("a code blob of the manifest is missing")?;
         let me = self.id;
-        let r = self.node.apply_cluster(bundle, &|spec| {
+        let mut r = self.node.apply_cluster(bundle, &|spec| {
             let nodes = p.nodes(&spec.name);
             if nodes.contains(&me) {
                 Placement::Local
@@ -235,7 +237,7 @@ impl ClusterShared {
             }
         });
         let mut v = self.apply_view.lock().unwrap_or_else(|e| e.into_inner());
-        match &r {
+        match &mut r {
             Ok(rep) => {
                 self.stats.applies.fetch_add(1, Relaxed);
                 self.inbox.send(MeshMsg::Ranking(Arc::new(ranking(&st.manifest, &members))));
@@ -244,6 +246,13 @@ impl ClusterShared {
                 v.unplaced = p.unplaced;
                 v.last_error = None;
                 v.placed_at_ns = sys::mono_ns();
+                let notes = image_notes(&st.manifest, &p, &members, me);
+                if notes != v.image_notes {
+                    notes.iter().for_each(|n| eprintln!("k10s: cluster: {n}"));
+                    v.image_notes = notes.clone();
+                }
+                rep.warnings.extend(notes);
+                rep.warnings.sort();
                 if !(rep.added.is_empty() && rep.updated.is_empty() && rep.removed.is_empty()) {
                     let here: Vec<&str> = p.on_node(me).iter().map(|(s, _)| *s).collect();
                     eprintln!(
@@ -319,6 +328,12 @@ impl ClusterShared {
         if let Err(e) = bundle.manifest.validate() {
             return err(422, e);
         }
+        if let Err(e) = k10_mesh::placement::check_members(&bundle.manifest, &self.placement_members()) {
+            return err(409, e);
+        }
+        if let Err(e) = bundle.manifest.check_secrets(self.cfg.keys.as_ref()) {
+            return err(422, e);
+        }
         if self.leaving() {
             return err(503, "node is leaving the cluster".into());
         }
@@ -356,6 +371,37 @@ impl ClusterShared {
         self.inbox.send(MeshMsg::SetDesired { version: st.version(), hash: st.hash });
         eprintln!("k10s: cluster: desired state v{} ({}) announced", st.version(), short_hash(&st.hash));
         (200, apply_json(&rep, &st.hash))
+    }
+}
+
+/// Why image services are not placed, or are placed here although this node cannot run them.
+fn image_notes(m: &Manifest, p: &k10_mesh::Placement, members: &[Member], me: NodeId) -> Vec<String> {
+    let mut notes = Vec::new();
+    for s in &m.image_services {
+        if p.nodes(&s.name).contains(&me) {
+            let why = k10_mesh::caps::lx_gap::describe(k10_mesh::caps::lx_gap::HOSTED);
+            notes.push(format!("image service `{}` is placed on this node, which cannot run it ({why})", s.name));
+        }
+        notes.extend(k10_mesh::placement::image_note(s, p, members));
+    }
+    notes
+}
+
+fn caps_json(c: Option<&k10_mesh::NodeCaps>) -> String {
+    match c {
+        None => "null".into(),
+        Some(c) => format!(
+            "{{\"arch\":{},\"word_bits\":{},\"max_mem_log2\":{},\"jit\":{},\"lx\":{},\"lx_gap\":{},\"image_cache\":{},\"object_area\":{},\"tenant\":{}}}",
+            crate::admin::json_str(c.arch().map_or("unknown", |a| a.name())),
+            c.word_bits,
+            c.max_mem_log2,
+            c.jit,
+            c.lx,
+            crate::admin::json_str(k10_mesh::caps::lx_gap::describe(c.lx_gap)),
+            c.image_cache,
+            c.object_area,
+            crate::admin::json_str(&c.tenant)
+        ),
     }
 }
 
@@ -423,7 +469,7 @@ impl ClusterHooks for ClusterShared {
             .iter()
             .map(|m| {
                 format!(
-                    "{{\"id\":\"{}\",\"state\":\"{}\",\"incarnation\":{},\"gossip\":\"{}\",\"rpc\":\"{}\",\"http\":\"{}\",\"mem\":{},\"cores\":{},\"os\":{},\"self\":{}}}",
+                    "{{\"id\":\"{}\",\"state\":\"{}\",\"incarnation\":{},\"gossip\":\"{}\",\"rpc\":\"{}\",\"http\":\"{}\",\"mem\":{},\"cores\":{},\"os\":{},\"caps\":{},\"self\":{}}}",
                     m.id,
                     state_str(m.state),
                     m.incarnation,
@@ -433,6 +479,7 @@ impl ClusterHooks for ClusterShared {
                     m.capacity.mem_bytes,
                     m.capacity.cores,
                     os_json(m.os.as_ref()),
+                    caps_json(m.caps.as_ref()),
                     m.id == self.id
                 )
             })
@@ -475,7 +522,7 @@ impl ClusterHooks for ClusterShared {
             concat!(
                 "{{\"id\":\"{}\",\"incarnation\":{},\"gossip\":\"{}\",\"rpc\":\"{}\",\"http\":\"{}\",\"leaving\":{},\"auth\":{},",
                 "\"desired\":{},\"applied\":{},\"fetching\":{},\"last_error\":{},\"os_step\":{},",
-                "\"live_members\":{},\"members\":[{}],\"placement\":{{{}}},\"unplaced\":{},\"links\":[{}],",
+                "\"live_members\":{},\"members\":[{}],\"placement\":{{{}}},\"unplaced\":{},\"image_notes\":[{}],\"links\":[{}],",
                 "\"stats\":{{\"gossip_packets_sent\":{},\"gossip_bytes_sent\":{},\"gossip_packets_received\":{},",
                 "\"gossip_bytes_received\":{},\"gossip_malformed\":{},\"forwarded\":{},\"forward_retries\":{},",
                 "\"forward_failed\":{},\"forward_local\":{},\"resent_unsent\":{},\"served_for_peers\":{},\"not_here\":{},",
@@ -508,6 +555,7 @@ impl ClusterHooks for ClusterShared {
             members.join(","),
             placement.join(","),
             av.unplaced,
+            av.image_notes.iter().map(|n| js(n)).collect::<Vec<_>>().join(","),
             links.join(","),
             mv.io.packets_sent,
             mv.io.bytes_sent,
@@ -613,6 +661,9 @@ impl ClusterHooks for ClusterShared {
                     if os.failed != [0; 8] { format!(", failed {}", to_hex(&os.failed)) } else { String::new() }
                 );
             }
+            if let Some(c) = &m.caps {
+                let _ = writeln!(o, "    caps {}", c.describe());
+            }
         }
         let step = self.os_step.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if !step.is_empty() {
@@ -623,6 +674,9 @@ impl ClusterHooks for ClusterShared {
             let ids: Vec<String> =
                 nodes.iter().map(|n| if *n == self.id { format!("{n}*") } else { n.to_string() }).collect();
             let _ = writeln!(o, "  {:<24} {}", svc, ids.join(" "));
+        }
+        for n in &av.image_notes {
+            let _ = writeln!(o, "  note: {n}");
         }
         let _ = writeln!(o, "  (* = this node)\n\nlinks:");
         for l in &mv.links {
@@ -781,6 +835,7 @@ impl ClusterSetup {
         let mut me = Member::new(id, adv(gossip_bound), adv(rpc_bound), adv(http_bound), capacity);
         me.incarnation = incarnation;
         me.os = cfg.os.clone();
+        me.caps = Some(crate::node::node_caps(node.backend.name() == "jit"));
         let cs = Arc::new(ClusterShared {
             node: node.clone(),
             cfg: cfg.clone(),

@@ -376,6 +376,9 @@ impl NodeShared {
             if same {
                 let mut r = ApplyReport { version: cur.version, unchanged: cur.by_name.keys().cloned().collect(), ..Default::default() };
                 r.warnings = cur.by_name.values().filter_map(|s| s.call_warning()).collect();
+                if mode != ApplyMode::Cluster {
+                    r.warnings.extend(image_warnings(&bundle.manifest));
+                }
                 r.sort();
                 return Ok(r);
             }
@@ -472,6 +475,9 @@ impl NodeShared {
             }
         }
         report.warnings = by_name.values().filter_map(|s| s.call_warning()).collect();
+        if mode != ApplyMode::Cluster {
+            report.warnings.extend(image_warnings(&bundle.manifest));
+        }
         let table = Arc::new(ServiceTable {
             version: bundle.manifest.version,
             manifest: bundle.manifest.clone(),
@@ -508,6 +514,18 @@ impl NodeShared {
         }
         Ok(report)
     }
+}
+
+/// What a node outside a cluster reports for image services: it runs none of them (they need the native kernel's
+/// Linux personality, see [`node_caps`]).
+pub fn image_warnings(m: &k10_mesh::Manifest) -> Vec<String> {
+    let why = k10_mesh::caps::lx_gap::describe(k10_mesh::caps::lx_gap::HOSTED);
+    m.image_services.iter().map(|s| format!("image service `{}` is not running: this node cannot run it ({why})", s.name)).collect()
+}
+
+/// This node's capabilities for gossip (`EXT_CAPS`): its word size and largest slot, no image services.
+pub fn node_caps(jit: bool) -> k10_mesh::NodeCaps {
+    k10_mesh::NodeCaps::this_build(crate::slot::MAX_SLOT_LOG2, jit, k10_mesh::caps::lx_gap::HOSTED)
 }
 
 /// The last applied bundle of a single node, in its data.

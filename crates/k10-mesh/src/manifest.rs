@@ -11,11 +11,17 @@
 //! format 2: flags = fresh (bit0), any (bit1); calls = n:varint index:varint* (strictly increasing service indices)
 //! format 3: as format 2, then the OS plan: n:varint (platform_len:u8 platform image:[32])* wave:varint
 //!           (platforms sorted, unique; n >= 1, wave >= 1)
+//! format 4: native and image services in one name order, each `name | kind:u8 | body` (kind 0: the format-2
+//!           service fields; kind 1: an image service, see [`crate::image`]); calls index that common order; then
+//!           the OS plan with n >= 0 (no wave when n = 0); at least one image service
 //! ```
-//! The encoder emits format 3 when the manifest names OS images, else format 1 when no service may call anything
-//! (such manifests keep their earlier hash), else 2.
+//! The encoder emits the oldest format that expresses the manifest ([`Manifest::format`]): 4 with image services,
+//! else 3 when it names OS images, else 1 when no service may call anything (such manifests keep their earlier
+//! hash), else 2.
 
 use crate::codec::{put_u64, put_varint, DecodeError, Reader};
+use crate::caps::Arch;
+use crate::image::{self, ImageService};
 use crate::sha256::sha256;
 use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
@@ -45,6 +51,9 @@ const MAGIC: &[u8; 4] = b"K10M";
 const FORMAT_V1: u8 = 1;
 const FORMAT_V2: u8 = 2;
 const FORMAT_V3: u8 = 3;
+const FORMAT_V4: u8 = 4;
+const KIND_NATIVE: u8 = 0;
+const KIND_IMAGE: u8 = 1;
 /// Maximum OS images (platforms) in one manifest.
 pub const MAX_OS_IMAGES: usize = 64;
 const FLAG_FRESH: u8 = 1;
@@ -217,7 +226,7 @@ impl fmt::Debug for Calls {
 }
 
 /// A varint in its shortest form (another encoding of the same value would change the hash).
-fn varint(r: &mut Reader<'_>) -> Result<u64, DecodeError> {
+pub(crate) fn varint(r: &mut Reader<'_>) -> Result<u64, DecodeError> {
     let before = r.remaining();
     let v = r.varint()?;
     if before - r.remaining() != (64 - (v | 1).leading_zeros() as usize).div_ceil(7) {
@@ -226,7 +235,7 @@ fn varint(r: &mut Reader<'_>) -> Result<u64, DecodeError> {
     Ok(v)
 }
 
-fn varint_u32(r: &mut Reader<'_>) -> Result<u32, DecodeError> {
+pub(crate) fn varint_u32(r: &mut Reader<'_>) -> Result<u32, DecodeError> {
     u32::try_from(varint(r)?).map_err(|_| DecodeError::Invalid("u32 varint"))
 }
 
@@ -286,8 +295,43 @@ pub fn valid_platform(p: &str) -> bool {
 #[derive(Clone, PartialEq, Eq, Debug, Default, Hash)]
 pub struct Manifest {
     pub version: u64,
+    /// Native services.
     pub services: Vec<ServiceSpec>,
+    /// Image services (format 4); names are unique among all services.
+    pub image_services: Vec<ImageService>,
     pub os: OsPlan,
+}
+
+/// A service of either kind, for code that walks every service in name order.
+#[derive(Clone, Copy, Debug)]
+pub enum AnyService<'a> {
+    Native(&'a ServiceSpec),
+    Image(&'a ImageService),
+}
+
+impl<'a> AnyService<'a> {
+    pub fn name(&self) -> &'a str {
+        match self {
+            AnyService::Native(s) => &s.name,
+            AnyService::Image(s) => &s.name,
+        }
+    }
+
+    pub fn calls(&self) -> &'a Calls {
+        match self {
+            AnyService::Native(s) => &s.calls,
+            AnyService::Image(s) => &s.calls,
+        }
+    }
+    /// By name, native before image, then by every field: a total order, so equal inputs sort alike in any order.
+    fn order(&self, other: &Self) -> Ordering {
+        self.name().cmp(other.name()).then_with(|| match (self, other) {
+            (AnyService::Native(a), AnyService::Native(b)) => a.cmp(b),
+            (AnyService::Image(a), AnyService::Image(b)) => a.cmp(b),
+            (AnyService::Native(_), AnyService::Image(_)) => Ordering::Less,
+            (AnyService::Image(_), AnyService::Native(_)) => Ordering::Greater,
+        })
+    }
 }
 
 impl Manifest {
@@ -298,53 +342,82 @@ impl Manifest {
         out
     }
 
-    /// Callees that are not services of the manifest cannot be encoded (`validate` rejects such manifests).
-    pub fn encode_into(&self, out: &mut Vec<u8>) {
-        let mut order: Vec<&ServiceSpec> = self.services.iter().collect();
-        order.sort_by(|a, b| a.name.cmp(&b.name));
-        let format = if !self.os.images.is_empty() {
+    /// The binary format of [`Manifest::encode`]: the oldest one that expresses the manifest, so manifests that
+    /// use no newer feature keep their bytes and hash.
+    pub fn format(&self) -> u8 {
+        if !self.image_services.is_empty() {
+            FORMAT_V4
+        } else if !self.os.images.is_empty() {
             FORMAT_V3
-        } else if order.iter().all(|s| s.calls.is_none()) {
+        } else if self.services.iter().all(|s| s.calls.is_none()) {
             FORMAT_V1
         } else {
             FORMAT_V2
-        };
+        }
+    }
+
+    /// Every service, native and image, sorted by name (a total order: duplicates, which `validate` refuses, sort
+    /// the same whatever the input order).
+    pub fn all_services(&self) -> Vec<AnyService<'_>> {
+        let mut v: Vec<AnyService<'_>> = self.services.iter().map(AnyService::Native).collect();
+        v.extend(self.image_services.iter().map(AnyService::Image));
+        v.sort_by(AnyService::order);
+        v
+    }
+
+    /// Callees that are not services of the manifest cannot be encoded (`validate` rejects such manifests).
+    pub fn encode_into(&self, out: &mut Vec<u8>) {
+        let format = self.format();
         out.extend_from_slice(MAGIC);
         out.push(format);
         put_u64(out, self.version);
+        let order = self.all_services();
         put_varint(out, order.len() as u64);
-        for &s in &order {
-            let name = s.name.as_bytes();
+        for s in &order {
+            let name = s.name().as_bytes();
             let n = name.len().min(255);
             out.push(n as u8);
             out.extend_from_slice(&name[..n]);
-            out.extend_from_slice(&s.code_hash);
-            put_varint(out, s.replicas as u64);
-            out.push(s.mem_log2);
-            put_varint(out, s.max_instances as u64);
-            put_varint(out, s.cpu_ms as u64);
-            out.push(if s.fresh { FLAG_FRESH } else { 0 } | if s.calls.is_any() { FLAG_ANY } else { 0 });
-            put_varint(out, s.config.len() as u64);
-            out.extend_from_slice(&s.config);
-            if format != FORMAT_V1 {
-                let idx: Vec<usize> =
-                    s.calls.names().filter_map(|c| order.binary_search_by(|t| t.name.as_str().cmp(c)).ok()).collect();
-                put_varint(out, idx.len() as u64);
-                idx.into_iter().for_each(|i| put_varint(out, i as u64));
+            let idx: Vec<usize> =
+                s.calls().names().filter_map(|c| order.binary_search_by(|t| t.name().cmp(c)).ok()).collect();
+            match s {
+                AnyService::Native(s) => {
+                    if format == FORMAT_V4 {
+                        out.push(KIND_NATIVE);
+                    }
+                    out.extend_from_slice(&s.code_hash);
+                    put_varint(out, s.replicas as u64);
+                    out.push(s.mem_log2);
+                    put_varint(out, s.max_instances as u64);
+                    put_varint(out, s.cpu_ms as u64);
+                    out.push(if s.fresh { FLAG_FRESH } else { 0 } | if s.calls.is_any() { FLAG_ANY } else { 0 });
+                    put_varint(out, s.config.len() as u64);
+                    out.extend_from_slice(&s.config);
+                    if format != FORMAT_V1 {
+                        put_varint(out, idx.len() as u64);
+                        idx.into_iter().for_each(|i| put_varint(out, i as u64));
+                    }
+                }
+                AnyService::Image(s) => {
+                    out.push(KIND_IMAGE);
+                    s.encode_body(out, &idx);
+                }
             }
         }
-        if format == FORMAT_V3 {
+        if format >= FORMAT_V3 {
             let mut images: Vec<&OsImage> = self.os.images.iter().collect();
             images.sort();
             put_varint(out, images.len() as u64);
-            for i in images {
+            for i in &images {
                 let p = i.platform.as_bytes();
                 let n = p.len().min(255);
                 out.push(n as u8);
                 out.extend_from_slice(&p[..n]);
                 out.extend_from_slice(&i.image);
             }
-            put_varint(out, self.os.wave as u64);
+            if !images.is_empty() {
+                put_varint(out, self.os.wave as u64);
+            }
         }
     }
 
@@ -359,7 +432,7 @@ impl Manifest {
             return Err(DecodeError::Invalid("manifest magic"));
         }
         let format = r.u8()?;
-        if !(FORMAT_V1..=FORMAT_V3).contains(&format) {
+        if !(FORMAT_V1..=FORMAT_V4).contains(&format) {
             return Err(DecodeError::Invalid("manifest format"));
         }
         let version = r.u64()?;
@@ -368,24 +441,37 @@ impl Manifest {
             return Err(DecodeError::TooLarge("service count"));
         }
         let count = count as usize;
-        let min_service = MIN_SERVICE_BYTES + (format != FORMAT_V1) as usize;
+        let min_service = MIN_SERVICE_BYTES + (format != FORMAT_V1) as usize + (format == FORMAT_V4) as usize;
         if count > r.remaining() / min_service {
             return Err(DecodeError::Truncated);
         }
         let flag_mask = if format == FORMAT_V1 { FLAG_FRESH } else { FLAG_FRESH | FLAG_ANY };
         let mut services: Vec<ServiceSpec> = Vec::with_capacity(count);
-        // Callee indices per service, turned into names once every name is known.
-        let mut pending: Vec<(usize, Vec<u32>)> = Vec::new();
-        for i in 0..count {
+        let mut image_services: Vec<ImageService> = Vec::new();
+        // Every name in order, and the callee indices per (kind, position), turned into grants at the end.
+        let mut names: Vec<Box<str>> = Vec::with_capacity(count);
+        let mut pending: Vec<(u8, usize, Vec<u32>)> = Vec::new();
+        for _ in 0..count {
             let n = r.u8()? as usize;
             let name = core::str::from_utf8(r.bytes(n)?).map_err(|_| DecodeError::Invalid("service name"))?;
             if !valid_name(name) {
                 return Err(DecodeError::Invalid("service name"));
             }
-            if let Some(prev) = services.last() {
-                if prev.name.as_str() >= name {
-                    return Err(DecodeError::Invalid("service order (must be sorted, unique)"));
+            if names.last().is_some_and(|prev| &**prev >= name) {
+                return Err(DecodeError::Invalid("service order (must be sorted, unique)"));
+            }
+            names.push(Box::from(name));
+            let kind = if format == FORMAT_V4 { r.u8()? } else { KIND_NATIVE };
+            if kind == KIND_IMAGE {
+                let (s, idx) = ImageService::decode_body(&mut r, name, count)?;
+                if !idx.is_empty() {
+                    pending.push((KIND_IMAGE, image_services.len(), idx));
                 }
+                image_services.push(s);
+                continue;
+            }
+            if kind != KIND_NATIVE {
+                return Err(DecodeError::Invalid("service kind"));
             }
             let code_hash = r.array::<32>()?;
             let replicas = varint_u32(&mut r)?;
@@ -420,7 +506,7 @@ impl Manifest {
                     idx.push(x as u32);
                 }
                 if n > 0 {
-                    pending.push((i, idx));
+                    pending.push((KIND_NATIVE, services.len(), idx));
                 }
             }
             let s = ServiceSpec {
@@ -438,9 +524,9 @@ impl Manifest {
             services.push(s);
         }
         let mut os = OsPlan::default();
-        if format == FORMAT_V3 {
+        if format >= FORMAT_V3 {
             let n = varint(&mut r)?;
-            if n == 0 || n > MAX_OS_IMAGES as u64 {
+            if (n == 0 && format == FORMAT_V3) || n > MAX_OS_IMAGES as u64 {
                 return Err(DecodeError::Invalid("OS image count"));
             }
             for _ in 0..n {
@@ -451,24 +537,35 @@ impl Manifest {
                 }
                 os.images.push(OsImage { platform: platform.to_string(), image: r.array::<32>()? });
             }
-            os.wave = varint_u32(&mut r)?;
-            if os.wave == 0 {
-                return Err(DecodeError::Invalid("OS update wave"));
+            if n > 0 {
+                os.wave = varint_u32(&mut r)?;
+                if os.wave == 0 {
+                    return Err(DecodeError::Invalid("OS update wave"));
+                }
             }
         }
         if !r.is_empty() {
             return Err(DecodeError::Invalid("trailing bytes"));
         }
         if !pending.is_empty() {
-            let table: Arc<[Box<str>]> = services.iter().map(|s| Box::from(s.name.as_str())).collect();
-            for (i, idx) in pending {
-                services[i].calls = Calls(Grant::Names { table: table.clone(), idx: idx.into_boxed_slice() });
+            let table: Arc<[Box<str>]> = names.into();
+            for (kind, i, idx) in pending {
+                let calls = Calls(Grant::Names { table: table.clone(), idx: idx.into_boxed_slice() });
+                match kind {
+                    KIND_NATIVE => services[i].calls = calls,
+                    _ => image_services[i].calls = calls,
+                }
             }
         }
         if format == FORMAT_V2 && services.iter().all(|s| s.calls.is_none()) {
             return Err(DecodeError::Invalid("manifest format (2 without calls)"));
         }
-        Ok(Manifest { version, services, os })
+        if format == FORMAT_V4 && image_services.is_empty() {
+            return Err(DecodeError::Invalid("manifest format (4 without image services)"));
+        }
+        let m = Manifest { version, services, image_services, os };
+        m.validate_global().map_err(|_| DecodeError::Invalid("manifest (routes or public ports)"))?;
+        Ok(m)
     }
 
     /// Content hash: SHA-256 of the canonical encoding.
@@ -478,28 +575,53 @@ impl Manifest {
 
     /// Checks names, uniqueness and field ranges (what [`Manifest::decode`] would reject).
     pub fn validate(&self) -> Result<(), String> {
-        let mut names: Vec<&str> = Vec::with_capacity(self.services.len());
+        if self.services.len() + self.image_services.len() > MAX_SERVICES {
+            return Err("too many services".to_string());
+        }
+        let mut names: Vec<&str> = Vec::with_capacity(self.services.len() + self.image_services.len());
         for s in &self.services {
             s.validate()?;
             names.push(&s.name);
         }
-        if self.services.len() > MAX_SERVICES {
-            return Err("too many services".to_string());
+        for s in &self.image_services {
+            s.validate()?;
+            names.push(&s.name);
         }
         names.sort_unstable();
         if let Some(w) = names.windows(2).find(|w| w[0] == w[1]) {
             return Err(format!("duplicate service `{}`", w[0]));
         }
         // The manifest is the complete desired state: an undeclared callee is a mistake.
-        for s in &self.services {
-            if let Some(c) = s.calls.names().find(|c| names.binary_search(c).is_err()) {
-                return Err(format!("service `{}` calls `{c}`, which is not a service of this manifest", s.name));
+        for s in self.all_services() {
+            if let Some(c) = s.calls().names().find(|c| names.binary_search(c).is_err()) {
+                return Err(format!("service `{}` calls `{c}`, which is not a service of this manifest", s.name()));
             }
         }
+        self.validate_global()?;
         self.os.validate()
     }
 
-    /// Every blob the manifest references: code (in service order), then OS images; deduplicated.
+    /// Routes and public ports are cluster-wide: one service each.
+    fn validate_global(&self) -> Result<(), String> {
+        if self.image_services.len() < 2 {
+            return Ok(());
+        }
+        // (port, route, service): a public port, or a route with port 0.
+        let mut claims: Vec<(u16, &str, &str)> = Vec::new();
+        for s in &self.image_services {
+            claims.extend(s.routes.iter().map(|r| (0, r.as_str(), s.name.as_str())));
+            claims.extend(s.public.iter().map(|p| (p.port, "", s.name.as_str())));
+        }
+        claims.sort_unstable();
+        match claims.windows(2).find(|w| (w[0].0, w[0].1) == (w[1].0, w[1].1)) {
+            Some(w) if w[0].0 == 0 => Err(format!("route `{}` is claimed by `{}` and `{}`", w[0].1, w[0].2, w[1].2)),
+            Some(w) => Err(format!("public port {} is claimed by `{}` and `{}`", w[0].0, w[0].2, w[1].2)),
+            None => Ok(()),
+        }
+    }
+
+    /// Every blob the manifest references: code (in service order), then OS images; deduplicated. The `K10I`
+    /// images of image services are content objects, not bundle blobs.
     pub fn blob_hashes(&self) -> Vec<[u8; 32]> {
         let mut v: Vec<[u8; 32]> = Vec::new();
         for h in self.services.iter().map(|s| &s.code_hash).chain(self.os.images.iter().map(|i| &i.image)) {
@@ -512,6 +634,25 @@ impl Manifest {
 
     pub fn service(&self, name: &str) -> Option<&ServiceSpec> {
         self.services.iter().find(|s| s.name == name)
+    }
+
+    pub fn image_service(&self, name: &str) -> Option<&ImageService> {
+        self.image_services.iter().find(|s| s.name == name)
+    }
+
+    /// Every secret is sealed with one of the cluster's keys (`None`: an unauthenticated cluster, which has none).
+    pub fn check_secrets(&self, keys: Option<&crate::secure::ClusterKeys>) -> Result<(), String> {
+        for s in &self.image_services {
+            for (var, sealed) in &s.secrets {
+                let why = match keys {
+                    None => "this cluster has no key (it runs unauthenticated)",
+                    Some(k) if !k.holds_secret_key(sealed) => "not sealed with this cluster's key (pass it to --cluster-key-file)",
+                    Some(_) => continue,
+                };
+                return Err(format!("secret `{var}` of image service `{}`: {why}", s.name));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -704,7 +845,7 @@ impl<'a> Lexer<'a> {
                 let start = self.pos;
                 while self.pos < self.src.len() {
                     let c = self.src[self.pos];
-                    if c.is_ascii_alphanumeric() || c == b'_' || c == b'-' {
+                    if c.is_ascii_alphanumeric() || c == b'_' || c == b'-' || c == b'.' {
                         self.pos += 1;
                     } else {
                         break;
@@ -753,13 +894,13 @@ fn unit_multiplier(unit: &str) -> Option<u64> {
     }
 }
 
-/// Parses `64KiB`, `1MiB`, `4096`, `64 KiB` (the unit may be a separate word) into log2(bytes).
-fn parse_memory(lx: &mut Lexer<'_>, word: &str, line: u32) -> Result<u8, ParseError> {
+/// Parses `64KiB`, `1MiB`, `4096`, `64 KiB` (the unit may be a separate word) into bytes.
+fn parse_size(lx: &mut Lexer<'_>, word: &str, line: u32, key: &str) -> Result<u64, ParseError> {
     let split = word.find(|c: char| !c.is_ascii_digit() && c != '_').unwrap_or(word.len());
     let (num, mut unit) = (&word[..split], word[split..].to_string());
     let digits: String = num.chars().filter(|&c| c != '_').collect();
     if digits.is_empty() {
-        return err(line, format!("`memory` expects a size like 64KiB, got `{word}`"));
+        return err(line, format!("`{key}` expects a size like 64KiB, got `{word}`"));
     }
     if unit.is_empty() {
         if let Some((Tok::Word(w), _)) = lx.peek()? {
@@ -770,18 +911,58 @@ fn parse_memory(lx: &mut Lexer<'_>, word: &str, line: u32) -> Result<u8, ParseEr
         }
     }
     let Some(mult) = unit_multiplier(&unit) else {
-        return err(line, format!("unknown memory unit `{unit}` (use B, KiB, MiB or GiB)"));
+        return err(line, format!("unknown {key} unit `{unit}` (use B, KiB, MiB or GiB)"));
     };
-    let Ok(n) = digits.parse::<u64>() else { return err(line, format!("memory value `{word}` out of range")) };
-    let Some(bytes) = n.checked_mul(mult) else { return err(line, format!("memory value `{word}` out of range")) };
-    if !bytes.is_power_of_two() {
-        return err(line, format!("memory must be a power of two, got {bytes} bytes"));
+    let Ok(n) = digits.parse::<u64>() else { return err(line, format!("{key} value `{word}` out of range")) };
+    let Some(bytes) = n.checked_mul(mult) else { return err(line, format!("{key} value `{word}` out of range")) };
+    Ok(bytes)
+}
+
+/// `10s`, `500ms`, `2m` into milliseconds.
+fn parse_duration_ms(word: &str, line: u32, key: &str) -> Result<u32, ParseError> {
+    let split = word.find(|c: char| !c.is_ascii_digit()).unwrap_or(word.len());
+    let mult: u64 = match &word[split..] {
+        "ms" => 1,
+        "s" => 1000,
+        "m" => 60_000,
+        _ => return err(line, format!("`{key}` expects a duration like 10s, 500ms or 2m, got `{word}`")),
+    };
+    let ms = word[..split].parse::<u64>().ok().and_then(|n| n.checked_mul(mult)).filter(|&ms| ms <= u32::MAX as u64);
+    ms.map(|ms| ms as u32).ok_or_else(|| ParseError { line, msg: format!("`{key}` value `{word}` out of range") })
+}
+
+/// `0.5`, `2`, `1.25` cores into thousandths.
+fn parse_cpu(word: &str, line: u32) -> Result<u32, ParseError> {
+    let bad = || err(line, format!("`cpu` expects cores like 0.5 or 2 (at most 3 decimals), got `{word}`"));
+    let (int, frac) = word.split_once('.').unwrap_or((word, ""));
+    if int.is_empty() || int.len() > 4 || frac.len() > 3 || !(int.bytes().chain(frac.bytes()).all(|c| c.is_ascii_digit())) {
+        return bad();
     }
-    let log2 = bytes.trailing_zeros() as u8;
-    if !(MIN_MEM_LOG2..=MAX_MEM_LOG2).contains(&log2) {
-        return err(line, format!("memory must be between 4KiB and 64GiB, got {bytes} bytes"));
+    let frac_milli = format!("{frac:0<3}").parse::<u32>().unwrap_or(0);
+    let milli = int.parse::<u32>().map(|i| i * 1000 + frac_milli).or_else(|_| bad())?;
+    if milli > image::MAX_CPU_MILLI {
+        return err(line, "`cpu` above 1024 cores");
     }
-    Ok(log2)
+    Ok(milli)
+}
+
+fn parse_bool(word: &str, line: u32, key: &str) -> Result<bool, ParseError> {
+    match word {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => err(line, format!("`{key}` expects true or false, got `{word}`")),
+    }
+}
+
+fn parse_port(word: &str, line: u32, key: &str) -> Result<u16, ParseError> {
+    match parse_u32(word, line, key)? {
+        p @ 1..=65535 => Ok(p as u16),
+        _ => err(line, format!("`{key}` must be a port in 1..65535, got `{word}`")),
+    }
+}
+
+fn utf8(s: Vec<u8>, line: u32, what: &str) -> Result<String, ParseError> {
+    String::from_utf8(s).or_else(|_| err(line, format!("{what} is not UTF-8")))
 }
 
 /// Parses a `calls` list after its `[`: quoted names, comma-separated (trailing comma allowed).
@@ -812,6 +993,91 @@ fn parse_calls(lx: &mut Lexer<'_>, line: u32) -> Result<Calls, ParseError> {
     Calls::from_list(&list).or_else(|e| err(line, e))
 }
 
+/// A list of quoted strings after its `[`, comma-separated (trailing comma allowed).
+fn parse_strings(lx: &mut Lexer<'_>, key: &str, line: u32) -> Result<Vec<(String, u32)>, ParseError> {
+    let mut out = Vec::new();
+    loop {
+        match lx.next()? {
+            Some((Tok::RBracket, _)) => return Ok(out),
+            Some((Tok::Str(s), l)) => {
+                if out.len() == image::MAX_LIST {
+                    return err(l, format!("more than {} entries in `{key}`", image::MAX_LIST));
+                }
+                out.push((utf8(s, l, &format!("a `{key}` entry"))?, l));
+                match lx.next()? {
+                    Some((Tok::Comma, _)) => {}
+                    Some((Tok::RBracket, _)) => return Ok(out),
+                    Some((t, l)) => return err(l, format!("expected `,` or `]` in `{key}`, found {}", describe(&t))),
+                    None => return err(line, format!("unterminated `{key}` list (missing `]`)")),
+                }
+            }
+            Some((t, l)) => return err(l, format!("`{key}` expects quoted strings, found {}", describe(&t))),
+            None => return err(line, format!("unterminated `{key}` list (missing `]`)")),
+        }
+    }
+}
+
+/// `{ KEY = VALUE, … }` after its `{`: keys are words or quoted strings, values words or quoted strings; entries
+/// are separated by `,`, `;` or nothing. Duplicate keys are refused.
+fn parse_map(lx: &mut Lexer<'_>, key: &str, line: u32) -> Result<Vec<(String, Tok, u32)>, ParseError> {
+    let mut out: Vec<(String, Tok, u32)> = Vec::new();
+    loop {
+        let (k, l) = match lx.next()? {
+            Some((Tok::RBrace, _)) => return Ok(out),
+            Some((Tok::Comma | Tok::Semi, _)) => continue,
+            Some((Tok::Word(w), l)) => (w, l),
+            Some((Tok::Str(s), l)) => (utf8(s, l, &format!("a `{key}` key"))?, l),
+            Some((t, l)) => return err(l, format!("expected a key or `}}` in `{key}`, found {}", describe(&t))),
+            None => return err(line, format!("unterminated `{key}` (missing `}}`)")),
+        };
+        if out.iter().any(|(x, _, _)| *x == k) {
+            return err(l, format!("`{k}` set twice in `{key}`"));
+        }
+        if out.len() == image::MAX_LIST {
+            return err(l, format!("more than {} entries in `{key}`", image::MAX_LIST));
+        }
+        match lx.next()? {
+            Some((Tok::Eq, _)) => {}
+            Some((t, l)) => return err(l, format!("expected `=` after `{k}` in `{key}`, found {}", describe(&t))),
+            None => return err(line, format!("unterminated `{key}` (missing `}}`)")),
+        }
+        match lx.next()? {
+            Some((v @ (Tok::Word(_) | Tok::Str(_)), vl)) => out.push((k, v, vl)),
+            Some((t, l)) => return err(l, format!("bad value for `{k}` in `{key}`: {}", describe(&t))),
+            None => return err(line, format!("unterminated `{key}` (missing `}}`)")),
+        }
+    }
+}
+
+/// `[{ port = 5432, to = 5432 }, …]` after its `[` (`to` defaults to `port`).
+fn parse_public(lx: &mut Lexer<'_>, line: u32) -> Result<Vec<image::PublicPort>, ParseError> {
+    let mut out = Vec::new();
+    loop {
+        match lx.next()? {
+            Some((Tok::RBracket, _)) => return Ok(out),
+            Some((Tok::Comma, _)) => continue,
+            Some((Tok::LBrace, l)) => {
+                let (mut port, mut to) = (None, None);
+                for (k, v, vl) in parse_map(lx, "public", l)? {
+                    let p = match &v {
+                        Tok::Word(w) => parse_port(w, vl, &k)?,
+                        t => return err(vl, format!("bad value for `{k}` in `public`: {}", describe(t))),
+                    };
+                    match k.as_str() {
+                        "port" => port = Some(p),
+                        "to" => to = Some(p),
+                        _ => return err(vl, format!("unknown key `{k}` in `public` (expected port, to)")),
+                    }
+                }
+                let Some(port) = port else { return err(l, "`public` entries need `port`") };
+                out.push(image::PublicPort { port, to: to.unwrap_or(port) });
+            }
+            Some((t, l)) => return err(l, format!("`public` expects entries like {{ port = 5432, to = 5432 }}, found {}", describe(&t))),
+            None => return err(line, "unterminated `public` list (missing `]`)"),
+        }
+    }
+}
+
 /// The `os { … }` block of the operator text format: signed image files (paths as written) and the first wave.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct OsDecl {
@@ -820,16 +1086,32 @@ pub struct OsDecl {
     pub line: u32,
 }
 
+/// One image service block of the operator text format, with defaults applied. Secret values are files (paths as
+/// written in `secret_files`) that the CLI reads and seals with the cluster key into `spec.secrets`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ImageDecl {
+    pub spec: ImageService,
+    /// `(variable, file)` pairs.
+    pub secret_files: Vec<(String, String)>,
+    /// Line of the `service` keyword.
+    pub line: u32,
+}
+
 /// A parsed operator text file.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Document {
     pub services: Vec<ServiceDecl>,
+    pub images: Vec<ImageDecl>,
     pub os: Option<OsDecl>,
 }
 
-/// Parses a text file that declares services only (an `os` block is an error here; see [`parse_document`]).
+/// Parses a text file that declares native services only (an `os` block or an image service is an error here; see
+/// [`parse_document`]).
 pub fn parse_text(src: &str) -> Result<Vec<ServiceDecl>, ParseError> {
     let doc = parse_document(src)?;
+    if let Some(i) = doc.images.first() {
+        return err(i.line, "image services are not allowed here");
+    }
     match doc.os {
         Some(os) => err(os.line, "`os` blocks are not allowed here"),
         None => Ok(doc.services),
@@ -902,15 +1184,22 @@ fn parse_os(lx: &mut Lexer<'_>, line: u32) -> Result<OsDecl, ParseError> {
     Ok(d)
 }
 
+const NATIVE_KEYS: &[&str] = &["code", "config", "max_instances", "cpu_ms", "fresh"];
+const IMAGE_KEYS: &[&str] = &[
+    "images", "entrypoint", "args", "workdir", "user", "env", "secrets", "cpu", "pids_max", "fds_max", "http", "routes",
+    "public", "egress", "health", "stop_grace", "scratch", "restart", "init", "tenant",
+];
+
 /// Parses the operator text format: service declarations (defaults applied, names unique, callees declared) and
-/// at most one `os` block.
+/// at most one `os` block. A block with `images` is an image service, otherwise a native one (`code`).
 pub fn parse_document(src: &str) -> Result<Document, ParseError> {
     let mut lx = Lexer::new(src);
     let mut out: Vec<ServiceDecl> = Vec::new();
+    let mut images: Vec<ImageDecl> = Vec::new();
     let mut os: Option<OsDecl> = None;
     let mut seen: BTreeSet<String> = BTreeSet::new();
-    // (declaration index, `calls` line): callees are checked once every service is known.
-    let mut calls_at: Vec<(usize, u32)> = Vec::new();
+    // (image service?, declaration index, `calls` line): callees are checked once every service is known.
+    let mut calls_at: Vec<(bool, usize, u32)> = Vec::new();
     while let Some((tok, line)) = lx.next()? {
         match tok {
             Tok::Semi => continue,
@@ -953,6 +1242,11 @@ pub fn parse_document(src: &str) -> Result<Document, ParseError> {
             calls: Calls::none(),
             line,
         };
+        let mut img = ImageService::new(&d.name, Vec::new(), 0);
+        let mut secret_files: Vec<(String, String)> = Vec::new();
+        let (mut mem, mut scratch): (Option<(u64, u32)>, Option<(u64, u32)>) = (None, None);
+        let (mut native_key, mut image_key): (Option<(String, u32)>, Option<(String, u32)>) = (None, None);
+        let mut calls_line = None;
         let mut seen: Vec<String> = Vec::new();
         loop {
             let (key, kline) = match lx.next()? {
@@ -971,6 +1265,12 @@ pub fn parse_document(src: &str) -> Result<Document, ParseError> {
                 None => return err(kline, format!("expected `=` after `{key}`")),
             }
             let Some((val, vline)) = lx.next()? else { return err(kline, format!("missing value for `{key}`")) };
+            if NATIVE_KEYS.contains(&key.as_str()) && native_key.is_none() {
+                native_key = Some((key.clone(), kline));
+            }
+            if IMAGE_KEYS.contains(&key.as_str()) && image_key.is_none() {
+                image_key = Some((key.clone(), kline));
+            }
             match (key.as_str(), val) {
                 ("code", Tok::Str(s)) => {
                     d.code = String::from_utf8(s).or_else(|_| err(vline, "`code` path is not UTF-8"))?;
@@ -1002,46 +1302,210 @@ pub fn parse_document(src: &str) -> Result<Document, ParseError> {
                         return err(vline, "`cpu_ms` must be >= 1");
                     }
                 }
-                ("memory", Tok::Word(w)) => d.mem_log2 = parse_memory(&mut lx, &w, vline)?,
-                ("fresh", Tok::Word(w)) => {
-                    d.fresh = match w.as_str() {
-                        "true" => true,
-                        "false" => false,
-                        _ => return err(vline, format!("`fresh` expects true or false, got `{w}`")),
+                ("memory", Tok::Word(w)) => {
+                    let bytes = parse_size(&mut lx, &w, vline, "memory")?;
+                    if !bytes.is_power_of_two() && bytes % image::PAGE != 0 {
+                        let image = "a multiple of 4KiB for image services";
+                        return err(vline, format!("memory must be a power of two ({image}), got {bytes} bytes"));
                     }
+                    if !(1u64 << MIN_MEM_LOG2..=1u64 << MAX_MEM_LOG2).contains(&bytes) {
+                        return err(vline, format!("memory must be between 4KiB and 64GiB, got {bytes} bytes"));
+                    }
+                    mem = Some((bytes, vline));
                 }
+                ("fresh", Tok::Word(w)) => d.fresh = parse_bool(&w, vline, "fresh")?,
                 ("calls", Tok::LBracket) => {
                     d.calls = parse_calls(&mut lx, vline)?;
-                    calls_at.push((out.len(), vline));
+                    calls_line = Some(vline);
                 }
-                ("code" | "config", t) => return err(vline, format!("`{key}` expects a quoted string, found {}", describe(&t))),
+                ("images", Tok::LBrace) => {
+                    for (k, v, l) in parse_map(&mut lx, "images", vline)? {
+                        let arch = Arch::parse(&k).ok_or_else(|| ParseError {
+                            line: l,
+                            msg: format!("unknown architecture `{k}` in `images` (want x86_64, aarch64, i686, armv7 or riscv64)"),
+                        })?;
+                        let hash = match &v {
+                            Tok::Str(s) => s.strip_prefix(b"sha256:").and_then(|h| core::str::from_utf8(h).ok()),
+                            _ => None,
+                        };
+                        let Some(hash) = hash.filter(|h| h.len() == 64).and_then(crate::sha256::from_hex) else {
+                            return err(l, format!("`images` entry `{k}` wants \"sha256:\" and 64 hex digits (a K10I image)"));
+                        };
+                        img.images.push(image::ImageRef { arch, hash });
+                    }
+                    if img.images.is_empty() {
+                        return err(vline, "`images` is empty");
+                    }
+                }
+                ("entrypoint" | "args", Tok::LBracket) => {
+                    let list = parse_strings(&mut lx, &key, vline)?.into_iter().map(|(s, _)| s).collect();
+                    *(if key == "entrypoint" { &mut img.entrypoint } else { &mut img.args }) = Some(list);
+                }
+                ("workdir", Tok::Str(s)) => {
+                    img.workdir = utf8(s, vline, "`workdir`")?;
+                    if !img.workdir.starts_with('/') || img.workdir.len() > image::MAX_PATH || img.workdir.contains('\0') {
+                        return err(vline, "`workdir` must be an absolute path");
+                    }
+                }
+                ("user", Tok::Str(s)) => {
+                    img.user = utf8(s, vline, "`user`")?;
+                    if !image::valid_user(&img.user) {
+                        return err(vline, format!("invalid user `{}` (want NAME or UID, optionally :GROUP)", img.user));
+                    }
+                }
+                ("tenant", Tok::Str(s)) => {
+                    img.tenant = utf8(s, vline, "`tenant`")?;
+                    if !valid_name(&img.tenant) {
+                        return err(vline, format!("invalid tenant `{}` (want [a-z0-9-], 1..=63 chars)", img.tenant));
+                    }
+                }
+                ("env" | "secrets", Tok::LBrace) => {
+                    for (k, v, l) in parse_map(&mut lx, &key, vline)? {
+                        if !image::valid_env_key(&k) {
+                            return err(l, format!("invalid variable name `{k}` in `{key}`"));
+                        }
+                        let Tok::Str(v) = v else { return err(l, format!("`{key}` values are quoted strings")) };
+                        let v = utf8(v, l, &format!("`{k}` in `{key}`"))?;
+                        if key == "env" {
+                            if v.contains('\0') {
+                                return err(l, format!("`{k}` in `env` contains a NUL byte"));
+                            }
+                            img.env.push((k, v));
+                        } else if v.is_empty() {
+                            return err(l, format!("`{k}` in `secrets` needs a file name"));
+                        } else {
+                            secret_files.push((k, v));
+                        }
+                    }
+                }
+                ("cpu", Tok::Word(w)) => img.cpu_milli = parse_cpu(&w, vline)?,
+                ("pids_max" | "fds_max", Tok::Word(w)) => {
+                    let n = parse_u32(&w, vline, &key)?;
+                    let (min, max) = if key == "pids_max" { (1, image::MAX_PIDS) } else { (3, image::MAX_FDS) };
+                    if !(min..=max).contains(&n) {
+                        return err(vline, format!("`{key}` must be {min}..={max}"));
+                    }
+                    *(if key == "pids_max" { &mut img.pids_max } else { &mut img.fds_max }) = n;
+                }
+                ("http", Tok::Word(w)) => img.http = parse_port(&w, vline, "http")?,
+                ("routes", Tok::LBracket) => {
+                    for (r, l) in parse_strings(&mut lx, "routes", vline)? {
+                        if !image::valid_route(&r) {
+                            return err(l, format!("invalid route `{r}` (want host[/path] or tls:host, lowercase)"));
+                        }
+                        if img.routes.contains(&r) {
+                            return err(l, format!("route `{r}` listed twice"));
+                        }
+                        img.routes.push(r);
+                    }
+                }
+                ("egress", Tok::LBracket) => {
+                    for (e, l) in parse_strings(&mut lx, "egress", vline)? {
+                        let e = image::Egress::parse(&e).or_else(|m| err(l, m))?;
+                        if img.egress.contains(&e) {
+                            return err(l, format!("egress `{e}` listed twice"));
+                        }
+                        img.egress.push(e);
+                    }
+                }
+                ("public", Tok::LBracket) => {
+                    img.public = parse_public(&mut lx, vline)?;
+                    if let Some(p) = img.public.iter().enumerate().find(|(i, p)| img.public[..*i].iter().any(|q| q.port == p.port)) {
+                        return err(vline, format!("public port {} listed twice", p.1.port));
+                    }
+                }
+                ("health", Tok::Str(s)) => img.health = image::Health::parse(&utf8(s, vline, "`health`")?).or_else(|m| err(vline, m))?,
+                ("stop_grace", Tok::Word(w)) => {
+                    img.stop_grace_ms = parse_duration_ms(&w, vline, "stop_grace")?;
+                    if img.stop_grace_ms > image::MAX_STOP_GRACE_MS {
+                        return err(vline, "`stop_grace` must be at most 1h");
+                    }
+                }
+                ("scratch", Tok::Word(w)) => scratch = Some((parse_size(&mut lx, &w, vline, "scratch")?, vline)),
+                ("restart", Tok::Word(w)) => {
+                    img.restart = image::Restart::parse(&w)
+                        .ok_or_else(|| ParseError { line: vline, msg: format!("`restart` expects always, on-failure or never, got `{w}`") })?;
+                }
+                ("init", Tok::Word(w)) => img.init = parse_bool(&w, vline, "init")?,
+                ("code" | "config" | "workdir" | "user" | "tenant" | "health", t) => {
+                    return err(vline, format!("`{key}` expects a quoted string, found {}", describe(&t)))
+                }
                 ("calls", t) => {
                     let found = describe(&t);
                     return err(vline, format!("`calls` expects a list like [\"echo\", \"kv-store\"], found {found}"));
                 }
-                ("replicas" | "max_instances" | "cpu_ms" | "memory" | "fresh", t) => {
+                ("entrypoint" | "args" | "routes" | "egress" | "public", t) => {
+                    return err(vline, format!("`{key}` expects a list like [\"…\"], found {}", describe(&t)))
+                }
+                ("images" | "env" | "secrets", t) => {
+                    return err(vline, format!("`{key}` expects a map like {{ KEY = \"value\" }}, found {}", describe(&t)))
+                }
+                (k, t) if k == "memory" || NATIVE_KEYS.contains(&k) || IMAGE_KEYS.contains(&k) || k == "replicas" => {
                     return err(vline, format!("bad value for `{key}`: {}", describe(&t)))
                 }
                 (_, _) => {
-                    let keys = "code, replicas, memory, max_instances, cpu_ms, fresh, config, calls";
+                    let keys = "native: code, replicas, memory, max_instances, cpu_ms, fresh, config, calls; image: images, \
+                                replicas, memory, cpu, entrypoint, args, env, secrets, workdir, user, http, routes, public, \
+                                calls, egress, health, stop_grace, scratch, restart, init, pids_max, fds_max, tenant";
                     return err(kline, format!("unknown key `{key}` (expected {keys})"));
                 }
             }
             seen.push(key);
         }
-        if d.code.is_empty() {
-            return err(d.line, format!("service `{}` has no `code`", d.name));
+        if img.images.is_empty() {
+            if let Some((k, l)) = image_key {
+                return err(l, format!("`{k}` is a key of image services, which need `images`"));
+            }
+            if d.code.is_empty() {
+                return err(d.line, format!("service `{}` has no `code` (or `images`, for an image service)", d.name));
+            }
+            if let Some((bytes, l)) = mem {
+                if !bytes.is_power_of_two() {
+                    return err(l, format!("memory must be a power of two, got {bytes} bytes"));
+                }
+                d.mem_log2 = bytes.trailing_zeros() as u8;
+            }
+            if let Some(l) = calls_line {
+                calls_at.push((false, out.len(), l));
+            }
+            out.push(d);
+            continue;
         }
-        out.push(d);
+        if let Some((k, l)) = native_key {
+            return err(l, format!("`{k}` is a key of native services; `{}` has `images`", d.name));
+        }
+        let Some((bytes, l)) = mem else {
+            return err(d.line, format!("image service `{}` needs `memory` (its exact limit, like 256MiB)", d.name));
+        };
+        if bytes % image::PAGE != 0 {
+            return err(l, format!("image service memory must be a multiple of 4KiB, got {bytes} bytes"));
+        }
+        img.mem_bytes = bytes;
+        img.scratch_bytes = (bytes / 4) & !(image::PAGE - 1);
+        if let Some((s, l)) = scratch {
+            if s % image::PAGE != 0 || s > bytes {
+                return err(l, format!("scratch must be a multiple of 4KiB, at most `memory`, got {s} bytes"));
+            }
+            img.scratch_bytes = s;
+        }
+        img.replicas = d.replicas;
+        img.calls = d.calls;
+        // Remaining cross-field checks (sizes, `routes` without `http`, …); secrets are checked once sealed.
+        img.canonicalize();
+        img.validate().or_else(|e| err(d.line, e))?;
+        if let Some(l) = calls_line {
+            calls_at.push((true, images.len(), l));
+        }
+        images.push(ImageDecl { spec: img, secret_files, line: d.line });
     }
     // The text is the complete desired state: an undeclared callee is a mistake (typo).
-    for (i, line) in calls_at {
-        let d = &out[i];
-        if let Some(c) = d.calls.names().find(|c| !seen.contains(*c)) {
-            return err(line, format!("service `{}` calls `{c}`, which is not declared in this manifest", d.name));
+    for (is_image, i, line) in calls_at {
+        let (name, calls) = if is_image { (&images[i].spec.name, &images[i].spec.calls) } else { (&out[i].name, &out[i].calls) };
+        if let Some(c) = calls.names().find(|c| !seen.contains(*c)) {
+            return err(line, format!("service `{name}` calls `{c}`, which is not declared in this manifest"));
         }
     }
-    Ok(Document { services: out, os })
+    Ok(Document { services: out, images, os })
 }
 
 #[cfg(test)]
@@ -1439,5 +1903,359 @@ service minimal {
             assert!(e.line == line && e.msg.contains(msg), "{src}: {e}");
         }
         assert!(parse_text("os { images = [\"a\"] }").is_err());
+    }
+
+    fn image_svc(name: &str) -> ImageService {
+        ImageService::new(name, vec![image::ImageRef { arch: Arch::X86_64, hash: sha256(name.as_bytes()) }], 64 << 20)
+    }
+
+    /// An image service using every field.
+    fn full_image(name: &str) -> ImageService {
+        let k = crate::secure::ClusterKey::new(&[7; 32]);
+        let mut s = ImageService {
+            images: vec![
+                image::ImageRef { arch: Arch::Aarch64, hash: [2; 32] },
+                image::ImageRef { arch: Arch::X86_64, hash: [1; 32] },
+            ],
+            replicas: 3,
+            cpu_milli: 500,
+            pids_max: 200,
+            fds_max: 70_000,
+            entrypoint: Some(vec![]),
+            args: Some(vec!["--port".into(), "8080".into(), "".into()]),
+            workdir: "/srv/app".into(),
+            user: "1000:1000".into(),
+            env: vec![("ZED".into(), "z".into()), ("LOG_LEVEL".into(), "info".into()), ("EMPTY".into(), String::new())],
+            secrets: vec![("DB_PASSWORD".into(), k.seal_secret(name, "DB_PASSWORD", b"pw"))],
+            http: 8080,
+            routes: vec!["tls:secure.example.com".into(), "api.example.com".into(), "example.com/api".into()],
+            public: vec![image::PublicPort { port: 5432, to: 5433 }, image::PublicPort { port: 22, to: 2222 }],
+            calls: Calls::from_list(&["db", name]).unwrap(),
+            egress: vec![
+                image::Egress::parse("10.1.2.0/24:5432").unwrap(),
+                image::Egress::Dns,
+                image::Egress::parse("[2001:db8::/32]:443").unwrap(),
+                image::Egress::parse("0.0.0.0/0:443").unwrap(),
+            ],
+            health: image::Health::parse("http:8080/healthz").unwrap(),
+            stop_grace_ms: 30_000,
+            scratch_bytes: 16 << 20,
+            restart: image::Restart::OnFailure,
+            init: true,
+            tenant: "acme".into(),
+            ..ImageService::new(name, vec![], 384 << 20)
+        };
+        s.canonicalize();
+        s
+    }
+
+    fn format4_sample() -> Manifest {
+        let mut web = calling("web", &["api", "echo"]);
+        web.replicas = 2;
+        Manifest {
+            version: 11,
+            services: vec![web, spec("echo", 1), spec("db", 1)],
+            image_services: vec![full_image("api"), ImageService { calls: Calls::any(), ..image_svc("cache") }],
+            os: OsPlan::default(),
+        }
+    }
+
+    #[test]
+    fn format4_roundtrip_and_canonical_hash() {
+        let m = format4_sample();
+        m.validate().unwrap();
+        let bytes = m.encode();
+        assert_eq!((bytes[4], m.format()), (FORMAT_V4, FORMAT_V4));
+        let back = Manifest::decode(&bytes).unwrap();
+        assert_eq!(back.hash(), m.hash());
+        assert_eq!(sha256(&bytes), back.hash());
+        assert_eq!(back.services.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["db", "echo", "web"]);
+        assert_eq!(back.image_services.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["api", "cache"]);
+        let api = back.image_service("api").unwrap();
+        assert_eq!(api.env.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), ["EMPTY", "LOG_LEVEL", "ZED"], "sorted");
+        assert_eq!(api.entrypoint, Some(vec![]), "an empty entrypoint override is kept");
+        assert_eq!(api.args.as_ref().unwrap()[0], "--port", "argument order is kept");
+        assert_eq!(names(&api.calls), ["api", "db"]);
+        assert!(back.image_service("cache").unwrap().calls.is_any());
+        assert_eq!(names(&back.service("web").unwrap().calls), ["api", "echo"], "native services call image services");
+        assert!(back.service("web").unwrap().calls.allows(b"api"));
+        // Calls index one name table shared by both kinds.
+        match (&back.service("web").unwrap().calls.0, &api.calls.0) {
+            (Grant::Names { table: t1, idx: i1 }, Grant::Names { table: t2, idx: i2 }) => {
+                assert!(Arc::ptr_eq(t1, t2));
+                assert_eq!((&**i1, &**i2), (&[0u32, 3][..], &[0u32, 2][..]));
+            }
+            _ => panic!("named grants"),
+        }
+        let mut shuffled = m.clone();
+        shuffled.services.reverse();
+        shuffled.image_services.reverse();
+        assert_eq!(shuffled.hash(), m.hash(), "service order does not change the hash");
+        let api = &mut shuffled.image_services[1];
+        api.env.reverse();
+        api.routes.reverse();
+        api.public.reverse();
+        api.egress.reverse();
+        api.images.reverse();
+        assert!(shuffled.validate().unwrap_err().contains("canonical order"), "lists are canonical in memory");
+        shuffled.image_services[1].canonicalize();
+        assert_eq!(shuffled.hash(), m.hash());
+        let mut other = m.clone();
+        other.image_services[0].args = None;
+        assert_ne!(other.hash(), m.hash(), "None (the image's Cmd) differs from an override");
+        // With an OS plan too, and with no native service at all.
+        let with_os = Manifest { os: OsPlan { images: vec![OsImage { platform: "x86_64-vm".into(), image: [9; 32] }], wave: 2 }, ..m.clone() };
+        assert_eq!(Manifest::decode(&with_os.encode()).unwrap(), Manifest::decode(&with_os.encode()).unwrap());
+        assert_eq!(Manifest::decode(&with_os.encode()).unwrap().os, with_os.os);
+        let only = Manifest { version: 1, image_services: vec![image_svc("a")], ..Default::default() };
+        assert_eq!(Manifest::decode(&only.encode()).unwrap(), only);
+        for n in 0..bytes.len() {
+            assert!(Manifest::decode(&bytes[..n]).is_err());
+        }
+    }
+
+    /// Random mutations of format-4 encodings: never a panic, and whatever decodes is canonical and valid.
+    #[test]
+    fn format4_canonicality_fuzz() {
+        let seeds = [format4_sample().encode(), Manifest { version: 1, image_services: vec![image_svc("a")], ..Default::default() }.encode()];
+        let mut rng = crate::codec::Rng::new(0x6b31_3034);
+        let (mut accepted, mut tries) = (0, 0);
+        for seed in &seeds {
+            for i in 0..seed.len() {
+                for bit in 0..8 {
+                    let mut x = seed.clone();
+                    x[i] ^= 1 << bit;
+                    tries += 1;
+                    if let Ok(m) = Manifest::decode(&x) {
+                        accepted += 1;
+                        assert_eq!(m.encode(), x, "every accepted encoding is canonical");
+                        m.validate().unwrap();
+                    }
+                }
+            }
+            for _ in 0..20_000 {
+                let mut x = seed.clone();
+                for _ in 0..1 + rng.below(3) {
+                    let at = rng.below(x.len());
+                    match rng.below(4) {
+                        0 => x[at] = rng.next_u64() as u8,
+                        1 => x.insert(at, rng.next_u64() as u8),
+                        2 => drop(x.remove(at)),
+                        _ => x[at] = x[at].wrapping_add(1),
+                    }
+                }
+                tries += 1;
+                if let Ok(m) = Manifest::decode(&x) {
+                    accepted += 1;
+                    assert_eq!(m.encode(), x, "every accepted encoding is canonical");
+                    m.validate().unwrap();
+                }
+            }
+        }
+        assert!(accepted > 0 && accepted < tries / 2, "{accepted} of {tries}");
+    }
+
+    #[test]
+    fn format4_decode_is_strict() {
+        let m = Manifest { version: 1, image_services: vec![ImageService { env: vec![("AA".into(), "1".into()), ("BB".into(), "2".into())], ..image_svc("a") }], ..Default::default() };
+        let bytes = m.encode();
+        assert!(Manifest::decode(&bytes).is_ok());
+        // The same entries out of order.
+        let at = bytes.windows(2).position(|w| w == b"AA").unwrap();
+        let bt = bytes.windows(2).position(|w| w == b"BB").unwrap();
+        let mut swapped = bytes.clone();
+        swapped[at..at + 2].copy_from_slice(b"BB");
+        swapped[bt..bt + 2].copy_from_slice(b"AA");
+        swapped[at + 3] = b'2';
+        swapped[bt + 3] = b'1';
+        assert_eq!(Manifest::decode(&swapped), Err(DecodeError::Invalid("image service field")));
+        // Format 4 is only for manifests with image services; formats 1-3 do not carry them.
+        let natives = Manifest { version: 1, services: vec![spec("a", 1)], ..Default::default() };
+        let mut f4 = natives.encode();
+        f4[4] = FORMAT_V4;
+        assert!(Manifest::decode(&f4).is_err());
+        let mut f3 = bytes.clone();
+        f3[4] = FORMAT_V3;
+        assert!(Manifest::decode(&f3).is_err());
+        // Unknown kinds, and route or public port clashes between services.
+        let kind_at = 4 + 1 + 8 + 1 + 1 + 1;
+        let mut k = bytes.clone();
+        k[kind_at] = 2;
+        assert_eq!(Manifest::decode(&k), Err(DecodeError::Invalid("service kind")));
+        let routed = |n: &str| ImageService { http: 80, routes: vec!["a.example".into()], ..image_svc(n) };
+        let clash = Manifest { version: 1, image_services: vec![routed("a"), routed("b")], ..Default::default() };
+        assert!(clash.validate().unwrap_err().contains("route `a.example` is claimed by `a` and `b`"));
+        assert_eq!(Manifest::decode(&clash.encode()), Err(DecodeError::Invalid("manifest (routes or public ports)")));
+        let port = |n: &str| ImageService { public: vec![image::PublicPort { port: 443, to: 8443 }], ..image_svc(n) };
+        let clash = Manifest { version: 1, image_services: vec![port("a"), port("b")], ..Default::default() };
+        assert!(clash.validate().unwrap_err().contains("public port 443"));
+        // One name space for both kinds.
+        let dup = Manifest { version: 1, services: vec![spec("a", 1)], image_services: vec![image_svc("a")], ..Default::default() };
+        assert!(dup.validate().unwrap_err().contains("duplicate service `a`"));
+        assert!(Manifest::decode(&dup.encode()).is_err());
+        let typo = Manifest { version: 1, image_services: vec![ImageService { calls: Calls::from_list(&["nope"]).unwrap(), ..image_svc("a") }], ..Default::default() };
+        assert!(typo.validate().unwrap_err().contains("calls `nope`"));
+    }
+
+    #[test]
+    fn image_service_validation() {
+        let ok = |s: ImageService| Manifest { version: 1, image_services: vec![s], ..Default::default() }.validate();
+        assert!(ok(full_image("api")).is_err(), "calls `db`, which is not in this manifest");
+        let full = ImageService { calls: Calls::none(), ..full_image("api") };
+        ok(full.clone()).unwrap();
+        let bad: Vec<(ImageService, &str)> = vec![
+            (ImageService { images: vec![], ..full.clone() }, "no image"),
+            (ImageService { images: vec![full.images[0], full.images[0]], ..full.clone() }, "two images for x86_64"),
+            (ImageService { mem_bytes: (64 << 20) + 1, ..full.clone() }, "multiple of 4KiB"),
+            (ImageService { mem_bytes: 128 << 30, ..full.clone() }, "multiple of 4KiB between"),
+            (ImageService { scratch_bytes: 512 << 20, ..full.clone() }, "scratch"),
+            (ImageService { cpu_milli: image::MAX_CPU_MILLI + 1, ..full.clone() }, "cpu"),
+            (ImageService { fds_max: 2, ..full.clone() }, "fds_max"),
+            (ImageService { workdir: "srv".into(), ..full.clone() }, "absolute"),
+            (ImageService { user: "a:b:c".into(), ..full.clone() }, "invalid user"),
+            (ImageService { env: vec![("A=B".into(), "x".into())], ..full.clone() }, "variable name"),
+            (ImageService { env: vec![("A".into(), "x".into()), ("A".into(), "y".into())], ..full.clone() }, "set twice"),
+            (ImageService { env: vec![("B".into(), "x".into()), ("A".into(), "y".into())], ..full.clone() }, "canonical order"),
+            (ImageService { env: vec![("DB_PASSWORD".into(), "x".into())], ..full.clone() }, "both in env and in secrets"),
+            (ImageService { secrets: vec![("S".into(), vec![1, 2, 3])], ..full.clone() }, "invalid secret"),
+            (ImageService { args: Some(vec!["a\0b".into()]), ..full.clone() }, "NUL"),
+            (ImageService { args: Some(vec!["x".repeat(300 << 10)]), ..full.clone() }, "exceed 256 KiB"),
+            (ImageService { routes: vec!["API.example.com".into()], ..full.clone() }, "invalid route"),
+            (ImageService { routes: vec!["tls:a.example/x".into()], ..full.clone() }, "invalid route"),
+            (ImageService { http: 0, ..full.clone() }, "routes need `http`"),
+            (ImageService { public: vec![image::PublicPort { port: 1, to: 0 }], ..full.clone() }, "out of range"),
+            (ImageService { egress: vec![image::Egress::Dns, image::Egress::Dns], ..full.clone() }, "listed twice"),
+            (ImageService { tenant: "Acme".into(), ..full.clone() }, "invalid tenant"),
+            (ImageService { stop_grace_ms: image::MAX_STOP_GRACE_MS + 1, ..full.clone() }, "stop_grace"),
+        ];
+        for (s, needle) in bad {
+            let e = ok(s).unwrap_err();
+            assert!(e.contains(needle) && e.starts_with("image service `api`"), "{needle}: {e}");
+        }
+        for (src, want) in [
+            ("process", image::Health::Process),
+            ("tcp:5432", image::Health::Tcp { port: 5432 }),
+            ("http:80", image::Health::Http { port: 80, path: "/".into() }),
+            ("exec:/bin/check  --quick", image::Health::Exec(vec!["/bin/check".into(), "--quick".into()])),
+        ] {
+            assert_eq!(image::Health::parse(src).unwrap(), want);
+            assert_eq!(image::Health::parse(&want.to_string()).unwrap(), want);
+        }
+        for bad in ["http:0/x", "tcp:x", "exec:", "http:80/a b", "ping"] {
+            assert!(image::Health::parse(bad).is_err(), "{bad}");
+        }
+        for (src, shown) in [
+            ("dns", "dns"),
+            ("10.0.0.0/8", "10.0.0.0/8"),
+            ("10.1.2.3:53", "10.1.2.3/32:53"),
+            ("2001:db8::/32", "2001:db8::/32"),
+            ("[::1]:443", "[::1/128]:443"),
+        ] {
+            let e = image::Egress::parse(src).unwrap();
+            assert_eq!(e.to_string(), shown);
+            assert_eq!(image::Egress::parse(shown).unwrap(), e);
+        }
+        for bad in ["10.0.0.1/8", "10.0.0.0/33", "10.0.0.0/8:0", "host:80", "[::1]", "::1:80:x"] {
+            assert!(image::Egress::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn text_image_services() {
+        let h = |b: u8| alloc::format!("sha256:{}", crate::sha256::to_hex(&[b; 32]));
+        let src = alloc::format!(
+            r#"
+service api {{
+  images = {{ x86_64 = "{}", aarch64 = "{}" }}
+  replicas = 3
+  memory = 384MiB                              # exact
+  cpu = 0.5
+  args = ["--port", "8080"]
+  entrypoint = []
+  env = {{ LOG_LEVEL = "info", "my.var" = "x" }}
+  secrets = {{ DB_PASSWORD = "secrets/db-password" }}
+  http = 8080
+  routes = ["api.example.com", "tls:secure.example.com"]
+  public = [{{ port = 5432, to = 5433 }}, {{ port = 22 }}]
+  calls = ["db"]
+  egress = ["0.0.0.0/0:443", "dns"]
+  health = "http:8080/healthz"
+  stop_grace = 30s
+  scratch = 64MiB
+  restart = on-failure
+  init = true
+  workdir = "/srv"
+  user = "app:app"
+  pids_max = 100
+  fds_max = 65536
+  tenant = "acme"
+}}
+service db {{ code = "db.ten" calls = ["api"] }}
+service tiny {{ images = {{ x86_64 = "{}" }}; memory = 6MiB }}
+"#,
+            h(1),
+            h(2),
+            h(3)
+        );
+        let doc = parse_document(&src).unwrap();
+        assert_eq!((doc.services.len(), doc.images.len()), (1, 2));
+        let api = &doc.images[0];
+        assert_eq!((api.line, api.spec.mem_bytes, api.spec.cpu_milli, api.spec.replicas), (2, 384 << 20, 500, 3));
+        assert_eq!(api.spec.image_for(Arch::Aarch64 as u8), Some(&[2; 32]));
+        assert_eq!(api.secret_files, [("DB_PASSWORD".to_string(), "secrets/db-password".to_string())]);
+        assert!(api.spec.secrets.is_empty(), "sealed by the CLI");
+        assert_eq!(api.spec.public, [image::PublicPort { port: 22, to: 22 }, image::PublicPort { port: 5432, to: 5433 }]);
+        assert_eq!((api.spec.stop_grace_ms, api.spec.scratch_bytes, api.spec.restart), (30_000, 64 << 20, image::Restart::OnFailure));
+        assert_eq!(api.spec.env[1], ("my.var".to_string(), "x".to_string()));
+        assert_eq!(names(&api.spec.calls), ["db"]);
+        let tiny = &doc.images[1].spec;
+        assert_eq!((tiny.mem_bytes, tiny.scratch_bytes, tiny.pids_max, tiny.args.is_none()), (6 << 20, 1536 << 10, image::DEFAULT_PIDS, true));
+        let mut m = Manifest {
+            version: 1,
+            services: doc.services.iter().map(|d| d.to_spec([0; 32])).collect(),
+            image_services: doc.images.iter().map(|d| d.spec.clone()).collect(),
+            ..Default::default()
+        };
+        m.image_services[0].secrets = vec![("DB_PASSWORD".into(), crate::secure::ClusterKey::new(&[1; 32]).seal_secret("api", "DB_PASSWORD", b"x"))];
+        m.validate().unwrap();
+        assert_eq!(Manifest::decode(&m.encode()).unwrap().hash(), m.hash());
+        let img = |body: &str| alloc::format!("service a {{\n images = {{ x86_64 = \"{}\" }}\n memory = 64MiB\n{body}\n}}", h(1));
+        let cases: Vec<(String, u32, &str)> = vec![
+            (img(" code = \"a.ten\""), 4, "key of native services"),
+            ("service a {\n code = \"a\"\n http = 80\n}".into(), 3, "key of image services"),
+            ("service a {\n images = { x86_64 = \"sha256:00\" }\n memory = 1MiB\n}".into(), 2, "64 hex digits"),
+            ("service a {\n images = { sparc = \"x\" }\n}".into(), 2, "unknown architecture `sparc`"),
+            ("service a {\n images = {}\n}".into(), 2, "`images` is empty"),
+            (alloc::format!("service a {{\n images = {{ x86_64 = \"{}\" }}\n}}", h(1)), 1, "needs `memory`"),
+            (img(" memory = 1MiB"), 4, "duplicate key"),
+            (alloc::format!("service a {{\n images = {{ x86_64 = \"{}\" }}\n memory = 6000\n}}", h(1)), 3, "multiple of 4KiB"),
+            (img(" cpu = 0.0005"), 4, "at most 3 decimals"),
+            (img(" cpu = 2000"), 4, "above 1024 cores"),
+            (img(" env = { A = \"1\" A = \"2\" }"), 4, "set twice in `env`"),
+            (img(" env = { \"A=B\" = \"1\" }"), 4, "invalid variable name"),
+            (img(" env = [\"A\"]"), 4, "expects a map"),
+            (img(" routes = [\"Bad\"]"), 4, "invalid route"),
+            (img(" routes = [\"a.example\"]"), 1, "routes need `http`"),
+            (img(" egress = [\"10.0.0.1/8\"]"), 4, "host bits set"),
+            (img(" public = [{ to = 5 }]"), 4, "need `port`"),
+            (img(" public = [{ port = 5 }, { port = 5 }]"), 4, "listed twice"),
+            (img(" public = [{ port = 70000 }]"), 4, "1..65535"),
+            (img(" health = \"ping\""), 4, "unknown health check"),
+            (img(" stop_grace = 10"), 4, "duration"),
+            (img(" stop_grace = 2h"), 4, "duration"),
+            (img(" scratch = 128MiB"), 4, "at most `memory`"),
+            (img(" restart = sometimes"), 4, "always, on-failure or never"),
+            (img(" workdir = \"tmp\""), 4, "absolute path"),
+            (img(" user = \"a b\""), 4, "invalid user"),
+            (img(" tenant = \"A\""), 4, "invalid tenant"),
+            (img(" pids_max = 0"), 4, "`pids_max` must be"),
+            (img(" calls = [\"b\"]"), 4, "calls `b`, which is not declared"),
+            (img(" secrets = { S = \"\" }"), 4, "needs a file name"),
+        ];
+        for (src, line, needle) in &cases {
+            let e = parse_document(src).unwrap_err();
+            assert!(e.line == *line && e.msg.contains(needle), "{src:?} -> {e}");
+        }
+        assert!(parse_text(&img("")).unwrap_err().msg.contains("image services are not allowed here"));
     }
 }

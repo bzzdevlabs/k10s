@@ -327,3 +327,73 @@ fn mixed_placement_versions_use_the_lowest_until_all_upgrade() {
     assert!(v.windows(2).all(|w| w[0] == w[1]));
     assert_eq!(v[0].placed(), 50, "version 2 charges the tail page");
 }
+
+/// EXT_CAPS in a mixed cluster: members converge on each other's capabilities, compute the same version-3
+/// placement, and image services wait (and are refused at apply) while a member runs an older version.
+#[test]
+fn capabilities_converge_and_constrain_placement() {
+    use k10_mesh::caps::{lx_gap, Arch, NodeCaps};
+    use k10_mesh::placement::check_members;
+    use k10_mesh::{place, ImageService, Manifest, ServiceSpec};
+    let caps = |arch: Arch, lx: u8| NodeCaps {
+        arch: arch as u8,
+        word_bits: arch.word_bits(),
+        max_mem_log2: if arch == Arch::I686 { 28 } else { 36 },
+        lx,
+        lx_gap: if lx > 0 { lx_gap::NONE } else { lx_gap::HOSTED },
+        ..Default::default()
+    };
+    let native = |name: &str, mem_log2: u8| ServiceSpec {
+        name: name.into(),
+        code_hash: [0; 32],
+        replicas: 3,
+        mem_log2,
+        max_instances: 1,
+        cpu_ms: 1,
+        fresh: false,
+        config: vec![],
+        calls: Calls::none(),
+    };
+    let image = ImageService {
+        replicas: 2,
+        ..ImageService::new("api", vec![k10_mesh::image::ImageRef { arch: Arch::X86_64, hash: [1; 32] }], 256 << 20)
+    };
+    let m = Manifest { version: 1, services: vec![native("big", 29), native("small", 20)], image_services: vec![image], ..Default::default() };
+    let views = |s: &Sim| -> Vec<_> { s.up_nodes().iter().map(|&i| place(&m, &s.nodes[i].gossip.live_members())).collect() };
+    let mut s = sim(0.0, 23);
+    s.caps = Some(caps(Arch::X86_64, 1));
+    let ids = s.add_cluster(2);
+    s.caps = Some(caps(Arch::X86_64, 0));
+    let hosted = s.add_node();
+    s.caps = Some(caps(Arch::I686, 0));
+    let small: Vec<usize> = (0..2).map(|_| s.add_node()).collect();
+    // A node of the previous release: placement version 2, no EXT_CAPS.
+    s.caps = None;
+    s.placement_version = 2;
+    let old = s.add_node();
+    for &i in small.iter().chain([&hosted, &old]) {
+        s.join(i, &[ids[0]]);
+    }
+    let known = |s: &Sim| s.up_nodes().iter().all(|&i| s.nodes[i].gossip.live_members().iter().filter(|m| m.caps.is_some()).count() == 5);
+    s.run_until_true(60_000, 50, |s| s.converged() && known(s)).unwrap();
+    let v = views(&s);
+    assert!(v.windows(2).all(|w| w[0] == w[1]), "every member computes the same placement");
+    assert!(v[0].nodes("api").is_empty() && v[0].nodes("big").len() == 3, "version 2: image services wait");
+    let members = s.nodes[ids[0]].gossip.live_members();
+    assert!(check_members(&m, &members).unwrap_err().contains(&format!("{} (placement v2)", s.id(old))));
+    // The old node comes back upgraded (version 3, with its capabilities).
+    s.placement_version = k10_mesh::PLACEMENT_VERSION;
+    s.caps = Some(caps(Arch::X86_64, 0));
+    s.crash(old);
+    s.run_for(1_000);
+    s.restart(old, &[ids[0]]);
+    let known = |s: &Sim| s.up_nodes().iter().all(|&i| s.nodes[i].gossip.live_members().iter().all(|m| m.caps.is_some()));
+    s.run_until_true(60_000, 50, |s| s.converged() && known(s)).unwrap();
+    let v = views(&s);
+    assert!(v.windows(2).all(|w| w[0] == w[1]));
+    let on = |svc: &str| -> Vec<usize> { v[0].nodes(svc).iter().map(|id| (0..s.nodes.len()).find(|&i| s.id(i) == *id).unwrap()).collect() };
+    assert!(on("api").len() == 2 && on("api").iter().all(|i| ids.contains(i)), "only nodes with the Linux personality");
+    assert!(on("big").len() == 3 && on("big").iter().all(|i| !small.contains(i)), "2^29 never on a 32-bit node");
+    assert_eq!(on("small").len(), 3);
+    assert!(check_members(&m, &s.nodes[ids[0]].gossip.live_members()).is_ok());
+}

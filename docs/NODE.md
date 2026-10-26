@@ -24,7 +24,8 @@ placement and peer links on top of it.
 - **Slots**: instance memory = `S = 2^k` + a 4096-byte tail page (TIR needs 8 tail bytes), carved out of 1 GiB
   `MAP_NORESERVE` regions per size class (per shard). Allocation pops a LIFO free list or bumps the newest region:
   no syscall. On 32-bit targets (i686, armv7: a 3-4 GiB address space) regions are 64 MiB and slots at most 2^28
-  bytes; `apply` refuses a larger `memory` for a service placed on the node. Freed slots are `madvise(MADV_DONTNEED)`-ed (they read back as zeros) and reused.
+  bytes; the node announces that largest slot (`EXT_CAPS`), so placement never gives it a larger `memory`, and a
+  standalone `apply` refuses one. Freed slots are `madvise(MADV_DONTNEED)`-ed (they read back as zeros) and reused.
   Regions are `MADV_NOHUGEPAGE`: with THP `always`, one touch would commit 2 MiB, i.e. ~30 neighbouring 64 KiB
   slots (measured: 70 KB RSS per instance instead of 4.4 KB). Physical memory = pages actually touched.
   `--mem SIZE` caps the address space handed to live instances (sum of `S + 4 KiB`; default: physical RAM), with
@@ -36,7 +37,7 @@ placement and peer links on top of it.
     bundle and cluster states are installed in full, over-committed (one instance each, no burst), logged
     `DEGRADED` and reported (`memory.mem_overcommit`, `k10s_memory_overcommit_bytes`); a failed reload is reported
     (`reload_error`, `k10s_reload_failed`);
-  - placement charges the same footprint per replica (placement version 2; see "Placement");
+  - placement charges the same footprint per replica (placement versions 2 and 3; see "Placement");
   - burst instances are created only while committed bytes fit; a request that finds no memory waits for one of
     the service's instances, and queued requests fail at once (503) when the last instance goes and no memory is
     left for a replacement;
@@ -144,7 +145,8 @@ status ≥ 0, −1 unknown service, −2 unavailable (crash backoff with nothing
   calls fail with −1 until it is re-applied with `calls`. Every apply and every reload of a stored state reports each
   service whose module imports `call` but is granted nothing: a `k10s: warning:` log line, `warnings` in the apply
   report and `manifest.warnings` in `/_k10s/status` (metal: a serial line and the apply report). A manifest that uses
-  `calls` is encoded as format 2, which nodes built before `calls` cannot decode: upgrade every node first.
+  `calls` is encoded as format 2, which nodes built before `calls` cannot decode: upgrade every node first. Image
+  services (format 4, below) are refused (409) until every live member runs placement version 3.
 - **Deadlines**: each call gets `min(now + call_timeout (5 s), caller's deadline)`; ingress requests 30 s. A timed-out
   waiter is resumed with −3 and removed from the wait queue; a late reply is dropped (token gone). This breaks call
   cycles that exhaust instances (A→B→A with `max_instances = 1`): the inner call times out and everything unwinds.
@@ -433,13 +435,23 @@ persists (no fsync: a torn file fails its hash at load and is fetched again) and
 the larger hash wins on every node. Blobs no longer referenced by the current manifest are deleted (except blobs
 younger than 60 s and those of the manifest being fetched, which are pinned).
 
-**Placement.** Members advertise their placement version; `place` uses the lowest live one (version 2 charges
+**Placement.** Members advertise their placement version; `place` uses the lowest live one (versions 2 and 3 charge
 `2^memory + 4 KiB` per replica, version 1 `2^memory`), so mixed-version clusters agree during a rolling upgrade
 (the version rides in the top byte of `cores`: older nodes show newer members with an inflated core count). The
 same byte says whether a member decodes extension records; Tier 1 nodes report their OS image in one, sent only to
 members that decode them (crates/k10-mesh/README.md, docs/OS.md "Updates"), and the cluster status shows it per
-member (`os`) with the node's update step (`os_step`).
-On every desired-state change and on every change of the live member set (ids + capacity + placement version; Alive and
+member (`os`) with the node's update step (`os_step`). Every node also announces its capabilities in one
+(`EXT_CAPS`: architecture, word size, largest slot, JIT, Linux-personality level; status `caps` per member, text
+status `caps …`), and version 3 places a service only on nodes able to run it: a native service where its slot fits
+(the 2^28-byte limit of 32-bit nodes; while a member still runs version 2, a 32-bit node given a larger slot refuses
+that desired state, as before), an image service where the Linux personality runs one of its images.
+Hosted and Tier 1 nodes announce no Linux personality (`lx` 0, "hosted node"), so image services are accepted,
+validated and placed but stay unplaced on them; the apply report's `warnings`, the log and the cluster status
+(`image_notes`) say why per service ("1 of 1 replica(s) not placed; 3 member(s): hosted node: …"). A node outside
+a cluster accepts them too and reports each in `warnings` as not running. Image-service secrets must be sealed with
+one of the cluster's keys (`k10s apply --cluster-key-file`; otherwise 422).
+On every desired-state change and on every change of the live member set (ids + capacity + placement version +
+capabilities; Alive and
 Suspect count, like in `place`), batched in a 50 ms window (`ClusterConfig::debounce`; bounds the delay, not
 extended by later events), the applier computes `place(manifest, live members)` and calls
 `NodeShared::apply_cluster(bundle, placement)`: services placed on this node get `Placement::Local`, the others

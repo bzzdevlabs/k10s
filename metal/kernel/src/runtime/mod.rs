@@ -1550,6 +1550,8 @@ pub fn install<'b>(
         }
         new.insert(spec.name.clone(), Arc::new(Service::new(spec, prep, pl)));
     }
+    let why = k10_mesh::caps::lx_gap::describe(k10_mesh::caps::lx_gap::NOT_BUILT);
+    warnings.extend(m.image_services.iter().map(|s| alloc::format!("image service `{}` is not running: this node cannot run it ({why})", s.name)));
     for w in &warnings {
         kprintln!("apply: warning: {w}");
     }

@@ -1,7 +1,7 @@
 # k10-mesh
 
 The k10s cluster layer, with no control plane (see `docs/DESIGN.md` §2.6–2.8). The desired state is a small
-manifest plus content-addressed code blobs, spread by gossip. Membership and failure detection use SWIM-style
+manifest (native services, image services, the OS plan) plus content-addressed code blobs, spread by gossip. Membership and failure detection use SWIM-style
 gossip. Placement is a pure function that every node computes on its own.
 
 The core is **sans-IO** and `no_std + alloc` (`--no-default-features`). It has no sockets, threads or clocks:
@@ -12,14 +12,16 @@ adds a UDP driver, a thread runner and a deterministic simulator. The crate has 
 |---|---|
 | `gossip` | `Gossip` state machine: SWIM probes, suspicion, refutation, dissemination, push-pull sync, desired-state pointer |
 | `manifest` | `Manifest`/`ServiceSpec`/`OsPlan`, canonical binary codec, `hash()`, operator text format parser (`parse_document`) |
-| `placement` | `place(&Manifest, &[Member]) -> Placement` (capacity-aware weighted rendezvous hashing) |
+| `image` | `ImageService` (an OCI image converted to `K10I`, run under the native kernel's Linux personality) and its fields |
+| `placement` | `place(&Manifest, &[Member]) -> Placement` (capacity-aware weighted rendezvous hashing over capable nodes), `check_members`, `image_note` |
 | `member` | `NodeId`, `Addr` (= `core::net::SocketAddr`), `Capacity`, `Member`, `MemberState`, `OsInfo` (extension record) |
+| `caps` | `Arch` (codes shared by manifests, `K10I` and gossip), `NodeCaps` (the `EXT_CAPS` extension record) |
 | `osimage` | signed OS images (Tier 1 updates): `sign`, `inspect`, `verify` |
 | `rollout` | `rollout::step(&OsPlan, &[Member], me)`: the OS update waves, evaluated by every node |
 | `wire` | TCP peer protocol framing: `Msg` (borrowed, copy-free), `FrameDecoder` (incremental) |
 | `sha256` | SHA-256, `to_hex`/`from_hex` |
 | `crypto` | ChaCha20 (AVX2 or SSE2 on x86-64), Poly1305, (X)ChaCha20-Poly1305, HMAC/HKDF-SHA256, SHA-512, Ed25519, `ct_eq` (RFC vectors) |
-| `secure` | cluster keys (current + next), `GossipCipher` (sealed datagrams, anti-replay), `Link` (peer-link handshake, sealed records; hosted and metal) |
+| `secure` | cluster keys (current + next), `GossipCipher` (sealed datagrams, anti-replay), `Link` (peer-link handshake, sealed records; hosted and metal), sealed image-service secrets |
 | `admin_auth` | signed admin requests: `AdminKey` (client), `AdminVerifier` (clock window, nonce cache), `check_body` |
 | `driver` (std) | `UdpDriver` (caller-owned epoll loop) and `MeshThread` (self-contained thread) |
 | `sim` (std) | discrete-event simulator: virtual time, loss, latency, partitions |
@@ -90,8 +92,13 @@ ext     = len:u8 (type:u8 len:u8 value)*        present when bit 30 of cores is 
   placement version (they keep their own, lower one) and would reject the records, so a node sends records with
   extensions only to members whose bit 7 is set. Capable members always get the extension block (empty: no OS
   report); a copy without it (sent before the receiver was known, or relayed by an older node) leaves the report
-  unknown, never erases one of the same incarnation, and makes `rollout` wait. The OS record is a Tier 1 node's
-  report for the update waves (`rollout`, docs/OS.md).
+  unknown, never erases one of the same incarnation, and makes `rollout` wait. The OS record (`EXT_OS`) is a Tier 1
+  node's report for the update waves (`rollout`, docs/OS.md). The capability record (`EXT_CAPS`, every node of
+  placement version 3) carries the architecture, word size, largest native slot (`max_mem_log2`), JIT flag,
+  Linux-personality level (0: no image services) and the reason for a 0 (hosted node, kernel without the
+  personality, CPU gate, architecture), image-cache and object-area bytes and the tenant the node is dedicated to;
+  nodes that predate it skip it as an unknown record, and a copy of the same incarnation that carries it adds it to
+  one relayed without it (capabilities are fixed for an incarnation).
 - **Leave.** `Left` is sent to 16 random members, which re-gossip it.
 - **Desired-state pointer.** `(version, hash, origin)`: the highest version wins, and ties go to the larger
   hash.
@@ -120,7 +127,12 @@ The decoder is strict and bounded. Format 2 adds each service's `calls` grant: a
 increasing indices into the sorted service list (existing and canonical by construction, 4 bytes each in memory).
 A manifest without any grant is encoded as format 1 (the original bytes, so older manifests keep their hash and
 decode with nothing granted). Format 3 adds the OS plan after the services: one image hash per platform (sorted) and
-the first wave's size. The operator text format (`k10s apply`) looks like this:
+the first wave's size. Format 4 adds image services: native and image services share one name order, each entry
+`name | kind | body` (kind 0: the native fields; kind 1: an image service), `calls` index that common order, and the
+OS plan may be empty. The encoder writes the oldest format that expresses a manifest (`Manifest::format`), so a
+manifest without image services keeps its format and hash. An image service's lists are canonical in memory
+(`ImageService::canonicalize` sorts them, `validate` refuses any other order or a duplicate), and route and public
+port claims are unique across the manifest. The operator text format (`k10s apply`) looks like this:
 
 ```
 service echo {
@@ -136,23 +148,54 @@ service echo {
 ```
 
 ```
+service api {
+  images = { x86_64 = "sha256:…", aarch64 = "sha256:…" }  # K10I image digests, one per architecture
+  replicas = 3
+  memory = 384MiB        # exact limit, a multiple of 4KiB (required)
+  cpu = 0.5              # cores (quota); default none
+  entrypoint = ["/app"]  # replaces the image's Entrypoint; args = [...] replaces its Cmd
+  env = { LOG_LEVEL = "info" }
+  secrets = { DB_PASSWORD = "db-password" }  # files, sealed with the cluster key by the CLI
+  workdir = "/srv"       # user = "app:app"
+  http = 8080            # container port for routes and native callers
+  routes = ["api.example.com", "example.com/api", "tls:secure.example.com"]
+  public = [{ port = 5432, to = 5432 }]  # node ports, cluster-wide
+  calls = ["db"]
+  egress = ["0.0.0.0/0:443", "dns"]      # default none
+  health = "http:8080/healthz"           # tcp:PORT, exec:CMD, default process
+  stop_grace = 10s       # scratch = 64MiB (default memory/4); restart = always|on-failure|never
+  init = false           # pids_max = 1024, fds_max = 4096, tenant = "acme"
+}
+```
+
+```
 os {
   images = ["k10s-os-0.1.0-x86_64-vm.efi"]  # signed OS images, at most one per platform
   wave = 1                                  # nodes in the first update wave (default 1), then doubling
 }
 ```
 
+A block with `images` is an image service, otherwise a native one (`code`); keys of the other kind are errors.
 `calls` names must be services of the same manifest (an error otherwise: typos are caught); the list is sorted
-and deduplicated. `parse_document` returns the `ServiceDecl`s and the `OsDecl` (`parse_text` the services of a file
-without `os`); errors read `line N: message`. Convert each declaration with `decl.to_spec(code_hash)`; the CLI reads
-each image, takes its platform from the signed trailer and adds it as a blob.
+and deduplicated. `parse_document` returns the `ServiceDecl`s, the `ImageDecl`s and the `OsDecl` (`parse_text` the
+native services of a file without `os`); errors read `line N: message`. Convert each declaration with
+`decl.to_spec(code_hash)`; the CLI reads each OS image, takes its platform from the signed trailer and adds it as a
+blob, and seals each secret file with `ClusterKey::seal_secret` (XChaCha20-Poly1305 under a subkey of the cluster
+key, bound to the service and variable, nonce derived from the inputs so an unchanged manifest keeps its hash).
 
 ## Placement
 
 Weighted rendezvous hashing, with the weight equal to the node's `mem_bytes`. Each service ranks the nodes, and
 its replicas take the top-ranked nodes that have memory left (anti-affinity). When no such node remains,
 replicas stack using per-replica scores. Replica 0 of every service is placed before any replica 1. Only Alive
-and Suspect members are used, and the result does not depend on input order.
+and Suspect members are used, and the result does not depend on input order. Every node uses the lowest placement
+version of the live members. Version 3 puts a service only on nodes able to run it: a native service on nodes
+whose largest slot holds it (a 32-bit node never gets more than 256 MiB; a member whose `EXT_CAPS` is not known
+yet counts as unlimited), an image service on nodes with the Linux personality, one of its images' architectures,
+its tenant and none of its public ports among the node's own, charged `mem_bytes + 256 KiB`. Image services stay
+unplaced under an older version; `check_members` refuses a manifest with image services while a live member runs
+one (the node answers 409), and `image_note` says why an image service has missing replicas. Two tests pin the
+output (versions 1–2, and version 3 with capabilities and image services); 1000 nodes × 10k services take ≈ 40 ms.
 
 ## Tests
 

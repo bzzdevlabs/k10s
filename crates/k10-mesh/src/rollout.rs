@@ -66,7 +66,7 @@ pub fn step(plan: &OsPlan, members: &[Member], me: NodeId) -> Step {
     if let Some((_, m)) = ranked.iter().find(|(_, m)| m.os.as_ref().is_some_and(|o| o.failed == tid)) {
         return Step::Halted { image: *target, node: m.id };
     }
-    let unknown = members.iter().filter(|m| m.ext && !m.os_known && m.is_live()).count();
+    let unknown = members.iter().filter(|m| m.ext && !m.ext_known && m.is_live()).count();
     if unknown > 0 {
         return Step::Unknown { image: *target, members: unknown };
     }
@@ -171,7 +171,7 @@ mod tests {
         assert_eq!(step(&OsPlan::default(), &ms, NodeId(1)), Step::Idle);
         assert_eq!(step(&p, &ms, NodeId(99)), Step::Idle);
         // A copy of a record without its extensions: that member may rank first, so wait for its report.
-        ms[2].os_known = false;
+        ms[2].ext_known = false;
         assert_eq!(step(&p, &ms, NodeId(1)), Step::Unknown { image: NEW, members: 1 });
         ms[2].state = MemberState::Dead;
         assert_eq!(step(&p, &ms, NodeId(1)), Step::Update { image: NEW, wave: 0 });

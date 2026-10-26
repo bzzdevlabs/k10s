@@ -1,5 +1,6 @@
 //! Cluster members: identity, addresses, capacity, SWIM state.
 
+use crate::caps::NodeCaps;
 use crate::codec::{put_u16, put_u64, put_varint, DecodeError, Reader, Res};
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -21,7 +22,7 @@ impl fmt::Display for NodeId {
 pub type Addr = SocketAddr;
 
 /// Placement algorithm version of this build (see [`crate::place`]).
-pub const PLACEMENT_VERSION: u8 = 2;
+pub const PLACEMENT_VERSION: u8 = 3;
 const CORES_MASK: u32 = (1 << 24) - 1;
 /// Top byte of the cores varint: the placement version in the low 6 bits, then these flags.
 const PLACEMENT_MASK: u8 = 0x3f;
@@ -32,6 +33,7 @@ const TOP_EXT_CAPABLE: u8 = 0x80;
 const TOP_EXT_PRESENT: u8 = 0x40;
 /// Extension record types.
 const EXT_OS: u8 = 1;
+const EXT_CAPS: u8 = 2;
 const OS_COMMITTED: u8 = 1;
 const OS_UPDATABLE: u8 = 2;
 
@@ -139,9 +141,12 @@ pub struct Member {
     pub ext: bool,
     /// OS image report of a Tier 1 node, carried in an extension record.
     pub os: Option<OsInfo>,
+    /// What the node can run (`EXT_CAPS` record), read by placement version 3.
+    pub caps: Option<NodeCaps>,
     /// This copy of the record came with its extension records, so `os` is authoritative (a copy relayed in the
-    /// form older nodes decode does not say whether the member reports an OS).
-    pub os_known: bool,
+    /// form older nodes decode does not say whether the member reports an OS). `caps` may still be missing from a
+    /// copy relayed by a node that predates them.
+    pub ext_known: bool,
 }
 
 impl Member {
@@ -158,7 +163,8 @@ impl Member {
             placement: PLACEMENT_VERSION,
             ext: true,
             os: None,
-            os_known: true,
+            caps: None,
+            ext_known: true,
         }
     }
 
@@ -175,8 +181,8 @@ impl Member {
     }
 
     /// The encoding with extension records, for extension-capable receivers: `len:u8 | (type:u8 len:u8 value)*`
-    /// after the cores varint (possibly empty: "no OS report"), unknown types skipped by the decoder. Written for
-    /// extension-capable members whose records this copy knows.
+    /// after the cores varint (`EXT_OS`, `EXT_CAPS`; possibly empty: "no OS report"), unknown types skipped by the
+    /// decoder. Written for extension-capable members whose records this copy knows.
     pub fn encode_ext_into(&self, out: &mut Vec<u8>) {
         self.encode_with(out, true);
     }
@@ -189,7 +195,7 @@ impl Member {
         put_rel_addr(out, &self.rpc, &self.gossip);
         put_rel_addr(out, &self.http, &self.gossip);
         put_varint(out, self.capacity.mem_bytes);
-        let records = ext && self.ext && self.os_known;
+        let records = ext && self.ext && self.ext_known;
         // The top byte of the cores varint carries the placement version (0 from older nodes = 1) and the flags.
         let top = (self.placement & PLACEMENT_MASK)
             | if self.ext { TOP_EXT_CAPABLE } else { 0 }
@@ -201,6 +207,14 @@ impl Member {
             if let Some(os) = &self.os {
                 os.encode_into(out);
             }
+            if let Some(caps) = &self.caps {
+                out.push(EXT_CAPS);
+                out.push(0);
+                let at = out.len();
+                caps.encode_into(out);
+                out[at - 1] = (out.len() - at) as u8;
+            }
+            debug_assert!(out.len() - len_pos - 1 <= u8::MAX as usize);
             out[len_pos] = (out.len() - len_pos - 1) as u8;
         }
     }
@@ -217,20 +231,23 @@ impl Member {
         let top = (cores >> 24) as u8;
         let placement = (top & PLACEMENT_MASK).max(1);
         let capacity = Capacity { mem_bytes, cores: cores & CORES_MASK };
-        let mut os = None;
+        let (mut os, mut caps) = (None, None);
         if top & TOP_EXT_PRESENT != 0 {
             let n = r.u8()? as usize;
             let mut e = Reader::new(r.bytes(n)?);
             while !e.is_empty() {
                 let (ty, len) = (e.u8()?, e.u8()? as usize);
                 let v = e.bytes(len)?;
-                if ty == EXT_OS {
-                    os = Some(OsInfo::decode(v)?);
+                match ty {
+                    EXT_OS => os = Some(OsInfo::decode(v)?),
+                    EXT_CAPS => caps = Some(NodeCaps::decode(v)?),
+                    _ => {}
                 }
             }
         }
-        let os_known = top & TOP_EXT_PRESENT != 0;
-        Ok(Member { id, gossip, rpc, http, capacity, incarnation, state, placement, ext: top & TOP_EXT_CAPABLE != 0, os, os_known })
+        let ext_known = top & TOP_EXT_PRESENT != 0;
+        let ext = top & TOP_EXT_CAPABLE != 0;
+        Ok(Member { id, gossip, rpc, http, capacity, incarnation, state, placement, ext, os, caps, ext_known })
     }
 
     /// Decodes a member encoded with [`Member::encode_into`]; trailing bytes are an error.
@@ -311,7 +328,7 @@ mod tests {
         let mut b = Vec::new();
         m.encode_into(&mut b);
         // The plain form does not say whether the member reports an OS.
-        assert_eq!(Member::decode(&b).unwrap(), Member { os_known: false, ..m.clone() });
+        assert_eq!(Member::decode(&b).unwrap(), Member { ext_known: false, ..m.clone() });
         // Older nodes send no placement version in the cores varint: read as version 1.
         let mut b0 = Vec::new();
         Member { placement: 0, ..m.clone() }.encode_into(&mut b0);
@@ -337,7 +354,7 @@ mod tests {
             return Err(DecodeError::Invalid("trailing bytes"));
         }
         let m = Member::new(id, gossip, rpc, http, Capacity { mem_bytes, cores: cores & CORES_MASK });
-        Ok((Member { incarnation, state, os_known: false, ..m }, placement))
+        Ok((Member { incarnation, state, ext_known: false, ..m }, placement))
     }
 
     #[test]
@@ -350,15 +367,15 @@ mod tests {
         assert!(ext.len() > plain.len());
         assert_eq!(Member::decode(&ext).unwrap(), m);
         let d = Member::decode(&plain).unwrap();
-        assert_eq!((d.os, d.ext, d.os_known, d.placement), (None, true, false, PLACEMENT_VERSION));
+        assert_eq!((d.os, d.ext, d.ext_known, d.placement), (None, true, false, PLACEMENT_VERSION));
         // A member without an OS report says so (an empty extension); a copy that does not know it says nothing.
         let mut none = Vec::new();
         sample().encode_ext_into(&mut none);
         let d = Member::decode(&none).unwrap();
-        assert!(d.os.is_none() && d.os_known);
+        assert!(d.os.is_none() && d.ext_known);
         let mut relayed = Vec::new();
-        Member { os_known: false, ..d }.encode_ext_into(&mut relayed);
-        assert!(!Member::decode(&relayed).unwrap().os_known);
+        Member { ext_known: false, ..d }.encode_ext_into(&mut relayed);
+        assert!(!Member::decode(&relayed).unwrap().ext_known);
         // Older nodes decode the plain form, see a high placement version (they use the lowest live one, their own).
         let (old, placement) = legacy_decode(&plain).unwrap();
         assert_eq!((old.id, old.capacity, placement), (m.id, m.capacity, PLACEMENT_VERSION | 0x80));
@@ -367,7 +384,7 @@ mod tests {
         let mut b = Vec::new();
         Member { ext: false, ..sample() }.encode_ext_into(&mut b);
         let d = Member::decode(&b).unwrap();
-        assert!(!d.ext && d.os.is_none() && !d.os_known);
+        assert!(!d.ext && d.os.is_none() && !d.ext_known);
         // Unknown extension records are skipped; a corrupt OS record or length is refused.
         let at = plain.len(); // same prefix: the flag bit sits in the cores varint, whose length does not change
         let mut unknown = ext.clone();
@@ -382,5 +399,47 @@ mod tests {
         for n in at..ext.len() {
             assert!(Member::decode(&ext[..n]).is_err());
         }
+    }
+
+    /// The extension loop of nodes that predate `EXT_CAPS`, verbatim: they skip the record.
+    fn decode_os_only(bytes: &[u8]) -> Res<Option<OsInfo>> {
+        let mut prefix = Vec::new();
+        Member::decode(bytes)?.encode_into(&mut prefix);
+        let mut r = Reader::new(bytes);
+        r.bytes(prefix.len())?;
+        let n = r.u8()? as usize;
+        let mut e = Reader::new(r.bytes(n)?);
+        let mut os = None;
+        while !e.is_empty() {
+            let (ty, len) = (e.u8()?, e.u8()? as usize);
+            let v = e.bytes(len)?;
+            if ty == EXT_OS {
+                os = Some(OsInfo::decode(v)?);
+            }
+        }
+        if !r.is_empty() {
+            return Err(DecodeError::Invalid("trailing bytes"));
+        }
+        Ok(os)
+    }
+
+    #[test]
+    fn caps_extension() {
+        let os = OsInfo { platform: "x86_64-metal".into(), image: [3; 8], committed: true, updatable: false, failed: [0; 8] };
+        let caps = NodeCaps { lx: 1, lx_gap: 0, tenant: "a-tenant-name-that-is-exactly-sixty-three-characters-long-xxxxx".into(), ..NodeCaps::this_build(36, true, crate::caps::lx_gap::HOSTED) };
+        assert_eq!(caps.tenant.len(), 63);
+        let m = Member { os: Some(os.clone()), caps: Some(caps.clone()), ..sample() };
+        let mut ext = Vec::new();
+        m.encode_ext_into(&mut ext);
+        assert_eq!(Member::decode(&ext).unwrap(), m, "largest records fit the one-byte block length");
+        assert_eq!(decode_os_only(&ext).unwrap(), Some(os), "nodes before EXT_CAPS keep the OS report");
+        let mut plain = Vec::new();
+        m.encode_into(&mut plain);
+        assert_eq!(Member::decode(&plain).unwrap().caps, None);
+        let only = Member { caps: Some(caps), ..sample() };
+        let mut b = Vec::new();
+        only.encode_ext_into(&mut b);
+        assert_eq!(Member::decode(&b).unwrap(), only);
+        assert_eq!(decode_os_only(&b).unwrap(), None);
     }
 }

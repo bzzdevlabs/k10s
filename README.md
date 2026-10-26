@@ -89,6 +89,11 @@ Prebuilt binaries: [Releases and versions](#releases-and-versions).
 `calls = [...]` (none by default); nodes log a warning for every service that imports `call` but is granted nothing.
 Nodes built before `calls` cannot decode format-2 manifests: upgrade every node before applying one.
 
+**Image services (manifest format 4):** a service block with `images = { x86_64 = "sha256:…" }` declares an OCI
+image converted to `K10I` (docs/research/oci.md); the desired state accepts, validates and places it on nodes that
+announce the native kernel's Linux personality, which no node does yet, so it stays unplaced and apply reports why.
+Applying one needs placement version 3 on every member (409 otherwise).
+
 Prebuilt artifacts: [GitHub Releases](https://github.com/bzzdevlabs/k10s/releases). *Latest* is the last stable
 release; every push to `main` also publishes a development pre-release. Binaries are for x86-64 Linux, plus static
 arm64, i686 and armv7 `k10s` builds (i686 and armv7 run services on the interpreter and are best effort). `V` below

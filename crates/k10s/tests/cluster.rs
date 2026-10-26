@@ -784,6 +784,56 @@ fn placement_respects_memory_reservations() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Image services are accepted, validated, sealed and placed; hosted nodes advertise no Linux personality, so they
+/// stay unplaced with the reason in the apply report and the status, and native services are unaffected.
+#[test]
+fn image_services_are_accepted_and_reported() {
+    let (dir, nodes) = start_cluster("images", 2, &Opts::default());
+    write_modules(&dir, 0);
+    std::fs::write(dir.join("db-password"), "s3cret\n").unwrap();
+    let digest = format!("sha256:{}", k10_mesh::sha256::to_hex(&[7; 32]));
+    let m = format!(
+        "service echo {{ code = \"echo.k10\" calls = [\"api\"] }}\n\
+         service api {{\n images = {{ x86_64 = \"{digest}\" }}\n memory = 128MiB\n http = 8080\n routes = [\"api.example.com\"]\n \
+         secrets = {{ DB_PASSWORD = \"db-password\" }}\n env = {{ LOG_LEVEL = \"info\" }}\n}}\n"
+    );
+    let path = dir.join("images.k10s");
+    std::fs::write(&path, &m).unwrap();
+    let run = |key: Option<&Path>| {
+        let mut c = Command::new(common::k10s_bin());
+        c.args(["apply", path.to_str().unwrap(), "--node", &nodes[1].http]).env("K10S_ADMIN_TOKEN_FILE", support::admin_key_file());
+        if let Some(k) = key {
+            c.args(["--cluster-key-file", k.to_str().unwrap()]);
+        }
+        let out = c.output().unwrap();
+        (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr))
+    };
+    let (ok, out) = run(None);
+    assert!(!ok && out.contains("secrets are sealed with the cluster key"), "{out}");
+    let other = support::new_key_file("images-other");
+    let (ok, out) = run(Some(&other));
+    assert!(!ok && out.contains("HTTP 422") && out.contains("not sealed with this cluster's key"), "{out}");
+    let (ok, out) = run(Some(support::key_file()));
+    assert!(ok && out.contains("image service `api`: 1 of 1 replica(s) not placed"), "{out}");
+    assert!(out.contains("2 member(s): hosted node"), "{out}");
+    wait_applied(&nodes, 1, Duration::from_secs(30));
+    for n in &nodes {
+        let s = n.status();
+        let p = placement(&s);
+        assert_eq!((p["api"].len(), p["echo"].len()), (0, 1), "{}: {p:?}", n.name);
+        assert_eq!(cluster_num(&s, "unplaced"), Some(1));
+        assert!(s.contains("\"image_notes\":[\"image service `api`: 1 of 1 replica(s) not placed"), "{s}");
+        let arch = k10_mesh::Arch::build().unwrap().name();
+        let caps = format!("\"caps\":{{\"arch\":\"{arch}\",\"word_bits\":{},\"max_mem_log2\":{},", usize::BITS, k10_node::slot::MAX_SLOT_LOG2);
+        assert!(s.contains(&caps), "{s}");
+        assert!(s.contains("\"lx\":0,\"lx_gap\":\"hosted node: image services run only on the native kernel\""), "{s}");
+    }
+    let mut c = Client::connect(&nodes[0].http, Duration::from_secs(10)).unwrap();
+    assert_eq!(c.request("GET", "/echo", b"").unwrap().status, 200);
+    let _ = std::fs::remove_file(other);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ------------------------------------------------------------------------------------------------------------------
 // Measurements (`cargo test --release -p k10s --test cluster -- --ignored --nocapture --test-threads 1 measure_`)
 // ------------------------------------------------------------------------------------------------------------------

@@ -18,6 +18,8 @@ pub const KEY_LEN: usize = 32;
 pub struct ClusterKey {
     gossip: [u8; 32],
     peer: [u8; 32],
+    secret: [u8; 32],
+    secret_iv: [u8; 32],
     id: [u8; 8],
 }
 
@@ -25,7 +27,25 @@ impl Drop for ClusterKey {
     fn drop(&mut self) {
         zeroize(&mut self.gossip);
         zeroize(&mut self.peer);
+        zeroize(&mut self.secret);
+        zeroize(&mut self.secret_iv);
     }
+}
+
+/// Bytes a sealed secret adds to its value: key id, nonce and tag.
+pub const SEALED_OVERHEAD: usize = 8 + 24 + TAG_LEN;
+
+fn secret_aad(service: &str, var: &str) -> Vec<u8> {
+    let mut aad = b"k10s secret v1\0".to_vec();
+    aad.extend_from_slice(service.as_bytes());
+    aad.push(0);
+    aad.extend_from_slice(var.as_bytes());
+    aad
+}
+
+/// The id of the cluster key that sealed `sealed` (see [`ClusterKey::seal_secret`]).
+pub fn secret_key_id(sealed: &[u8]) -> Option<[u8; 8]> {
+    sealed.get(..8)?.try_into().ok()
 }
 
 impl fmt::Debug for ClusterKey {
@@ -37,9 +57,11 @@ impl fmt::Debug for ClusterKey {
 impl ClusterKey {
     pub fn new(secret: &[u8; KEY_LEN]) -> ClusterKey {
         let mut prk = hkdf_extract(b"k10s cluster key v1", secret);
-        let mut k = ClusterKey { gossip: [0; 32], peer: [0; 32], id: [0; 8] };
+        let mut k = ClusterKey { gossip: [0; 32], peer: [0; 32], secret: [0; 32], secret_iv: [0; 32], id: [0; 8] };
         hkdf_expand(&prk, &[b"k10s gossip v1"], &mut k.gossip);
         hkdf_expand(&prk, &[b"k10s peer v1"], &mut k.peer);
+        hkdf_expand(&prk, &[b"k10s secrets v1"], &mut k.secret);
+        hkdf_expand(&prk, &[b"k10s secrets nonce v1"], &mut k.secret_iv);
         hkdf_expand(&prk, &[b"k10s key id v1"], &mut k.id);
         zeroize(&mut prk);
         k
@@ -64,6 +86,23 @@ impl ClusterKey {
 
     pub fn id_hex(&self) -> String {
         crate::sha256::to_hex(&self.id)
+    }
+
+    /// Seals the value of variable `var` of image service `service`: `key id | nonce[24] | XChaCha20-Poly1305`.
+    /// The nonce is a keyed hash of the inputs (SIV), so equal inputs give equal bytes and an unchanged manifest
+    /// keeps its hash; only equality of two sealed values of the same variable is visible.
+    pub fn seal_secret(&self, service: &str, var: &str, value: &[u8]) -> Vec<u8> {
+        let aad = secret_aad(service, var);
+        let iv = crate::crypto::hkdf::hmac_sha256(&self.secret_iv, &[&aad, &[0], value]);
+        let nonce: [u8; 24] = iv[..24].try_into().unwrap();
+        let mut out = Vec::with_capacity(SEALED_OVERHEAD + value.len());
+        out.extend_from_slice(&self.id);
+        out.extend_from_slice(&nonce);
+        let at = out.len();
+        out.extend_from_slice(value);
+        let tag = xseal(&self.secret, &nonce, &aad, &mut out[at..]);
+        out.extend_from_slice(&tag);
+        out
     }
 }
 
@@ -96,6 +135,23 @@ impl ClusterKeys {
 
     fn by_id(&self, id: &[u8]) -> Option<&ClusterKey> {
         self.all().find(|k| k.id[..] == *id)
+    }
+
+    /// Whether `sealed` names one of these keys (no decryption).
+    pub fn holds_secret_key(&self, sealed: &[u8]) -> bool {
+        secret_key_id(sealed).is_some_and(|id| self.by_id(&id).is_some())
+    }
+
+    /// Opens a value sealed by [`ClusterKey::seal_secret`] for the same service and variable.
+    pub fn open_secret(&self, service: &str, var: &str, sealed: &[u8]) -> Option<Vec<u8>> {
+        if sealed.len() < SEALED_OVERHEAD {
+            return None;
+        }
+        let key = self.by_id(&sealed[..8])?;
+        let nonce: [u8; 24] = sealed[8..32].try_into().ok()?;
+        let (body, tag) = sealed[32..].split_at(sealed.len() - 32 - TAG_LEN);
+        let mut value = body.to_vec();
+        xopen(&key.secret, &nonce, &secret_aad(service, var), &mut value, tag.try_into().ok()?).then_some(value)
     }
 }
 
@@ -810,6 +866,31 @@ mod tests {
         assert!(!alloc::format!("{a:?}").contains("0011"), "Debug does not print key material");
         assert_ne!(a.gossip, a.peer);
         assert!(ClusterKeys::new(key(1), Some(key(1))).is_err());
+    }
+
+    #[test]
+    fn sealed_secrets() {
+        let s = key(1).seal_secret("api", "DB_PASSWORD", b"hunter2");
+        assert_eq!(s.len(), SEALED_OVERHEAD + 7);
+        assert_eq!(s, key(1).seal_secret("api", "DB_PASSWORD", b"hunter2"), "deterministic: the manifest hash is stable");
+        assert_ne!(s, key(1).seal_secret("api", "DB_PASSWORD", b"hunter3"));
+        assert!(!s.windows(7).any(|w| w == b"hunter2"));
+        assert_eq!(keys(1).open_secret("api", "DB_PASSWORD", &s).as_deref(), Some(&b"hunter2"[..]));
+        // Bound to its key, service and variable; any changed byte fails.
+        assert!(keys(2).open_secret("api", "DB_PASSWORD", &s).is_none() && !keys(2).holds_secret_key(&s));
+        assert!(keys(1).holds_secret_key(&s));
+        assert!(ClusterKeys::new(key(2), Some(key(1))).unwrap().open_secret("api", "DB_PASSWORD", &s).is_some());
+        assert!(keys(1).open_secret("web", "DB_PASSWORD", &s).is_none());
+        assert!(keys(1).open_secret("api", "DB_PASSWORD2", &s).is_none());
+        for i in 0..s.len() {
+            let mut b = s.clone();
+            b[i] ^= 1;
+            assert!(keys(1).open_secret("api", "DB_PASSWORD", &b).is_none());
+        }
+        for n in 0..s.len() {
+            assert!(keys(1).open_secret("api", "DB_PASSWORD", &s[..n]).is_none());
+        }
+        assert_eq!(keys(1).open_secret("a", "B", &key(1).seal_secret("a", "B", b"")).as_deref(), Some(&b""[..]));
     }
 
     /// Key material is wiped when its holder drops.

@@ -194,7 +194,11 @@ pub fn status_json(node: &NodeShared) -> String {
     let mut names: Vec<&String> = table.by_name.keys().collect();
     names.sort();
     let services: Vec<String> = names.iter().map(|n| svc_json(&table.by_name[*n], now)).collect();
-    let warnings: Vec<String> = names.iter().filter_map(|n| table.by_name[*n].call_warning()).map(|w| json_str(&w)).collect();
+    let mut warnings: Vec<String> = names.iter().filter_map(|n| table.by_name[*n].call_warning()).map(|w| json_str(&w)).collect();
+    // In a cluster, placement decides where image services go and the cluster status reports them.
+    if node.cluster_hooks().is_none() {
+        warnings.extend(crate::node::image_warnings(&table.manifest).iter().map(|w| json_str(w)));
+    }
     let m = &node.mem;
     let kv = node.kv.stats();
     let code = node.backend.stats();

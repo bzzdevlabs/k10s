@@ -43,8 +43,11 @@ place(manifest, live members) → service → [nodes]
 ```
 
 The function is capacity-aware weighted **rendezvous hashing**: every (node, service) pair gets a score, and each
-service takes the `replicas` best-scoring live nodes that have room for its memory reservation. Every node
-evaluates it on the same inputs, so all of them agree, with no scheduler, no leader and nothing to watch.
+service takes the `replicas` best-scoring live nodes that have room for its memory reservation and can run it. Each
+node announces what it can run in its gossip record (architecture, word size, largest memory slot, Linux
+personality), so a 32-bit node never gets a slot over 256 MiB and an image service goes only where its image runs.
+Every node evaluates the function on the same inputs, so all of them agree, with no scheduler, no leader and nothing
+to watch.
 
 When membership changes, a node is only replaced where it was placed: other services keep their placement, and
 their warm instances. Try it:

@@ -151,6 +151,25 @@ fn apply_warns_about_callers_without_calls() {
     node.shutdown();
 }
 
+/// A hosted node accepts image services (format 4) next to native ones and reports that it does not run them.
+#[test]
+fn image_services_are_accepted_and_reported() {
+    let node = start(config(1));
+    let mut b = bundle(vec![svc("echo", &demo::echo()).calls(&["api"])]);
+    let image = k10_mesh::image::ImageRef { arch: k10_mesh::Arch::X86_64, hash: [3; 32] };
+    b.manifest.image_services.push(k10_mesh::ImageService::new("api", vec![image], 64 << 20));
+    assert_eq!(b.manifest.format(), 4);
+    let r = node.apply(b.clone()).unwrap();
+    assert_eq!(r.added, ["echo"]);
+    let want = "image service `api` is not running: this node cannot run it (hosted node: image services run only on the native kernel)";
+    assert_eq!(r.warnings, [want]);
+    assert!(status(&node).contains(&format!("\"warnings\":[\"{want}\"]")));
+    assert_eq!(get(&node, "/echo").status, 200);
+    assert_eq!(get(&node, "/api").status, 404, "nothing serves an image service here");
+    assert_eq!(node.apply(b).unwrap().warnings, [want], "a no-op re-apply still reports it");
+    node.shutdown();
+}
+
 #[test]
 fn kv_and_bundle_persist_across_restart() {
     let dir = tmpdir("persist");

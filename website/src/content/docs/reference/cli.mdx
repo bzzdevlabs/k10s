@@ -61,11 +61,12 @@ On a k10s disk image, init starts the node with `--os-agent-fd 3`, its update ch
 ## k10s apply
 
 ```bash
-k10s apply FILE.k10s [--node HOST:PORT]
+k10s apply FILE.k10s [--node HOST:PORT] [--cluster-key-file FILE]
 ```
 
 Compiles `code = "x.ten"` sources, sends `x.k10` modules as they are, and deploys the manifest as the new desired
-state; the signed OS images of an `os` block are checked and sent along. Prints the apply report as JSON. See
+state; the signed OS images of an `os` block are checked and sent along, and the secret files of image services are
+sealed with the cluster key of `--cluster-key-file`. Prints the apply report as JSON. See
 [Manifests](/k10s/guides/manifests/).
 
 ## k10s build

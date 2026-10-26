@@ -95,6 +95,8 @@ pub struct Sim {
     pub log: Vec<(u64, usize, Event)>,
     /// Placement version advertised by nodes created from now on.
     pub placement_version: u8,
+    /// Capabilities (`EXT_CAPS`) of nodes created from now on.
+    pub caps: Option<crate::caps::NodeCaps>,
     queue: BinaryHeap<Scheduled>,
     seq: u64,
     rng: Rng,
@@ -114,6 +116,7 @@ impl Sim {
             record_events: false,
             log: Vec::new(),
             placement_version: crate::PLACEMENT_VERSION,
+            caps: None,
             queue: BinaryHeap::new(),
             seq: 0,
             rng,
@@ -127,7 +130,11 @@ impl Sim {
         let id = NodeId(self.rng.next_u64());
         let rpc = Addr::new(addr.ip(), 7947);
         let http = Addr::new(addr.ip(), 8080);
-        let m = Member { placement: self.placement_version, ..Member::new(id, addr, rpc, http, Capacity { mem_bytes: 8 << 30, cores: 4 }) };
+        let m = Member {
+            placement: self.placement_version,
+            caps: self.caps.clone(),
+            ..Member::new(id, addr, rpc, http, Capacity { mem_bytes: 8 << 30, cores: 4 })
+        };
         Gossip::new(m, self.cfg.gossip.clone(), self.rng.next_u64())
     }
 

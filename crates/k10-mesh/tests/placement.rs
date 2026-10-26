@@ -219,6 +219,70 @@ fn output_is_pinned() {
     assert_eq!(h, "b7606a6c9b9388a8");
 }
 
+/// The same for version 3: 32-bit nodes, nodes with and without the Linux personality or capabilities, tenants,
+/// image services of one or two architectures, public ports.
+#[test]
+fn output_v3_is_pinned() {
+    use k10_mesh::caps::{lx_gap, Arch, NodeCaps};
+    use k10_mesh::image::{ImageRef, PublicPort};
+    let members: Vec<Member> = (0..300u64)
+        .map(|i| {
+            let arch = if i % 11 == 0 { Arch::Aarch64 } else if i % 7 == 0 { Arch::I686 } else { Arch::X86_64 };
+            let lx = (i % 5 == 0 && arch != Arch::I686) as u8;
+            let caps = NodeCaps {
+                arch: arch as u8,
+                word_bits: arch.word_bits(),
+                max_mem_log2: if arch == Arch::I686 { 28 } else { 36 },
+                lx,
+                lx_gap: if lx > 0 { lx_gap::NONE } else { lx_gap::HOSTED },
+                tenant: if i % 17 == 0 { "t1".into() } else { String::new() },
+                ..Default::default()
+            };
+            Member { caps: (i % 13 != 0).then_some(caps), ..member(i, (1 + i % 4) << 30) }
+        })
+        .collect();
+    let mut m = manifest(2000, 1, 16);
+    for (i, s) in m.services.iter_mut().enumerate() {
+        s.replicas = 1 + (i % 3) as u32;
+        s.mem_log2 = 16 + (i % 15) as u8;
+    }
+    m.image_services = (0..300u32)
+        .map(|i| {
+            let mut images = vec![ImageRef { arch: Arch::X86_64, hash: [i as u8; 32] }];
+            if i % 3 == 0 {
+                images.push(ImageRef { arch: Arch::Aarch64, hash: [1; 32] });
+            }
+            let mut s = k10_mesh::ImageService::new(&format!("img-{i}"), images, (8 + (i as u64 % 9) * 24) << 20);
+            s.replicas = 1 + i % 4;
+            s.tenant = if i % 10 == 0 { "t1".into() } else { String::new() };
+            if i % 50 == 0 {
+                s.public = vec![PublicPort { port: 9000 + i as u16, to: 80 }];
+            }
+            s
+        })
+        .collect();
+    m.validate().unwrap();
+    let p = place(&m, &members);
+    let caps = |id: &NodeId| members.iter().find(|x| x.id == *id).unwrap().caps.clone();
+    for s in &m.services {
+        assert!(p.nodes(&s.name).iter().all(|n| caps(n).map_or(true, |c| c.max_mem_log2 >= s.mem_log2)));
+    }
+    for s in &m.image_services {
+        for c in p.nodes(&s.name).iter().map(|n| caps(n).unwrap()) {
+            assert!(c.lx > 0 && s.image_for(c.arch).is_some() && c.tenant == s.tenant);
+        }
+    }
+    let mut d = Vec::new();
+    for (name, ns) in &p.services {
+        d.extend_from_slice(name.as_bytes());
+        ns.iter().for_each(|n| d.extend_from_slice(&n.0.to_le_bytes()));
+    }
+    d.extend_from_slice(&p.unplaced.to_le_bytes());
+    let h: String = k10_mesh::sha256::sha256(&d)[..8].iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!((p.placed(), p.unplaced), (4503, 246));
+    assert_eq!(h, "d6ba51469763666f");
+}
+
 #[test]
 fn speed_1000_nodes_10k_replicas() {
     let members: Vec<Member> = (0..1000).map(|i| member(i, 64 << 30)).collect();

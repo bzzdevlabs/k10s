@@ -21,12 +21,20 @@ verified against the key built into k10s; `SHA256SUMS`).
   `Hello` opens, capped unauthenticated input and handshaking links); cluster key rotation (current + next key);
   zeroized key material; metal secrets via fw_cfg, wall-clock resync, RDRAND failure fails the link.
 - Authority: per-service `calls` allowlist (manifest format 2, index-based, canonical).
+- Image services in the desired state (step 17 P5.1): manifest format 4 (native and image services in one canonical
+  order; `K10I` digests per architecture, entrypoint/args/env/workdir/user overrides, exact memory and CPU, PID/FD
+  limits, routes, public ports, `calls`, egress, health, restart policy, stop grace, scratch, tenant, secrets sealed
+  with the cluster key by `k10s apply --cluster-key-file`), the `EXT_CAPS` gossip record (architecture, word size,
+  largest slot, JIT, Linux-personality level and why it is 0, image-cache and object-area bytes, tenant) and
+  placement v3 (services only on capable nodes; refused with 409 until every live member runs it). No node runs
+  image services yet: hosted, Tier 1 and native nodes announce no Linux personality, so they stay unplaced with the
+  reason in apply reports and the status. The native kernel decodes format 4 and announces `EXT_CAPS` (+49 KB).
 - Side channels: `br_table` compare trees and clamped jump tables, opt-in lfence/retpoline, speculation-safe host
   bounds (`k10-nospec`), per-node SipHash-keyed fuzzy guest clock; one host ABI crate (`k10-host`) for hosted and metal.
 - Defense in depth: two-phase start (bind, then `--user` drop, capability check, Landlock, seccomp, then workloads),
   root refused without `--user`, `--sandbox on|seccomp-only|log|off`.
 - DoS: per-service memory reservations and bounded overshoot (`k10_mesh::memory`, hosted and metal, `k10.mem`),
-  placement versioned in gossip (1000 nodes × 10k services in ≈ 80 ms, output pinned by a test), rejoin through
+  placement versioned in gossip (1000 nodes × 10k services in ≈ 80 ms, output pinned by two tests), rejoin through
   tombstone addresses and `DATA/peers`, KV store with ordered flushes and rewrite-from-memory on I/O errors; peer
   links on both get 1 MiB per iteration/poll (bytes read plus replies queued) and capped unsent bytes
   (`k10_mesh::secure`; metal: soft cap ≤ RAM/16, never into the heap reserve), so a peer flooding requests or not
@@ -232,6 +240,8 @@ seek privileges on this machine.
       `bench/oci/syscalls.md`), the plan in docs/LX.md (M1 implements 115 of the 120 calls the M1 corpus makes),
       test images without Docker (`scripts/oci-testimages.sh`, `lxprobe` differential probes) and a plain-HTTP
       distribution server (`os/tools/registry.py`); CI's unit suite runs `table.py --check` and the registry self-test.
+    - P5.1 done: manifest format 4, `EXT_CAPS`, placement v3 ("State of main"); releases (§11.4) come with packages
+      (P6.3) as a later format.
 13. **Tier 2: k10s on its own kernel, on QEMU and on real x86 machines** — done under QEMU (docs/TASK-native-hardware.md, plan
     in docs/research/native-hardware.md §9, decisions in docs/REPORT.md §9; the prototype branches no longer exist).
     Goal: the `metal/` kernel boots from the shared image (universal-os.md §8.4) on VMs and on a real x86 machine and
@@ -344,8 +354,8 @@ seek privileges on this machine.
 - Multi-hour soak to rule out the ~40 KB/min RSS drift seen once on a cluster node.
 - Hosted aarch64 nodes on 16 KiB-page kernels are unsupported until step 16; the k10s arm64 kernel uses 4 KiB pages.
 - 32-bit nodes (U5): `k10-nospec` clamps are plain code there (`GUARANTEED = false`, docs/OS.md Limits); placement
-  does not know a node's word size, so a 32-bit node refuses the whole desired state if a service over 256 MiB is
-  placed on it. riscv64 has no build (no `coro.rs` switch or seccomp arch). The i686 image is BIOS-only (no 32-bit
+  v3 keeps services over 256 MiB off them, but while a member still runs placement v2 a 32-bit node given one refuses
+  that desired state. riscv64 has no build (no `coro.rs` switch or seccomp arch). The i686 image is BIOS-only (no 32-bit
   UEFI); the armv7 image has no SoC drivers for real boards.
 - arm64 JIT (U4): the SFI verifiers run in the tests only, not when code is loaded; `csdb` costs ~12 ns per jump
   table on Apple cores.

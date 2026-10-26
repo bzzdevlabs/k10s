@@ -38,6 +38,37 @@ service session {
 Service names use `[a-z0-9-]`, 1 to 63 characters. They are also the first path segment at the ingress
 (`/hello/…`) and the name of the service's key-value namespace.
 
+## Image services
+
+A block with `images` instead of `code` declares an **image service**: a Linux program from an OCI image, converted
+to a `K10I` image and run by the native kernel's Linux personality, next to native services and with the same
+`replicas` and `calls`. The desired state accepts, validates and places them today; no node runs them yet (hosted,
+Tier 1 and native nodes announce no Linux personality, so they stay unplaced and the apply report says why).
+
+```
+service api {
+    images = { x86_64 = "sha256:…" }          # K10I image digest per architecture
+    memory = 384MiB                           # required: the exact limit, a multiple of 4KiB
+    replicas = 3
+    cpu = 0.5                                 # cores; default no quota
+    args = ["--port", "8080"]                 # replaces the image's Cmd; entrypoint = [...] its Entrypoint
+    env = { LOG_LEVEL = "info" }
+    secrets = { DB_PASSWORD = "db-password" } # a file, sealed with the cluster key (--cluster-key-file)
+    http = 8080                               # container port for routes and native callers
+    routes = ["api.example.com", "tls:secure.example.com"]
+    public = [{ port = 5432, to = 5432 }]     # node ports, cluster-wide
+    calls = ["db"]
+    egress = ["0.0.0.0/0:443", "dns"]         # default none
+    health = "http:8080/healthz"              # tcp:PORT, exec:CMD; default the process is alive
+}
+```
+
+Other keys: `workdir`, `user` (`NAME` or `UID`, optionally `:GROUP`), `stop_grace` (`10s`), `scratch` (default
+`memory`/4), `restart` (`always`, `on-failure`, `never`), `init`, `pids_max` (1024), `fds_max` (4096) and `tenant`
+(only nodes dedicated to that tenant run it). A route or public port belongs to one service. Every node of the
+cluster must run a k10s that knows image services (placement version 3): until then, `apply` answers 409 and names
+the members to upgrade.
+
 ## OS images
 
 A cluster of machines running a k10s disk image also updates the image itself from the manifest. An `os` block

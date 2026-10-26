@@ -437,6 +437,8 @@ pub fn start(mut cfg: Config, net: &mut Net) -> bool {
     me.incarnation = time::unix_ms();
     // The kernel image this node runs, for cluster-rolled updates (none when k10boot did not boot it).
     me.os = crate::osupdate::info();
+    let gap = k10_mesh::caps::lx_gap::NOT_BUILT;
+    me.caps = Some(k10_mesh::NodeCaps::this_build(k10_mesh::manifest::MAX_MEM_LOG2, runtime::engine::jit_enabled(), gap));
     let mut gc = k10_mesh::Config::default();
     if let Some(ms) = cfg.probe_ms {
         gc.probe_interval_ms = ms;
@@ -1619,6 +1621,12 @@ impl Cluster {
             Err(e) => return err(400, &alloc::format!("invalid bundle: {e:?}")),
         };
         if let Err(e) = bundle.manifest.validate() {
+            return err(422, &e);
+        }
+        if let Err(e) = k10_mesh::placement::check_members(&bundle.manifest, &self.gossip.live_members()) {
+            return err(409, &e);
+        }
+        if let Err(e) = bundle.manifest.check_secrets(self.cfg.keys.as_ref()) {
             return err(422, &e);
         }
         let highest = self.highest_version();
