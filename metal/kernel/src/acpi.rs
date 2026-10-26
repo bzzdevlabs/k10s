@@ -15,6 +15,7 @@ use alloc::vec::Vec;
 use crate::arch::{inb, inl, inw, outb, outl, outw};
 use crate::arch::paging;
 use crate::kprintln;
+use crate::mem::PhysAddr;
 use crate::sync::SetOnce;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,21 +101,23 @@ impl Gas {
                 }
                 0
             }
-            // SAFETY: mapped uncached by `map_registers`.
+            // SAFETY: mapped uncached in the direct map by `map_registers`.
             (SPACE_MEMORY, None) => unsafe {
+                let p = PhysAddr::new(a);
                 match w {
-                    1 => core::ptr::read_volatile(a as *const u8) as u64,
-                    2 => core::ptr::read_volatile(a as *const u16) as u64,
-                    4 => core::ptr::read_volatile(a as *const u32) as u64,
-                    _ => core::ptr::read_volatile(a as *const u64),
+                    1 => core::ptr::read_volatile(p.ptr::<u8>()) as u64,
+                    2 => core::ptr::read_volatile(p.ptr::<u16>()) as u64,
+                    4 => core::ptr::read_volatile(p.ptr::<u32>()) as u64,
+                    _ => core::ptr::read_volatile(p.ptr::<u64>()),
                 }
             },
             (SPACE_MEMORY, Some(v)) => unsafe {
+                let p = PhysAddr::new(a);
                 match w {
-                    1 => core::ptr::write_volatile(a as *mut u8, v as u8),
-                    2 => core::ptr::write_volatile(a as *mut u16, v as u16),
-                    4 => core::ptr::write_volatile(a as *mut u32, v as u32),
-                    _ => core::ptr::write_volatile(a as *mut u64, v),
+                    1 => core::ptr::write_volatile(p.ptr::<u8>(), v as u8),
+                    2 => core::ptr::write_volatile(p.ptr::<u16>(), v as u16),
+                    4 => core::ptr::write_volatile(p.ptr::<u32>(), v as u32),
+                    _ => core::ptr::write_volatile(p.ptr::<u64>(), v),
                 }
                 0
             },
@@ -141,7 +144,7 @@ impl Gas {
     /// Maps a memory-space register uncached (once, at boot).
     fn map(&self) {
         if self.valid() && self.space == SPACE_MEMORY {
-            paging::map_mmio(self.addr, self.len() as u64);
+            paging::map_mmio(PhysAddr::new(self.addr), self.len() as u64);
         }
     }
 }
@@ -221,13 +224,13 @@ impl Tables {
 }
 
 static TABLES: SetOnce<Tables> = SetOnce::new();
-/// The EBDA's physical address (BIOS data area word 0x40E), read before page 0 is unmapped.
+/// The EBDA's physical address (BIOS data area word 0x40E).
 static EBDA: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// Reads what the tables search needs from page 0. Called before paging::init.
+/// Reads what the tables search needs from the BIOS data area.
 pub fn early() {
-    // SAFETY: boot.rs identity-maps the first 4 GiB, page 0 included, until paging::init.
-    let seg = unsafe { core::ptr::read_volatile(0x40E as *const u16) };
+    // SAFETY: the BIOS data area, in the direct map (boot.rs maps the first 4 GiB).
+    let seg = unsafe { core::ptr::read_volatile(PhysAddr::new(0x40E).ptr::<u16>()) };
     let ebda = (seg as u64) << 4;
     if (0x8_0000..0xA_0000).contains(&ebda) {
         EBDA.store(ebda, core::sync::atomic::Ordering::Relaxed);
@@ -247,13 +250,14 @@ pub fn get() -> Option<&'static Tables> {
     TABLES.get()
 }
 
-/// `len` bytes of physical memory (identity-mapped; mapped read-only first if it was not).
+/// `len` bytes of physical memory (through the direct map; mapped read-only first if they were not).
 fn phys(addr: u64, len: usize) -> Option<&'static [u8]> {
-    if addr == 0 || !paging::ensure_mapped(addr, len as u64) {
+    if addr == 0 {
         return None;
     }
+    let v = paging::ensure_mapped(PhysAddr::new(addr), len as u64)?;
     // SAFETY: mapped above; firmware tables are never written while the kernel runs.
-    Some(unsafe { core::slice::from_raw_parts(addr as *const u8, len) })
+    Some(unsafe { core::slice::from_raw_parts(v.ptr::<u8>(), len) })
 }
 
 fn u16_at(b: &[u8], o: usize) -> u16 {
@@ -397,7 +401,7 @@ fn parse(rsdp: u64, t: &mut Tables) {
         }
         for (g, len) in [(f.gpe0, f.gpe0_len), (f.gpe1, f.gpe1_len)] {
             if g.valid() && g.space == SPACE_MEMORY {
-                paging::map_mmio(g.addr, len as u64);
+                paging::map_mmio(PhysAddr::new(g.addr), len as u64);
             }
         }
     }

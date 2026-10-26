@@ -19,6 +19,7 @@ use super::{Desc, Queue, Transport, DESC_F_NEXT, DESC_F_WRITE};
 use crate::dev::{DmaRegion, NetCounters, NetDevice, NetRx, NetTx};
 use crate::kprintln;
 use crate::mem::frames::Tag;
+use crate::mem::VirtAddr;
 
 const F_MAC: u64 = 1 << 5;
 const F_ANY_LAYOUT: u64 = 1 << 27;
@@ -44,7 +45,7 @@ fn set_rx_interrupts(on: bool) {
 fn ack_irq() {
     let base = MMIO_ACK.load(Ordering::Relaxed);
     if base != 0 {
-        super::mmio::ack_at(base);
+        super::mmio::ack_at(VirtAddr::new(base));
     }
 }
 
@@ -86,8 +87,14 @@ pub struct VirtioNet {
     kicks: u64,
 }
 
+/// Buffer `id` of `region`, for the CPU.
 fn buf(region: &DmaRegion, id: u16) -> *mut u8 {
-    (region.paddr() + id as u64 * BUF_LEN as u64) as *mut u8
+    (region.virt() + id as u64 * BUF_LEN as u64).ptr()
+}
+
+/// Buffer `id` of `region`, for the device.
+fn buf_paddr(region: &DmaRegion, id: u16) -> u64 {
+    (region.paddr() + id as u64 * BUF_LEN as u64).get()
 }
 
 /// The head descriptor of buffer `id`, and the buffer of head descriptor `head` (`None`: not one of ours).
@@ -158,10 +165,11 @@ impl NetTx for Tx {
             core::ptr::write_bytes(b, 0, self.hdr);
             fill(core::slice::from_raw_parts_mut(b.add(self.hdr), len));
         }
+        let at = buf_paddr(&self.bufs, id);
         if self.chain {
-            self.q.set_desc(2 * id + 1, Desc { addr: b as u64 + self.hdr as u64, len: len as u32, flags: 0, next: 0 });
+            self.q.set_desc(2 * id + 1, Desc { addr: at + self.hdr as u64, len: len as u32, flags: 0, next: 0 });
         } else {
-            self.q.set_desc(id, Desc { addr: b as u64, len: (self.hdr + len) as u32, flags: 0, next: 0 });
+            self.q.set_desc(id, Desc { addr: at, len: (self.hdr + len) as u32, flags: 0, next: 0 });
         }
         self.queued[id as usize] = true;
         self.q.push(head(self.chain, id));
@@ -202,7 +210,7 @@ impl VirtioNet {
             _ => (gsi, 0),
         };
         let irq = crate::arch::ioapic::route(gsi, crate::arch::idt::VEC_NET, crate::arch::apic::id(), flags & !0b1100);
-        Self::init(t, name, features, nbufs, None, irq, if irq { m.base() } else { 0 })
+        Self::init(t, name, features, nbufs, None, irq, if irq { m.base().get() } else { 0 })
     }
 
     fn init(t: Transport, name: &'static str, features: u64, nbufs: u16, vector: Option<u16>, irq: bool, mmio_ack: u64) -> Option<VirtioNet> {
@@ -239,7 +247,7 @@ impl VirtioNet {
         }
         // Post every RX buffer; with chained headers, fix the TX header descriptors too.
         for i in 0..nrx {
-            let b = buf(&rx_bufs, i) as u64;
+            let b = buf_paddr(&rx_bufs, i);
             if chain {
                 rxq.set_desc(2 * i, Desc { addr: b, len: hdr as u32, flags: DESC_F_WRITE | DESC_F_NEXT, next: 2 * i + 1 });
                 rxq.set_desc(2 * i + 1, Desc { addr: b + hdr as u64, len: (BUF_LEN - hdr) as u32, flags: DESC_F_WRITE, next: 0 });
@@ -250,7 +258,7 @@ impl VirtioNet {
         }
         if chain {
             for i in 0..ntx {
-                txq.set_desc(2 * i, Desc { addr: buf(&tx_bufs, i) as u64, len: hdr as u32, flags: DESC_F_NEXT, next: 2 * i + 1 });
+                txq.set_desc(2 * i, Desc { addr: buf_paddr(&tx_bufs, i), len: hdr as u32, flags: DESC_F_NEXT, next: 2 * i + 1 });
             }
         }
         rxq.set_no_interrupt(true);

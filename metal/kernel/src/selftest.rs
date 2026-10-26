@@ -15,7 +15,8 @@ use k10_ir::{ModuleBuilder, Trap};
 
 
 use crate::coro::{Coroutine, Yield};
-use crate::mem::{frames, slots};
+use crate::mem::addr::USER_END;
+use crate::mem::{frames, slots, PhysAddr, VirtAddr};
 use crate::runtime::engine::{self, HostCalls, Scratch};
 use crate::runtime::host::HostFn;
 use crate::{arch, fw_cfg, http, kprintln, runtime, time};
@@ -41,7 +42,8 @@ pub fn run(nic: bool) -> bool {
     let before = frames::free_bytes();
     let a = frames::alloc(16, 16, frames::Tag::Kernel);
     let b = frames::alloc(1, 1, frames::Tag::Kernel);
-    check!(ok, a.is_some_and(|p| p % (16 * 4096) == 0), "frames: 64 KiB-aligned run of 16 frames at {:#x}", a.unwrap_or(0));
+    let at = a.map_or(0, PhysAddr::get);
+    check!(ok, a.is_some() && at % (16 * 4096) == 0, "frames: 64 KiB-aligned run of 16 frames at {:#x}", at);
     frames::free(a.unwrap(), 16, frames::Tag::Kernel);
     frames::free(b.unwrap(), 1, frames::Tag::Kernel);
     check!(ok, frames::free_bytes() == before, "frames: free count restored");
@@ -139,15 +141,22 @@ pub fn run(nic: bool) -> bool {
 
     ok &= admin_gate();
 
-    // Page permissions: kernel text read+execute, data read+write+NX, null page unmapped.
+    // Page permissions: text r-x and its direct-map alias r--, data rw-, nothing in the lower half.
     let nx = arch::paging::nx_enabled();
-    let text = arch::paging::query(run as *const () as u64);
-    let data = arch::paging::query(&raw const TEST_STATIC as u64);
-    let heap_page = arch::paging::query(Box::into_raw(Box::new(0u64)) as u64);
+    let run_at = VirtAddr::of(run as *const ());
+    let text = arch::paging::query(run_at);
+    let alias = arch::paging::query(run_at.phys().virt());
+    let data = arch::paging::query(VirtAddr::of(&raw const TEST_STATIC));
+    let heap_page = arch::paging::query(VirtAddr::of(Box::into_raw(Box::new(0u64))));
+    let lower = [0, 0x8000, run_at.phys().get(), USER_END - 4096].map(|a| arch::paging::query(VirtAddr::new(a)).0);
     check!(
         ok,
-        text == (true, false, true) && data == (true, true, !nx) && heap_page == (true, true, !nx) && !arch::paging::query(0).0,
-        "paging: NX {}, kernel text r-x, data rw-, heap rw-, page 0 unmapped",
+        text == (true, false, true)
+            && alias == (true, false, !nx)
+            && data == (true, true, !nx)
+            && heap_page == (true, true, !nx)
+            && lower == [false; 4],
+        "paging: NX {}, kernel text r-x (alias r--), data rw-, heap rw-, lower half unmapped",
         if nx { "on" } else { "off (CPU lacks it)" }
     );
 
@@ -209,19 +218,20 @@ fn platform(nic: bool) -> bool {
         kprintln!("  info acpi: no ACPI tables (CPUs from {}): no power off", if t.source.is_empty() { "nowhere" } else { t.source });
     }
     // Cache attributes: devices uncached, the kernel write-back.
-    let text = platform as *const () as u64;
-    let mut uc = alloc::vec![("kernel text", text, false)];
+    let text = VirtAddr::of(platform as *const ());
+    let dev = |a: u64| PhysAddr::new(a).virt();
+    let mut uc = alloc::vec![("kernel text", text, false), ("kernel text alias", text.phys().virt(), false)];
     for io in &t.ioapics {
-        uc.push(("I/O APIC", io.addr, true));
+        uc.push(("I/O APIC", dev(io.addr), true));
     }
     if !arch::apic::x2apic() {
-        uc.push(("local APIC", t.lapic, true));
+        uc.push(("local APIC", dev(t.lapic), true));
     }
     if let Some(h) = t.hpet {
-        uc.push(("HPET", h, true));
+        uc.push(("HPET", dev(h), true));
     }
     for e in &t.ecam {
-        uc.push(("ECAM", e.base + ((e.bus_start as u64) << 20), true));
+        uc.push(("ECAM", dev(e.base + ((e.bus_start as u64) << 20)), true));
     }
     let bad: Vec<_> = uc.iter().filter(|(_, a, want)| arch::paging::uncached(*a) != Some(*want)).map(|x| x.0).collect();
     check!(ok, bad.is_empty(), "paging: devices mapped uncached, kernel write-back (bad: {:?})", bad);
@@ -237,13 +247,15 @@ fn platform(nic: bool) -> bool {
         kprintln!("  info paging: no memory above 4 GiB (RAM ends at {} MiB)", top >> 20);
     }
     for &p in &high {
-        let w = p as *mut u64;
+        let w = p.ptr::<u64>();
         unsafe { core::ptr::write_volatile(w, 0x6b31_3073_6869_6768) };
         let back = unsafe { core::ptr::read_volatile(w) };
-        let q = arch::paging::query(p);
+        let q = arch::paging::query(p.virt());
         check!(
             ok,
-            back == 0x6b31_3073_6869_6768 && q == (true, true, !arch::paging::nx_enabled()) && arch::paging::uncached(p) == Some(false),
+            back == 0x6b31_3073_6869_6768
+                && q == (true, true, !arch::paging::nx_enabled())
+                && arch::paging::uncached(p.virt()) == Some(false),
             "paging: frame {:#x} above 4 GiB read and written (rw-, write-back; RAM ends at {:#x})",
             p,
             top
@@ -289,7 +301,7 @@ fn disks() -> bool {
             }
             s[..20].copy_from_slice(b"written by k10-metal");
             let w = block_sync(d, req(BlockOp::Write, 2, 8, buf.paddr(), 2));
-            let f = block_sync(d, req(BlockOp::Flush, 0, 0, 0, 3));
+            let f = block_sync(d, req(BlockOp::Flush, 0, 0, PhysAddr::new(0), 3));
             let Some(back) = DmaRegion::alloc(8 * bs, frames::Tag::Kernel) else { continue };
             let r = block_sync(d, req(BlockOp::Read, 2, 8, back.paddr(), 4));
             let same = back.as_slice()[..8 * bs] == buf.as_slice()[..8 * bs];

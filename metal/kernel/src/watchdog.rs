@@ -13,6 +13,7 @@ use k10_drivers::watchdog::{esb, itco, wdat, Bdf, Platform, Watchdog};
 
 use crate::arch;
 use crate::kprintln;
+use crate::mem::PhysAddr;
 use crate::sync::IrqLock;
 
 pub const DEFAULT_TIMEOUT_S: u32 = 60;
@@ -56,26 +57,27 @@ impl Platform for Plat {
         crate::pci::write8(bdf(f), off, v)
     }
     fn map(&self, paddr: u64, len: u64) -> bool {
-        arch::paging::map_mmio(paddr, len)
+        arch::paging::map_mmio(PhysAddr::new(paddr), len).is_some()
     }
+    // The drivers name registers by physical address; they are reached through the direct map.
     fn mmio_read32(&self, a: u64) -> u32 {
         // SAFETY: mapped through `map` by the driver before use.
-        unsafe { core::ptr::read_volatile(a as *const u32) }
+        unsafe { core::ptr::read_volatile(PhysAddr::new(a).ptr::<u32>()) }
     }
     fn mmio_write32(&self, a: u64, v: u32) {
-        unsafe { core::ptr::write_volatile(a as *mut u32, v) }
+        unsafe { core::ptr::write_volatile(PhysAddr::new(a).ptr::<u32>(), v) }
     }
     fn mmio_read16(&self, a: u64) -> u16 {
-        unsafe { core::ptr::read_volatile(a as *const u16) }
+        unsafe { core::ptr::read_volatile(PhysAddr::new(a).ptr::<u16>()) }
     }
     fn mmio_write16(&self, a: u64, v: u16) {
-        unsafe { core::ptr::write_volatile(a as *mut u16, v) }
+        unsafe { core::ptr::write_volatile(PhysAddr::new(a).ptr::<u16>(), v) }
     }
     fn mmio_read8(&self, a: u64) -> u8 {
-        unsafe { core::ptr::read_volatile(a as *const u8) }
+        unsafe { core::ptr::read_volatile(PhysAddr::new(a).ptr::<u8>()) }
     }
     fn mmio_write8(&self, a: u64, v: u8) {
-        unsafe { core::ptr::write_volatile(a as *mut u8, v) }
+        unsafe { core::ptr::write_volatile(PhysAddr::new(a).ptr::<u8>(), v) }
     }
     fn delay_us(&self, us: u32) {
         crate::dev::nic::delay_us(us)

@@ -4,32 +4,33 @@
 
 use alloc::vec::Vec;
 
+use crate::mem::{PhysAddr, VirtAddr};
 use crate::sync::IrqLock;
 
-const IOREGSEL: usize = 0x00;
-const IOWIN: usize = 0x10;
+const IOREGSEL: u64 = 0x00;
+const IOWIN: u64 = 0x10;
 const REG_VER: u32 = 0x01;
 const MASKED: u64 = 1 << 16;
 
 struct Chip {
-    base: u64,
+    base: VirtAddr,
     gsi_base: u32,
     pins: u32,
 }
 
 static CHIPS: IrqLock<Vec<Chip>> = IrqLock::new(Vec::new());
 
-fn read(base: u64, reg: u32) -> u32 {
+fn read(base: VirtAddr, reg: u32) -> u32 {
     unsafe {
-        core::ptr::write_volatile((base as usize + IOREGSEL) as *mut u32, reg);
-        core::ptr::read_volatile((base as usize + IOWIN) as *const u32)
+        core::ptr::write_volatile((base + IOREGSEL).ptr::<u32>(), reg);
+        core::ptr::read_volatile((base + IOWIN).ptr::<u32>())
     }
 }
 
-fn write(base: u64, reg: u32, v: u32) {
+fn write(base: VirtAddr, reg: u32, v: u32) {
     unsafe {
-        core::ptr::write_volatile((base as usize + IOREGSEL) as *mut u32, reg);
-        core::ptr::write_volatile((base as usize + IOWIN) as *mut u32, v);
+        core::ptr::write_volatile((base + IOREGSEL).ptr::<u32>(), reg);
+        core::ptr::write_volatile((base + IOWIN).ptr::<u32>(), v);
     }
 }
 
@@ -45,13 +46,11 @@ pub fn init(chips: &[crate::acpi::IoApic]) {
     let mut v = CHIPS.lock();
     let mut next = 0;
     for c in chips {
-        if !super::paging::map_mmio(c.addr, 4096) {
-            continue;
-        }
-        let pins = ((read(c.addr, REG_VER) >> 16) & 0xFF) + 1;
+        let Some(base) = super::paging::map_mmio(PhysAddr::new(c.addr), 4096) else { continue };
+        let pins = ((read(base, REG_VER) >> 16) & 0xFF) + 1;
         let gsi_base = if c.gsi_base == crate::acpi::GSI_AFTER_PREVIOUS { next } else { c.gsi_base };
         next = gsi_base + pins;
-        let chip = Chip { base: c.addr, gsi_base, pins };
+        let chip = Chip { base, gsi_base, pins };
         // Only pins left unmasked are written (each access is an exit under a hypervisor).
         for p in (0..pins).filter(|&p| read(chip.base, 0x10 + 2 * p) as u64 & MASKED == 0) {
             set_entry(&chip, p, MASKED);

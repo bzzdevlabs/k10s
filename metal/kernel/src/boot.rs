@@ -10,10 +10,13 @@
 //!     `-initrd` as module 0) — see `pvh.rs`;
 //!   * no usable stack, GDT or IDT.
 //!
-//! The trampoline below zeroes .bss, builds identity-mapped page tables for the first 4 GiB with 2 MiB pages
-//! (PML4 → 1 PDPT → 4 PDs), enables PAE + long mode + paging (and SSE, for the future JIT), loads a minimal GDT and
-//! far-returns into 64-bit code, which sets up the boot stack and calls `kmain`. Everything is linked at 1 MiB
-//! (see linker.ld) and runs at its physical address.
+//! The kernel is loaded at physical 1 MiB and linked at `KERNEL_BASE` + 1 MiB (linker.ld, mem/addr.rs); the 32-bit
+//! code below runs at physical addresses, so it names every symbol as `sym - KVMA`. It zeroes .bss and builds page
+//! tables for the first 4 GiB with 2 MiB pages (1 PDPT → 4 PDs), reached from the PML4 twice: identity (slot 0, to
+//! turn paging on) and the direct map (slot 256); slot 511 maps the first GiB at `KERNEL_BASE` (the image). It
+//! enables PAE + long mode + paging (and SSE, for the JIT), loads a minimal GDT and far-returns into 64-bit code,
+//! which jumps to the image's address, sets up the boot stack and calls `kmain`. arch/paging.rs drops the identity
+//! map once the kernel's tables are built.
 //!
 //! Two more ways in end at the same entry with a `start_info` (metal/README.md, "Booting"):
 //!   * k10boot, the UEFI loader (metal/boot), loads the ELF's segments and enters `_pvh_start` as QEMU does;
@@ -26,8 +29,12 @@
 
 use core::arch::global_asm;
 
+use crate::mem::{PhysAddr, VirtAddr};
+
 global_asm!(
     r#"
+.set KVMA, {kvma}
+
 /* ---------------------------------------------------------------------------------------------------------- */
 /* ELF note read by QEMU (hw/i386/x86.c: load_elfboot): type 18 = XEN_ELFNOTE_PHYS32_ENTRY. For an ELF64 image */
 /* QEMU reads the descriptor as a 64-bit value, so it is a .quad (like Linux's vmlinux).                         */
@@ -38,7 +45,7 @@ global_asm!(
     .long 18                /* XEN_ELFNOTE_PHYS32_ENTRY */
     .asciz "Xen"
     .balign 4
-    .quad _pvh_start
+    .quad _pvh_start - KVMA
     .balign 4
 .popsection
 
@@ -58,7 +65,7 @@ mb2_header:
     .balign 8
     .word 3, 0              /* entry address */
     .long 12
-    .long _mb2_start
+    .long _mb2_start - KVMA
     .balign 8
     .word 6, 0              /* modules page-aligned: the kernel releases module pages one module at a time */
     .long 8
@@ -82,9 +89,13 @@ mb2_rsdp_v2: .skip 4
     .balign 4096
     .global boot_pml4
 boot_pml4:  .skip 4096
-boot_pdpt:  .skip 4096
+boot_pdpt:  .skip 4096              /* the first 512 GiB of the direct map (and the identity map while booting) */
+    .global boot_pdpt_hi
+boot_pdpt_hi: .skip 4096            /* the top 512 GiB: the image at KERNEL_BASE */
     .global boot_pd
 boot_pd:    .skip 4096 * 4          /* 4 page directories = 4 GiB of 2 MiB pages */
+    .global ap_pml4
+ap_pml4:    .skip 4096              /* the AP trampoline's PML4 (smp.rs), below 4 GiB */
     .balign 16
     .global boot_stack_bottom
 boot_stack_bottom:
@@ -106,7 +117,11 @@ boot_gdt_end:
     .balign 8
 boot_gdt_ptr:
     .word boot_gdt_end - boot_gdt - 1
-    .long boot_gdt
+    .long boot_gdt - KVMA
+    .balign 8
+boot_gdt_ptr64:
+    .word boot_gdt_end - boot_gdt - 1
+    .quad boot_gdt
 .popsection
 
 /* ---------------------------------------------------------------------------------------------------------- */
@@ -116,17 +131,17 @@ boot_gdt_ptr:
 _mb2_start:
     cli
     cld
-    mov $boot_stack_top, %esp
+    mov $boot_stack_top - KVMA, %esp
     cmp $0x36d76289, %eax
     jne 9f
     mov (%ebx), %edx
     add %ebx, %edx                  /* edx: end of the information */
     lea 8(%ebx), %esi               /* esi: the first tag */
     xor %eax, %eax
-    mov $mb2_si, %edi
+    mov $mb2_si - KVMA, %edi
     mov $64, %ecx
     rep stosb
-    movl $0, mb2_rsdp_v2
+    movl $0, mb2_rsdp_v2 - KVMA
 1:  cmp %edx, %esi
     jae 7f
     mov (%esi), %eax                /* tag type */
@@ -150,14 +165,14 @@ _mb2_start:
     jmp 1b
 
 10: lea 8(%esi), %eax               /* command line */
-    mov %eax, mb2_si + 24
+    mov %eax, mb2_si + 24 - KVMA
     jmp 6b
 
-20: mov mb2_si + 12, %eax           /* module: start, end, then its command line (the name) */
+20: mov mb2_si + 12 - KVMA, %eax    /* module: start, end, then its command line (the name) */
     cmp $16, %eax
     jae 6b
     shl $5, %eax
-    add $mb2_modlist, %eax
+    add $mb2_modlist - KVMA, %eax
     mov 8(%esi), %ecx
     mov %ecx, (%eax)
     mov 12(%esi), %ecx
@@ -165,7 +180,7 @@ _mb2_start:
     mov %ecx, 8(%eax)
     lea 16(%esi), %ecx
     mov %ecx, 16(%eax)
-    incl mb2_si + 12
+    incl mb2_si + 12 - KVMA
     jmp 6b
 
 30: push %esi                       /* memory map: entry size, version, then entries */
@@ -179,11 +194,11 @@ _mb2_start:
 31: lea (%esi, %ebx), %eax
     cmp %edx, %eax
     ja 39f
-    mov mb2_si + 48, %eax
+    mov mb2_si + 48 - KVMA, %eax
     cmp $256, %eax
     jae 39f
     imul $24, %eax, %edi
-    add $mb2_memmap, %edi
+    add $mb2_memmap - KVMA, %edi
     mov %esi, %ecx
     movsl                           /* base, length, type */
     movsl
@@ -193,17 +208,17 @@ _mb2_start:
     movl $0, (%edi)
     mov %ecx, %esi
     add %ebx, %esi
-    incl mb2_si + 48
+    incl mb2_si + 48 - KVMA
     jmp 31b
 39: pop %edx
     pop %esi
     jmp 6b
 
-40: cmpl $0, mb2_rsdp_v2            /* ACPI RSDP v1 (20 bytes), unless v2 came first */
+40: cmpl $0, mb2_rsdp_v2 - KVMA     /* ACPI RSDP v1 (20 bytes), unless v2 came first */
     jne 6b
     mov $20, %ecx
     jmp 45f
-50: movl $1, mb2_rsdp_v2            /* ACPI RSDP v2 (36 bytes) */
+50: movl $1, mb2_rsdp_v2 - KVMA     /* ACPI RSDP v2 (36 bytes) */
     mov 4(%esi), %ecx
     sub $8, %ecx
     cmp $40, %ecx
@@ -211,17 +226,17 @@ _mb2_start:
     mov $40, %ecx
 45: push %esi
     add $8, %esi
-    mov $mb2_rsdp, %edi
+    mov $mb2_rsdp - KVMA, %edi
     rep movsb
     pop %esi
-    movl $mb2_rsdp, mb2_si + 32
+    movl $mb2_rsdp - KVMA, mb2_si + 32 - KVMA
     jmp 6b
 
-7:  movl $0x336ec578, mb2_si        /* magic, version 1, module list, memory map */
-    movl $1, mb2_si + 4
-    movl $mb2_modlist, mb2_si + 16
-    movl $mb2_memmap, mb2_si + 40
-    mov $mb2_si, %ebx
+7:  movl $0x336ec578, mb2_si - KVMA /* magic, version 1, module list, memory map */
+    movl $1, mb2_si + 4 - KVMA
+    movl $mb2_modlist - KVMA, mb2_si + 16 - KVMA
+    movl $mb2_memmap - KVMA, mb2_si + 40 - KVMA
+    mov $mb2_si - KVMA, %ebx
     jmp _pvh_start
 9:  hlt                             /* not started by a Multiboot2 loader */
     jmp 9b
@@ -231,21 +246,24 @@ _pvh_start:
     cli
     cld
     /* Zero .bss (QEMU zero-fills it too, but do not rely on the loader). ebx (start info) is preserved. */
-    mov $__bss_start, %edi
-    mov $__bss_end, %ecx
+    mov $__bss_start - KVMA, %edi
+    mov $__bss_end - KVMA, %ecx
     sub %edi, %ecx
     xor %eax, %eax
     rep stosb
-    mov %ebx, pvh_start_info_ptr
-    mov $boot_stack_top, %esp
+    mov %ebx, pvh_start_info_ptr - KVMA
+    mov $boot_stack_top - KVMA, %esp
 
-    /* PML4[0] → PDPT; PDPT[0..4] → PD0..PD3 (present | writable). */
-    mov $boot_pdpt, %eax
-    or $0x3, %eax
-    mov %eax, boot_pml4
-    mov $boot_pd, %eax
-    or $0x3, %eax
-    mov $boot_pdpt, %edi
+    /* PML4[0] (identity), PML4[256] (direct map) → PDPT; PML4[511] → PDPT_hi, entry 510 (KERNEL_BASE) → PD0. */
+    mov $boot_pdpt + 3 - KVMA, %eax
+    mov %eax, boot_pml4 - KVMA
+    mov %eax, boot_pml4 + 256 * 8 - KVMA
+    mov $boot_pdpt_hi + 3 - KVMA, %eax
+    mov %eax, boot_pml4 + 511 * 8 - KVMA
+    mov $boot_pd + 3 - KVMA, %eax
+    mov %eax, boot_pdpt_hi + 510 * 8 - KVMA
+    /* PDPT[0..4] → PD0..PD3 (present | writable). */
+    mov $boot_pdpt - KVMA, %edi
     mov $4, %ecx
 1:  mov %eax, (%edi)
     add $4096, %eax
@@ -253,7 +271,7 @@ _pvh_start:
     loop 1b
 
     /* PD entries: entry i maps [i * 2 MiB, (i+1) * 2 MiB) with present | writable | PS (2 MiB page). */
-    mov $boot_pd, %edi
+    mov $boot_pd - KVMA, %edi
     mov $0x83, %eax
     mov $2048, %ecx
 2:  mov %eax, (%edi)
@@ -263,7 +281,7 @@ _pvh_start:
 
     /* The top 512 MiB (0xE000_0000..4 GiB: PCI MMIO hole, I/O APIC, local APIC) are mapped uncached
        (PCD | PWT). Guest RAM never reaches there with QEMU's i440fx machine and -m <= 3.5 GiB. */
-    mov $boot_pd + 1792 * 8, %edi
+    mov $boot_pd + 1792 * 8 - KVMA, %edi
     mov $256, %ecx
 3:  orl $0x18, (%edi)
     add $8, %edi
@@ -274,7 +292,7 @@ _pvh_start:
     mov %cr4, %eax
     or $((1 << 5) | (1 << 9) | (1 << 10)), %eax
     mov %eax, %cr4
-    mov $boot_pml4, %eax
+    mov $boot_pml4 - KVMA, %eax
     mov %eax, %cr3
     /* EFER.LME */
     mov $0xC0000080, %ecx
@@ -287,14 +305,18 @@ _pvh_start:
     or $((1 << 31) | (1 << 16) | (1 << 5) | (1 << 1) | 1), %eax
     mov %eax, %cr0
 
-    lgdt boot_gdt_ptr
+    lgdt boot_gdt_ptr - KVMA
     /* Far return into the 64-bit code segment (selector 0x08). */
     push $0x08
-    push $long_mode_entry
+    push $long_mode_entry - KVMA
     lret
 
 .code64
 long_mode_entry:
+    /* Still at the physical address: on to the image's. */
+    movabs $1f, %rax
+    jmp *%rax
+1:  lgdt boot_gdt_ptr64(%rip)
     mov $0x10, %ax
     mov %ax, %ds
     mov %ax, %es
@@ -302,7 +324,7 @@ long_mode_entry:
     xor %eax, %eax
     mov %ax, %fs
     mov %ax, %gs
-    mov $boot_stack_top, %rsp
+    lea boot_stack_top(%rip), %rsp
     xor %ebp, %ebp
     call kmain
 4:  cli
@@ -310,6 +332,7 @@ long_mode_entry:
     jmp 4b
 .popsection
 "#,
+    kvma = const crate::mem::addr::KERNEL_BASE,
     options(att_syntax)
 );
 
@@ -322,14 +345,14 @@ extern "C" {
 }
 
 /// Physical address of the PVH `hvm_start_info` handed over in `ebx`.
-pub fn start_info_paddr() -> u64 {
+pub fn start_info_paddr() -> PhysAddr {
     // SAFETY: written once by the trampoline before any Rust code runs.
-    unsafe { core::ptr::read_volatile(&raw const pvh_start_info_ptr) }
+    PhysAddr::new(unsafe { core::ptr::read_volatile(&raw const pvh_start_info_ptr) })
 }
 
-/// `[start, end)` of the loaded kernel image (code, data, bss, boot page tables and boot stack).
-pub fn kernel_image() -> (u64, u64) {
-    (&raw const __kernel_start as u64, &raw const __kernel_end as u64)
+/// Physical `[start, end)` of the loaded kernel image (code, data, bss, boot page tables and boot stack).
+pub fn kernel_image() -> (PhysAddr, PhysAddr) {
+    (VirtAddr::of(&raw const __kernel_start).phys(), VirtAddr::of(&raw const __kernel_end).phys())
 }
 
 /// `[bottom, top)` of the boot stack (the scheduler's stack).

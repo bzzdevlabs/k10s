@@ -13,6 +13,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::arch::{inl, outl};
+use crate::mem::{PhysAddr, VirtAddr};
 use crate::sync::{IrqLock, SetOnce};
 
 /// Next free (I/O port, 32-bit MMIO) address for BARs the firmware did not assign.
@@ -65,7 +66,7 @@ pub fn init(windows: &[crate::acpi::Ecam], full_scan: bool) {
         let len = ((w.bus_end - w.bus_start) as u64 + 1) << 20;
         // ECAM covers buses from 0: the window's base is where bus 0 would be.
         let first = w.base + ((w.bus_start as u64) << 20);
-        if crate::arch::paging::map_mmio(first, len) {
+        if crate::arch::paging::map_mmio(PhysAddr::new(first), len).is_some() {
             v.push(*w);
         }
     }
@@ -77,9 +78,11 @@ pub fn uses_ecam() -> bool {
     ECAM.get().is_some_and(|v| !v.is_empty())
 }
 
-fn ecam_addr(b: Bdf, off: u16) -> Option<u64> {
+/// The dword at `off` of `b`'s configuration space in its ECAM window (mapped in the direct map by [`init`]).
+fn ecam_addr(b: Bdf, off: u16) -> Option<VirtAddr> {
     let w = ECAM.get()?.iter().find(|w| w.segment == b.seg && (w.bus_start..=w.bus_end).contains(&b.bus))?;
-    Some(w.base + ((b.bus as u64) << 20 | (b.dev as u64) << 15 | (b.func as u64) << 12 | (off & 0xFFC) as u64))
+    let at = (b.bus as u64) << 20 | (b.dev as u64) << 15 | (b.func as u64) << 12 | (off & 0xFFC) as u64;
+    Some(PhysAddr::new(w.base + at).virt())
 }
 
 fn port_addr(b: Bdf, off: u16) -> u32 {
@@ -89,7 +92,7 @@ fn port_addr(b: Bdf, off: u16) -> u32 {
 pub fn read32(b: Bdf, off: u16) -> u32 {
     if let Some(a) = ecam_addr(b, off) {
         // SAFETY: inside a mapped ECAM window.
-        return unsafe { core::ptr::read_volatile(a as *const u32) };
+        return unsafe { core::ptr::read_volatile(a.ptr::<u32>()) };
     }
     if b.seg != 0 || off >= 256 {
         return u32::MAX;
@@ -101,7 +104,7 @@ pub fn read32(b: Bdf, off: u16) -> u32 {
 
 pub fn write32(b: Bdf, off: u16, v: u32) {
     if let Some(a) = ecam_addr(b, off) {
-        unsafe { core::ptr::write_volatile(a as *mut u32, v) };
+        unsafe { core::ptr::write_volatile(a.ptr::<u32>(), v) };
         return;
     }
     if b.seg != 0 || off >= 256 {
@@ -119,9 +122,9 @@ fn write_narrow(b: Bdf, off: u16, v: u32, bytes: u8) {
         let a = a + (off & 3) as u64;
         unsafe {
             if bytes == 2 {
-                core::ptr::write_volatile(a as *mut u16, v as u16)
+                core::ptr::write_volatile(a.ptr::<u16>(), v as u16)
             } else {
-                core::ptr::write_volatile(a as *mut u8, v as u8)
+                core::ptr::write_volatile(a.ptr::<u8>(), v as u8)
             }
         }
         return;
@@ -284,8 +287,11 @@ impl Device {
         let size = ((head >> 16) as u16 & 0x7FF) + 1;
         let t = self.read32(cap + 4);
         let (io, base) = self.bar((t & 7) as u8);
-        let table = base + (t & !7) as u64;
-        (!io && base != 0 && crate::arch::paging::map_mmio(table, size as u64 * 16)).then_some(MsiX { table, size, cap })
+        if io || base == 0 {
+            return None;
+        }
+        let table = crate::arch::paging::map_mmio(PhysAddr::new(base + (t & !7) as u64), size as u64 * 16)?;
+        Some(MsiX { table, size, cap })
     }
 
     /// Points the MSI capability at `vector` on this CPU (one message, unmasked) and enables it. False without MSI,
@@ -319,7 +325,7 @@ impl Device {
 }
 
 pub struct MsiX {
-    table: u64,
+    table: VirtAddr,
     pub size: u16,
     cap: u16,
 }
@@ -332,7 +338,7 @@ impl MsiX {
         if entry >= self.size {
             return false;
         }
-        let e = (self.table + 16 * entry as u64) as *mut u32;
+        let e = (self.table + 16 * entry as u64).ptr::<u32>();
         // SAFETY: inside the MSI-X table, mapped uncached by `Device::msix`.
         unsafe {
             core::ptr::write_volatile(e.add(3), 1); // masked while it changes

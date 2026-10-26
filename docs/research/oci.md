@@ -122,12 +122,12 @@ in `/_k10s/status` with the call number, so the corpus run shows what to build n
 ## 4. Kernel architecture changes
 
 ### 4.1 Address spaces
-The kernel identity-maps physical memory in the lower canonical half (metal/README.md "The identity map"); Linux
-programs need that half (`0x400000` executables, PIE at `0x5555…`, mmap top-down below `0x7fff…`). The kernel moves
-to the upper half: a direct map of all RAM at a fixed upper base (`PHYS_OFFSET`), the kernel image linked high, every
-physical/virtual conversion explicit (`DmaRegion`s and virtio/NVMe/AHCI descriptors take physical addresses, slots and
-the heap take direct-map addresses). The upper-half PML4 entries are shared by every address space; each process has
-its own lower half. Native slots stay in the direct map: TIR instances never run in a process address space.
+Linux programs need the lower canonical half (`0x400000` executables, PIE at `0x5555…`, mmap top-down below
+`0x7fff…`), so the kernel lives in the upper half (P1.1; metal/README.md "Virtual memory"): a direct map of all
+physical memory at a fixed upper base (`PHYS_OFFSET`), the kernel image linked in the top 2 GiB, every
+physical/virtual conversion explicit (`PhysAddr`/`VirtAddr`: `DmaRegion`s and virtio/NVMe/AHCI descriptors take
+physical addresses, slots and the heap take direct-map addresses), nothing mapped below 2^47. The upper-half PML4
+entries are shared by every address space; each process has its own lower half. Native slots stay in the direct map: TIR instances never run in a process address space.
 - PCID: 12-bit ASIDs, recycled with a generation; INVPCID single-context on reuse.
 - TLB coherence: the lazy generation scheme (enough for kernel-only W^X sealing) is insufficient once user mappings
   change while other CPUs run the same address space. Each address space keeps a CPU mask; `munmap`, `mprotect`

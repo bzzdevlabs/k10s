@@ -3,7 +3,7 @@
 //! behind a host interface later (docs/research/native-hardware.md §5.2).
 //!
 //! DMA memory is a [`DmaRegion`]: physically contiguous, page-aligned frames, like a TIR instance slot. Devices are
-//! handed physical addresses inside regions only (the identity map makes them valid pointers too); without an
+//! handed physical addresses inside regions only, the CPU reaches the same bytes through the direct map; without an
 //! IOMMU nothing stops a device from reaching elsewhere, which is why first-party drivers stay in the kernel.
 //! Queues are numbered: a NIC has receive/transmit queue pairs, a disk request queues (one each today; network I/O
 //! runs on CPU 0).
@@ -20,11 +20,12 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 pub use k10_drivers::Link;
 
 use crate::mem::frames::{self, Tag, FRAME};
+use crate::mem::{PhysAddr, VirtAddr};
 use crate::sync::IrqLock;
 
 /// Physically contiguous, zeroed, page-aligned memory for DMA, returned to the frame allocator on drop.
 pub struct DmaRegion {
-    paddr: u64,
+    paddr: PhysAddr,
     frames: usize,
     tag: Tag,
 }
@@ -36,16 +37,20 @@ impl DmaRegion {
     pub fn alloc(bytes: usize, tag: Tag) -> Option<DmaRegion> {
         let frames = bytes.div_ceil(FRAME as usize).max(1);
         let paddr = frames::alloc(frames, 1, tag)?;
-        // SAFETY: freshly allocated frames, identity-mapped.
-        unsafe { core::ptr::write_bytes(paddr as *mut u8, 0, frames * FRAME as usize) };
+        // SAFETY: freshly allocated frames, through the direct map.
+        unsafe { core::ptr::write_bytes(paddr.ptr::<u8>(), 0, frames * FRAME as usize) };
         Some(DmaRegion { paddr, frames, tag })
     }
-    /// Physical (= virtual) address of byte 0.
-    pub fn paddr(&self) -> u64 {
+    /// Physical address of byte 0: what the device uses.
+    pub fn paddr(&self) -> PhysAddr {
         self.paddr
     }
+    /// Its address in the direct map: what the CPU uses.
+    pub fn virt(&self) -> VirtAddr {
+        self.paddr.virt()
+    }
     pub fn ptr(&self) -> *mut u8 {
-        self.paddr as *mut u8
+        self.paddr.ptr()
     }
     pub fn len(&self) -> usize {
         self.frames * FRAME as usize
@@ -154,7 +159,7 @@ pub struct BlockRequest {
     pub op: BlockOp,
     pub lba: u64,
     pub blocks: u32,
-    pub paddr: u64,
+    pub paddr: PhysAddr,
     pub tag: u32,
 }
 
@@ -278,7 +283,7 @@ pub fn probe(cmdline: &str, nic_bufs: u16) -> Option<Box<dyn NetDevice>> {
         }
     }
     for m in slots {
-        let Some(t) = crate::virtio::mmio::Mmio::new(m.base, m.size) else { continue };
+        let Some(t) = crate::virtio::mmio::Mmio::new(PhysAddr::new(m.base), m.size) else { continue };
         match t.device_type() {
             crate::virtio::TYPE_NET if nic.is_none() => {
                 if let Some(n) = crate::virtio::net::VirtioNet::probe_mmio(t, m.irq, nic_bufs) {

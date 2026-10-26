@@ -12,13 +12,14 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use k10_bootproto::{Framebuffer, PixelFormat};
 
 use super::font::GLYPHS;
+use crate::mem::{PhysAddr, VirtAddr};
 use crate::sync::IrqLock;
 
 const FG: (u8, u8, u8) = (0xC0, 0xC0, 0xC0);
 const BG: (u8, u8, u8) = (0x00, 0x00, 0x00);
 
 struct Console {
-    base: u64,
+    base: VirtAddr,
     stride: u32,
     fg: u32,
     bg: u32,
@@ -72,9 +73,7 @@ pub fn init(bytes: &[u8]) -> Option<(u32, u32, u32, u32, u32, u32)> {
     if f.width == 0 || f.height == 0 || f.stride < f.width || (f.size != 0 && f.size < len) || f.base == 0 {
         return None;
     }
-    if !crate::arch::paging::map_wc(f.base, len) {
-        return None;
-    }
+    let base = crate::arch::paging::map_wc(PhysAddr::new(f.base), len)?;
     let scale = (f.width / 640).min(f.height / 400).clamp(1, 4);
     let (cw, ch) = (8 * scale, 10 * scale);
     let (cols, rows) = (f.width / cw, f.height / ch);
@@ -82,7 +81,7 @@ pub fn init(bytes: &[u8]) -> Option<(u32, u32, u32, u32, u32, u32)> {
         return None;
     }
     let mut c = Console {
-        base: f.base,
+        base,
         stride: f.stride,
         fg: pixel(&f.format, FG),
         bg: pixel(&f.format, BG),
@@ -102,7 +101,7 @@ pub fn init(bytes: &[u8]) -> Option<(u32, u32, u32, u32, u32, u32)> {
 impl Console {
     fn put_px(&self, x: u32, y: u32, v: u32) {
         // SAFETY: inside the mapped framebuffer (x < width <= stride, y < height).
-        unsafe { core::ptr::write_volatile((self.base + (y as u64 * self.stride as u64 + x as u64) * 4) as *mut u32, v) }
+        unsafe { core::ptr::write_volatile((self.base + (y as u64 * self.stride as u64 + x as u64) * 4).ptr::<u32>(), v) }
     }
 
     fn clear(&mut self, w: u32, h: u32) {

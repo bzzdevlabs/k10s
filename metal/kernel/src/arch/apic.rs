@@ -1,5 +1,5 @@
 //! Local APIC, in x2APIC mode (MSR interface, 32-bit APIC ids) when the CPU has it, else xAPIC (memory-mapped at
-//! the address in IA32_APIC_BASE, uncached in the identity map), and the legacy 8259 PICs (remapped and fully
+//! the address in IA32_APIC_BASE, uncached in the direct map), and the legacy 8259 PICs (remapped and fully
 //! masked: every interrupt we use is the LAPIC timer, an IPI, MSI-X or an I/O APIC line).
 //!
 //! Firmware may hand over in x2APIC mode (it must when APIC ids exceed 254); leaving it is an illegal transition,
@@ -16,6 +16,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::idt::{VEC_SPURIOUS, VEC_TIMER};
 use super::{cpuid, inb, outb, rdmsr, rdtsc, wrmsr};
+use crate::mem::{PhysAddr, VirtAddr};
 
 const IA32_APIC_BASE: u32 = 0x1B;
 const IA32_TSC_DEADLINE: u32 = 0x6E0;
@@ -41,7 +42,8 @@ const ICR_STARTUP: u32 = 0b110 << 8;
 const ICR_ASSERT: u32 = 1 << 14;
 const ICR_LEVEL: u32 = 1 << 15;
 
-static BASE: AtomicU64 = AtomicU64::new(0xFEE0_0000);
+/// The xAPIC registers in the direct map.
+static BASE: AtomicU64 = AtomicU64::new(PhysAddr::new(0xFEE0_0000).virt().get());
 static X2APIC: AtomicBool = AtomicBool::new(false);
 static TSC_DEADLINE: AtomicBool = AtomicBool::new(false);
 /// LAPIC timer ticks per 2^32 TSC ticks (count mode only).
@@ -51,14 +53,14 @@ fn read(reg: usize) -> u32 {
     if X2APIC.load(Ordering::Relaxed) {
         rdmsr(X2APIC_MSR + (reg >> 4) as u32) as u32
     } else {
-        unsafe { core::ptr::read_volatile((BASE.load(Ordering::Relaxed) as usize + reg) as *const u32) }
+        unsafe { core::ptr::read_volatile(VirtAddr::new(BASE.load(Ordering::Relaxed) + reg as u64).ptr::<u32>()) }
     }
 }
 fn write(reg: usize, v: u32) {
     if X2APIC.load(Ordering::Relaxed) {
         wrmsr(X2APIC_MSR + (reg >> 4) as u32, v as u64)
     } else {
-        unsafe { core::ptr::write_volatile((BASE.load(Ordering::Relaxed) as usize + reg) as *mut u32, v) }
+        unsafe { core::ptr::write_volatile(VirtAddr::new(BASE.load(Ordering::Relaxed) + reg as u64).ptr::<u32>(), v) }
     }
 }
 
@@ -90,9 +92,9 @@ pub fn init(prefer_xapic: bool, wide_ids: bool) {
     let hypervisor = cpuid(1, 0).2 & (1 << 31) != 0;
     let x2 = base & APIC_EXTD != 0 || has_x2apic() && (wide_ids || hypervisor && !prefer_xapic);
     X2APIC.store(x2, Ordering::Relaxed);
-    BASE.store(base & 0xF_FFFF_F000, Ordering::Relaxed);
     if !X2APIC.load(Ordering::Relaxed) {
-        super::paging::map_mmio(BASE.load(Ordering::Relaxed), 4096);
+        let regs = PhysAddr::new(base & 0xF_FFFF_F000);
+        BASE.store(super::paging::map_mmio(regs, 4096).unwrap_or(regs.virt()).get(), Ordering::Relaxed);
     }
     init_local();
 }

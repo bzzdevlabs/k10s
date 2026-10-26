@@ -1,5 +1,5 @@
 //! The kernel heap (`#[global_allocator]`), backed directly by the frame allocator — there is no fixed heap
-//! region, so the heap and the instance slots share all of RAM.
+//! region, so the heap and the instance slots share all of RAM. Heap memory is addressed through the direct map.
 //!
 //! * Small objects (≤ 2 KiB after rounding size up to the alignment) come from power-of-two size classes. Each class
 //!   keeps an intrusive free list, refilled one 4 KiB frame at a time. Freed blocks go back to their class
@@ -12,6 +12,7 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::null_mut;
 
 use super::frames::{self, Tag, FRAME};
+use super::VirtAddr;
 use crate::sync::IrqLock;
 
 const MIN_CLASS_LOG2: u32 = 4; // 16 bytes
@@ -59,7 +60,7 @@ unsafe impl GlobalAlloc for KernelHeap {
                 if st.free[c].is_null() {
                     // Refill: split one frame into blocks.
                     let Some(page) = frames::alloc(1, 1, Tag::HeapSmall) else { return null_mut() };
-                    let base = page as *mut u8;
+                    let base = page.ptr::<u8>();
                     let n = FRAME as usize / bsize;
                     for i in (0..n).rev() {
                         let b = base.add(i * bsize);
@@ -78,7 +79,7 @@ unsafe impl GlobalAlloc for KernelHeap {
                 match frames::alloc(n, align, Tag::HeapLarge) {
                     Some(p) => {
                         st.in_use += n * FRAME as usize;
-                        p as *mut u8
+                        p.ptr()
                     }
                     None => null_mut(),
                 }
@@ -98,7 +99,7 @@ unsafe impl GlobalAlloc for KernelHeap {
             }
             None => {
                 let (n, _) = large_frames(&l);
-                frames::free(p as u64, n, Tag::HeapLarge);
+                frames::free(VirtAddr::of(p).phys(), n, Tag::HeapLarge);
                 st.in_use -= n * FRAME as usize;
             }
         }

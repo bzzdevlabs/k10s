@@ -1,9 +1,10 @@
 //! The JIT engine: `k10_jit` machine code (docs/JIT-ABI.md) running directly on the coroutine stacks.
 //!
 //! * **Compile** (at apply, once per distinct module): `k10_jit::compile_blob` (no_std) → a position-independent
-//!   blob, copied into fresh frames through the identity map and then sealed read+execute ([`CodeMem`],
+//!   blob, copied into fresh frames through the direct map and then sealed read+execute there ([`CodeMem`],
 //!   `arch::paging::seal_code`): code pages are never writable while executable, and nothing else is executable
-//!   (NX). Code is freed (pages unsealed, frames returned) when the last service using it is gone.
+//!   (NX). Code runs at its direct-map address and is freed (pages unsealed, frames returned) when the last
+//!   service using it is gone.
 //! * **Invoke** runs on the current stack (a coroutine's, or the boot stack in the self tests). The `VmCtx` lives
 //!   in the invoking frame: `mem_base`/`mem_mask` = the instance slot (`2^k` + a 4 KiB tail ≥ the 8 bytes the
 //!   JIT may touch), `real_stack_limit` = stack bottom + canary + [`HOST_RESERVE`], `user` = an [`Invocation`]
@@ -33,6 +34,7 @@ use super::engine::HostCalls;
 use super::host::{HostFn, HOST_FNS};
 use crate::arch::paging;
 use crate::mem::frames::{self, Tag, FRAME};
+use crate::mem::{PhysAddr, VirtAddr};
 use crate::sync::{IrqLock, SetOnce};
 use crate::{coro, time};
 
@@ -43,13 +45,13 @@ pub const HOST_RESERVE: usize = 32 * 1024;
 
 /// Machine code of one module in sealed (read+execute) frames.
 pub struct CodeMem {
-    paddr: u64,
+    paddr: PhysAddr,
     pages: usize,
 }
 
 impl CodeMem {
     fn ptr(&self) -> *const u8 {
-        self.paddr as *const u8
+        self.paddr.ptr::<u8>().cast_const()
     }
 }
 
@@ -67,10 +69,10 @@ impl Drop for CodeMem {
 }
 
 /// Freed code frames (with several CPUs online), reused for code only: (address, pages).
-static CODE_POOL: IrqLock<Vec<(u64, usize)>> = IrqLock::new(Vec::new());
+static CODE_POOL: IrqLock<Vec<(PhysAddr, usize)>> = IrqLock::new(Vec::new());
 
 /// `pages` contiguous frames for code: a freed run of exactly that size, else new frames.
-fn code_frames(pages: usize) -> Option<u64> {
+fn code_frames(pages: usize) -> Option<PhysAddr> {
     {
         let mut pool = CODE_POOL.lock();
         if let Some(i) = pool.iter().position(|&(_, n)| n == pages) {
@@ -105,8 +107,8 @@ pub fn compile(m: &Module, imports: &[HostFn]) -> Result<JitModule, String> {
     let blob = k10_jit::compile_blob(m, OPTIONS.get().expect("JIT configured at boot")).map_err(|e| alloc::format!("jit: {e}"))?;
     let pages = blob.len().div_ceil(FRAME as usize).max(1);
     let paddr = code_frames(pages).ok_or("jit: out of memory for code")?;
-    // SAFETY: freshly allocated frames, identity-mapped writable and not yet executable.
-    let dst = unsafe { core::slice::from_raw_parts_mut(paddr as *mut u8, pages * FRAME as usize) };
+    // SAFETY: freshly allocated frames, writable and not yet executable in the direct map.
+    let dst = unsafe { core::slice::from_raw_parts_mut(paddr.ptr::<u8>(), pages * FRAME as usize) };
     let written = blob.write_to(dst);
     let code = CodeMem { paddr, pages };
     if !written || !paging::seal_code(paddr, pages) {
@@ -134,9 +136,9 @@ impl JitModule {
         self.meta.code_len()
     }
 
-    /// Physical (= virtual) address of the first code page.
-    pub fn code_addr(&self) -> u64 {
-        self.code.paddr
+    /// Address of the first code page (in the direct map).
+    pub fn code_addr(&self) -> VirtAddr {
+        self.code.paddr.virt()
     }
 
     pub fn export(&self, name: &str) -> Option<u32> {

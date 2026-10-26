@@ -5,6 +5,7 @@ use core::ptr::{read_volatile, write_volatile};
 
 use super::{Notifier, Transport, NO_VECTOR};
 use crate::arch::{inb, inl, inw, outb, outl, outw};
+use crate::mem::{PhysAddr, VirtAddr};
 use crate::pci::Device;
 
 // Legacy registers (I/O space).
@@ -121,16 +122,17 @@ impl Legacy {
     }
 }
 
+/// The capabilities' register ranges, in the direct map.
 pub struct Modern {
-    common: u64,
-    notify: u64,
+    common: VirtAddr,
+    notify: VirtAddr,
     notify_mult: u32,
-    device: u64,
+    device: Option<VirtAddr>,
 }
 
 impl Modern {
     fn new(d: &Device) -> Option<Modern> {
-        let (mut common, mut notify, mut device, mut mult) = (0, 0, 0, 0);
+        let (mut common, mut notify, mut device, mut mult) = (None, None, None, 0);
         // Each capability names a BAR, an offset and a length: only that range is mapped (sizing the BAR would cost
         // several configuration accesses, VM exits under a hypervisor).
         let mut bars: [Option<(bool, u64)>; 6] = [None; 6];
@@ -145,38 +147,39 @@ impl Modern {
             }
             let (off, len) = (d.read32(cap + 8) as u64, d.read32(cap + 12) as u64);
             let (io, base) = *bars[bar as usize].get_or_insert_with(|| d.bar(bar));
-            if io || base == 0 || !crate::arch::paging::map_mmio(base + off, len.max(1)) {
+            if io || base == 0 {
                 continue;
             }
+            let Some(at) = crate::arch::paging::map_mmio(PhysAddr::new(base + off), len.max(1)) else { continue };
             match kind {
-                CFG_COMMON if common == 0 => common = base + off,
-                CFG_NOTIFY if notify == 0 => {
-                    notify = base + off;
+                CFG_COMMON if common.is_none() => common = Some(at),
+                CFG_NOTIFY if notify.is_none() => {
+                    notify = Some(at);
                     mult = d.read32(cap + 16);
                 }
-                CFG_DEVICE if device == 0 => device = base + off,
+                CFG_DEVICE if device.is_none() => device = Some(at),
                 _ => {}
             }
         }
-        (common != 0 && notify != 0).then_some(Modern { common, notify, notify_mult: mult, device })
+        Some(Modern { common: common?, notify: notify?, notify_mult: mult, device })
     }
     fn r8(&self, o: u64) -> u8 {
-        unsafe { read_volatile((self.common + o) as *const u8) }
+        unsafe { read_volatile((self.common + o).ptr::<u8>()) }
     }
     fn r16(&self, o: u64) -> u16 {
-        unsafe { read_volatile((self.common + o) as *const u16) }
+        unsafe { read_volatile((self.common + o).ptr::<u16>()) }
     }
     fn r32(&self, o: u64) -> u32 {
-        unsafe { read_volatile((self.common + o) as *const u32) }
+        unsafe { read_volatile((self.common + o).ptr::<u32>()) }
     }
     fn w8(&self, o: u64, v: u8) {
-        unsafe { write_volatile((self.common + o) as *mut u8, v) }
+        unsafe { write_volatile((self.common + o).ptr::<u8>(), v) }
     }
     fn w16(&self, o: u64, v: u16) {
-        unsafe { write_volatile((self.common + o) as *mut u16, v) }
+        unsafe { write_volatile((self.common + o).ptr::<u16>(), v) }
     }
     fn w32(&self, o: u64, v: u32) {
-        unsafe { write_volatile((self.common + o) as *mut u32, v) }
+        unsafe { write_volatile((self.common + o).ptr::<u32>(), v) }
     }
     fn w64(&self, o: u64, v: u64) {
         self.w32(o, v as u32);
@@ -240,15 +243,13 @@ impl Modern {
     }
     /// A configuration field read with one access of `w` bytes.
     pub fn config_wide(&self, off: u16, w: usize) -> u64 {
-        if self.device == 0 {
-            return 0;
-        }
-        let a = self.device + off as u64;
+        let Some(device) = self.device else { return 0 };
+        let a = device + off as u64;
         unsafe {
             match w {
-                1 => read_volatile(a as *const u8) as u64,
-                2 => read_volatile(a as *const u16) as u64,
-                _ => read_volatile(a as *const u32) as u64,
+                1 => read_volatile(a.ptr::<u8>()) as u64,
+                2 => read_volatile(a.ptr::<u16>()) as u64,
+                _ => read_volatile(a.ptr::<u32>()) as u64,
             }
         }
     }

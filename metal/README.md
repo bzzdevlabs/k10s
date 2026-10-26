@@ -3,7 +3,8 @@
 k10-metal boots the k10s node runtime directly on a (virtual) x86-64 machine, with no Linux underneath
 (docs/DESIGN.md §2.9). Workloads are TIR modules, isolated by construction: masked memory accesses, structured
 control flow, and a closed host API. So the kernel needs no processes, no system calls, no user/kernel boundary,
-and no per-workload page tables. It runs one identity-mapped address space (all RAM, above 4 GiB too) on one or more
+and no per-workload page tables. It runs in one address space (the kernel in the upper half with a direct map of all
+physical memory, RAM above 4 GiB too; the lower half empty, left to user address spaces) on one or more
 cores (up to 64, from the ACPI MADT), with a timer, a NIC, an optional disk and its consoles (serial, the screen of
 a UEFI machine, UDP). It finds the platform in the ACPI tables, without an AML interpreter, powers off and reboots
 through ACPI, and arms the machine's hardware watchdog while it runs.
@@ -113,11 +114,13 @@ on top like an apply (an older manifest version is refused, the same one changes
 metal/                    its own cargo workspace (own target dir); path-depends on ../crates/k10-ir, k10-mesh, k10-jit
                           (kernel) and k10-lang (mkbundle)
   kernel/                 the kernel (x86_64-unknown-none, no_std + alloc), ~12k lines incl. comments and self tests
-    linker.ld, build.rs   linked at 1 MiB, non-PIE (.cargo/config.toml), optional embedded bundle
+    linker.ld, build.rs   loaded at 1 MiB, linked at KERNEL_BASE + 1 MiB (the top 2 GiB), non-PIE (.cargo/config.toml),
+                          optional embedded bundle
     src/boot.rs           PVH ELF note + 32-bit entry → page tables → long mode → kmain; Multiboot2 header and shim
     src/arch/             port I/O, MSRs, per-CPU GDT+TSS (IST for #DF), IDT + asm entry stubs, local APIC (x2APIC or
-                          xAPIC: timer, IPIs, INIT/STARTUP, NMI), I/O APIC routing, paging.rs (the identity map: all
-                          RAM, uncached device ranges, NX, W^X for the kernel image and JIT code, TLB generations)
+                          xAPIC: timer, IPIs, INIT/STARTUP, NMI), I/O APIC routing, paging.rs (the kernel's page
+                          tables: the direct map of all RAM, uncached device ranges, the image at its link address, NX,
+                          W^X for the kernel image and JIT code, TLB generations)
     src/acpi.rs           ACPI tables without AML: MADT, FADT, MCFG, HPET, SPCR, \_S5, virtio-mmio and power button
                           GPEs by DSDT/SSDT scan; MP table fallback
     src/power.rs          ACPI S5 power off, reset chain, the power button (SCI), the fatal-error path (stop the other
@@ -132,7 +135,8 @@ metal/                    its own cargo workspace (own target dir); path-depends
                           checkpoints, the node's own files
     src/osupdate.rs       cluster-rolled kernel updates: the gossip report, install into a slot, trial commit/abandon
     src/fw_cfg.rs         QEMU fw_cfg over I/O ports: named files (secrets under -kernel)
-    src/mem/              memory map (sorted, disjoint), frame allocator (bitmap), kernel heap, instance slots
+    src/mem/              physical and virtual addresses (addr.rs), memory map (sorted, disjoint), frame allocator
+                          (bitmap), kernel heap, instance slots
     src/time.rs           TSC clock (kvmclock / CPUID 0x15 / HPET / PM timer / PIT), wall clock (kvmclock resync), guest
                           clock, preemption flag + JIT preemption word
     src/sntp.rs           SNTP client (without kvmclock): servers, DNS names, step or slew
@@ -179,13 +183,15 @@ metal/                    its own cargo workspace (own target dir); path-depends
 note. QEMU's `pvh.bin` option ROM then enters it in 32-bit protected mode, with paging off and `ebx` pointing at
 `hvm_start_info`, which holds the E820 map, the command line and `-initrd` as module 0. Multiboot v1 was rejected
 for two reasons. QEMU's Multiboot loader refuses ELF64 ("give a 32bit one"), so it would need a 32-bit wrapper or
-the a.out kludge with a flat binary. And PVH is also what Firecracker and Cloud Hypervisor boot. The trampoline
-(boot.rs) does the following:
+the a.out kludge with a flat binary. And PVH is also what Firecracker and Cloud Hypervisor boot. Loaders place the
+ELF's segments at their physical addresses (`p_paddr`, from 1 MiB); the trampoline (boot.rs) runs there, before
+paging, and does the following:
 1. Zeroes .bss.
-2. Identity-maps 4 GiB with 2 MiB pages (PML4 → PDPT → 4 PDs). The top 512 MiB (MMIO, APIC) is uncached.
+2. Maps the first 4 GiB with 2 MiB pages (PDPT → 4 PDs) twice, identity (to turn paging on) and in the direct map,
+   and the first GiB at `KERNEL_BASE` (the image; "Virtual memory"). The top 512 MiB (MMIO, APIC) is uncached.
 3. Enables PAE, long mode and paging (CR0.WP: read-only pages are read-only for the kernel too). It also enables
    SSE, for JIT code; the kernel itself is soft-float.
-4. Loads a GDT, far-returns to 64-bit code, sets the stack and calls `kmain`.
+4. Loads a GDT, far-returns to 64-bit code, jumps to the image's link address, sets the stack and calls `kmain`.
 
 The image works with SeaBIOS (QEMU's default), qboot (`BIOS=/usr/share/qemu/qboot.rom`, faster; it leaves PCI BARs
 unprogrammed, so the PCI code assigns them itself), QEMU `microvm`, Firecracker and Cloud Hypervisor.
@@ -264,9 +270,10 @@ sets the kernel's arguments whose meaning it shares (bootcfg.rs; the command lin
 
 `k10s.KEY=VALUE` on the command line overrides the file, as on Tier 1. The kernel listens on 7946, 7947 and 80 in
 any case; the addresses are what it gives its peers (forwarded ports under QEMU). Once the node is healthy (ready for
-15 s, at least one frame received; a trial kernel: once it commits), efi.rs deletes k10boot's boot counter: a call to `SetVariable` on page tables of
-its own (the first 4 GiB and the firmware's runtime regions identity-mapped, executable), switched in on CPU 0 with
-interrupts off for the call only. Two counted native boots in a row that never get there make k10boot boot Tier 1
+15 s, at least one frame received; a trial kernel: once it commits), efi.rs deletes k10boot's boot counter: a call
+to `SetVariable` on page tables of its own (the kernel's upper half; the first 4 GiB and the firmware's runtime
+regions identity-mapped, executable), switched in on CPU 0 with interrupts off for the call only; its arguments are
+in the kernel image and passed by physical address. Two counted native boots in a row that never get there make k10boot boot Tier 1
 (docs/OS.md, "Tiers").
 
 **Memory.** A bitmap frame allocator covers all E820 RAM above 1 MiB. It excludes the kernel image and the boot
@@ -293,20 +300,46 @@ wakes (IPI) the halted CPUs that hold queued or waiting invocations, which look 
 The memory map is kept sorted and disjoint (the more restrictive type wins where firmware entries overlap), with
 adjacent regions merged, so UEFI maps of 100+ descriptors take a few entries.
 
-**The identity map (arch/paging.rs).** boot.rs maps the first 4 GiB with 2 MiB pages; right after the frame
-allocator starts, the kernel rebuilds the map from the memory map. IA32_PAT is set to its power-on layout on every
-CPU, so PCD|PWT always means uncached whatever the firmware programmed. Below 4 GiB, a 2 MiB page holding any memory
-(RAM, ACPI tables, ACPI NVS) is write-back and every other one uncached: the PCI hole with every 32-bit BAR, ECAM,
-the I/O APICs, the HPET and the local APIC. RAM above 4 GiB is mapped write-back with 1 GiB pages where the CPU has
-them (2 MiB, and 4 KiB at unaligned edges, otherwise). Devices above 4 GiB (64-bit BARs; OVMF puts them at hundreds
-of GiB) are mapped uncached by `map_mmio` when a driver claims them. Identity mapping limits physical addresses to
-the 47-bit lower canonical half. EFER.NXE is enabled and everything is non-executable except the kernel's text.
-The first 2 MiB (low memory and the kernel image) are split into
-4 KiB pages: `.text` read+execute, `.rodata` read-only, the rest read+write, page 0 not present (null guard). JIT
-code gets its own frames (tag `code`): written through the writable, non-executable identity mapping, then
-*sealed* read+execute (the large page around them is split once, its page table kept) and never written again;
-when the last service using the code is gone, the pages are unsealed and freed. So nothing is ever writable and
-executable at the same time: not the kernel, not instance memory, not JIT code.
+**Virtual memory (arch/paging.rs, mem/addr.rs).** Four-level paging, 48-bit addresses:
+
+| Virtual range | PML4 slots | Contents |
+|---|---|---|
+| `0` – `0x0000_7fff_ffff_ffff` | 0–255 | lower half: nothing mapped (user address spaces) |
+| `0xffff_8000_0000_0000` – `0xffff_bfff_ffff_ffff` | 256–383 | direct map: physical address `p` at `PHYS_OFFSET` + `p`, 64 TiB |
+| `0xffff_c000_0000_0000` – `0xffff_ff7f_ffff_ffff` | 384–510 | unused |
+| `0xffff_ff80_0000_0000` – `0xffff_ffff_ffff_ffff` | 511 | the kernel image at `KERNEL_BASE` (`0xffff_ffff_8000_0000`) + its physical address: the top 2 GiB, the `kernel` code model |
+
+Every physical↔virtual conversion is explicit: `PhysAddr` (what devices, page-table entries, the boot protocol and
+the firmware use) and `VirtAddr` (what the CPU dereferences) convert only through the direct map (`PhysAddr::virt`,
+`VirtAddr::phys`, which also takes kernel-image addresses). The frame allocator hands out `PhysAddr`s; the heap,
+instance slots, coroutine and CPU stacks, page tables and JIT code use their direct-map addresses; a `DmaRegion`
+gives the device its physical address and the CPU its virtual one, and so do descriptors, virtqueues, PRP lists and
+command tables; device registers (BARs, ECAM, APICs, HPET, ACPI registers, the UART, the framebuffer) are mapped
+uncached (the framebuffer write-combining) in the direct map, whose address `map_mmio` returns; ACPI tables, the PVH
+`start_info`, the memory map and the boot modules are read through it; kvmclock and steal-time areas are registered
+by physical address. Physical addresses at or above 2^46 are out of the direct map's reach: RAM there is ignored
+(the boot says how much), a device there is refused.
+
+boot.rs maps the first 4 GiB with 2 MiB pages, identity and in the direct map, and the first GiB at `KERNEL_BASE`;
+right after the frame allocator starts, the kernel builds its own tables from the memory map and drops the
+identity map: from then on nothing below 2^47 is mapped. IA32_PAT is set to its power-on layout on every CPU, so
+PCD|PWT always means uncached whatever the firmware programmed. In the direct map below 4 GiB, a 2 MiB page holding
+any memory (RAM, ACPI tables, ACPI NVS) is write-back and every other one uncached: the PCI hole with every 32-bit
+BAR, ECAM, the I/O APICs, the HPET and the local APIC. RAM above 4 GiB is mapped write-back with 1 GiB pages where
+the CPU has them (2 MiB, and 4 KiB at unaligned edges, otherwise). Devices above 4 GiB (64-bit BARs; OVMF puts them
+at hundreds of GiB) are mapped uncached by `map_mmio` when a driver claims them. EFER.NXE is enabled and everything
+is non-executable except the kernel's text. The image is mapped at its link address in 4 KiB pages: `.text`
+read+execute, `.rodata` read-only, the rest read+write; in the direct map, the first 2 MiB and the image are split
+into 4 KiB pages too, with the alias of `.text` and `.rodata` read-only. JIT code gets its own frames (tag `code`):
+written through the writable, non-executable direct map, then *sealed* read+execute there (the large page around
+them is split once, its page table kept), run at that address and never written again; when the last service using
+the code is gone, the pages are unsealed and freed. So nothing is ever writable and executable at the same time:
+not the kernel, not instance memory, not JIT code.
+
+Every CPU runs on the kernel's PML4. Other page tables share its upper half by copying its PML4 entries 256–511
+when they are built (an entry, once present, never changes): the application processors' start (smp.rs: the upper
+half plus page 0x8000 identity-mapped read+execute, the only identity mapping after boot, used by an AP for its
+first instructions only) and UEFI runtime calls (efi.rs).
 
 **Interrupts and time.** The IDT has handlers for every exception, which print a register dump (CR2 for page
 faults) and take the fatal-error path (power.rs). The double fault, NMI and machine-check handlers use an IST stack.
@@ -469,11 +502,12 @@ did not change keep their runtime (warm instances, counters), prepared code is r
 invocations finish on the old code and queued ones move to the new version.
 
 **SMP (smp.rs, percpu.rs).** The boot CPU takes the CPUs the MADT lists as enabled (or the MP table's), up to 64 and
-`k10.smp=N`, copies a 16→32→64-bit trampoline to page 0x8000 (made read+execute just for the bring-up; the APs take
-their index with a `lock xadd` while paging is still off, so the page never needs to be writable for them), and sends
-each AP its own INIT, then after 1 ms a STARTUP, and a second STARTUP to those not up 200 µs later — all APs at once,
-and none the firmware did not list. Each AP loads the shared page tables (with NXE), gets its own stack, GDT + TSS +
-IST stack, the shared IDT, the PAT, its local APIC (in the boot CPU's mode; TSC-deadline timer) and its per-CPU block
+`k10.smp=N`, copies a 16→32→64-bit trampoline to page 0x8000 through the direct map (whose alias of the page then
+becomes read-only; the APs take their index with a `lock xadd` while paging is still off, so the page never needs to
+be writable for them), and sends each AP its own INIT, then after 1 ms a STARTUP, and a second STARTUP to those not
+up 200 µs later — all APs at once, and none the firmware did not list. Each AP turns paging on with the trampoline's
+page tables ("Virtual memory"), jumps to the kernel image, loads the shared page tables (with NXE), gets its own
+stack, GDT + TSS + IST stack, the shared IDT, the PAT, its local APIC (in the boot CPU's mode; TSC-deadline timer) and its per-CPU block
 (GS base), and enters `runtime::worker_main`. Under TCG, 32 CPUs are online 5 ms after the first INIT. Locks (`IrqLock`) are spinlocks that also mask interrupts on the
 holding CPU; per-CPU state (preemption request, JIT preemption word, coroutine bookkeeping, scheduler queues) needs
 none.
@@ -788,11 +822,11 @@ and k10boot (UEFI); GRUB's Multiboot2 path boots `/k10s/metal.elf` only.
   machine without one of these runs without a watchdog (the boot says nothing unless `k10.verbose`).
 * **No guard pages on coroutine stacks.** A canary is checked at every switch instead, and the call depth is
   bounded.
-* **No guard pages around instance slots.** Slots are contiguous frames in the 2 MiB identity map; a guard would cost
+* **No guard pages around instance slots.** Slots are contiguous frames in the direct map's large pages; a guard would cost
   a page-table split and a frame per slot plus TLB shootdowns on every allocation (the kernel never revokes rights
   it handed out), and would only catch linear overruns, which masked SFI addressing cannot produce (the 4 KiB tail
   absorbs the 8-byte straddle). Hardware protection that does exist: slot memory is never executable (NX), JIT code
-  and the kernel are W^X, page 0 is unmapped. There is no OS layer under the kernel: an SFI escape here reaches
+  and the kernel are W^X, the lower half is unmapped (null pointers fault). There is no OS layer under the kernel: an SFI escape here reaches
   everything, which is why the JIT's output is verified independently (SECURITY.md, "Defense in depth").
 * **BIOS boots are unchecked.** GRUB verifies no signature and k10boot's boot counter exists only on UEFI.
 

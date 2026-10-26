@@ -12,6 +12,7 @@ use core::fmt::{self, Write};
 
 use crate::arch::{inb, outb};
 
+use crate::mem::PhysAddr;
 use crate::sync::IrqLock;
 
 const COM1: u16 = 0x3F8;
@@ -24,7 +25,7 @@ const THRE_SPINS: u32 = 1 << 16;
 pub enum Port {
     None,
     Io(u16),
-    /// Memory-mapped 16550 with registers `1 << shift` bytes apart, accessed 8 or 32 bits wide.
+    /// Memory-mapped 16550 at physical `base` with registers `1 << shift` bytes apart, accessed 8 or 32 bits wide.
     Mmio { base: u64, shift: u8, wide: bool },
 }
 
@@ -46,9 +47,14 @@ impl Port {
         match *self {
             Port::None => 0xFF,
             Port::Io(p) => inb(p + reg),
+            // SAFETY: mapped uncached in the direct map by `set_port`.
             Port::Mmio { base, shift, wide } => unsafe {
-                let a = base + ((reg as u64) << shift);
-                if wide { core::ptr::read_volatile(a as *const u32) as u8 } else { core::ptr::read_volatile(a as *const u8) }
+                let a = PhysAddr::new(base + ((reg as u64) << shift));
+                if wide {
+                    core::ptr::read_volatile(a.ptr::<u32>()) as u8
+                } else {
+                    core::ptr::read_volatile(a.ptr::<u8>())
+                }
             },
         }
     }
@@ -57,8 +63,12 @@ impl Port {
             Port::None => {}
             Port::Io(p) => outb(p + reg, v),
             Port::Mmio { base, shift, wide } => unsafe {
-                let a = base + ((reg as u64) << shift);
-                if wide { core::ptr::write_volatile(a as *mut u32, v as u32) } else { core::ptr::write_volatile(a as *mut u8, v) }
+                let a = PhysAddr::new(base + ((reg as u64) << shift));
+                if wide {
+                    core::ptr::write_volatile(a.ptr::<u32>(), v as u32)
+                } else {
+                    core::ptr::write_volatile(a.ptr::<u8>(), v)
+                }
             },
         }
     }
@@ -84,7 +94,7 @@ pub fn init() {
 /// Moves the console to `port` (configured at `baud`, 0 = as the firmware left it; `fifo`: a 16550, not a 16450).
 pub fn set_port(port: Port, baud: u32, fifo: bool) {
     if let Port::Mmio { base, .. } = port {
-        if !crate::arch::paging::map_mmio(base, 4096) {
+        if crate::arch::paging::map_mmio(PhysAddr::new(base), 4096).is_none() {
             return;
         }
     }

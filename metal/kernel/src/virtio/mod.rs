@@ -18,6 +18,7 @@ use core::sync::atomic::{fence, Ordering};
 
 use crate::dev::DmaRegion;
 use crate::mem::frames::{Tag, FRAME};
+use crate::mem::VirtAddr;
 
 pub const VENDOR: u16 = 0x1AF4;
 pub const TYPE_NET: u32 = 1;
@@ -47,16 +48,16 @@ pub enum Transport {
 #[derive(Clone, Copy)]
 pub enum Notifier {
     Port(u16),
-    Mmio16(u64),
-    Mmio32(u64),
+    Mmio16(VirtAddr),
+    Mmio32(VirtAddr),
 }
 
 impl Notifier {
     fn notify(&self, q: u16) {
         match *self {
             Notifier::Port(p) => crate::arch::outw(p, q),
-            Notifier::Mmio16(a) => unsafe { write_volatile(a as *mut u16, q) },
-            Notifier::Mmio32(a) => unsafe { write_volatile(a as *mut u32, q as u32) },
+            Notifier::Mmio16(a) => unsafe { write_volatile(a.ptr::<u16>(), q) },
+            Notifier::Mmio32(a) => unsafe { write_volatile(a.ptr::<u32>(), q as u32) },
         }
     }
 }
@@ -227,14 +228,14 @@ impl Queue {
         let page = FRAME as usize;
         let used_off = (16 * n + 6 + 2 * n).div_ceil(page) * page;
         let mem = DmaRegion::alloc(used_off + (6 + 8 * n).div_ceil(page) * page, tag)?;
-        let base = mem.paddr();
-        let notifier = t.queue_setup(index, size, base, base + 16 * n as u64, base + used_off as u64, vector)?;
+        let (pa, va) = (mem.paddr().get(), mem.virt());
+        let notifier = t.queue_setup(index, size, pa, pa + 16 * n as u64, pa + used_off as u64, vector)?;
         Some(Queue {
             index,
             size,
-            desc: base as *mut Desc,
-            avail: (base + 16 * n as u64) as *mut u16,
-            used: (base + used_off as u64) as *mut u16,
+            desc: va.ptr(),
+            avail: (va + 16 * n as u64).ptr(),
+            used: (va + used_off as u64).ptr(),
             avail_idx: 0,
             last_used: 0,
             notifier,

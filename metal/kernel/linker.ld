@@ -1,13 +1,17 @@
-/* k10-metal: linked at 1 MiB, loaded there by QEMU's ELF loader (PVH boot), k10boot or GRUB, identity-mapped afterwards. */
+/* k10-metal: loaded at physical 1 MiB by QEMU's ELF loader (PVH boot), k10boot or GRUB (program headers' p_paddr),
+   linked at KERNEL_BASE + 1 MiB in the top 2 GiB (mem/addr.rs): the first section's AT() sets every section's load
+   address to its link address less KERNEL_BASE. The 32-bit entry code runs at physical addresses (boot.rs). */
 ENTRY(_pvh_start)
+
+KERNEL_BASE = 0xFFFFFFFF80000000;
 
 SECTIONS
 {
-    . = 1M;
+    . = KERNEL_BASE + 1M;
     __kernel_start = .;
 
     /* The PVH entry note must be in a PT_NOTE segment, 4-byte aligned (QEMU aligns the name to p_align). */
-    .note.Xen : ALIGN(4) { KEEP(*(.note.Xen)) }
+    .note.Xen : AT(ADDR(.note.Xen) - KERNEL_BASE) ALIGN(4) { KEEP(*(.note.Xen)) }
 
     /* GRUB looks for the Multiboot2 header in the first 32 KiB of the file (boot.rs). */
     .multiboot2 : ALIGN(8) { KEEP(*(.multiboot2)) }

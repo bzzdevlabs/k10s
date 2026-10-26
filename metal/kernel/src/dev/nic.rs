@@ -12,33 +12,34 @@ use k10_drivers::{e1000e, igc, ring, rtl8169, DmaMem, Hw, IrqMode, Link, Nic, Re
 use super::{DmaRegion, NetCounters, NetDevice, NetRx, NetTx};
 use crate::kprintln;
 use crate::mem::frames::Tag;
+use crate::mem::{PhysAddr, VirtAddr};
 use crate::pci;
 
 /// A memory BAR, mapped uncached.
 #[derive(Clone, Copy)]
 pub struct Mmio {
-    base: u64,
+    base: VirtAddr,
 }
 
 impl Regs for Mmio {
     fn read32(&self, off: u32) -> u32 {
         // SAFETY: inside the BAR mapped by `probe`.
-        unsafe { core::ptr::read_volatile((self.base + off as u64) as *const u32) }
+        unsafe { core::ptr::read_volatile((self.base + off as u64).ptr::<u32>()) }
     }
     fn write32(&self, off: u32, v: u32) {
-        unsafe { core::ptr::write_volatile((self.base + off as u64) as *mut u32, v) }
+        unsafe { core::ptr::write_volatile((self.base + off as u64).ptr::<u32>(), v) }
     }
     fn read16(&self, off: u32) -> u16 {
-        unsafe { core::ptr::read_volatile((self.base + off as u64) as *const u16) }
+        unsafe { core::ptr::read_volatile((self.base + off as u64).ptr::<u16>()) }
     }
     fn write16(&self, off: u32, v: u16) {
-        unsafe { core::ptr::write_volatile((self.base + off as u64) as *mut u16, v) }
+        unsafe { core::ptr::write_volatile((self.base + off as u64).ptr::<u16>(), v) }
     }
     fn read8(&self, off: u32) -> u8 {
-        unsafe { core::ptr::read_volatile((self.base + off as u64) as *const u8) }
+        unsafe { core::ptr::read_volatile((self.base + off as u64).ptr::<u8>()) }
     }
     fn write8(&self, off: u32, v: u8) {
-        unsafe { core::ptr::write_volatile((self.base + off as u64) as *mut u8, v) }
+        unsafe { core::ptr::write_volatile((self.base + off as u64).ptr::<u8>(), v) }
     }
 }
 
@@ -102,7 +103,7 @@ impl Hw for KHw {
 
 impl DmaMem for DmaRegion {
     fn paddr(&self) -> u64 {
-        DmaRegion::paddr(self)
+        DmaRegion::paddr(self).get()
     }
     fn ptr(&self) -> *mut u8 {
         DmaRegion::ptr(self)
@@ -188,7 +189,7 @@ static IRQ_KIND: AtomicU32 = AtomicU32::new(0);
 static IRQ_XID: AtomicU32 = AtomicU32::new(0);
 
 fn hook_mmio() -> Mmio {
-    Mmio { base: IRQ_BASE.load(Ordering::Relaxed) }
+    Mmio { base: VirtAddr::new(IRQ_BASE.load(Ordering::Relaxed)) }
 }
 
 fn rtl_chip() -> rtl8169::Chip {
@@ -236,13 +237,13 @@ pub fn probe(d: &pci::Device, nbufs: u16) -> Option<Box<dyn NetDevice>> {
     })?;
     let (_, base) = d.bar(bar);
     let size = d.bar_size(bar).max(0x1000);
-    if !crate::arch::paging::map_mmio(base, size) {
+    let Some(regs) = crate::arch::paging::map_mmio(PhysAddr::new(base), size) else {
         kprintln!("{model}: BAR {bar} at {base:#x} cannot be mapped");
         return None;
-    }
+    };
     // Memory decoding first; bus mastering once the driver has reset the device (Hw::bus_master).
     d.enable(false);
-    let hw = KHw { mmio: Mmio { base }, dev: *d };
+    let hw = KHw { mmio: Mmio { base: regs }, dev: *d };
     // Interrupt: igb/igc take MSI-X only, e1000e MSI only, Realtek either.
     let msix = matches!(id.family, Family::I82576 | Family::I350 | Family::I210 | Family::I225 | Family::Rtl8168 | Family::Rtl8125)
         .then(|| d.msix())
@@ -275,7 +276,7 @@ pub fn probe(d: &pci::Device, nbufs: u16) -> Option<Box<dyn NetDevice>> {
     match dev {
         Ok(n) => {
             if n.has_interrupts() {
-                IRQ_BASE.store(base, Ordering::Relaxed);
+                IRQ_BASE.store(regs.get(), Ordering::Relaxed);
                 IRQ_KIND.store(kind, Ordering::Release);
                 super::set_net_hooks(hook_rx, Some(hook_ack));
             }

@@ -1774,7 +1774,7 @@ fn status_json() -> String {
     let fs = frames::stats();
     let hs = crate::mem::heap::stats();
     let (kstart, kend) = crate::boot::kernel_image();
-    let kernel = kend - kstart;
+    let kernel = kend.get() - kstart.get();
     let (stacks, stack_hw) = coro::stats();
     let (services, version, kv_bytes) = {
         let node = NODE.lock();

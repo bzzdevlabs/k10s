@@ -12,6 +12,7 @@
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::arch::{self, cpuid, inb, outb, rdtsc, wrmsr};
+use crate::mem::{PhysAddr, VirtAddr};
 use crate::sync::{Global, SetOnce};
 use k10_host::clock::{EdgeCache, GuestClock};
 
@@ -257,7 +258,7 @@ pub fn init_steal_time() {
     if b != u32::from_le_bytes(*b"KVMK") || cpuid(0x4000_0001, 0).0 & KVM_FEATURE_STEAL_TIME == 0 {
         return;
     }
-    wrmsr(MSR_KVM_STEAL_TIME, &raw mut STEAL as u64 | 1);
+    wrmsr(MSR_KVM_STEAL_TIME, VirtAddr::of(&raw const STEAL).phys().get() | 1);
     STEAL_ON.store(true, Ordering::Relaxed);
 }
 
@@ -334,7 +335,7 @@ impl PvReading {
 
 /// Reads this CPU's kvmclock (registered for the read only).
 fn pvclock_read() -> PvReading {
-    wrmsr(MSR_KVM_SYSTEM_TIME_NEW, &raw mut PVCLOCK as u64 | 1);
+    wrmsr(MSR_KVM_SYSTEM_TIME_NEW, VirtAddr::of(&raw const PVCLOCK).phys().get() | 1);
     let r = loop {
         // The hypervisor makes `version` odd while updating.
         // SAFETY: plain volatile reads of a static that only the hypervisor writes.
@@ -360,7 +361,7 @@ fn pvclock_read() -> PvReading {
 
 /// Unix time (ns) at kvmclock system time 0, as the host's clock says now.
 fn kvm_wall_base_ns() -> u64 {
-    wrmsr(MSR_KVM_WALL_CLOCK_NEW, &raw mut PVWALL as u64);
+    wrmsr(MSR_KVM_WALL_CLOCK_NEW, VirtAddr::of(&raw const PVWALL).phys().get());
     loop {
         // SAFETY: as in `pvclock_read`.
         let (v, sec, nsec, v2) = unsafe {
@@ -441,10 +442,8 @@ fn calibrate(read: &dyn Fn() -> u64, mask: u64, hz: u64, ms: u64) -> Option<u64>
 
 /// HPET main counter: period (femtoseconds) in the capabilities register, enabled if the firmware left it off.
 fn hpet_hz(base: u64) -> Option<u64> {
-    if !crate::arch::paging::map_mmio(base, 1024) {
-        return None;
-    }
-    let reg = |o: u64| (base + o) as *mut u64;
+    let regs = crate::arch::paging::map_mmio(PhysAddr::new(base), 1024)?;
+    let reg = |o: u64| (regs + o).ptr::<u64>();
     // SAFETY: the HPET register block (ACPI HPET table), mapped uncached above.
     let cap = unsafe { core::ptr::read_volatile(reg(0)) };
     let period_fs = cap >> 32;

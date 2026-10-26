@@ -10,6 +10,8 @@
 use core::ptr::read_unaligned;
 use k10_bootproto::e820;
 
+use crate::mem::PhysAddr;
+
 const START_MAGIC: u32 = 0x336e_c578;
 /// As many as k10boot hands over (merged).
 pub const MAX_MEMMAP: usize = 256;
@@ -49,14 +51,14 @@ struct ModEntry {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Module {
-    pub paddr: u64,
+    pub paddr: PhysAddr,
     pub size: u64,
     name: [u8; MAX_NAME],
     name_len: usize,
 }
 
 impl Module {
-    const EMPTY: Module = Module { paddr: 0, size: 0, name: [0; MAX_NAME], name_len: 0 };
+    const EMPTY: Module = Module { paddr: PhysAddr::new(0), size: 0, name: [0; MAX_NAME], name_len: 0 };
 
     /// The loader's name for it (empty for QEMU's `-initrd`).
     pub fn name(&self) -> &str {
@@ -68,7 +70,7 @@ impl Module {
     /// # Safety
     /// The module must not have been released (frames::release_module).
     pub unsafe fn bytes(&self) -> &'static [u8] {
-        unsafe { core::slice::from_raw_parts(self.paddr as *const u8, self.size as usize) }
+        unsafe { core::slice::from_raw_parts(self.paddr.ptr::<u8>(), self.size as usize) }
     }
 }
 
@@ -123,12 +125,12 @@ impl BootInfo {
     }
 }
 
-/// Parses the start info at `paddr` (identity-mapped). Panics on a bad magic: there is no other boot path.
+/// Parses the start info at `paddr` (through the direct map). Panics on a bad magic: there is no other boot path.
 ///
 /// # Safety
 /// `paddr` must be the pointer the loader passed in `ebx`.
-pub unsafe fn parse(paddr: u64) -> BootInfo {
-    let si: StartInfo = read_unaligned(paddr as *const StartInfo);
+pub unsafe fn parse(paddr: PhysAddr) -> BootInfo {
+    let si: StartInfo = read_unaligned(paddr.ptr::<StartInfo>());
     assert!(si.magic == START_MAGIC, "PVH start info: bad magic {:#x}", si.magic);
     let mut bi = BootInfo {
         memmap: [MemRegion::default(); MAX_MEMMAP],
@@ -145,7 +147,7 @@ pub unsafe fn parse(paddr: u64) -> BootInfo {
     // Merged as it is copied: UEFI maps have hundreds of entries, adjacent ones mostly of the same type.
     let mut n = 0;
     for i in 0..si.memmap_entries as usize {
-        let e: MemRegion = read_unaligned((si.memmap_paddr as *const MemRegion).add(i));
+        let e: MemRegion = read_unaligned(PhysAddr::new(si.memmap_paddr).ptr::<MemRegion>().add(i));
         if n == MAX_MEMMAP {
             n = e820::normalize(&mut bi.memmap);
             if n == MAX_MEMMAP {
@@ -159,8 +161,8 @@ pub unsafe fn parse(paddr: u64) -> BootInfo {
     bi.memmap_len = e820::normalize(&mut bi.memmap[..n]);
     let n = (si.nr_modules as usize).min(MAX_MODULES);
     for i in 0..n {
-        let m: ModEntry = read_unaligned((si.modlist_paddr as *const ModEntry).add(i));
-        let mut module = Module { paddr: m.paddr, size: m.size, ..Module::EMPTY };
+        let m: ModEntry = read_unaligned(PhysAddr::new(si.modlist_paddr).ptr::<ModEntry>().add(i));
+        let mut module = Module { paddr: PhysAddr::new(m.paddr), size: m.size, ..Module::EMPTY };
         module.name_len = copy_cstr(m.cmdline_paddr, &mut module.name);
         // A name is printable ASCII: qboot leaves module command lines undefined (their upper half is garbage).
         if !module.name[..module.name_len].iter().all(|c| c.is_ascii_graphic()) {
@@ -185,12 +187,12 @@ pub unsafe fn parse(paddr: u64) -> BootInfo {
 }
 
 /// Copies the NUL-terminated string at `paddr` (0: none) into `out`; returns its length (cut at `out`'s size).
-/// Only the first 4 GiB are mapped this early: a pointer beyond is no string.
+/// Only the first 4 GiB are in the direct map this early: a pointer beyond is no string.
 unsafe fn copy_cstr(paddr: u64, out: &mut [u8]) -> usize {
     if paddr == 0 || paddr >= (1 << 32) - out.len() as u64 {
         return 0;
     }
-    let p = paddr as *const u8;
+    let p = PhysAddr::new(paddr).ptr::<u8>().cast_const();
     let mut len = 0;
     while len < out.len() && *p.add(len) != 0 {
         out[len] = *p.add(len);

@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use super::{BlockDevice, BlockError, BlockOp, BlockRequest, DmaRegion};
 use crate::kprintln;
 use crate::mem::frames::Tag;
+use crate::mem::{PhysAddr, VirtAddr};
 
 const CAP: u64 = 0x00;
 const CC: u64 = 0x14;
@@ -45,12 +46,12 @@ struct Queue {
     sq_tail: u16,
     cq_head: u16,
     phase: u16,
-    sq_db: u64,
-    cq_db: u64,
+    sq_db: VirtAddr,
+    cq_db: VirtAddr,
 }
 
 impl Queue {
-    fn new(depth: u16, sq_db: u64, cq_db: u64) -> Option<Queue> {
+    fn new(depth: u16, sq_db: VirtAddr, cq_db: VirtAddr) -> Option<Queue> {
         Some(Queue {
             sq: DmaRegion::alloc(depth as usize * 64, Tag::Kernel)?,
             cq: DmaRegion::alloc(depth as usize * 16, Tag::Kernel)?,
@@ -65,38 +66,38 @@ impl Queue {
 
     /// Queues a command and rings the submission doorbell.
     fn push(&mut self, cmd: &[u32; 16]) {
-        let at = self.sq.paddr() + self.sq_tail as u64 * 64;
+        let at = self.sq.virt() + self.sq_tail as u64 * 64;
         for (i, w) in cmd.iter().enumerate() {
             // SAFETY: inside the submission queue's region.
-            unsafe { core::ptr::write_volatile((at + 4 * i as u64) as *mut u32, *w) };
+            unsafe { core::ptr::write_volatile((at + 4 * i as u64).ptr::<u32>(), *w) };
         }
         self.sq_tail = (self.sq_tail + 1) % self.depth;
         // SAFETY: the mapped doorbell register.
-        unsafe { core::ptr::write_volatile(self.sq_db as *mut u32, self.sq_tail as u32) };
+        unsafe { core::ptr::write_volatile(self.sq_db.ptr::<u32>(), self.sq_tail as u32) };
     }
 
     /// The next completion: (command id, status field without the phase bit).
     fn pop(&mut self) -> Option<(u16, u16)> {
-        let at = self.cq.paddr() + self.cq_head as u64 * 16;
+        let at = self.cq.virt() + self.cq_head as u64 * 16;
         // SAFETY: inside the completion queue's region.
-        let st = unsafe { core::ptr::read_volatile((at + 14) as *const u16) };
+        let st = unsafe { core::ptr::read_volatile((at + 14).ptr::<u16>()) };
         if st & 1 != self.phase {
             return None;
         }
-        let cid = unsafe { core::ptr::read_volatile((at + 12) as *const u16) };
+        let cid = unsafe { core::ptr::read_volatile((at + 12).ptr::<u16>()) };
         self.cq_head += 1;
         if self.cq_head == self.depth {
             self.cq_head = 0;
             self.phase ^= 1;
         }
         // SAFETY: the mapped doorbell register.
-        unsafe { core::ptr::write_volatile(self.cq_db as *mut u32, self.cq_head as u32) };
+        unsafe { core::ptr::write_volatile(self.cq_db.ptr::<u32>(), self.cq_head as u32) };
         Some((cid, st >> 1))
     }
 }
 
 pub struct Nvme {
-    regs: u64,
+    regs: VirtAddr,
     admin: Queue,
     io: Queue,
     nsid: u32,
@@ -120,27 +121,27 @@ pub struct Nvme {
 // SAFETY: owned registers and regions, used by one CPU at a time.
 unsafe impl Send for Nvme {}
 
-fn r32(regs: u64, off: u64) -> u32 {
+fn r32(regs: VirtAddr, off: u64) -> u32 {
     // SAFETY: the mapped register block.
-    unsafe { core::ptr::read_volatile((regs + off) as *const u32) }
+    unsafe { core::ptr::read_volatile((regs + off).ptr::<u32>()) }
 }
 
-fn w32(regs: u64, off: u64, v: u32) {
+fn w32(regs: VirtAddr, off: u64, v: u32) {
     // SAFETY: the mapped register block.
-    unsafe { core::ptr::write_volatile((regs + off) as *mut u32, v) }
+    unsafe { core::ptr::write_volatile((regs + off).ptr::<u32>(), v) }
 }
 
-fn r64(regs: u64, off: u64) -> u64 {
+fn r64(regs: VirtAddr, off: u64) -> u64 {
     r32(regs, off) as u64 | (r32(regs, off + 4) as u64) << 32
 }
 
-fn w64(regs: u64, off: u64, v: u64) {
+fn w64(regs: VirtAddr, off: u64, v: u64) {
     w32(regs, off, v as u32);
     w32(regs, off + 4, (v >> 32) as u32);
 }
 
 /// Waits until `CSTS & mask == want` (false after `ms`).
-fn wait_csts(regs: u64, mask: u32, want: u32, ms: u64) -> bool {
+fn wait_csts(regs: VirtAddr, mask: u32, want: u32, ms: u64) -> bool {
     let deadline = crate::time::now_ns() + ms * 1_000_000;
     while r32(regs, CSTS) & mask != want {
         if crate::time::now_ns() > deadline {
@@ -156,13 +157,13 @@ impl Nvme {
         let at = |msg: &str| kprintln!("nvme {:02x}:{:02x}.{}: {msg}", d.bus, d.dev, d.func);
         let (io, base) = d.bar(0);
         let size = d.bar_size(0);
-        if io || base == 0 || size < 0x2000 || !crate::arch::paging::map_mmio(base, size) {
+        let mapped = || crate::arch::paging::map_mmio(PhysAddr::new(base), size);
+        let Some(regs) = (if io || base == 0 || size < 0x2000 { None } else { mapped() }) else {
             at("no usable register BAR");
             return None;
-        }
+        };
         // Memory space on, bus mastering only once the controller is reset.
         d.enable(false);
-        let regs = base;
         let cap = r64(regs, CAP);
         let timeout_ms = ((cap >> 24) & 0xFF).max(1) * 500;
         let dstrd = (cap >> 32) & 0xF;
@@ -192,8 +193,8 @@ impl Nvme {
             return None;
         };
         w32(regs, AQA, ((ad - 1) as u32) << 16 | (ad - 1) as u32);
-        w64(regs, ASQ, admin.sq.paddr());
-        w64(regs, ACQ, admin.cq.paddr());
+        w64(regs, ASQ, admin.sq.paddr().get());
+        w64(regs, ACQ, admin.cq.paddr().get());
         w32(regs, CC, CC_EN | CC_QES);
         if !wait_csts(regs, CSTS_RDY | CSTS_CFS, CSTS_RDY, timeout_ms) {
             at("does not become ready");
@@ -221,7 +222,7 @@ impl Nvme {
             n.disable();
         };
         // Identify controller: volatile write cache, largest transfer.
-        if let Err(st) = n.admin_cmd(ADMIN_IDENTIFY, 0, buf.paddr(), [1, 0, 0, 0, 0, 0]) {
+        if let Err(st) = n.admin_cmd(ADMIN_IDENTIFY, 0, buf.paddr().get(), [1, 0, 0, 0, 0, 0]) {
             fail(&mut n, "identify controller", st);
             return None;
         }
@@ -229,10 +230,10 @@ impl Nvme {
         n.vwc = id[525] & 1 != 0;
         let mdts = id[77];
         // The first active namespace (namespace list), else 1.
-        if n.admin_cmd(ADMIN_IDENTIFY, 0, buf.paddr(), [2, 0, 0, 0, 0, 0]).is_ok() {
+        if n.admin_cmd(ADMIN_IDENTIFY, 0, buf.paddr().get(), [2, 0, 0, 0, 0, 0]).is_ok() {
             n.nsid = u32::from_le_bytes(buf.as_slice()[..4].try_into().unwrap()).max(1);
         }
-        if let Err(st) = n.admin_cmd(ADMIN_IDENTIFY, n.nsid, buf.paddr(), [0, 0, 0, 0, 0, 0]) {
+        if let Err(st) = n.admin_cmd(ADMIN_IDENTIFY, n.nsid, buf.paddr().get(), [0, 0, 0, 0, 0, 0]) {
             fail(&mut n, "identify namespace", st);
             return None;
         }
@@ -254,11 +255,11 @@ impl Nvme {
         let msix = d.msix().filter(|m| m.route(0, crate::arch::idt::VEC_DISK));
         let ien = if msix.is_some() { 2 } else { 0 };
         let qsize = ((iod - 1) as u32) << 16 | 1;
-        if let Err(st) = n.admin_cmd(ADMIN_CREATE_CQ, 0, n.io.cq.paddr(), [qsize, 1 | ien, 0, 0, 0, 0]) {
+        if let Err(st) = n.admin_cmd(ADMIN_CREATE_CQ, 0, n.io.cq.paddr().get(), [qsize, 1 | ien, 0, 0, 0, 0]) {
             fail(&mut n, "create I/O completion queue", st);
             return None;
         }
-        if let Err(st) = n.admin_cmd(ADMIN_CREATE_SQ, 0, n.io.sq.paddr(), [qsize, 1 | 1 << 16, 0, 0, 0, 0]) {
+        if let Err(st) = n.admin_cmd(ADMIN_CREATE_SQ, 0, n.io.sq.paddr().get(), [qsize, 1 | 1 << 16, 0, 0, 0, 0]) {
             fail(&mut n, "create I/O submission queue", st);
             return None;
         }
@@ -344,23 +345,25 @@ impl BlockDevice for Nvme {
         c[1] = self.nsid;
         if r.op != BlockOp::Flush {
             let bytes = r.blocks as u64 * self.block_size as u64;
-            let next = (r.paddr | (PAGE - 1)) + 1;
-            let prp2 = if r.paddr + bytes <= next {
+            let buf = r.paddr.get();
+            let next = (buf | (PAGE - 1)) + 1;
+            let prp2 = if buf + bytes <= next {
                 0
-            } else if r.paddr + bytes <= next + PAGE {
+            } else if buf + bytes <= next + PAGE {
                 next
             } else {
                 // A PRP list: the pages after the first.
-                let list = self.prps.paddr() + slot as u64 * PAGE;
-                let pages = (r.paddr + bytes - next).div_ceil(PAGE);
+                let off = slot as u64 * PAGE;
+                let list = self.prps.virt() + off;
+                let pages = (buf + bytes - next).div_ceil(PAGE);
                 for i in 0..pages {
                     // SAFETY: this slot's PRP list page.
-                    unsafe { core::ptr::write_volatile((list + 8 * i) as *mut u64, next + i * PAGE) };
+                    unsafe { core::ptr::write_volatile((list + 8 * i).ptr::<u64>(), next + i * PAGE) };
                 }
-                list
+                (self.prps.paddr() + off).get()
             };
-            c[6] = r.paddr as u32;
-            c[7] = (r.paddr >> 32) as u32;
+            c[6] = buf as u32;
+            c[7] = (buf >> 32) as u32;
             c[8] = prp2 as u32;
             c[9] = (prp2 >> 32) as u32;
             c[10] = r.lba as u32;

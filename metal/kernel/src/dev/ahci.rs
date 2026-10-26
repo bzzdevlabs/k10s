@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use super::{BlockDevice, BlockError, BlockOp, BlockRequest, DmaRegion};
 use crate::kprintln;
 use crate::mem::frames::Tag;
+use crate::mem::{PhysAddr, VirtAddr};
 
 const CAP: u64 = 0x00;
 const GHC: u64 = 0x04;
@@ -50,14 +51,14 @@ const TABLE_BYTES: usize = 256;
 /// Largest request (one PRD entry takes up to 4 MiB).
 const MAX_BYTES: u32 = 1 << 20;
 
-fn r32(at: u64) -> u32 {
+fn r32(at: VirtAddr) -> u32 {
     // SAFETY: a mapped HBA register.
-    unsafe { core::ptr::read_volatile(at as *const u32) }
+    unsafe { core::ptr::read_volatile(at.ptr::<u32>()) }
 }
 
-fn w32(at: u64, v: u32) {
+fn w32(at: VirtAddr, v: u32) {
     // SAFETY: a mapped HBA register.
-    unsafe { core::ptr::write_volatile(at as *mut u32, v) }
+    unsafe { core::ptr::write_volatile(at.ptr::<u32>(), v) }
 }
 
 /// Waits until `cond()` (false after `ms`).
@@ -74,7 +75,7 @@ fn wait(ms: u64, cond: impl Fn() -> bool) -> bool {
 
 pub struct AhciDisk {
     /// The port's registers.
-    port: u64,
+    port: VirtAddr,
     mem: DmaRegion,
     slots: u32,
     /// The HBA addresses all of memory (else requests must stay below 4 GiB).
@@ -95,12 +96,13 @@ unsafe impl Send for AhciDisk {}
 /// The disks of the AHCI controller `d`.
 pub fn probe(d: &crate::pci::Device) -> Vec<AhciDisk> {
     let at = |msg: &str| kprintln!("ahci {:02x}:{:02x}.{}: {msg}", d.bus, d.dev, d.func);
-    let (io, abar) = d.bar(5);
+    let (io, bar) = d.bar(5);
     let size = d.bar_size(5);
-    if io || abar == 0 || size < 0x180 || !crate::arch::paging::map_mmio(abar, size) {
+    let abar = if io || bar == 0 || size < 0x180 { None } else { crate::arch::paging::map_mmio(PhysAddr::new(bar), size) };
+    let Some(abar) = abar else {
         at("no usable ABAR");
         return Vec::new();
-    }
+    };
     d.enable(false);
     // Take the HBA from the firmware, then reset it (no command of the firmware's survives).
     if r32(abar + CAP2) & 1 != 0 {
@@ -153,10 +155,10 @@ pub fn probe(d: &crate::pci::Device) -> Vec<AhciDisk> {
 }
 
 impl AhciDisk {
-    fn start(port: u64, slots: u32, s64a: bool) -> Result<AhciDisk, &'static str> {
+    fn start(port: VirtAddr, slots: u32, s64a: bool) -> Result<AhciDisk, &'static str> {
         let mem = DmaRegion::alloc(TABLES + 32 * TABLE_BYTES, Tag::Kernel).ok_or("no memory")?;
         let ident = DmaRegion::alloc(512, Tag::Kernel).ok_or("no memory")?;
-        if !s64a && (mem.paddr() + mem.len() as u64 > 1 << 32 || ident.paddr() >> 32 != 0) {
+        if !s64a && ((mem.paddr() + mem.len() as u64).get() > 1 << 32 || ident.paddr().get() >> 32 != 0) {
             return Err("a 32-bit HBA and no memory below 4 GiB");
         }
         let mut disk = AhciDisk {
@@ -172,7 +174,7 @@ impl AhciDisk {
             ready: VecDeque::new(),
         };
         disk.stop()?;
-        let base = disk.mem.paddr();
+        let base = disk.mem.paddr().get();
         w32(port + P_CLB, (base + CL as u64) as u32);
         w32(port + P_CLB + 4, ((base + CL as u64) >> 32) as u32);
         w32(port + P_FB, (base + FB as u64) as u32);
@@ -235,10 +237,11 @@ impl AhciDisk {
     }
 
     /// Fills command slot `slot` (header, command FIS, one PRD entry when `bytes` > 0) and issues it.
-    fn issue(&mut self, slot: u32, cmd: u8, lba: u64, count: u32, paddr: u64, bytes: u32, write: bool) {
-        let base = self.mem.paddr();
-        let table = base + (TABLES + slot as usize * TABLE_BYTES) as u64;
-        let header = base + (CL + slot as usize * 32) as u64;
+    fn issue(&mut self, slot: u32, cmd: u8, lba: u64, count: u32, buf: PhysAddr, bytes: u32, write: bool) {
+        let (table_off, header_off) = ((TABLES + slot as usize * TABLE_BYTES) as u64, (CL + slot as usize * 32) as u64);
+        let (table, header) = (self.mem.virt() + table_off, self.mem.virt() + header_off);
+        let table_phys = (self.mem.paddr() + table_off).get();
+        let paddr = buf.get();
         let mut fis = [0u8; 20];
         fis[0] = 0x27; // register host to device
         fis[1] = 0x80; // command
@@ -250,20 +253,20 @@ impl AhciDisk {
         // SAFETY: this slot's command table and header, which the HBA reads only once issued.
         unsafe {
             for (i, w) in fis.chunks(4).enumerate() {
-                core::ptr::write_volatile((table + 4 * i as u64) as *mut u32, u32::from_le_bytes(w.try_into().unwrap()));
+                core::ptr::write_volatile((table + 4 * i as u64).ptr::<u32>(), u32::from_le_bytes(w.try_into().unwrap()));
             }
             let prdtl = if bytes > 0 { 1u32 } else { 0 };
             if bytes > 0 {
                 let prd = table + 0x80;
-                core::ptr::write_volatile(prd as *mut u32, paddr as u32);
-                core::ptr::write_volatile((prd + 4) as *mut u32, (paddr >> 32) as u32);
-                core::ptr::write_volatile((prd + 8) as *mut u32, 0);
-                core::ptr::write_volatile((prd + 12) as *mut u32, bytes - 1);
+                core::ptr::write_volatile(prd.ptr::<u32>(), paddr as u32);
+                core::ptr::write_volatile((prd + 4).ptr::<u32>(), (paddr >> 32) as u32);
+                core::ptr::write_volatile((prd + 8).ptr::<u32>(), 0);
+                core::ptr::write_volatile((prd + 12).ptr::<u32>(), bytes - 1);
             }
-            core::ptr::write_volatile(header as *mut u32, 5 | (write as u32) << 6 | prdtl << 16);
-            core::ptr::write_volatile((header + 4) as *mut u32, 0);
-            core::ptr::write_volatile((header + 8) as *mut u32, table as u32);
-            core::ptr::write_volatile((header + 12) as *mut u32, (table >> 32) as u32);
+            core::ptr::write_volatile(header.ptr::<u32>(), 5 | (write as u32) << 6 | prdtl << 16);
+            core::ptr::write_volatile((header + 4).ptr::<u32>(), 0);
+            core::ptr::write_volatile((header + 8).ptr::<u32>(), table_phys as u32);
+            core::ptr::write_volatile((header + 12).ptr::<u32>(), (table_phys >> 32) as u32);
         }
         w32(self.port + P_CI, 1 << slot);
     }
@@ -310,7 +313,7 @@ impl BlockDevice for AhciDisk {
             if r.blocks == 0 || bytes > MAX_BYTES as u64 || r.lba.checked_add(r.blocks as u64).is_none_or(|e| e > self.blocks) {
                 return Err(BlockError::Range);
             }
-            if !self.s64a && r.paddr + bytes > 1 << 32 {
+            if !self.s64a && r.paddr.get() + bytes > 1 << 32 {
                 return Err(BlockError::Unsupported);
             }
         }
@@ -324,7 +327,7 @@ impl BlockDevice for AhciDisk {
         match r.op {
             BlockOp::Read => self.issue(slot, ATA_READ_DMA_EXT, r.lba, r.blocks, r.paddr, bytes as u32, false),
             BlockOp::Write => self.issue(slot, ATA_WRITE_DMA_EXT, r.lba, r.blocks, r.paddr, bytes as u32, true),
-            BlockOp::Flush => self.issue(slot, ATA_FLUSH_CACHE_EXT, 0, 0, 0, 0, false),
+            BlockOp::Flush => self.issue(slot, ATA_FLUSH_CACHE_EXT, 0, 0, PhysAddr::new(0), 0, false),
         }
         Ok(())
     }

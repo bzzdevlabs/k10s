@@ -8,12 +8,12 @@ import Terminal from '~/components/Terminal.astro';
 
 With isolation done by the compiler, a node needs from the OS only memory, a timer, a NIC and a console. So the same
 runtime also boots **as its own kernel**: `k10-metal`. No processes, no system calls, no user/kernel boundary, no
-per-workload page tables: one identity-mapped address space over all of RAM on up to 64 cores, polling its NIC's
-queues directly. It finds the machine in the ACPI tables (no AML interpreter), powers off and reboots through ACPI
-and arms the hardware watchdog. It boots on QEMU (`pc`, `q35`, `microvm`; KVM or TCG), Firecracker and Cloud
-Hypervisor, and on PCs from the x86-64 disk image (on a disk or a USB stick), with the Intel e1000e (82574L,
-I217/I218, I219), igb (82576, I350, I210/I211) and igc (I225/I226) and Realtek RTL8111/8168/8125 Ethernet
-controllers. In a cloud, where every node is already a VM, this deletes the guest Linux.
+per-workload page tables: one address space (the kernel in the upper half, a direct map of all RAM) on up to 64
+cores, polling its NIC's queues directly. It finds the machine in the ACPI tables (no AML interpreter), powers off
+and reboots through ACPI and arms the hardware watchdog. It boots on QEMU (`pc`, `q35`, `microvm`; KVM or TCG),
+Firecracker and Cloud Hypervisor, and on PCs from the x86-64 disk image (on a disk or a USB stick), with the Intel
+e1000e (82574L, I217/I218, I219), igb (82576, I350, I210/I211) and igc (I225/I226) and Realtek RTL8111/8168/8125
+Ethernet controllers. In a cloud, where every node is already a VM, this deletes the guest Linux.
 
 | | k10-metal | Linux guest, same QEMU setup |
 |---|---|---|
@@ -158,8 +158,9 @@ baked in at build time (`EMBED=1`); with neither, the node starts empty and wait
   `\_S5`, virtio-mmio slots and power button events by a DSDT scan, ECAM windows (MCFG), the HPET, the console UART
   (SPCR); an MP table
   where there is no ACPI. x2APIC (or xAPIC), CPUs started one by one from the MADT, never by broadcast.
-- **Memory:** every byte of RAM identity-mapped, above 4 GiB too; device ranges uncached; a tagged frame allocator
-  shared by the heap and the instance slots; NX everywhere, the kernel and JIT code W^X, page 0 unmapped.
+- **Memory:** the kernel in the upper half and every byte of RAM in a direct map, above 4 GiB too; device ranges
+  uncached; a tagged frame allocator shared by the heap and the instance slots; NX everywhere, the kernel and JIT code
+  W^X, the lower half unmapped.
 - **Time:** kvmclock, else the TSC calibrated against the HPET, the ACPI PM timer or the PIT; a tickless one-shot
   LAPIC timer armed only for the next deadline; an idle node takes no timer interrupts. The wall clock (gossip and
   admin request time windows) is re-read from kvmclock every 10 s; without kvmclock an SNTP client sets it (the

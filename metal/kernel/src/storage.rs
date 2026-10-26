@@ -20,6 +20,7 @@ use k10_kvlog::{files, gpt, layout, record};
 use crate::dev::{self, BlockDevice, BlockOp, BlockRequest, DmaRegion};
 use crate::kprintln;
 use crate::mem::frames::Tag;
+use crate::mem::PhysAddr;
 use crate::sync::Global;
 use crate::time;
 
@@ -383,7 +384,8 @@ impl Storage {
             }
             if !b.flushing {
                 b.flushing = true;
-                if self.dev.submit(0, BlockRequest { op: BlockOp::Flush, lba: 0, blocks: 0, paddr: 0, tag: TAG_BATCH - 1 }).is_err() {
+                let flush = BlockRequest { op: BlockOp::Flush, lba: 0, blocks: 0, paddr: PhysAddr::new(0), tag: TAG_BATCH - 1 };
+                if self.dev.submit(0, flush).is_err() {
                     b.failed = true;
                     continue;
                 }

@@ -11,6 +11,7 @@ use super::{Desc, Queue, Transport, DESC_F_NEXT, DESC_F_WRITE};
 use crate::dev::{BlockDevice, BlockError, BlockOp, BlockRequest, DmaRegion};
 use crate::kprintln;
 use crate::mem::frames::Tag;
+use crate::mem::VirtAddr;
 
 const F_SIZE_MAX: u64 = 1 << 1;
 const F_SEG_MAX: u64 = 1 << 2;
@@ -97,8 +98,10 @@ impl VirtioBlk {
         })
     }
 
-    fn slot(&self, k: u16) -> u64 {
-        self.slots.paddr() + k as u64 * SLOT_BYTES as u64
+    /// Slot `k` (request header, then the status byte at 16): (for the CPU, for the device).
+    fn slot(&self, k: u16) -> (VirtAddr, u64) {
+        let off = k as u64 * SLOT_BYTES as u64;
+        (self.slots.virt() + off, (self.slots.paddr() + off).get())
     }
 }
 
@@ -137,15 +140,15 @@ impl BlockDevice for VirtioBlk {
         }
         let Some(k) = self.free.pop() else { return Err(BlockError::Busy) };
         self.tags[k as usize] = r.tag;
-        let hdr = self.slot(k);
+        let (at, hdr) = self.slot(k);
         let status = hdr + 16;
         let sector = r.lba * (self.block_size as u64 / 512);
         // SAFETY: slot k's header and status byte, owned by this driver until the request completes.
         unsafe {
-            core::ptr::write_volatile(hdr as *mut u32, kind);
-            core::ptr::write_volatile((hdr + 4) as *mut u32, 0);
-            core::ptr::write_volatile((hdr + 8) as *mut u64, if kind == T_FLUSH { 0 } else { sector });
-            core::ptr::write_volatile(status as *mut u8, 0xFF);
+            core::ptr::write_volatile(at.ptr::<u32>(), kind);
+            core::ptr::write_volatile((at + 4).ptr::<u32>(), 0);
+            core::ptr::write_volatile((at + 8).ptr::<u64>(), if kind == T_FLUSH { 0 } else { sector });
+            core::ptr::write_volatile((at + 16).ptr::<u8>(), 0xFF);
         }
         let (d0, d1, d2) = (3 * k, 3 * k + 1, 3 * k + 2);
         if r.op == BlockOp::Flush {
@@ -153,7 +156,7 @@ impl BlockDevice for VirtioBlk {
         } else {
             self.q.set_desc(d0, Desc { addr: hdr, len: 16, flags: DESC_F_NEXT, next: d1 });
             let w = if r.op == BlockOp::Read { DESC_F_WRITE } else { 0 };
-            self.q.set_desc(d1, Desc { addr: r.paddr, len: bytes as u32, flags: DESC_F_NEXT | w, next: d2 });
+            self.q.set_desc(d1, Desc { addr: r.paddr.get(), len: bytes as u32, flags: DESC_F_NEXT | w, next: d2 });
         }
         self.q.set_desc(d2, Desc { addr: status, len: 1, flags: DESC_F_WRITE, next: 0 });
         self.q.push(d0);
@@ -173,7 +176,7 @@ impl BlockDevice for VirtioBlk {
                 break k;
             }
         };
-        let st = unsafe { core::ptr::read_volatile((self.slot(k) + 16) as *const u8) };
+        let st = unsafe { core::ptr::read_volatile((self.slot(k).0 + 16).ptr::<u8>()) };
         self.free.push(k);
         let res = match st {
             S_OK => Ok(()),

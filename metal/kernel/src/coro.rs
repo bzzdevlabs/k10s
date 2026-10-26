@@ -17,6 +17,7 @@ use core::arch::global_asm;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::mem::frames::{self, Tag, FRAME};
+use crate::mem::VirtAddr;
 use crate::percpu::{self, MAX_CPUS};
 use crate::sync::IrqLock;
 
@@ -84,21 +85,22 @@ extern "C" {
 }
 
 pub struct Stack {
-    base: u64,
+    /// Bottom, in the direct map.
+    base: VirtAddr,
     size: usize,
 }
 
 impl Stack {
     fn top(&self) -> u64 {
-        self.base + self.size as u64
+        (self.base + self.size as u64).get()
     }
     fn canary_ok(&self) -> bool {
-        let p = self.base as *const u64;
+        let p = self.base.ptr::<u64>().cast_const();
         (0..CANARY_WORDS).all(|i| unsafe { core::ptr::read_volatile(p.add(i)) } == CANARY)
     }
     /// Bytes of this stack ever written (painted-pattern scan from the bottom).
     pub fn high_water(&self) -> usize {
-        let p = self.base as *const u64;
+        let p = self.base.ptr::<u64>().cast_const();
         let words = self.size / 8;
         let mut i = CANARY_WORDS;
         while i < words && unsafe { *p.add(i) } == PAINT {
@@ -130,10 +132,10 @@ fn stack_alloc() -> Option<Stack> {
     if frames::free_bytes() < size as u64 + crate::reserve_bytes() {
         return None;
     }
-    let base = frames::alloc(size / FRAME as usize, 1, Tag::Stack)?;
+    let base = frames::alloc(size / FRAME as usize, 1, Tag::Stack)?.virt();
     pool.allocated += 1;
     drop(pool);
-    let p = base as *mut u64;
+    let p = base.ptr::<u64>();
     unsafe {
         for i in 0..size / 8 {
             p.add(i).write(if i < CANARY_WORDS { CANARY } else { PAINT });
@@ -150,7 +152,7 @@ fn stack_free(s: Stack) {
     } else {
         pool.high_water = pool.high_water.max(s.high_water());
         pool.allocated -= 1;
-        frames::free(s.base, s.size / FRAME as usize, Tag::Stack);
+        frames::free(s.base.phys(), s.size / FRAME as usize, Tag::Stack);
     }
 }
 
@@ -160,7 +162,7 @@ pub fn trim_pool() {
     while let Some(s) = pool.free.pop() {
         pool.high_water = pool.high_water.max(s.high_water());
         pool.allocated -= 1;
-        frames::free(s.base, s.size / FRAME as usize, Tag::Stack);
+        frames::free(s.base.phys(), s.size / FRAME as usize, Tag::Stack);
     }
 }
 
@@ -291,6 +293,6 @@ pub fn current_stack() -> Option<(u64, u64)> {
         if co.is_null() {
             return None;
         }
-        (*co).stack.as_ref().map(|s| (s.base, s.top()))
+        (*co).stack.as_ref().map(|s| (s.base.get(), s.top()))
     }
 }

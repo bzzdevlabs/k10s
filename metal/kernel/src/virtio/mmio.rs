@@ -4,6 +4,7 @@
 use core::ptr::{read_volatile, write_volatile};
 
 use super::Notifier;
+use crate::mem::{PhysAddr, VirtAddr};
 
 const MAGIC: u64 = 0x000;
 const VERSION: u64 = 0x004;
@@ -31,25 +32,24 @@ const CONFIG: u64 = 0x100;
 
 #[derive(Clone, Copy)]
 pub struct Mmio {
-    base: u64,
+    /// The registers, in the direct map.
+    base: VirtAddr,
     version: u32,
 }
 
 impl Mmio {
-    /// The slot at `base` (mapped uncached) if it holds a virtio device of a supported version.
-    pub fn new(base: u64, size: u64) -> Option<Mmio> {
-        if !crate::arch::paging::map_mmio(base, size.max(0x200)) {
-            return None;
-        }
+    /// The slot at `paddr` (mapped uncached) if it holds a virtio device of a supported version.
+    pub fn new(paddr: PhysAddr, size: u64) -> Option<Mmio> {
+        let base = crate::arch::paging::map_mmio(paddr, size.max(0x200))?;
         let m = Mmio { base, version: 0 };
         let version = m.r32(VERSION);
         (m.r32(MAGIC) == 0x7472_6976 && matches!(version, 1 | 2)).then_some(Mmio { base, version })
     }
     fn r32(&self, o: u64) -> u32 {
-        unsafe { read_volatile((self.base + o) as *const u32) }
+        unsafe { read_volatile((self.base + o).ptr::<u32>()) }
     }
     fn w32(&self, o: u64, v: u32) {
-        unsafe { write_volatile((self.base + o) as *mut u32, v) }
+        unsafe { write_volatile((self.base + o).ptr::<u32>(), v) }
     }
     pub fn version(&self) -> u32 {
         self.version
@@ -122,9 +122,9 @@ impl Mmio {
         let a = self.base + CONFIG + off as u64;
         unsafe {
             match w {
-                1 => read_volatile(a as *const u8) as u64,
-                2 => read_volatile(a as *const u16) as u64,
-                _ => read_volatile(a as *const u32) as u64,
+                1 => read_volatile(a.ptr::<u8>()) as u64,
+                2 => read_volatile(a.ptr::<u16>()) as u64,
+                _ => read_volatile(a.ptr::<u32>()) as u64,
             }
         }
     }
@@ -135,12 +135,12 @@ impl Mmio {
             self.w32(INTERRUPT_ACK, s);
         }
     }
-    pub fn base(&self) -> u64 {
+    pub fn base(&self) -> VirtAddr {
         self.base
     }
 }
 
 /// Acknowledges the interrupt of the device at `base` (from the interrupt handler, through the NIC hook).
-pub fn ack_at(base: u64) {
+pub fn ack_at(base: VirtAddr) {
     Mmio { base, version: 2 }.ack_interrupt()
 }

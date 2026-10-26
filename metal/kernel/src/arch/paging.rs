@@ -1,24 +1,30 @@
-//! The identity map: every byte of RAM and every device the kernel uses at its physical address, with W^X for the
-//! kernel image and for JIT code.
+//! The kernel's address space (metal/README.md, "Virtual memory"):
+//! * the direct map: every byte of RAM and every device the kernel uses at [`PHYS_OFFSET`] + its physical address,
+//!   non-executable (sealed JIT code aside);
+//! * the kernel image at its link address ([`KERNEL_BASE`] + its physical address) in 4 KiB pages: `.text`
+//!   read+execute, `.rodata` read-only, the rest read+write; in the direct map, `.text` and `.rodata` are read-only;
+//! * nothing in the lower half, which is left to user address spaces. Every CPU runs on the kernel's PML4
+//!   ([`kernel_root`]); other page tables (the application processors' start, UEFI runtime calls, address spaces)
+//!   share its upper half by copying its entries ([`copy_kernel_half`]), which never change once present.
 //!
-//! boot.rs maps the first 4 GiB with 2 MiB pages, all present + writable + executable. [`init`] rebuilds that from
-//! the memory map:
+//! boot.rs maps the first 4 GiB with 2 MiB pages, present + writable + executable, identity (to turn paging on) and
+//! in the direct map, and the first GiB at [`KERNEL_BASE`]. [`init`] rebuilds that from the memory map:
 //! * IA32_PAT is set to the power-on layout except entry 1 (PWT alone), which is write-combining: PCD|PWT always
 //!   selects UC whatever the firmware programmed, PWT alone WC (the framebuffer, [`map_wc`]);
 //! * below 4 GiB, a 2 MiB page that holds any memory (RAM, ACPI tables, ACPI NVS) is write-back, every other one
-//!   (the PCI hole: 32-bit BARs, ECAM, I/O APIC, HPET, local APIC) is uncached; the first 2 MiB are split into 4 KiB
-//!   pages (page 0 not present: null-pointer guard);
+//!   (the PCI hole: 32-bit BARs, ECAM, I/O APIC, HPET, local APIC) is uncached; the first 2 MiB and the image's
+//!   pages are split into 4 KiB pages;
 //! * memory above 4 GiB is mapped write-back with 1 GiB pages where the CPU has them, else 2 MiB, 4 KiB at the
 //!   unaligned edges;
-//! * EFER.NXE is enabled (when the CPU has NX): everything is non-executable except the kernel's `.text`
-//!   (read+execute; `.rodata` read-only).
+//! * EFER.NXE is enabled (when the CPU has NX): only the kernel's `.text` is executable;
+//! * the identity map is dropped.
 //! Devices above 4 GiB (64-bit BARs; OVMF puts them at hundreds of GiB) are mapped uncached by [`map_mmio`] when a
-//! driver claims them. Identity mapping limits physical addresses to the 47-bit lower canonical half.
+//! driver claims them. The direct map reaches physical addresses below [`PHYS_LIMIT`] (2^46).
 //!
 //! JIT code ([`seal_code`] / [`unseal_code`]) lives in ordinary frames: written through the (writable,
-//! non-executable) identity map, then remapped read+execute — never written again while executable. A large page
-//! that holds code is split down to 4 KiB pages the first time (the page tables stay). CR0.WP (set at boot) makes
-//! read-only pages read-only for the kernel too.
+//! non-executable) direct map, then remapped there read+execute — never written again while executable. A large
+//! page that holds code is split down to 4 KiB pages the first time (the page tables stay). CR0.WP (set at boot)
+//! makes read-only pages read-only for the kernel too.
 //!
 //! Other CPUs: a change is followed by `invlpg` on the CPU that makes it only. Changes that *grant* rights other
 //! CPUs need (sealing code executable, splitting a large page) bump [`GEN`]; a CPU reloads CR3 before it runs JIT
@@ -30,12 +36,14 @@ use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::{cpuid, rdmsr, wrmsr};
+use crate::mem::addr::{KERNEL_BASE, PHYS_LIMIT, PHYS_OFFSET};
 use crate::mem::frames::{self, Tag, FRAME};
 use crate::mem::memmap::MemoryMap;
+use crate::mem::{PhysAddr, VirtAddr};
 use crate::sync::IrqLock;
 
-const P: u64 = 1;
-const W: u64 = 1 << 1;
+pub const P: u64 = 1;
+pub const W: u64 = 1 << 1;
 const PWT: u64 = 1 << 3;
 const PCD: u64 = 1 << 4;
 const PS: u64 = 1 << 7;
@@ -44,20 +52,21 @@ const NX: u64 = 1 << 63;
 const UC: u64 = PCD | PWT;
 /// Write-combining (PAT entry 1).
 const WC: u64 = PWT;
-const ADDR: u64 = 0x000F_FFFF_FFFF_F000;
+pub const ADDR: u64 = 0x000F_FFFF_FFFF_F000;
 const LARGE: u64 = 2 << 20;
 const HUGE: u64 = 1 << 30;
 const FOUR_GIB: u64 = 4 << 30;
-/// Highest identity-mappable address + 1 (the lower canonical half of 48-bit virtual addresses).
-const LIMIT: u64 = 1 << 47;
+/// The first PML4 entry of the upper half.
+pub const KERNEL_HALF: usize = 256;
 const IA32_EFER: u32 = 0xC000_0080;
 const IA32_PAT: u32 = 0x277;
 /// WB, WC, UC-, UC, WB, WT, UC-, UC.
 const PAT_DEFAULT: u64 = 0x0007_0406_0007_0106;
 
 extern "C" {
+    static mut boot_pml4: [u64; 512];
+    static mut boot_pdpt_hi: [u64; 512];
     static mut boot_pd: [u64; 2048];
-    static boot_pml4: u8;
     static __text_start: u8;
     static __rodata_start: u8;
     static __data_start: u8;
@@ -82,8 +91,8 @@ fn nx() -> u64 {
     }
 }
 
-fn invlpg(addr: u64) {
-    unsafe { asm!("invlpg [{}]", in(reg) addr, options(nostack, preserves_flags)) }
+fn invlpg(va: VirtAddr) {
+    unsafe { asm!("invlpg [{}]", in(reg) va.get(), options(nostack, preserves_flags)) }
 }
 
 fn reload_cr3() {
@@ -108,32 +117,53 @@ pub fn init_pat() {
     }
 }
 
-fn index(addr: u64, level: u32) -> usize {
-    ((addr >> (12 + 9 * (level - 1))) & 511) as usize
+/// Index of `va` in its table at `level` (4 = PML4 … 1 = page table).
+pub fn index(va: u64, level: u32) -> usize {
+    ((va >> (12 + 9 * (level - 1))) & 511) as usize
 }
 
 fn page_size(level: u32) -> u64 {
     1 << (12 + 9 * (level - 1))
 }
 
+/// The kernel's PML4, through the image mapping.
 fn root() -> *mut u64 {
-    &raw const boot_pml4 as *mut u64
+    (&raw mut boot_pml4).cast()
+}
+
+/// Physical address of the kernel's PML4 (below 4 GiB: it is in the image), every CPU's CR3.
+pub fn kernel_root() -> PhysAddr {
+    VirtAddr::of(&raw const boot_pml4).phys()
+}
+
+/// Copies the kernel's upper-half PML4 entries into the PML4 at `pml4`.
+pub fn copy_kernel_half(pml4: PhysAddr) {
+    let _g = LOCK.lock();
+    for i in KERNEL_HALF..512 {
+        // SAFETY: `pml4` is a page-table page owned by the caller; the kernel's root is always mapped.
+        unsafe { pml4.ptr::<u64>().add(i).write(root().add(i).read()) };
+    }
+}
+
+/// The table a non-leaf entry points to.
+fn table(e: u64) -> *mut u64 {
+    PhysAddr::new(e & ADDR).ptr()
 }
 
 /// A zeroed page-table frame.
-fn alloc_table() -> Option<u64> {
+pub fn alloc_table() -> Option<PhysAddr> {
     let t = frames::alloc(1, 1, Tag::Kernel)?;
-    unsafe { core::ptr::write_bytes(t as *mut u8, 0, FRAME as usize) };
+    unsafe { core::ptr::write_bytes(t.ptr::<u8>(), 0, FRAME as usize) };
     Some(t)
 }
 
 /// Splits the large page in entry `e` (at `level` 3 = 1 GiB or 2 = 2 MiB) into a table of `level - 1` entries
-/// produced by `flags(addr)`, or with the large page's own flags if `flags` is `None`.
+/// produced by `flags(paddr)`, or with the large page's own flags if `flags` is `None`.
 ///
 /// # Safety
 /// Page-table lock held; `e` is a present large-page entry at `level`.
 unsafe fn split(e: *mut u64, level: u32, flags: Option<&dyn Fn(u64) -> u64>) -> Option<()> {
-    let t = alloc_table()? as *mut u64;
+    let t = alloc_table()?;
     let old = unsafe { *e };
     let base = old & ADDR & !(page_size(level) - 1);
     let child = page_size(level - 1);
@@ -142,43 +172,40 @@ unsafe fn split(e: *mut u64, level: u32, flags: Option<&dyn Fn(u64) -> u64>) -> 
     for i in 0..512u64 {
         let a = base + i * child;
         let f = flags.map_or(inherited, |f| f(a) | if level == 3 { PS } else { 0 });
-        unsafe { t.add(i as usize).write(a | f) };
+        unsafe { t.ptr::<u64>().add(i as usize).write(a | f) };
     }
     // Non-leaf entry: present + writable + executable; the leaves decide.
-    unsafe { *e = t as u64 | P | W };
+    unsafe { *e = t.get() | P | W };
     reload_cr3();
     GEN.fetch_add(1, Ordering::Release);
     Some(())
 }
 
-/// The entry for `addr` at `level` (3 = 1 GiB, 2 = 2 MiB, 1 = 4 KiB): missing tables above it are created, large
-/// pages above it split (keeping their flags).
+/// The entry for `va` at `level` (3 = 1 GiB, 2 = 2 MiB, 1 = 4 KiB) in the kernel's tables: missing tables above it
+/// are created, large pages above it split (keeping their flags).
 ///
 /// # Safety
-/// Page-table lock held; `addr < LIMIT`.
-unsafe fn entry(addr: u64, level: u32) -> Option<*mut u64> {
+/// Page-table lock held; `va` in the upper half.
+unsafe fn entry(va: u64, level: u32) -> Option<*mut u64> {
     let mut t = root();
     for l in (level + 1..=4).rev() {
-        let e = unsafe { t.add(index(addr, l)) };
+        let e = unsafe { t.add(index(va, l)) };
         let v = unsafe { *e };
         if v & P == 0 {
-            unsafe { *e = alloc_table()? | P | W };
+            unsafe { *e = alloc_table()?.get() | P | W };
         } else if v & PS != 0 {
             unsafe { split(e, l, None)? };
         }
-        t = (unsafe { *e } & ADDR) as *mut u64;
+        t = table(unsafe { *e });
     }
-    Some(unsafe { t.add(index(addr, level)) })
+    Some(unsafe { t.add(index(va, level)) })
 }
 
-/// The leaf entry mapping `addr` and its level, without changing anything.
-fn leaf(addr: u64) -> Option<(*mut u64, u32)> {
-    if addr >= LIMIT {
-        return None;
-    }
+/// The leaf entry mapping `va` and its level, without changing anything.
+fn leaf(va: VirtAddr) -> Option<(*mut u64, u32)> {
     let mut t = root();
     for l in (1..=4).rev() {
-        let e = unsafe { t.add(index(addr, l)) };
+        let e = unsafe { t.add(index(va.get(), l)) };
         let v = unsafe { *e };
         if v & P == 0 {
             return None;
@@ -186,20 +213,20 @@ fn leaf(addr: u64) -> Option<(*mut u64, u32)> {
         if l == 1 || v & PS != 0 {
             return Some((e, l));
         }
-        t = (v & ADDR) as *mut u64;
+        t = table(v);
     }
     None
 }
 
-/// Maps `[start, end)` (4 KiB-aligned) with `flags` (without PS), using the largest pages that fit; ranges that
-/// are already split into a finer table are mapped at the finer level.
+/// Maps physical `[start, end)` (4 KiB-aligned) in the direct map with `flags` (without PS), using the largest
+/// pages that fit; ranges that are already split into a finer table are mapped at the finer level.
 ///
 /// # Safety
 /// Page-table lock held; nothing in the range may be in use with other attributes (code, the kernel image).
 unsafe fn map(start: u64, end: u64, flags: u64) -> bool {
     let mut a = start;
     while a < end {
-        if a >= LIMIT {
+        if a >= PHYS_LIMIT {
             return false;
         }
         let fits = |s: u64| a % s == 0 && a + s <= end;
@@ -211,7 +238,7 @@ unsafe fn map(start: u64, end: u64, flags: u64) -> bool {
             1
         };
         loop {
-            let Some(e) = (unsafe { entry(a, level) }) else { return false };
+            let Some(e) = (unsafe { entry(PHYS_OFFSET + a, level) }) else { return false };
             let v = unsafe { *e };
             if level > 1 && v & P != 0 && v & PS == 0 {
                 level -= 1; // already a table: keep its finer mappings
@@ -236,9 +263,9 @@ pub fn sync_tlb() {
     }
 }
 
-/// Rebuilds the identity map from the memory map and enables NX and W^X on the kernel image (see the module docs).
-/// Needs the frame allocator.
-pub fn init(memmap: &MemoryMap) {
+/// Builds the kernel's address space from the memory map (see the module docs) and drops the identity map. Needs
+/// the frame allocator; `image` is the kernel image's physical range.
+pub fn init(memmap: &MemoryMap, image: (PhysAddr, PhysAddr)) {
     let _g = LOCK.lock();
     let max_ext = cpuid(0x8000_0000, 0).0;
     let ext = if max_ext >= 0x8000_0001 { cpuid(0x8000_0001, 0).3 } else { 0 };
@@ -248,150 +275,151 @@ pub fn init(memmap: &MemoryMap) {
     }
     HUGE_PAGES.store(ext & (1 << 26) != 0, Ordering::Relaxed);
     init_pat();
-    let text = &raw const __text_start as u64;
-    let rodata = &raw const __rodata_start as u64;
-    let data = &raw const __data_start as u64;
+    let text = VirtAddr::of(&raw const __text_start).phys().get();
+    let rodata = VirtAddr::of(&raw const __rodata_start).phys().get();
+    let data = VirtAddr::of(&raw const __data_start).phys().get();
+    let (start, end) = (image.0.get(), image.1.get());
     let nx = nx();
     let cache = |a: u64, size: u64| if memmap.overlaps_memory(a, size) { 0 } else { UC };
-    // Kernel image: .text read+execute, .rodata read-only, the rest read+write.
-    let perms = |a: u64| {
-        if (text..rodata).contains(&a) {
-            P
-        } else if (rodata..data).contains(&a) {
-            P | nx
-        } else {
-            P | W | nx
-        }
-    };
     unsafe {
-        let pd = &raw mut boot_pd;
-        // The code running now must stay executable at every step: large pages holding kernel text keep X until
-        // they are split below, and the first 2 MiB is replaced by its final 4 KiB table in one store.
-        for (i, e) in (*pd).iter_mut().enumerate().skip(1) {
-            let a = i as u64 * LARGE;
-            let x = if a < rodata && a + LARGE > text { 0 } else { nx };
-            *e = a | P | W | PS | x | cache(a, LARGE);
-        }
-        let low: &dyn Fn(u64) -> u64 = &|a| if a == 0 { 0 } else { perms(a) | cache(a, FRAME) };
-        split((*pd).as_mut_ptr(), 2, Some(low)).expect("no frame for the low page table");
-        // An image that extends past 2 MiB: its other large pages in 4 KiB pages too.
-        let mut a = LARGE;
-        while a < data.div_ceil(LARGE) * LARGE {
-            let e = entry(a, 1).expect("no frame for a kernel page table");
-            *e = a | perms(a) | cache(a, FRAME);
+        // The image at KERNEL_BASE in a page directory of its own, swapped in with one store (this code runs there).
+        let pd = alloc_table().expect("no frame for the kernel image's page directory");
+        let mut a = start;
+        while a < end {
+            let va = KERNEL_BASE + a;
+            let pde = pd.ptr::<u64>().add(index(va, 2));
+            if *pde & P == 0 {
+                *pde = alloc_table().expect("no frame for a kernel page table").get() | P | W;
+            }
+            let perms = if (text..rodata).contains(&a) {
+                P
+            } else if (rodata..data).contains(&a) {
+                P | nx
+            } else {
+                P | W | nx
+            };
+            *table(*pde).add(index(va, 1)) = a | perms;
             a += FRAME;
+        }
+        (*(&raw mut boot_pdpt_hi))[index(KERNEL_BASE, 3)] = pd.get() | P | W;
+        reload_cr3();
+
+        // The direct map below 4 GiB; the first 2 MiB and the image's alias in 4 KiB pages, .text and .rodata read-only.
+        let alias = |a: u64| if (text..data).contains(&a) { P | nx } else { P | W | nx };
+        let pd = &raw mut boot_pd;
+        for (i, e) in (*pd).iter_mut().enumerate() {
+            let a = i as u64 * LARGE;
+            *e = a | P | W | PS | nx | cache(a, LARGE);
+        }
+        let small: &dyn Fn(u64) -> u64 = &|a| alias(a) | cache(a, FRAME);
+        for e in (*pd).iter_mut().take(end.div_ceil(LARGE) as usize) {
+            split(e, 2, Some(small)).expect("no frame for a low page table");
         }
         for r in memmap.regions().iter().filter(|r| r.is_memory() && r.end() > FOUR_GIB) {
             let s = r.addr.max(FOUR_GIB) & !(FRAME - 1);
             if !map(s, r.end().div_ceil(FRAME) * FRAME, P | W | nx) {
-                crate::kprintln!("paging: memory at {:#x}..{:#x} not mapped (out of page tables or above 2^47)", s, r.end());
+                crate::kprintln!("paging: memory at {:#x}..{:#x} not mapped (out of page tables or above 2^46)", s, r.end());
             }
         }
-        // Ranges whose memory type changed (write-back to uncached) may have lines in the caches from before.
+        // No lower half; ranges that became uncached may still have lines in the caches.
+        (*(&raw mut boot_pml4))[0] = 0;
         asm!("wbinvd", options(nostack, preserves_flags));
     }
     reload_cr3();
 }
 
 /// Maps `[paddr, paddr + len)` uncached, read+write, non-executable: device registers (BARs, ECAM, APICs, HPET).
-/// False if it cannot be identity-mapped. RAM is never passed here.
-pub fn map_mmio(paddr: u64, len: u64) -> bool {
-    if len == 0 {
-        return true;
+/// Its address in the direct map, `None` if the direct map does not reach it. RAM is never passed here.
+pub fn map_mmio(paddr: PhysAddr, len: u64) -> Option<VirtAddr> {
+    let (s, e) = (paddr.get() & !(FRAME - 1), paddr.get().saturating_add(len).div_ceil(FRAME) * FRAME);
+    if e > PHYS_LIMIT {
+        return None;
     }
-    let (s, e) = (paddr & !(FRAME - 1), paddr.saturating_add(len).div_ceil(FRAME) * FRAME);
-    if e > LIMIT {
-        return false;
+    if len == 0 {
+        return Some(paddr.virt());
     }
     let _g = LOCK.lock();
     let ok = unsafe { map(s, e, P | W | UC | nx()) };
     reload_cr3();
     GEN.fetch_add(1, Ordering::Release);
-    ok
+    ok.then(|| paddr.virt())
 }
 
 /// Maps `[paddr, paddr + len)` write-combining, read+write, non-executable: a framebuffer (the CPU combines writes
-/// into bursts; reads are uncached). False if it cannot be identity-mapped.
-pub fn map_wc(paddr: u64, len: u64) -> bool {
-    let (s, e) = (paddr & !(FRAME - 1), paddr.saturating_add(len).div_ceil(FRAME) * FRAME);
-    if len == 0 || e > LIMIT {
-        return false;
+/// into bursts; reads are uncached). Its address in the direct map, `None` if it cannot be mapped.
+pub fn map_wc(paddr: PhysAddr, len: u64) -> Option<VirtAddr> {
+    let (s, e) = (paddr.get() & !(FRAME - 1), paddr.get().saturating_add(len).div_ceil(FRAME) * FRAME);
+    if len == 0 || e > PHYS_LIMIT {
+        return None;
     }
     let _g = LOCK.lock();
     let ok = unsafe { map(s, e, P | W | WC | nx()) };
     reload_cr3();
     GEN.fetch_add(1, Ordering::Release);
-    ok
+    ok.then(|| paddr.virt())
 }
 
 /// Makes `[paddr, paddr + len)` readable: pages that are not mapped yet (firmware tables in a hole above 4 GiB) are
-/// mapped uncached and read-only; mapped pages are left as they are.
-pub fn ensure_mapped(paddr: u64, len: u64) -> bool {
-    let mut a = paddr & !(FRAME - 1);
-    let end = paddr.saturating_add(len);
+/// mapped uncached and read-only; mapped pages are left as they are. Its address in the direct map.
+pub fn ensure_mapped(paddr: PhysAddr, len: u64) -> Option<VirtAddr> {
+    let end = paddr.get().checked_add(len).filter(|&e| e <= PHYS_LIMIT)?;
+    let mut a = paddr.get() & !(FRAME - 1);
     let _g = LOCK.lock();
     while a < end {
-        // Page 0 stays unmapped (null-pointer guard).
-        if a == 0 || leaf(a).is_none() && !unsafe { map(a, a + FRAME, P | UC | nx()) } {
-            return false;
+        if leaf(PhysAddr::new(a).virt()).is_none() && !unsafe { map(a, a + FRAME, P | UC | nx()) } {
+            return None;
         }
         a += FRAME;
     }
-    true
+    Some(paddr.virt())
 }
 
-/// Page-table entry for the 4 KiB page at `paddr`, splitting larger pages first if needed.
+/// The direct map's entry for the 4 KiB page at `paddr`, splitting larger pages first if needed.
 ///
 /// # Safety
 /// Page-table lock held; `paddr` page-aligned.
 unsafe fn pte(paddr: u64) -> Option<*mut u64> {
-    if paddr >= LIMIT {
+    if paddr >= PHYS_LIMIT {
         return None;
     }
-    unsafe { entry(paddr, 1) }
+    unsafe { entry(PHYS_OFFSET + paddr, 1) }
 }
 
-/// Makes `n` frames at `paddr` read+execute (and no longer writable). Returns false if a page table could not be
-/// allocated (the pages then stay writable and non-executable).
-pub fn seal_code(paddr: u64, n: usize) -> bool {
+/// Sets the direct map's entries of `n` frames at `paddr` to `flags` (or stops at the first that cannot be made).
+fn set_pages(paddr: PhysAddr, n: usize, flags: u64) -> bool {
     let _g = LOCK.lock();
     for k in 0..n as u64 {
         let a = paddr + k * FRAME;
-        let Some(e) = (unsafe { pte(a) }) else { return false };
-        unsafe { e.write(a | P) };
-        invlpg(a);
+        let Some(e) = (unsafe { pte(a.get()) }) else { return false };
+        unsafe { e.write(a.get() | flags) };
+        invlpg(a.virt());
     }
-    GEN.fetch_add(1, Ordering::Release);
     true
 }
 
-/// Sets the 4 KiB page at `addr` (in the first 2 MiB, which is always split) read+write+non-executable (`exec`
-/// false) or read+execute (`exec` true) — the application-processor trampoline.
-pub fn set_low_page(addr: u64, exec: bool) {
-    let _g = LOCK.lock();
-    if let Some(e) = unsafe { pte(addr) } {
-        unsafe { e.write(addr | P | if exec { 0 } else { W | nx() }) };
-        invlpg(addr);
-    }
+/// Makes `n` frames at `paddr` read+execute in the direct map (and no longer writable). Returns false if a page
+/// table could not be allocated (the pages then stay writable and non-executable).
+pub fn seal_code(paddr: PhysAddr, n: usize) -> bool {
+    let ok = set_pages(paddr, n, P);
+    GEN.fetch_add(1, Ordering::Release);
+    ok
 }
 
 /// Makes `n` frames at `paddr` read+write and non-executable again (code being freed).
-pub fn unseal_code(paddr: u64, n: usize) {
-    let _g = LOCK.lock();
-    let nx = nx();
-    for k in 0..n as u64 {
-        let a = paddr + k * FRAME;
-        if let Some(e) = unsafe { pte(a) } {
-            unsafe { e.write(a | P | W | nx) };
-            invlpg(a);
-        }
-    }
+pub fn unseal_code(paddr: PhysAddr, n: usize) {
+    set_pages(paddr, n, P | W | nx());
 }
 
-/// Permissions of the page at `addr`, as (present, writable, executable) — for the self tests.
-pub fn query(addr: u64) -> (bool, bool, bool) {
+/// Makes the frame at `paddr` read-only and non-executable in the direct map (the application-processor
+/// trampoline, executed through page tables of its own).
+pub fn seal_readonly(paddr: PhysAddr) -> bool {
+    set_pages(paddr, 1, P | nx())
+}
+
+/// Permissions of the page at `va`, as (present, writable, executable) — for the self tests.
+pub fn query(va: VirtAddr) -> (bool, bool, bool) {
     let _g = LOCK.lock();
-    match leaf(addr) {
+    match leaf(va) {
         Some((e, _)) => {
             let v = unsafe { *e };
             (true, v & W != 0, v & NX == 0)
@@ -400,8 +428,8 @@ pub fn query(addr: u64) -> (bool, bool, bool) {
     }
 }
 
-/// Whether the page at `addr` is mapped uncached (`None`: not mapped) — for the self tests.
-pub fn uncached(addr: u64) -> Option<bool> {
+/// Whether the page at `va` is mapped uncached (`None`: not mapped) — for the self tests.
+pub fn uncached(va: VirtAddr) -> Option<bool> {
     let _g = LOCK.lock();
-    leaf(addr).map(|(e, _)| unsafe { *e } & UC == UC)
+    leaf(va).map(|(e, _)| unsafe { *e } & UC == UC)
 }

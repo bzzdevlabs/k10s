@@ -249,6 +249,11 @@ seek privileges on this machine.
       version 1 builds refuse version 2; the crash model covers objects and the upgrade. Kernel text +17.8 KB.
       Software SHA-256 bounds verified object I/O (≈120 MiB/s): SHA-NI/ARMv8 SHA2 paths are due before images are
       served from it.
+    - P1.1 done: the native kernel runs in the upper half, linked at `KERNEL_BASE` + 1 MiB (its 32-bit PVH and
+      Multiboot2 entry runs at physical addresses), with a direct map of all physical memory (64 TiB) at
+      `PHYS_OFFSET`; every physical↔virtual conversion goes through `PhysAddr`/`VirtAddr`
+      (metal/kernel/src/mem/addr.rs) and nothing below 2^47 is mapped once booted (the AP trampoline and UEFI runtime
+      calls use page tables of their own sharing the kernel's upper half); layout in metal/README.md, "Virtual memory".
 13. **Tier 2: k10s on its own kernel, on QEMU and on real x86 machines** — done under QEMU (docs/TASK-native-hardware.md, plan
     in docs/research/native-hardware.md §9, decisions in docs/REPORT.md §9; the prototype branches no longer exist).
     Goal: the `metal/` kernel boots from the shared image (universal-os.md §8.4) on VMs and on a real x86 machine and

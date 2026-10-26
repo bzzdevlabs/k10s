@@ -2,13 +2,15 @@
 //!
 //! Workloads are isolated by construction (TIR's masked memory accesses, structured control flow and a closed
 //! host API), so the kernel needs no processes, no system calls, no user/kernel boundary and no per-workload page
-//! tables: one identity-mapped address space (W^X, NX), one or more CPUs, a timer, a NIC and a console.
+//! tables: one address space (the kernel in the upper half, a direct map of physical memory, W^X, NX; the lower
+//! half free for user address spaces), one or more CPUs, a timer, a NIC and a console.
 //!
 //! Boot: PVH entry (boot.rs) → `kmain`: per-CPU state, console, GDT/IDT, memory map → frame allocator + heap, the
-//! identity map (all RAM; devices uncached), ACPI tables (acpi.rs), console from SPCR, TSC clock, local APIC
-//! (x2APIC or xAPIC) and I/O APICs, application processors from the MADT (smp.rs), PCI (ECAM) and virtio-mmio →
-//! NIC and disks (dev/, virtio/) → smoltcp with DHCP or a static address, cluster layer (optional), deployment
-//! bundle → services (JIT-compiled), then CPU 0's main loop (the other CPUs run `runtime::worker_main`):
+//! kernel's page tables (arch/paging.rs: the direct map of all RAM, devices uncached), ACPI tables (acpi.rs), console
+//! from SPCR, TSC clock, local APIC (x2APIC or xAPIC) and I/O APICs, application processors from the MADT (smp.rs),
+//! PCI (ECAM) and virtio-mmio → NIC and disks (dev/, virtio/) → smoltcp with DHCP or a static address, cluster
+//! layer (optional), deployment bundle → services (JIT-compiled), then CPU 0's main loop (the other CPUs run
+//! `runtime::worker_main`):
 //!
 //! ```text
 //! loop { NIC rx → TCP → HTTP requests → dispatch to a CPU → gossip / peer links → run this CPU's invocations
@@ -122,7 +124,7 @@ extern "C" fn kmain() -> ! {
     let t_parse = arch::rdtsc();
     let memmap = mem::memmap::MemoryMap::from_entries(bi.memmap().iter().map(|r| (r.addr, r.size, r.kind)));
     frames::init(&memmap, bi.modules(), kernel);
-    arch::paging::init(&memmap);
+    arch::paging::init(&memmap, kernel);
     efi::init(&bi);
     TOTAL_RAM.store(frames::total_ram(&memmap), Ordering::Relaxed);
     let t_paging = arch::rdtsc();
@@ -208,7 +210,7 @@ extern "C" fn kmain() -> ! {
         env!("K10S_VERSION_FULL"),
         total_ram() >> 10,
         fs.usable >> 10,
-        (kernel.1 - kernel.0) >> 10,
+        (kernel.1.get() - kernel.0.get()) >> 10,
         time::tsc_hz() / 1_000_000,
         src,
         if arch::apic::x2apic() { "x2APIC" } else { "xAPIC" },
@@ -365,7 +367,7 @@ extern "C" fn kmain() -> ! {
     }
     if let Some(m) = bootcfg::bundle(&bi) {
         // SAFETY: the module range is reserved in the frame allocator until released below.
-        let bytes = unsafe { core::slice::from_raw_parts(m.paddr as *const u8, m.size as usize) };
+        let bytes = unsafe { m.bytes() };
         match apply_boot(bytes) {
             Ok(r) if r.contains("\"unchanged\":true") => {}
             Ok(_) => source = if m.name().is_empty() { "initrd" } else { "loader" },
@@ -411,7 +413,7 @@ extern "C" fn kmain() -> ! {
         if jit { "jit" } else { "interp" },
         ncpu,
         (fs.usable - fs.free) >> 10,
-        (kernel.1 - kernel.0) >> 10,
+        (kernel.1.get() - kernel.0.get()) >> 10,
         total_ram() >> 10,
         net.ipv4().map_or(alloc::string::String::from("none"), |a| alloc::format!("{}", a.address()))
     );

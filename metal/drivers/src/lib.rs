@@ -26,7 +26,7 @@ pub mod watchdog;
 /// Memory the device may read and write: physically contiguous, page-aligned, zeroed when allocated, returned to
 /// its allocator on drop.
 pub trait DmaMem {
-    /// The address the device uses (the kernel's identity map makes it the CPU's address too).
+    /// The address the device uses (physical); [`DmaMem::ptr`] is where the CPU reaches the same bytes.
     fn paddr(&self) -> u64;
     fn ptr(&self) -> *mut u8;
     fn len(&self) -> usize;

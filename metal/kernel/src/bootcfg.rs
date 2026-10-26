@@ -196,7 +196,7 @@ pub fn secret<T>(bi: &BootInfo, s: Secret, parse: impl FnOnce(&str) -> Result<T,
         return Err(format!("k10s.conf {key}={path}: the file already holds another key"));
     }
     // SAFETY: the module's memory, reserved until released below (once: CONSUMED).
-    let raw = unsafe { core::slice::from_raw_parts_mut(m.paddr as *mut u8, m.size as usize) };
+    let raw = unsafe { core::slice::from_raw_parts_mut(m.paddr.ptr::<u8>(), m.size as usize) };
     let r = match core::str::from_utf8(raw) {
         Ok(t) => parse(t).map(Some).map_err(|e| format!("{path}: {e}")),
         Err(_) => Err(format!("{path}: not text")),
@@ -214,7 +214,7 @@ pub fn wipe_unused_keys(bi: &BootInfo) {
             continue;
         }
         // SAFETY: the module's memory, reserved until released here (once: CONSUMED).
-        k10_mesh::crypto::zeroize(unsafe { core::slice::from_raw_parts_mut(m.paddr as *mut u8, m.size as usize) });
+        k10_mesh::crypto::zeroize(unsafe { core::slice::from_raw_parts_mut(m.paddr.ptr::<u8>(), m.size as usize) });
         crate::mem::frames::release_module(m.paddr, m.size);
     }
 }
