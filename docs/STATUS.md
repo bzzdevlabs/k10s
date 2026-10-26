@@ -226,6 +226,10 @@ seek privileges on this machine.
     with a k10s-owned per-CPU TCP/IP stack (SACK, window scaling, timestamps, congestion control) that native
     services use too. The step ends with M1 (stateless images), M2 (JVM), M3 (volumes, postgres), KPTI/IBRS for the
     CPUs that need them and the CLI's TLS registry client. Phases 0, 5 and 6 run alongside the kernel phases.
+    - P0.1–P0.2 done: syscall evidence from real images traced in a QEMU guest (`bench/oci/trace.sh`,
+      `bench/oci/syscalls.md`), the plan in docs/LX.md (M1 implements 115 of the 120 calls the M1 corpus makes),
+      test images without Docker (`scripts/oci-testimages.sh`, `lxprobe` differential probes) and a plain-HTTP
+      distribution server (`os/tools/registry.py`); CI's unit suite runs `table.py --check` and the registry self-test.
 13. **Tier 2: k10s on its own kernel, on QEMU and on real x86 machines** — done under QEMU (docs/TASK-native-hardware.md, plan
     in docs/research/native-hardware.md §9, decisions in docs/REPORT.md §9; the prototype branches no longer exist).
     Goal: the `metal/` kernel boots from the shared image (universal-os.md §8.4) on VMs and on a real x86 machine and

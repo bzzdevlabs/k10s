@@ -1,0 +1,9 @@
+[
+  {"name": "lxprobe", "tag": "k10s-test/lxprobe:v1", "image": "127.0.0.1:5077/k10s-test/lxprobe:v1", "steps": []},
+  {"name": "lxprobe-dynamic", "tag": "k10s-test/lxprobe-dynamic:v1",
+   "image": "127.0.0.1:5077/k10s-test/lxprobe-dynamic:v1", "steps": []},
+  {"name": "shell", "tag": "k10s-test/shell:v1", "image": "127.0.0.1:5077/k10s-test/shell:v1",
+   "steps": [["wait-tcp", "8080", "60"], ["http", "8080", "/", "10"], ["stop"]]},
+  {"name": "echo", "tag": "k10s-test/echo:v1", "image": "127.0.0.1:5077/k10s-test/echo:v1",
+   "steps": [["wait-tcp", "8080", "60"], ["http", "8080", "/", "10"], ["stop"]]}
+]

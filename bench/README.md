@@ -20,6 +20,12 @@ running the same workloads. Everything is scripted, idempotent and re-runnable; 
     (default `/data/counter`, pwrite without fsync). All use `PORT` (default 8080).
   `compute-purego` (native only) = `compute` built with `-tags purego` (Go's portable SHA-256 instead of its hand-written assembly), to separate the
   language/codegen gap from the platform gap.
+- `oci/` the syscall sizing of OCI images for the native kernel's Linux personality (docs/LX.md): `lxtrace/` (a ptrace
+  tracer, also the `/init` of the QEMU guest that runs each image), `elfscan.py` (static scan of the images' ELF files),
+  `corpus.json` (public images pinned by digest, with their workloads), `oci.py` (registry fetch through curl, layers
+  merged into an initramfs without root), `table.py` (`syscalls.json` and `syscalls.md`, checked in; `--check` in CI),
+  `lxplan.py` (the per-call plan), `lxprobe/` (deterministic syscall probes and a C echo server, built by
+  `scripts/oci-testimages.sh`), `testimages.json` (those test images traced from `os/tools/registry.py`).
 - `k8s/` kind scripts (see below). `native/` bare-process scripts. `k10s/` the k10s suite (see below). `summarize.py` builds the `SUMMARY.md` files,
   `compare.py` builds `results/COMPARISON.md` (all three side by side, ratios, caveats; closed-loop cells use the repeat with the least foreign CPU,
   `COMPARE_STAT=median` for medians). `run-final.sh` runs everything on a quiet machine.
@@ -30,6 +36,7 @@ bench/k8s/run-all.sh        # ~1 h: build, single-node suite, 3-node suite, SUMM
 bench/native/run-all.sh     # ~7 min: bare processes
 SKIP_THREE=1 bench/k8s/run-all.sh   # skip the 3-node part (idle + worker failure, ~15 min)
 QUICK=1 bench/k8s/run-all.sh        # smoke test, a few minutes, numbers meaningless
+bench/oci/trace.sh          # ~3 min (images cached): trace the OCI corpus in QEMU/KVM, regenerate oci/syscalls.{json,md} and docs/LX.md
 ```
 Requirements: docker, kind, kubectl, Go, python3, no root. Free disk >= 3 GB on /home is enforced (`check_disk` aborts).
 Single scripts (each needs the cluster: `k8s/create-cluster.sh && k8s/load-images.sh`; `VARIANT=three` for the 3-node cluster;

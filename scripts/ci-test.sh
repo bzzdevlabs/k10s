@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Test suites of CI and the release gate, same locally. usage: ci-test.sh SUITE...
-#   unit            all crates, release mode, JIT then interpreter (node, CLI); no #[ignore]d tests, no campaigns
+#   unit            all crates, release mode, JIT then interpreter (node, CLI); no #[ignore]d tests, no campaigns;
+#                   the OCI tooling that needs no image or guest: bench/oci/table.py --check (docs/LX.md and the
+#                   syscall table agree with the plan), os/tools/registry.py --self-test, lxtrace tracing a shell
 #   musl            the same on x86_64-unknown-linux-musl (the static release binary)
 #   arm64           on an arm64 host: the same (the AArch64 JIT, its encoder and SFI verifier tests included) for
 #                   the host's gnu target and aarch64-unknown-linux-musl
@@ -54,6 +56,18 @@ unit() { # [--target TRIPLE]
     objdump --version | head -1
     run env K10S_BACKEND=jit cargo test --release --locked "$@" "${EXTRA[@]}" "${CRATES[@]}" -- "${SKIP[@]}"
     run env K10S_BACKEND=interp cargo test --release --locked "$@" "${EXTRA[@]}" -p k10-node -p k10s -- "${SKIP[@]}"
+}
+
+oci_tools() {
+    run python3 bench/oci/table.py --check
+    run python3 -I os/tools/registry.py --self-test
+    local t=$PWD/target/oci-lxtrace out
+    (cd bench/oci/lxtrace && run env CARGO_TARGET_DIR="$t" cargo build --release --locked)
+    out=$(mktemp -d)
+    run "$t/release/lxtrace" trace "$out/trace.json" -- sh -c 'exec true'
+    python3 -c 'import json, sys; d = json.load(open(sys.argv[1])); assert d["exit"] == 0 and d["programs"], d' \
+        "$out/trace.json"
+    rm -rf "$out"
 }
 
 arm64() {
@@ -170,7 +184,7 @@ qemu_watchdog() { # NAME PLATFORM SECONDS EXPECTED_NAME [qemu args]
 for suite in "$@"; do
     echo "=== $suite"
     case $suite in
-    unit) unit ;;
+    unit) unit; oci_tools ;;
     musl) unit --target x86_64-unknown-linux-musl ;;
     campaign) campaign ;;
     dist) dist ;;

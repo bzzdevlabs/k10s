@@ -146,7 +146,7 @@ Then set the next version (`scripts/set-version.sh X.Y.(Z+1)`, or a minor or maj
 
 | Path | What |
 |---|---|
-| [docs/](docs/) | design, specs ([TIR](docs/TIR.md), [host API](docs/HOSTAPI.md), [JIT ABI](docs/JIT-ABI.md), [Ten](docs/TEN.md)), [node runtime](docs/NODE.md), [PID 1 mode](docs/OS.md), [status](docs/STATUS.md) |
+| [docs/](docs/) | design, specs ([TIR](docs/TIR.md), [host API](docs/HOSTAPI.md), [JIT ABI](docs/JIT-ABI.md), [Ten](docs/TEN.md)), [node runtime](docs/NODE.md), [PID 1 mode](docs/OS.md), [Linux syscall plan](docs/LX.md), [status](docs/STATUS.md) |
 | [crates/k10-ir](crates/k10-ir) | TIR: codec, validator, reference interpreter, random program generator |
 | [crates/k10-nospec](crates/k10-nospec) | branch-free clamps for host code indexed by guest values (Spectre v1) |
 | [crates/k10-host](crates/k10-host) | the host API, shared by the hosted node and the bare-metal kernel |
@@ -157,7 +157,7 @@ Then set the next version (`scripts/set-version.sh X.Y.(Z+1)`, or a minor or maj
 | [metal/](metal/) | the node as a bare-metal kernel (PVH, Multiboot2 and its UEFI loader k10boot, ACPI, virtio net and blk over PCI and MMIO, Intel and Realtek NICs, screen and UDP consoles, watchdogs, SMP, JIT, cluster member) |
 | [os/](os/) | the k10s Linux kernels (`vm`, `metal`), initramfs, firmware and disk image builders, PID 1 and image tests under QEMU ([docs/OS.md](docs/OS.md)) |
 | [examples/](examples/) | Ten services: hello, echo, compute (SHA-256), chain, counter, todo, nbody, sort |
-| [bench/](bench/) | Kubernetes / bare-process / k10s benchmark harness and results |
+| [bench/](bench/) | Kubernetes / bare-process / k10s benchmark harness and results; the OCI corpus syscall tracing (`bench/oci`) |
 | [editors/vscode](editors/vscode) | VS Code extension for Ten sources and `.k10s` manifests |
 | [website/](website/) | the documentation site (GitHub Pages) |
 

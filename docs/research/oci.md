@@ -93,7 +93,14 @@ Target: ≈ 180–200 implemented (≈ 60 of them partially or as documented stu
 `umount2`, `pivot_root`, `chroot` beyond the container's own tree, `setns`, `unshare`, `reboot`, `swapon/off`,
 `syslog`, `settimeofday`, `clock_settime`, `adjtimex`, `sethostname`, `init_module`, `kexec_*`, `bpf`,
 `perf_event_open`, `io_uring_*`, `userfaultfd`, `ptrace`, `process_vm_*`, `keyctl`/`add_key`, `pkey_*`,
-`personality` except `PER_LINUX`), everything else `ENOSYS`. The sizing tool (session P0.1) produces the real list.
+`personality` except `PER_LINUX`), everything else `ENOSYS`.
+
+Measured (P0.1: `bench/oci/trace.sh`, the per-call table in `bench/oci/syscalls.md`, the plan in docs/LX.md): the
+nine corpus images, traced with ptrace under their own entrypoints and a realistic workload, make 34 (static Go) to
+102 (postgres) distinct calls, 139 in all; the seven M1 images make 120, of which M1 implements 115 and 5 get an errno
+their callers handle (`clone3`, `rseq` and `io_setup` ENOSYS, `io_uring_setup/enter` EPERM). The same images
+reference 277 calls statically. The plan of docs/LX.md covers all 383 x86-64 calls: 239 in M1 (4 as stubs), 35 in
+M2/M3, 75 refused, 34 ENOSYS.
 
 Classes (x86-64 names; the personality is table-driven per arch):
 
@@ -621,12 +628,17 @@ suites, metal-selftest, image sizes), docs updated as current state. Native-only
 equivalent in behavior until an OCI feature is enabled.
 
 **Phase 0 — tooling and evidence**
-- P0.1 Syscall sizing: a ptrace tracer and an ELF static scanner (k10s-owned tools) run in CI on a QEMU Linux guest
-  over the corpus (busybox/alpine, nginx, redis, python, node, temurin, postgres, Go and Rust static binaries);
-  output: the call/flag/path table that drives `docs/LX.md`. (`scripts/`, `bench/oci/`)
-- P0.2 Test images: `scripts/oci-testimages.sh` builds OCI layouts with no Docker: static musl `lxprobe` programs,
-  the Go bench workloads (CGO off), a dynamically linked musl program with its loader, a shell-script entrypoint;
-  `os/tools/registry.py` (stdlib-only plain-HTTP distribution API over an OCI layout, bearer-token emulation).
+- P0.1 Syscall sizing: a ptrace tracer (`bench/oci/lxtrace`, also the `/init` of the QEMU guest whose initramfs is
+  the image) and an ELF static scanner (`bench/oci/elfscan.py`) over the corpus (busybox/alpine, nginx, redis,
+  python, node, temurin, postgres, Go and Rust static binaries) on the pinned Debian kernel; output: the
+  call/flag/path table `bench/oci/syscalls.md` that drives `docs/LX.md`. `bench/oci/trace.sh` reproduces it; CI
+  checks that the checked-in table, docs/LX.md and the plan agree (`bench/oci/table.py --check`).
+- P0.2 Test images: `scripts/oci-testimages.sh` builds OCI layouts and `docker save` archives with no Docker, from
+  musl 1.2.5 and busybox 1.37.0 built from pinned sources: static musl `lxprobe` (deterministic probes of the M1
+  calls, `bench/oci/lxprobe`), the same program dynamically linked with musl's loader, the Go bench workloads
+  (CGO off; `echo` as a linux/amd64 + linux/arm64 index), a busybox shell-script entrypoint serving HTTP;
+  `os/tools/registry.py` (stdlib-only plain-HTTP distribution API over an OCI layout, bearer-token emulation,
+  `--self-test` in CI).
 
 **Phase 1 — user mode in the native kernel** (metal/kernel; sequential)
 - P1.1 Higher-half kernel and direct map (all physical/virtual conversions explicit); no behavior change; full

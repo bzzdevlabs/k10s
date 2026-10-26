@@ -1,0 +1,9003 @@
+{
+ "images": {
+  "alpine-sh": {
+   "closure_objects": 2,
+   "driver": [],
+   "elf_objects": 17,
+   "execs": 95,
+   "exit": 0,
+   "forks": 100,
+   "image": "docker.io/library/alpine@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f",
+   "inline": [],
+   "kernel": "Linux 6.12.111+deb13-amd64 x86_64",
+   "killed": false,
+   "layers_bytes": 3794357,
+   "manifest": "sha256:dc92f017beea8e7f43263073d717f7bc011228c95d5312e440deb4d035bb4eec",
+   "milestone": "M1",
+   "programs": [
+    "/bin/busybox"
+   ],
+   "static_all": [
+    "accept",
+    "access",
+    "adjtimex",
+    "alarm",
+    "bind",
+    "capget",
+    "capset",
+    "chdir",
+    "chmod",
+    "chown",
+    "chroot",
+    "clock_gettime",
+    "clock_settime",
+    "clone",
+    "close",
+    "connect",
+    "dup",
+    "dup2",
+    "execve",
+    "exit_group",
+    "faccessat",
+    "fallocate",
+    "fchdir",
+    "fchmod",
+    "fchmodat",
+    "fchown",
+    "fchownat",
+    "fcntl",
+    "fdatasync",
+    "fgetxattr",
+    "flistxattr",
+    "flock",
+    "fork",
+    "fsetxattr",
+    "fstat",
+    "fstatfs",
+    "fsync",
+    "ftruncate",
+    "futex",
+    "getcwd",
+    "getdents64",
+    "getegid",
+    "geteuid",
+    "getgid",
+    "getgroups",
+    "getpeername",
+    "getpgrp",
+    "getpid",
+    "getppid",
+    "getpriority",
+    "getrandom",
+    "getresgid",
+    "getresuid",
+    "getrlimit",
+    "getsid",
+    "getsockname",
+    "getsockopt",
+    "gettimeofday",
+    "getuid",
+    "inotify_add_watch",
+    "inotify_init",
+    "inotify_rm_watch",
+    "ioctl",
+    "kill",
+    "lchown",
+    "link",
+    "linkat",
+    "listen",
+    "lseek",
+    "lstat",
+    "madvise",
+    "mkdir",
+    "mkdirat",
+    "mknod",
+    "mknodat",
+    "mlock",
+    "mmap",
+    "mount",
+    "mprotect",
+    "msgctl",
+    "msgget",
+    "munmap",
+    "nanosleep",
+    "newfstatat",
+    "open",
+    "openat",
+    "pause",
+    "personality",
+    "pipe",
+    "pivot_root",
+    "poll",
+    "ppoll",
+    "prctl",
+    "pread64",
+    "read",
+    "readahead",
+    "readlink",
+    "readlinkat",
+    "reboot",
+    "recvfrom",
+    "recvmmsg",
+    "recvmsg",
+    "rename",
+    "renameat",
+    "rmdir",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "rt_sigsuspend",
+    "rt_sigtimedwait",
+    "sched_getaffinity",
+    "sched_yield",
+    "select",
+    "semctl",
+    "semget",
+    "semop",
+    "sendfile",
+    "sendmmsg",
+    "sendmsg",
+    "sendto",
+    "setgid",
+    "setgroups",
+    "sethostname",
+    "setitimer",
+    "setns",
+    "setpgid",
+    "setpriority",
+    "setresgid",
+    "setresuid",
+    "setrlimit",
+    "setsid",
+    "setsockopt",
+    "settimeofday",
+    "setuid",
+    "shmat",
+    "shmctl",
+    "shmdt",
+    "shmget",
+    "shutdown",
+    "socket",
+    "socketpair",
+    "stat",
+    "statfs",
+    "swapoff",
+    "swapon",
+    "symlink",
+    "symlinkat",
+    "sync",
+    "syncfs",
+    "sysinfo",
+    "syslog",
+    "tgkill",
+    "umask",
+    "umount2",
+    "uname",
+    "unlink",
+    "unlinkat",
+    "unshare",
+    "utimensat",
+    "utimes",
+    "vfork",
+    "wait4",
+    "write"
+   ],
+   "static_closure": [
+    "accept",
+    "access",
+    "adjtimex",
+    "alarm",
+    "bind",
+    "capget",
+    "capset",
+    "chdir",
+    "chmod",
+    "chown",
+    "chroot",
+    "clock_gettime",
+    "clock_settime",
+    "clone",
+    "close",
+    "connect",
+    "dup",
+    "dup2",
+    "execve",
+    "exit_group",
+    "fallocate",
+    "fchdir",
+    "fchmod",
+    "fchown",
+    "fcntl",
+    "fdatasync",
+    "flock",
+    "fork",
+    "fstat",
+    "fsync",
+    "ftruncate",
+    "getcwd",
+    "getdents64",
+    "getegid",
+    "geteuid",
+    "getgid",
+    "getgroups",
+    "getpeername",
+    "getpgrp",
+    "getpid",
+    "getppid",
+    "getpriority",
+    "getresgid",
+    "getresuid",
+    "getrlimit",
+    "getsid",
+    "getsockname",
+    "getsockopt",
+    "gettimeofday",
+    "getuid",
+    "inotify_add_watch",
+    "inotify_init",
+    "inotify_rm_watch",
+    "ioctl",
+    "kill",
+    "lchown",
+    "link",
+    "listen",
+    "lseek",
+    "lstat",
+    "mkdir",
+    "mknod",
+    "mknodat",
+    "mmap",
+    "mount",
+    "msgctl",
+    "msgget",
+    "munmap",
+    "nanosleep",
+    "open",
+    "openat",
+    "pause",
+    "personality",
+    "pipe",
+    "pivot_root",
+    "poll",
+    "ppoll",
+    "prctl",
+    "pread64",
+    "read",
+    "readahead",
+    "readlink",
+    "reboot",
+    "recvfrom",
+    "recvmsg",
+    "rename",
+    "rmdir",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "rt_sigsuspend",
+    "rt_sigtimedwait",
+    "sched_getaffinity",
+    "sched_yield",
+    "semctl",
+    "semget",
+    "semop",
+    "sendfile",
+    "sendmsg",
+    "sendto",
+    "setgid",
+    "setgroups",
+    "sethostname",
+    "setitimer",
+    "setns",
+    "setpgid",
+    "setpriority",
+    "setresgid",
+    "setresuid",
+    "setrlimit",
+    "setsid",
+    "setsockopt",
+    "settimeofday",
+    "setuid",
+    "shmat",
+    "shmctl",
+    "shmdt",
+    "shmget",
+    "shutdown",
+    "socket",
+    "socketpair",
+    "stat",
+    "statfs",
+    "swapoff",
+    "swapon",
+    "symlink",
+    "sync",
+    "syncfs",
+    "sysinfo",
+    "syslog",
+    "tgkill",
+    "umask",
+    "umount2",
+    "uname",
+    "unlink",
+    "unshare",
+    "utimensat",
+    "utimes",
+    "vfork",
+    "wait4",
+    "write"
+   ],
+   "static_programs": [],
+   "tag": "alpine:3.22",
+   "threads": 0,
+   "traced": [
+    "arch_prctl",
+    "brk",
+    "chdir",
+    "close",
+    "connect",
+    "dup2",
+    "execve",
+    "exit_group",
+    "fchmod",
+    "fchown",
+    "fcntl",
+    "fork",
+    "fstat",
+    "getcwd",
+    "getdents64",
+    "getegid",
+    "geteuid",
+    "getgid",
+    "getgroups",
+    "getpid",
+    "getppid",
+    "getuid",
+    "ioctl",
+    "kill",
+    "lseek",
+    "lstat",
+    "mkdir",
+    "mmap",
+    "mprotect",
+    "munmap",
+    "nanosleep",
+    "open",
+    "pipe",
+    "read",
+    "rename",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "rt_sigreturn",
+    "rt_sigsuspend",
+    "sched_getaffinity",
+    "sendfile",
+    "set_tid_address",
+    "socket",
+    "stat",
+    "sysinfo",
+    "umask",
+    "unlink",
+    "wait4",
+    "write",
+    "writev"
+   ],
+   "workload": "entrypoint-style shell script: templating, text tools, archives, a trapped background job"
+  },
+  "go-static": {
+   "closure_objects": 1,
+   "driver": [
+    "wait-tcp 80 60: ok",
+    "http 80 / 20: fresh {\"200\": 20} keep-alive {\"200\": 20}",
+    "signal 15: sent"
+   ],
+   "elf_objects": 1,
+   "execs": 1,
+   "exit": -15,
+   "forks": 0,
+   "image": "docker.io/traefik/whoami@sha256:200689790a0a0ea48ca45992e0450bc26ccab5307375b41c84dfc4f2475937ab",
+   "inline": [
+    "clone",
+    "close",
+    "exit",
+    "exit_group",
+    "futex",
+    "getpid",
+    "gettid",
+    "kill",
+    "mincore",
+    "mmap",
+    "nanosleep",
+    "openat",
+    "read",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "sched_getaffinity",
+    "sched_yield",
+    "tgkill",
+    "timer_create",
+    "timer_delete",
+    "timer_settime",
+    "write"
+   ],
+   "kernel": "Linux 6.12.111+deb13-amd64 x86_64",
+   "killed": false,
+   "layers_bytes": 3035835,
+   "manifest": "sha256:4f90b33ddca9c4d4f06527070d6e503b16d71016edea036842be2a84e60c91cb",
+   "milestone": "M1",
+   "programs": [
+    "/whoami"
+   ],
+   "static_all": [],
+   "static_closure": [],
+   "static_programs": [
+    "whoami"
+   ],
+   "tag": "traefik/whoami:v1.11",
+   "threads": 3,
+   "traced": [
+    "accept4",
+    "arch_prctl",
+    "bind",
+    "clone",
+    "close",
+    "epoll_create1",
+    "epoll_ctl",
+    "epoll_pwait",
+    "eventfd2",
+    "fcntl",
+    "futex",
+    "getpid",
+    "getsockname",
+    "gettid",
+    "listen",
+    "madvise",
+    "mmap",
+    "nanosleep",
+    "openat",
+    "prlimit64",
+    "read",
+    "recvfrom",
+    "restart_syscall",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "rt_sigreturn",
+    "sched_getaffinity",
+    "sendto",
+    "setsockopt",
+    "sigaltstack",
+    "socket",
+    "tgkill",
+    "uname",
+    "write"
+   ],
+   "workload": "static Go HTTP server, 40 requests, SIGTERM"
+  },
+  "nginx": {
+   "closure_objects": 24,
+   "driver": [
+    "wait-tcp 80 60: ok",
+    "http 80 / 20: fresh {\"200\": 20} keep-alive {\"200\": 20}",
+    "signal 3: sent"
+   ],
+   "elf_objects": 831,
+   "execs": 19,
+   "exit": 0,
+   "forks": 24,
+   "image": "docker.io/library/nginx@sha256:1881968aff6f7cdcc4b888c00a11f4ce241ad7ec957e0cb4a9e19e93a3ff87ea",
+   "inline": [
+    "access",
+    "alarm",
+    "arch_prctl",
+    "bind",
+    "brk",
+    "chdir",
+    "chmod",
+    "chroot",
+    "clock_gettime",
+    "close",
+    "dup2",
+    "exit_group",
+    "fcntl",
+    "fstat",
+    "ftruncate",
+    "futex",
+    "getcwd",
+    "getdents64",
+    "getpeername",
+    "getpid",
+    "getrandom",
+    "getsockname",
+    "gettid",
+    "ioctl",
+    "lseek",
+    "madvise",
+    "mkdir",
+    "mmap",
+    "mprotect",
+    "mremap",
+    "munmap",
+    "newfstatat",
+    "openat",
+    "prctl",
+    "pread64",
+    "prlimit64",
+    "readlink",
+    "rename",
+    "rseq",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "sched_get_priority_max",
+    "sched_get_priority_min",
+    "sched_getparam",
+    "sched_getscheduler",
+    "sched_setscheduler",
+    "set_tid_address",
+    "setsockopt",
+    "socket",
+    "symlink",
+    "sysinfo",
+    "tgkill",
+    "uname",
+    "unlink",
+    "write",
+    "writev"
+   ],
+   "kernel": "Linux 6.12.111+deb13-amd64 x86_64",
+   "killed": false,
+   "layers_bytes": 62942486,
+   "manifest": "sha256:ab15d428b6a7121511a38221591a41f835933ac16f996fafd102d128a0fa20f7",
+   "milestone": "M1",
+   "programs": [
+    "/usr/bin/basename",
+    "/usr/bin/cut",
+    "/usr/bin/dash",
+    "/usr/bin/dpkg-query",
+    "/usr/bin/find",
+    "/usr/bin/grep",
+    "/usr/bin/mawk",
+    "/usr/bin/md5sum",
+    "/usr/bin/sed",
+    "/usr/bin/sort",
+    "/usr/bin/touch",
+    "/usr/sbin/nginx"
+   ],
+   "static_all": [
+    "accept",
+    "accept4",
+    "access",
+    "add_key",
+    "alarm",
+    "bind",
+    "capget",
+    "capset",
+    "chdir",
+    "chmod",
+    "chown",
+    "chroot",
+    "clock_getres",
+    "clock_gettime",
+    "clock_settime",
+    "clone",
+    "close",
+    "close_range",
+    "connect",
+    "copy_file_range",
+    "creat",
+    "dup",
+    "dup2",
+    "dup3",
+    "epoll_create",
+    "epoll_create1",
+    "epoll_ctl",
+    "epoll_pwait2",
+    "epoll_wait",
+    "eventfd2",
+    "execve",
+    "exit_group",
+    "faccessat",
+    "fadvise64",
+    "fallocate",
+    "fchdir",
+    "fchmod",
+    "fchmodat",
+    "fchown",
+    "fchownat",
+    "fcntl",
+    "fdatasync",
+    "fgetxattr",
+    "flistxattr",
+    "flock",
+    "fork",
+    "fremovexattr",
+    "fsconfig",
+    "fsetxattr",
+    "fsmount",
+    "fsopen",
+    "fspick",
+    "fstat",
+    "fstatfs",
+    "fsync",
+    "ftruncate",
+    "futex",
+    "futimesat",
+    "getcpu",
+    "getcwd",
+    "getdents64",
+    "getegid",
+    "geteuid",
+    "getgid",
+    "getgroups",
+    "getpeername",
+    "getpgid",
+    "getpgrp",
+    "getpid",
+    "getppid",
+    "getpriority",
+    "getrandom",
+    "getresgid",
+    "getresuid",
+    "getrlimit",
+    "getrusage",
+    "getsid",
+    "getsockname",
+    "getsockopt",
+    "gettid",
+    "gettimeofday",
+    "getuid",
+    "getxattr",
+    "inotify_add_watch",
+    "inotify_init",
+    "inotify_init1",
+    "inotify_rm_watch",
+    "ioctl",
+    "kill",
+    "lchown",
+    "lgetxattr",
+    "link",
+    "linkat",
+    "listen",
+    "listxattr",
+    "llistxattr",
+    "lremovexattr",
+    "lseek",
+    "lsetxattr",
+    "lstat",
+    "madvise",
+    "memfd_create",
+    "mincore",
+    "mkdir",
+    "mkdirat",
+    "mknod",
+    "mknodat",
+    "mlock",
+    "mlockall",
+    "mmap",
+    "mount",
+    "mount_setattr",
+    "move_mount",
+    "mprotect",
+    "mq_getsetattr",
+    "mq_open",
+    "mq_unlink",
+    "mremap",
+    "msgctl",
+    "msgget",
+    "msgrcv",
+    "msgsnd",
+    "msync",
+    "munlock",
+    "munmap",
+    "name_to_handle_at",
+    "nanosleep",
+    "newfstatat",
+    "open",
+    "open_tree",
+    "openat",
+    "pause",
+    "personality",
+    "pidfd_getfd",
+    "pidfd_open",
+    "pidfd_send_signal",
+    "pipe",
+    "pipe2",
+    "poll",
+    "ppoll",
+    "prctl",
+    "pread64",
+    "preadv",
+    "prlimit64",
+    "pselect6",
+    "ptrace",
+    "pwrite64",
+    "pwritev",
+    "quotactl",
+    "read",
+    "readlink",
+    "readlinkat",
+    "readv",
+    "recvfrom",
+    "recvmmsg",
+    "recvmsg",
+    "removexattr",
+    "rename",
+    "renameat",
+    "renameat2",
+    "rmdir",
+    "rt_sigaction",
+    "rt_sigpending",
+    "rt_sigprocmask",
+    "rt_sigsuspend",
+    "rt_sigtimedwait",
+    "sched_get_priority_max",
+    "sched_get_priority_min",
+    "sched_getaffinity",
+    "sched_getattr",
+    "sched_getparam",
+    "sched_getscheduler",
+    "sched_setaffinity",
+    "sched_setattr",
+    "sched_setscheduler",
+    "sched_yield",
+    "select",
+    "semctl",
+    "semget",
+    "semop",
+    "sendfile",
+    "sendmmsg",
+    "sendmsg",
+    "sendto",
+    "setdomainname",
+    "setfsgid",
+    "setfsuid",
+    "setgid",
+    "setgroups",
+    "sethostname",
+    "setitimer",
+    "setns",
+    "setpgid",
+    "setpriority",
+    "setregid",
+    "setresgid",
+    "setresuid",
+    "setreuid",
+    "setrlimit",
+    "setsid",
+    "setsockopt",
+    "settimeofday",
+    "setuid",
+    "setxattr",
+    "shmat",
+    "shmctl",
+    "shmdt",
+    "shmget",
+    "shutdown",
+    "sigaltstack",
+    "signalfd4",
+    "socket",
+    "socketpair",
+    "splice",
+    "stat",
+    "statfs",
+    "statx",
+    "swapoff",
+    "swapon",
+    "symlink",
+    "symlinkat",
+    "sync",
+    "sync_file_range",
+    "syncfs",
+    "sysinfo",
+    "syslog",
+    "tgkill",
+    "timer_create",
+    "timer_delete",
+    "timer_settime",
+    "timerfd_create",
+    "timerfd_settime",
+    "truncate",
+    "umask",
+    "umount2",
+    "uname",
+    "unlink",
+    "unlinkat",
+    "unshare",
+    "utime",
+    "utimensat",
+    "utimes",
+    "vfork",
+    "vhangup",
+    "wait4",
+    "waitid",
+    "write",
+    "writev"
+   ],
+   "static_closure": [
+    "accept",
+    "accept4",
+    "access",
+    "bind",
+    "chdir",
+    "chmod",
+    "chown",
+    "clock_gettime",
+    "clone",
+    "close",
+    "connect",
+    "dup",
+    "dup2",
+    "epoll_create",
+    "epoll_ctl",
+    "epoll_wait",
+    "eventfd2",
+    "execve",
+    "exit_group",
+    "faccessat",
+    "fadvise64",
+    "fchdir",
+    "fchmod",
+    "fchown",
+    "fcntl",
+    "fgetxattr",
+    "fork",
+    "fsetxattr",
+    "fstat",
+    "fstatfs",
+    "fsync",
+    "ftruncate",
+    "futex",
+    "getcwd",
+    "getdents64",
+    "getegid",
+    "geteuid",
+    "getgid",
+    "getpeername",
+    "getpgrp",
+    "getpid",
+    "getppid",
+    "getrandom",
+    "getrlimit",
+    "getsockname",
+    "getsockopt",
+    "gettid",
+    "gettimeofday",
+    "getuid",
+    "getxattr",
+    "ioctl",
+    "kill",
+    "lgetxattr",
+    "link",
+    "listen",
+    "lseek",
+    "lsetxattr",
+    "lstat",
+    "madvise",
+    "mincore",
+    "mkdir",
+    "mlock",
+    "mmap",
+    "mount",
+    "mprotect",
+    "munmap",
+    "nanosleep",
+    "newfstatat",
+    "open",
+    "openat",
+    "pause",
+    "pipe",
+    "pipe2",
+    "poll",
+    "prctl",
+    "pread64",
+    "pwrite64",
+    "pwritev",
+    "read",
+    "readlink",
+    "readlinkat",
+    "readv",
+    "recvfrom",
+    "recvmmsg",
+    "recvmsg",
+    "removexattr",
+    "rename",
+    "rmdir",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "rt_sigsuspend",
+    "sched_getaffinity",
+    "sched_setaffinity",
+    "sched_yield",
+    "select",
+    "sendfile",
+    "sendmmsg",
+    "sendmsg",
+    "sendto",
+    "setgid",
+    "setgroups",
+    "setitimer",
+    "setpgid",
+    "setpriority",
+    "setrlimit",
+    "setsid",
+    "setsockopt",
+    "setuid",
+    "setxattr",
+    "shmat",
+    "shmdt",
+    "shmget",
+    "shutdown",
+    "sigaltstack",
+    "socket",
+    "socketpair",
+    "splice",
+    "stat",
+    "statfs",
+    "sysinfo",
+    "tgkill",
+    "umask",
+    "umount2",
+    "uname",
+    "unlink",
+    "unlinkat",
+    "utimensat",
+    "utimes",
+    "vfork",
+    "wait4",
+    "write",
+    "writev"
+   ],
+   "static_programs": [
+    "usr/sbin/ldconfig"
+   ],
+   "tag": "nginx:1.29",
+   "threads": 0,
+   "traced": [
+    "accept4",
+    "access",
+    "arch_prctl",
+    "bind",
+    "brk",
+    "chown",
+    "clone",
+    "close",
+    "connect",
+    "dup2",
+    "epoll_create",
+    "epoll_ctl",
+    "epoll_wait",
+    "eventfd2",
+    "execve",
+    "exit_group",
+    "faccessat2",
+    "fadvise64",
+    "fchdir",
+    "fchown",
+    "fcntl",
+    "fgetxattr",
+    "fsetxattr",
+    "fstat",
+    "fstatfs",
+    "futex",
+    "getcwd",
+    "getdents64",
+    "getegid",
+    "geteuid",
+    "getgid",
+    "getpid",
+    "getppid",
+    "getrandom",
+    "gettid",
+    "getuid",
+    "io_setup",
+    "ioctl",
+    "listen",
+    "lseek",
+    "mkdir",
+    "mmap",
+    "mprotect",
+    "munmap",
+    "newfstatat",
+    "openat",
+    "pipe2",
+    "prctl",
+    "pread64",
+    "prlimit64",
+    "pwrite64",
+    "read",
+    "recvfrom",
+    "recvmsg",
+    "rename",
+    "rseq",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "rt_sigreturn",
+    "rt_sigsuspend",
+    "sched_getaffinity",
+    "sendfile",
+    "sendmsg",
+    "set_robust_list",
+    "set_tid_address",
+    "setgid",
+    "setgroups",
+    "setsockopt",
+    "setuid",
+    "sigaltstack",
+    "socket",
+    "socketpair",
+    "statfs",
+    "sysinfo",
+    "umask",
+    "uname",
+    "unlink",
+    "utimensat",
+    "vfork",
+    "wait4",
+    "write",
+    "writev"
+   ],
+   "workload": "entrypoint scripts, master and workers, 40 HTTP requests, SIGQUIT"
+  },
+  "node-http": {
+   "closure_objects": 9,
+   "driver": [
+    "wait-tcp 3000 60: ok",
+    "http 3000 / 20: fresh {\"200\": 20} keep-alive {\"200\": 20}",
+    "signal 15: sent"
+   ],
+   "elf_objects": 695,
+   "execs": 2,
+   "exit": 0,
+   "forks": 1,
+   "image": "docker.io/library/node@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d",
+   "inline": [
+    "access",
+    "alarm",
+    "arch_prctl",
+    "bind",
+    "brk",
+    "chdir",
+    "chmod",
+    "chroot",
+    "clock_gettime",
+    "clock_nanosleep",
+    "close",
+    "connect",
+    "dup2",
+    "exit_group",
+    "fcntl",
+    "fdatasync",
+    "fsync",
+    "ftruncate",
+    "futex",
+    "getcwd",
+    "getdents64",
+    "getpeername",
+    "getpid",
+    "getrandom",
+    "getsockname",
+    "gettid",
+    "ioctl",
+    "lseek",
+    "madvise",
+    "mkdir",
+    "mmap",
+    "mprotect",
+    "mremap",
+    "munmap",
+    "newfstatat",
+    "openat",
+    "poll",
+    "pread64",
+    "prlimit64",
+    "readlink",
+    "readv",
+    "recvfrom",
+    "recvmsg",
+    "rename",
+    "rseq",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "sched_get_priority_max",
+    "sched_get_priority_min",
+    "sched_getaffinity",
+    "sched_getparam",
+    "sched_getscheduler",
+    "sched_setscheduler",
+    "sched_yield",
+    "sendmmsg",
+    "sendto",
+    "set_tid_address",
+    "setitimer",
+    "setsockopt",
+    "socket",
+    "symlink",
+    "sysinfo",
+    "tgkill",
+    "uname",
+    "unlink",
+    "write",
+    "writev"
+   ],
+   "kernel": "Linux 6.12.111+deb13-amd64 x86_64",
+   "killed": false,
+   "layers_bytes": 79850351,
+   "manifest": "sha256:ea11b74b986d520137cdef9a5346e447a00f275ecc4abc0055b7151226231e09",
+   "milestone": "M1",
+   "programs": [
+    "/usr/bin/dash",
+    "/usr/local/bin/node"
+   ],
+   "static_all": [
+    "accept",
+    "accept4",
+    "access",
+    "alarm",
+    "bind",
+    "brk",
+    "capget",
+    "capset",
+    "chdir",
+    "chmod",
+    "chown",
+    "chroot",
+    "clock_getres",
+    "clock_gettime",
+    "clock_settime",
+    "clone",
+    "close",
+    "close_range",
+    "connect",
+    "copy_file_range",
+    "creat",
+    "dup",
+    "dup2",
+    "dup3",
+    "epoll_create1",
+    "epoll_ctl",
+    "epoll_pwait",
+    "epoll_wait",
+    "eventfd2",
+    "execve",
+    "exit_group",
+    "faccessat",
+    "fadvise64",
+    "fallocate",
+    "fchdir",
+    "fchmod",
+    "fchmodat",
+    "fchown",
+    "fchownat",
+    "fcntl",
+    "fdatasync",
+    "fgetxattr",
+    "flistxattr",
+    "flock",
+    "fork",
+    "fremovexattr",
+    "fsetxattr",
+    "fstat",
+    "fstatfs",
+    "fsync",
+    "ftruncate",
+    "futex",
+    "futimesat",
+    "getcpu",
+    "getcwd",
+    "getdents64",
+    "getegid",
+    "geteuid",
+    "getgid",
+    "getgroups",
+    "getpeername",
+    "getpgid",
+    "getpgrp",
+    "getpid",
+    "getppid",
+    "getpriority",
+    "getrandom",
+    "getresgid",
+    "getresuid",
+    "getrlimit",
+    "getrusage",
+    "getsid",
+    "getsockname",
+    "getsockopt",
+    "gettid",
+    "gettimeofday",
+    "getuid",
+    "getxattr",
+    "inotify_add_watch",
+    "inotify_init",
+    "inotify_init1",
+    "inotify_rm_watch",
+    "ioctl",
+    "iopl",
+    "kill",
+    "lchown",
+    "lgetxattr",
+    "link",
+    "linkat",
+    "listen",
+    "listxattr",
+    "llistxattr",
+    "lremovexattr",
+    "lseek",
+    "lsetxattr",
+    "lstat",
+    "madvise",
+    "memfd_create",
+    "mincore",
+    "mkdir",
+    "mkdirat",
+    "mknod",
+    "mknodat",
+    "mlock",
+    "mlockall",
+    "mmap",
+    "mount",
+    "mprotect",
+    "mq_getsetattr",
+    "mremap",
+    "msgctl",
+    "msgget",
+    "msgrcv",
+    "msgsnd",
+    "msync",
+    "munlock",
+    "munmap",
+    "name_to_handle_at",
+    "nanosleep",
+    "newfstatat",
+    "open",
+    "openat",
+    "pause",
+    "personality",
+    "pipe",
+    "pipe2",
+    "pkey_alloc",
+    "pkey_free",
+    "pkey_mprotect",
+    "poll",
+    "ppoll",
+    "prctl",
+    "pread64",
+    "prlimit64",
+    "pselect6",
+    "ptrace",
+    "pwrite64",
+    "quotactl",
+    "read",
+    "readlink",
+    "readlinkat",
+    "readv",
+    "reboot",
+    "recvfrom",
+    "recvmmsg",
+    "recvmsg",
+    "removexattr",
+    "rename",
+    "renameat",
+    "renameat2",
+    "rmdir",
+    "rt_sigaction",
+    "rt_sigpending",
+    "rt_sigprocmask",
+    "rt_sigsuspend",
+    "rt_sigtimedwait",
+    "sched_get_priority_max",
+    "sched_get_priority_min",
+    "sched_getaffinity",
+    "sched_getparam",
+    "sched_getscheduler",
+    "sched_setaffinity",
+    "sched_setscheduler",
+    "sched_yield",
+    "select",
+    "semctl",
+    "semget",
+    "semop",
+    "sendfile",
+    "sendmmsg",
+    "sendmsg",
+    "sendto",
+    "setdomainname",
+    "setfsgid",
+    "setfsuid",
+    "setgid",
+    "setgroups",
+    "sethostname",
+    "setitimer",
+    "setns",
+    "setpgid",
+    "setpriority",
+    "setregid",
+    "setresgid",
+    "setresuid",
+    "setreuid",
+    "setrlimit",
+    "setsid",
+    "setsockopt",
+    "settimeofday",
+    "setuid",
+    "setxattr",
+    "shmat",
+    "shmctl",
+    "shmdt",
+    "shmget",
+    "shutdown",
+    "sigaltstack",
+    "signalfd4",
+    "socket",
+    "socketpair",
+    "splice",
+    "stat",
+    "statfs",
+    "statx",
+    "swapoff",
+    "swapon",
+    "symlink",
+    "symlinkat",
+    "sync",
+    "sync_file_range",
+    "syncfs",
+    "sysinfo",
+    "syslog",
+    "tgkill",
+    "timer_create",
+    "timer_delete",
+    "timer_settime",
+    "timerfd_create",
+    "timerfd_settime",
+    "truncate",
+    "umask",
+    "umount2",
+    "uname",
+    "unlink",
+    "unlinkat",
+    "unshare",
+    "utime",
+    "utimensat",
+    "utimes",
+    "vfork",
+    "vhangup",
+    "wait4",
+    "waitid",
+    "write",
+    "writev"
+   ],
+   "static_closure": [
+    "accept",
+    "accept4",
+    "access",
+    "bind",
+    "chdir",
+    "chmod",
+    "chown",
+    "clock_getres",
+    "clock_gettime",
+    "clone",
+    "close",
+    "connect",
+    "dup2",
+    "dup3",
+    "epoll_create1",
+    "epoll_ctl",
+    "epoll_pwait",
+    "epoll_wait",
+    "eventfd2",
+    "execve",
+    "exit_group",
+    "faccessat",
+    "fadvise64",
+    "fchmod",
+    "fchmodat",
+    "fchown",
+    "fcntl",
+    "fdatasync",
+    "fork",
+    "fstat",
+    "fstatfs",
+    "fsync",
+    "ftruncate",
+    "futex",
+    "getcpu",
+    "getcwd",
+    "getdents64",
+    "getegid",
+    "geteuid",
+    "getgid",
+    "getgroups",
+    "getpeername",
+    "getpgrp",
+    "getpid",
+    "getppid",
+    "getpriority",
+    "getrandom",
+    "getrlimit",
+    "getrusage",
+    "getsockname",
+    "getsockopt",
+    "gettimeofday",
+    "getuid",
+    "inotify_add_watch",
+    "inotify_init1",
+    "inotify_rm_watch",
+    "ioctl",
+    "kill",
+    "lchown",
+    "link",
+    "listen",
+    "lseek",
+    "lstat",
+    "madvise",
+    "mkdir",
+    "mlock",
+    "mmap",
+    "mprotect",
+    "mremap",
+    "msync",
+    "munmap",
+    "nanosleep",
+    "open",
+    "openat",
+    "pipe",
+    "pipe2",
+    "pkey_alloc",
+    "pkey_free",
+    "pkey_mprotect",
+    "poll",
+    "prctl",
+    "pread64",
+    "pwrite64",
+    "read",
+    "readlink",
+    "readv",
+    "recvfrom",
+    "recvmmsg",
+    "recvmsg",
+    "rename",
+    "rmdir",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "rt_sigsuspend",
+    "sched_get_priority_max",
+    "sched_get_priority_min",
+    "sched_getaffinity",
+    "sched_yield",
+    "select",
+    "sendfile",
+    "sendmmsg",
+    "sendmsg",
+    "sendto",
+    "setgid",
+    "setgroups",
+    "setpgid",
+    "setpriority",
+    "setresgid",
+    "setresuid",
+    "setrlimit",
+    "setsid",
+    "setsockopt",
+    "setuid",
+    "shmat",
+    "shmdt",
+    "shmget",
+    "shutdown",
+    "socket",
+    "socketpair",
+    "stat",
+    "statfs",
+    "symlink",
+    "sysinfo",
+    "syslog",
+    "tgkill",
+    "truncate",
+    "umask",
+    "uname",
+    "unlink",
+    "unlinkat",
+    "utimensat",
+    "utimes",
+    "vfork",
+    "wait4",
+    "write",
+    "writev"
+   ],
+   "static_programs": [
+    "usr/sbin/ldconfig"
+   ],
+   "tag": "node:22-slim",
+   "threads": 10,
+   "traced": [
+    "accept4",
+    "access",
+    "arch_prctl",
+    "bind",
+    "brk",
+    "capget",
+    "clone",
+    "clone3",
+    "close",
+    "dup2",
+    "epoll_create1",
+    "epoll_ctl",
+    "epoll_pwait",
+    "eventfd2",
+    "execve",
+    "exit",
+    "exit_group",
+    "fcntl",
+    "fstat",
+    "futex",
+    "getcwd",
+    "getegid",
+    "geteuid",
+    "getgid",
+    "getpid",
+    "getppid",
+    "getrandom",
+    "gettid",
+    "getuid",
+    "io_uring_enter",
+    "io_uring_setup",
+    "ioctl",
+    "listen",
+    "lseek",
+    "madvise",
+    "mmap",
+    "mprotect",
+    "munmap",
+    "newfstatat",
+    "openat",
+    "pipe2",
+    "prctl",
+    "pread64",
+    "prlimit64",
+    "read",
+    "readlink",
+    "rseq",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "rt_sigreturn",
+    "sched_getaffinity",
+    "set_robust_list",
+    "set_tid_address",
+    "setsockopt",
+    "shutdown",
+    "socket",
+    "statx",
+    "sysinfo",
+    "uname",
+    "wait4",
+    "write",
+    "writev"
+   ],
+   "workload": "HTTP server reading a file per request (libuv pool), SIGTERM handler"
+  },
+  "postgres": {
+   "closure_objects": 54,
+   "driver": [
+    "wait-tcp 5432 400: ok",
+    "exec psql -h 127.0.0.1 -U postgres -c CREATE TABLE t (a int ...: exit 0: CREATE TABLE INSERT 0 5000  count |               ma",
+    "signal 2: sent"
+   ],
+   "elf_objects": 911,
+   "execs": 46,
+   "exit": 0,
+   "forks": 56,
+   "image": "docker.io/library/postgres@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe",
+   "inline": [
+    "access",
+    "alarm",
+    "arch_prctl",
+    "bind",
+    "brk",
+    "chdir",
+    "chmod",
+    "chroot",
+    "clock_gettime",
+    "clone",
+    "close",
+    "dup2",
+    "exit",
+    "exit_group",
+    "fcntl",
+    "fstat",
+    "ftruncate",
+    "futex",
+    "getcwd",
+    "getdents64",
+    "getpeername",
+    "getpid",
+    "getrandom",
+    "getsockname",
+    "gettid",
+    "ioctl",
+    "kill",
+    "lseek",
+    "madvise",
+    "mincore",
+    "mkdir",
+    "mmap",
+    "mprotect",
+    "mremap",
+    "munmap",
+    "nanosleep",
+    "newfstatat",
+    "openat",
+    "prctl",
+    "pread64",
+    "prlimit64",
+    "read",
+    "readlink",
+    "rename",
+    "rseq",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "sched_get_priority_max",
+    "sched_get_priority_min",
+    "sched_getaffinity",
+    "sched_getparam",
+    "sched_getscheduler",
+    "sched_setscheduler",
+    "sched_yield",
+    "set_tid_address",
+    "setsockopt",
+    "socket",
+    "symlink",
+    "sysinfo",
+    "tgkill",
+    "timer_create",
+    "timer_delete",
+    "timer_settime",
+    "uname",
+    "unlink",
+    "write",
+    "writev"
+   ],
+   "kernel": "Linux 6.12.111+deb13-amd64 x86_64",
+   "killed": false,
+   "layers_bytes": 161336460,
+   "manifest": "sha256:3518071376d0b6156b02e1db2747a78511b5b9dc3763cc79c506ebe2dc2ee71c",
+   "milestone": "M3",
+   "programs": [
+    "/usr/bin/bash",
+    "/usr/bin/cat",
+    "/usr/bin/chmod",
+    "/usr/bin/dash",
+    "/usr/bin/env",
+    "/usr/bin/find",
+    "/usr/bin/getent",
+    "/usr/bin/id",
+    "/usr/bin/locale",
+    "/usr/bin/ls",
+    "/usr/bin/mkdir",
+    "/usr/bin/perl",
+    "/usr/lib/postgresql/17/bin/initdb",
+    "/usr/lib/postgresql/17/bin/pg_ctl",
+    "/usr/lib/postgresql/17/bin/postgres",
+    "/usr/lib/postgresql/17/bin/psql",
+    "/usr/local/bin/gosu"
+   ],
+   "static_all": [
+    "accept",
+    "accept4",
+    "access",
+    "add_key",
+    "alarm",
+    "bind",
+    "capget",
+    "capset",
+    "chdir",
+    "chmod",
+    "chown",
+    "chroot",
+    "clock_getres",
+    "clock_gettime",
+    "clock_nanosleep",
+    "clock_settime",
+    "clone",
+    "close",
+    "close_range",
+    "connect",
+    "copy_file_range",
+    "creat",
+    "dup",
+    "dup2",
+    "dup3",
+    "epoll_create",
+    "epoll_create1",
+    "epoll_ctl",
+    "epoll_pwait2",
+    "epoll_wait",
+    "eventfd2",
+    "execve",
+    "exit_group",
+    "faccessat",
+    "fadvise64",
+    "fallocate",
+    "fchdir",
+    "fchmod",
+    "fchmodat",
+    "fchown",
+    "fchownat",
+    "fcntl",
+    "fdatasync",
+    "fgetxattr",
+    "flistxattr",
+    "flock",
+    "fork",
+    "fremovexattr",
+    "fsconfig",
+    "fsetxattr",
+    "fsmount",
+    "fsopen",
+    "fspick",
+    "fstat",
+    "fstatfs",
+    "fsync",
+    "ftruncate",
+    "futex",
+    "futimesat",
+    "getcwd",
+    "getdents64",
+    "getegid",
+    "geteuid",
+    "getgid",
+    "getgroups",
+    "getitimer",
+    "getpeername",
+    "getpgid",
+    "getpgrp",
+    "getpid",
+    "getppid",
+    "getpriority",
+    "getrandom",
+    "getresgid",
+    "getresuid",
+    "getrlimit",
+    "getrusage",
+    "getsid",
+    "getsockname",
+    "getsockopt",
+    "gettid",
+    "gettimeofday",
+    "getuid",
+    "getxattr",
+    "inotify_add_watch",
+    "inotify_init",
+    "inotify_init1",
+    "inotify_rm_watch",
+    "ioctl",
+    "kill",
+    "lchown",
+    "lgetxattr",
+    "link",
+    "linkat",
+    "listen",
+    "listxattr",
+    "llistxattr",
+    "lremovexattr",
+    "lseek",
+    "lsetxattr",
+    "lstat",
+    "madvise",
+    "memfd_create",
+    "mincore",
+    "mkdir",
+    "mkdirat",
+    "mknod",
+    "mknodat",
+    "mlock",
+    "mlockall",
+    "mmap",
+    "mount",
+    "mount_setattr",
+    "move_mount",
+    "mprotect",
+    "mq_getsetattr",
+    "mq_open",
+    "mq_unlink",
+    "mremap",
+    "msgctl",
+    "msgget",
+    "msgrcv",
+    "msgsnd",
+    "msync",
+    "munlock",
+    "munmap",
+    "name_to_handle_at",
+    "nanosleep",
+    "newfstatat",
+    "open",
+    "open_tree",
+    "openat",
+    "pause",
+    "personality",
+    "pidfd_getfd",
+    "pidfd_open",
+    "pidfd_send_signal",
+    "pipe",
+    "pipe2",
+    "poll",
+    "ppoll",
+    "prctl",
+    "pread64",
+    "preadv",
+    "prlimit64",
+    "pselect6",
+    "ptrace",
+    "pwrite64",
+    "pwritev",
+    "quotactl",
+    "read",
+    "readlink",
+    "readlinkat",
+    "readv",
+    "recvfrom",
+    "recvmmsg",
+    "recvmsg",
+    "removexattr",
+    "rename",
+    "renameat",
+    "renameat2",
+    "rmdir",
+    "rt_sigaction",
+    "rt_sigpending",
+    "rt_sigprocmask",
+    "rt_sigqueueinfo",
+    "rt_sigsuspend",
+    "rt_sigtimedwait",
+    "sched_get_priority_max",
+    "sched_get_priority_min",
+    "sched_getaffinity",
+    "sched_getattr",
+    "sched_getparam",
+    "sched_getscheduler",
+    "sched_setaffinity",
+    "sched_setattr",
+    "sched_setscheduler",
+    "sched_yield",
+    "select",
+    "semctl",
+    "semget",
+    "semop",
+    "sendfile",
+    "sendmmsg",
+    "sendmsg",
+    "sendto",
+    "setdomainname",
+    "setfsgid",
+    "setfsuid",
+    "setgid",
+    "setgroups",
+    "sethostname",
+    "setitimer",
+    "setns",
+    "setpgid",
+    "setpriority",
+    "setregid",
+    "setresgid",
+    "setresuid",
+    "setreuid",
+    "setrlimit",
+    "setsid",
+    "setsockopt",
+    "settimeofday",
+    "setuid",
+    "setxattr",
+    "shmat",
+    "shmctl",
+    "shmdt",
+    "shmget",
+    "shutdown",
+    "sigaltstack",
+    "signalfd4",
+    "socket",
+    "socketpair",
+    "splice",
+    "stat",
+    "statfs",
+    "statx",
+    "swapoff",
+    "swapon",
+    "symlink",
+    "symlinkat",
+    "sync",
+    "sync_file_range",
+    "syncfs",
+    "sysinfo",
+    "syslog",
+    "tgkill",
+    "timer_create",
+    "timer_delete",
+    "timer_settime",
+    "timerfd_create",
+    "timerfd_settime",
+    "truncate",
+    "umask",
+    "umount2",
+    "uname",
+    "unlink",
+    "unlinkat",
+    "unshare",
+    "utime",
+    "utimensat",
+    "utimes",
+    "vfork",
+    "vhangup",
+    "wait4",
+    "waitid",
+    "write",
+    "writev"
+   ],
+   "static_closure": [
+    "accept",
+    "accept4",
+    "access",
+    "add_key",
+    "alarm",
+    "bind",
+    "capget",
+    "capset",
+    "chdir",
+    "chmod",
+    "chown",
+    "chroot",
+    "clock_gettime",
+    "clone",
+    "close",
+    "close_range",
+    "connect",
+    "copy_file_range",
+    "dup",
+    "dup2",
+    "dup3",
+    "epoll_create1",
+    "epoll_ctl",
+    "epoll_pwait2",
+    "epoll_wait",
+    "execve",
+    "exit_group",
+    "faccessat",
+    "fadvise64",
+    "fallocate",
+    "fchdir",
+    "fchmod",
+    "fchmodat",
+    "fchown",
+    "fcntl",
+    "fdatasync",
+    "fgetxattr",
+    "flistxattr",
+    "flock",
+    "fork",
+    "fremovexattr",
+    "fsetxattr",
+    "fstat",
+    "fstatfs",
+    "fsync",
+    "ftruncate",
+    "futex",
+    "getcwd",
+    "getdents64",
+    "getegid",
+    "geteuid",
+    "getgid",
+    "getgroups",
+    "getpeername",
+    "getpgid",
+    "getpgrp",
+    "getpid",
+    "getppid",
+    "getpriority",
+    "getrandom",
+    "getrlimit",
+    "getrusage",
+    "getsockname",
+    "getsockopt",
+    "gettid",
+    "gettimeofday",
+    "getuid",
+    "getxattr",
+    "inotify_add_watch",
+    "inotify_init1",
+    "inotify_rm_watch",
+    "ioctl",
+    "kill",
+    "lchown",
+    "lgetxattr",
+    "link",
+    "linkat",
+    "listen",
+    "listxattr",
+    "llistxattr",
+    "lseek",
+    "lsetxattr",
+    "lstat",
+    "madvise",
+    "memfd_create",
+    "mkdir",
+    "mkdirat",
+    "mlock",
+    "mmap",
+    "mount",
+    "mprotect",
+    "mq_getsetattr",
+    "msgctl",
+    "msgget",
+    "msgrcv",
+    "msgsnd",
+    "munmap",
+    "name_to_handle_at",
+    "nanosleep",
+    "newfstatat",
+    "open",
+    "openat",
+    "pause",
+    "pidfd_open",
+    "pidfd_send_signal",
+    "pipe",
+    "pipe2",
+    "poll",
+    "ppoll",
+    "prctl",
+    "pread64",
+    "preadv",
+    "pselect6",
+    "pwrite64",
+    "pwritev",
+    "read",
+    "readlink",
+    "readlinkat",
+    "readv",
+    "recvfrom",
+    "recvmmsg",
+    "recvmsg",
+    "removexattr",
+    "rename",
+    "renameat",
+    "rmdir",
+    "rt_sigaction",
+    "rt_sigpending",
+    "rt_sigprocmask",
+    "rt_sigsuspend",
+    "rt_sigtimedwait",
+    "sched_getaffinity",
+    "sched_yield",
+    "select",
+    "semctl",
+    "semget",
+    "semop",
+    "sendfile",
+    "sendmmsg",
+    "sendmsg",
+    "sendto",
+    "setfsgid",
+    "setfsuid",
+    "setgid",
+    "setgroups",
+    "setitimer",
+    "setns",
+    "setpgid",
+    "setpriority",
+    "setregid",
+    "setresgid",
+    "setresuid",
+    "setreuid",
+    "setrlimit",
+    "setsid",
+    "setsockopt",
+    "setuid",
+    "setxattr",
+    "shmat",
+    "shmctl",
+    "shmdt",
+    "shmget",
+    "shutdown",
+    "signalfd4",
+    "socket",
+    "socketpair",
+    "stat",
+    "statfs",
+    "statx",
+    "symlink",
+    "sync",
+    "sync_file_range",
+    "syncfs",
+    "tgkill",
+    "timerfd_create",
+    "timerfd_settime",
+    "truncate",
+    "umask",
+    "umount2",
+    "uname",
+    "unlink",
+    "unlinkat",
+    "utime",
+    "utimensat",
+    "utimes",
+    "vfork",
+    "wait4",
+    "waitid",
+    "write",
+    "writev"
+   ],
+   "static_programs": [
+    "usr/local/bin/gosu",
+    "usr/sbin/ldconfig"
+   ],
+   "tag": "postgres:17",
+   "threads": 4,
+   "traced": [
+    "accept",
+    "access",
+    "arch_prctl",
+    "bind",
+    "brk",
+    "chdir",
+    "chmod",
+    "clock_nanosleep",
+    "clone",
+    "clone3",
+    "close",
+    "connect",
+    "dup",
+    "dup2",
+    "epoll_create1",
+    "epoll_ctl",
+    "epoll_pwait",
+    "epoll_wait",
+    "eventfd2",
+    "execve",
+    "exit_group",
+    "faccessat2",
+    "fadvise64",
+    "fallocate",
+    "fchdir",
+    "fchmodat",
+    "fcntl",
+    "fdatasync",
+    "fstat",
+    "fstatfs",
+    "fsync",
+    "futex",
+    "getcwd",
+    "getdents64",
+    "getegid",
+    "geteuid",
+    "getgid",
+    "getgroups",
+    "getpgrp",
+    "getpid",
+    "getppid",
+    "getrandom",
+    "getsockname",
+    "getsockopt",
+    "gettid",
+    "getuid",
+    "ioctl",
+    "kill",
+    "listen",
+    "lseek",
+    "madvise",
+    "mkdir",
+    "mmap",
+    "mprotect",
+    "munmap",
+    "nanosleep",
+    "newfstatat",
+    "openat",
+    "pipe2",
+    "poll",
+    "prctl",
+    "pread64",
+    "prlimit64",
+    "pwrite64",
+    "pwritev",
+    "read",
+    "readlink",
+    "recvfrom",
+    "recvmsg",
+    "rename",
+    "rseq",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "rt_sigreturn",
+    "sched_getaffinity",
+    "sched_yield",
+    "sendto",
+    "set_robust_list",
+    "set_tid_address",
+    "setgid",
+    "setgroups",
+    "setitimer",
+    "setsid",
+    "setsockopt",
+    "setuid",
+    "shmat",
+    "shmctl",
+    "shmdt",
+    "shmget",
+    "sigaltstack",
+    "signalfd4",
+    "socket",
+    "statfs",
+    "statx",
+    "sync_file_range",
+    "tgkill",
+    "umask",
+    "uname",
+    "unlink",
+    "vfork",
+    "wait4",
+    "write"
+   ],
+   "workload": "entrypoint (initdb, temporary server, gosu), psql DDL, DML and CHECKPOINT, SIGINT"
+  },
+  "python-http": {
+   "closure_objects": 5,
+   "driver": [
+    "wait-tcp 8000 60: ok",
+    "http 8000 / 20: fresh {\"200\": 20} keep-alive {\"200\": 20}",
+    "signal 15: sent"
+   ],
+   "elf_objects": 746,
+   "execs": 1,
+   "exit": -15,
+   "forks": 0,
+   "image": "docker.io/library/python@sha256:d98cc29d3266e535dd9da1099688d9cb3ca4753813571e071763d17725460962",
+   "inline": [
+    "access",
+    "alarm",
+    "arch_prctl",
+    "bind",
+    "brk",
+    "chdir",
+    "chmod",
+    "chroot",
+    "clock_gettime",
+    "close",
+    "dup2",
+    "exit_group",
+    "fcntl",
+    "fstat",
+    "ftruncate",
+    "futex",
+    "getcwd",
+    "getdents64",
+    "getpeername",
+    "getpid",
+    "getrandom",
+    "getsockname",
+    "gettid",
+    "ioctl",
+    "lseek",
+    "madvise",
+    "mkdir",
+    "mmap",
+    "mprotect",
+    "mremap",
+    "munmap",
+    "newfstatat",
+    "openat",
+    "prctl",
+    "pread64",
+    "prlimit64",
+    "readlink",
+    "rename",
+    "rseq",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "sched_get_priority_max",
+    "sched_get_priority_min",
+    "sched_getparam",
+    "sched_getscheduler",
+    "sched_setscheduler",
+    "set_tid_address",
+    "setsockopt",
+    "socket",
+    "symlink",
+    "sysinfo",
+    "tgkill",
+    "uname",
+    "unlink",
+    "write",
+    "writev"
+   ],
+   "kernel": "Linux 6.12.111+deb13-amd64 x86_64",
+   "killed": false,
+   "layers_bytes": 43057528,
+   "manifest": "sha256:d879ed88565a7a3c614b980b369d4a5025a9d057b71f93d09fc6d0b2ca823a18",
+   "milestone": "M1",
+   "programs": [
+    "/usr/local/bin/python3.13"
+   ],
+   "static_all": [
+    "accept",
+    "accept4",
+    "access",
+    "alarm",
+    "bind",
+    "capget",
+    "capset",
+    "chdir",
+    "chmod",
+    "chown",
+    "chroot",
+    "clock_getres",
+    "clock_gettime",
+    "clock_nanosleep",
+    "clock_settime",
+    "clone",
+    "close",
+    "close_range",
+    "connect",
+    "copy_file_range",
+    "creat",
+    "dup",
+    "dup2",
+    "dup3",
+    "epoll_create1",
+    "epoll_ctl",
+    "epoll_pwait2",
+    "epoll_wait",
+    "eventfd2",
+    "execve",
+    "exit_group",
+    "faccessat",
+    "fadvise64",
+    "fallocate",
+    "fchdir",
+    "fchmod",
+    "fchmodat",
+    "fchown",
+    "fchownat",
+    "fcntl",
+    "fdatasync",
+    "fgetxattr",
+    "flistxattr",
+    "flock",
+    "fork",
+    "fremovexattr",
+    "fsconfig",
+    "fsetxattr",
+    "fsmount",
+    "fsopen",
+    "fspick",
+    "fstat",
+    "fstatfs",
+    "fsync",
+    "ftruncate",
+    "futex",
+    "futimesat",
+    "getcwd",
+    "getdents64",
+    "getegid",
+    "geteuid",
+    "getgid",
+    "getgroups",
+    "getitimer",
+    "getpeername",
+    "getpgid",
+    "getpgrp",
+    "getpid",
+    "getppid",
+    "getpriority",
+    "getrandom",
+    "getresgid",
+    "getresuid",
+    "getrlimit",
+    "getrusage",
+    "getsid",
+    "getsockname",
+    "getsockopt",
+    "gettid",
+    "gettimeofday",
+    "getuid",
+    "getxattr",
+    "inotify_add_watch",
+    "inotify_init",
+    "inotify_init1",
+    "inotify_rm_watch",
+    "ioctl",
+    "kill",
+    "lchown",
+    "lgetxattr",
+    "link",
+    "linkat",
+    "listen",
+    "listxattr",
+    "llistxattr",
+    "lremovexattr",
+    "lseek",
+    "lsetxattr",
+    "lstat",
+    "madvise",
+    "memfd_create",
+    "mincore",
+    "mkdir",
+    "mkdirat",
+    "mknod",
+    "mknodat",
+    "mlock",
+    "mlockall",
+    "mmap",
+    "mount",
+    "mount_setattr",
+    "move_mount",
+    "mprotect",
+    "mq_getsetattr",
+    "mq_open",
+    "mq_unlink",
+    "mremap",
+    "msgctl",
+    "msgget",
+    "msgrcv",
+    "msgsnd",
+    "msync",
+    "munlock",
+    "munmap",
+    "name_to_handle_at",
+    "nanosleep",
+    "newfstatat",
+    "open",
+    "open_tree",
+    "openat",
+    "pause",
+    "personality",
+    "pidfd_getfd",
+    "pidfd_open",
+    "pidfd_send_signal",
+    "pipe",
+    "pipe2",
+    "poll",
+    "ppoll",
+    "prctl",
+    "pread64",
+    "preadv2",
+    "prlimit64",
+    "process_vm_readv",
+    "pselect6",
+    "ptrace",
+    "pwrite64",
+    "pwritev2",
+    "quotactl",
+    "read",
+    "readlink",
+    "readlinkat",
+    "readv",
+    "recvfrom",
+    "recvmmsg",
+    "recvmsg",
+    "removexattr",
+    "rename",
+    "renameat",
+    "renameat2",
+    "rmdir",
+    "rt_sigaction",
+    "rt_sigpending",
+    "rt_sigprocmask",
+    "rt_sigsuspend",
+    "rt_sigtimedwait",
+    "sched_get_priority_max",
+    "sched_get_priority_min",
+    "sched_getaffinity",
+    "sched_getattr",
+    "sched_getparam",
+    "sched_getscheduler",
+    "sched_rr_get_interval",
+    "sched_setaffinity",
+    "sched_setattr",
+    "sched_setparam",
+    "sched_setscheduler",
+    "sched_yield",
+    "select",
+    "semctl",
+    "semget",
+    "semop",
+    "sendfile",
+    "sendmmsg",
+    "sendmsg",
+    "sendto",
+    "setdomainname",
+    "setfsgid",
+    "setfsuid",
+    "setgid",
+    "setgroups",
+    "sethostname",
+    "setitimer",
+    "setns",
+    "setpgid",
+    "setpriority",
+    "setregid",
+    "setresgid",
+    "setresuid",
+    "setreuid",
+    "setrlimit",
+    "setsid",
+    "setsockopt",
+    "settimeofday",
+    "setuid",
+    "setxattr",
+    "shmat",
+    "shmctl",
+    "shmdt",
+    "shmget",
+    "shutdown",
+    "sigaltstack",
+    "signalfd4",
+    "socket",
+    "socketpair",
+    "splice",
+    "stat",
+    "statfs",
+    "statx",
+    "swapoff",
+    "swapon",
+    "symlink",
+    "symlinkat",
+    "sync",
+    "sync_file_range",
+    "syncfs",
+    "sysinfo",
+    "syslog",
+    "tgkill",
+    "timer_create",
+    "timer_delete",
+    "timer_settime",
+    "timerfd_create",
+    "timerfd_gettime",
+    "timerfd_settime",
+    "truncate",
+    "umask",
+    "umount2",
+    "uname",
+    "unlink",
+    "unlinkat",
+    "unshare",
+    "utime",
+    "utimensat",
+    "utimes",
+    "vfork",
+    "vhangup",
+    "wait4",
+    "waitid",
+    "write",
+    "writev"
+   ],
+   "static_closure": [
+    "access",
+    "alarm",
+    "chdir",
+    "chmod",
+    "chown",
+    "chroot",
+    "clock_getres",
+    "clock_gettime",
+    "clock_nanosleep",
+    "clock_settime",
+    "clone",
+    "close",
+    "close_range",
+    "copy_file_range",
+    "dup2",
+    "dup3",
+    "eventfd2",
+    "execve",
+    "exit_group",
+    "faccessat",
+    "fadvise64",
+    "fallocate",
+    "fchdir",
+    "fchmod",
+    "fchmodat",
+    "fchown",
+    "fchownat",
+    "fcntl",
+    "fdatasync",
+    "fgetxattr",
+    "flistxattr",
+    "fork",
+    "fremovexattr",
+    "fsetxattr",
+    "fstat",
+    "fstatfs",
+    "fsync",
+    "ftruncate",
+    "futex",
+    "getcwd",
+    "getdents64",
+    "getegid",
+    "geteuid",
+    "getgid",
+    "getgroups",
+    "getitimer",
+    "getpgid",
+    "getpgrp",
+    "getpid",
+    "getppid",
+    "getpriority",
+    "getrandom",
+    "getresgid",
+    "getresuid",
+    "getrlimit",
+    "getrusage",
+    "getsid",
+    "gettimeofday",
+    "getuid",
+    "getxattr",
+    "ioctl",
+    "kill",
+    "lchown",
+    "lgetxattr",
+    "link",
+    "linkat",
+    "listxattr",
+    "llistxattr",
+    "lremovexattr",
+    "lseek",
+    "lsetxattr",
+    "lstat",
+    "madvise",
+    "memfd_create",
+    "mkdir",
+    "mkdirat",
+    "mknod",
+    "mknodat",
+    "mmap",
+    "mprotect",
+    "munmap",
+    "newfstatat",
+    "open",
+    "openat",
+    "pause",
+    "pipe",
+    "pipe2",
+    "pread64",
+    "preadv2",
+    "pwrite64",
+    "pwritev2",
+    "read",
+    "readlink",
+    "readlinkat",
+    "readv",
+    "removexattr",
+    "rename",
+    "renameat",
+    "rmdir",
+    "rt_sigaction",
+    "rt_sigpending",
+    "rt_sigprocmask",
+    "rt_sigtimedwait",
+    "sched_get_priority_max",
+    "sched_get_priority_min",
+    "sched_getaffinity",
+    "sched_getparam",
+    "sched_getscheduler",
+    "sched_rr_get_interval",
+    "sched_setaffinity",
+    "sched_setparam",
+    "sched_setscheduler",
+    "sched_yield",
+    "sendfile",
+    "setgid",
+    "setgroups",
+    "setitimer",
+    "setns",
+    "setpgid",
+    "setpriority",
+    "setregid",
+    "setresgid",
+    "setresuid",
+    "setreuid",
+    "setrlimit",
+    "setsid",
+    "setuid",
+    "setxattr",
+    "sigaltstack",
+    "splice",
+    "stat",
+    "statfs",
+    "symlink",
+    "symlinkat",
+    "sync",
+    "tgkill",
+    "timerfd_create",
+    "timerfd_gettime",
+    "timerfd_settime",
+    "truncate",
+    "umask",
+    "uname",
+    "unlink",
+    "unlinkat",
+    "unshare",
+    "utimensat",
+    "wait4",
+    "waitid",
+    "write",
+    "writev"
+   ],
+   "static_programs": [
+    "usr/sbin/ldconfig"
+   ],
+   "tag": "python:3.13-slim",
+   "threads": 41,
+   "traced": [
+    "accept4",
+    "access",
+    "arch_prctl",
+    "bind",
+    "brk",
+    "clone3",
+    "close",
+    "connect",
+    "epoll_create1",
+    "exit",
+    "fcntl",
+    "fstat",
+    "futex",
+    "getcwd",
+    "getdents64",
+    "getegid",
+    "geteuid",
+    "getgid",
+    "getrandom",
+    "getsockname",
+    "gettid",
+    "getuid",
+    "ioctl",
+    "listen",
+    "lseek",
+    "madvise",
+    "mmap",
+    "mprotect",
+    "mremap",
+    "munmap",
+    "newfstatat",
+    "open",
+    "openat",
+    "poll",
+    "pread64",
+    "prlimit64",
+    "read",
+    "readlink",
+    "readlinkat",
+    "recvfrom",
+    "recvmsg",
+    "rename",
+    "rseq",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "sendto",
+    "set_robust_list",
+    "set_tid_address",
+    "setsockopt",
+    "shutdown",
+    "socket",
+    "uname",
+    "write"
+   ],
+   "workload": "`python3 -m http.server`, 40 requests, SIGTERM"
+  },
+  "redis": {
+   "closure_objects": 20,
+   "driver": [
+    "wait-tcp 6379 60: ok",
+    "exec redis-cli SET k10s trace: exit 0: OK",
+    "exec redis-cli INCRBY counter 41: exit 0: 41",
+    "exec redis-cli BGSAVE: exit 0: Background saving started",
+    "until 300 sh -c redis-cli INFO persistence | grep -q rdb_bgs...: exit 0: ",
+    "exec redis-cli INFO persistence: exit 0: # Persistence  loading:0  async_loading:0  current_c",
+    "signal 15: sent"
+   ],
+   "elf_objects": 707,
+   "execs": 19,
+   "exit": 0,
+   "forks": 20,
+   "image": "docker.io/library/redis@sha256:e5f23377739f95a2f530b9c99f93accb4f634577f09d00a7d8e0638f2fdf69e0",
+   "inline": [
+    "access",
+    "alarm",
+    "arch_prctl",
+    "bind",
+    "brk",
+    "chdir",
+    "chmod",
+    "chroot",
+    "clock_gettime",
+    "clock_nanosleep",
+    "close",
+    "connect",
+    "dup2",
+    "exit_group",
+    "fcntl",
+    "fdatasync",
+    "fsync",
+    "ftruncate",
+    "futex",
+    "getcwd",
+    "getdents64",
+    "getpeername",
+    "getpid",
+    "getrandom",
+    "getsockname",
+    "gettid",
+    "ioctl",
+    "lseek",
+    "madvise",
+    "mkdir",
+    "mmap",
+    "mprotect",
+    "mremap",
+    "munmap",
+    "newfstatat",
+    "openat",
+    "poll",
+    "pread64",
+    "prlimit64",
+    "readlink",
+    "readv",
+    "recvfrom",
+    "recvmsg",
+    "rename",
+    "rseq",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "sched_get_priority_max",
+    "sched_get_priority_min",
+    "sched_getaffinity",
+    "sched_getparam",
+    "sched_getscheduler",
+    "sched_setscheduler",
+    "sched_yield",
+    "sendmmsg",
+    "sendto",
+    "set_tid_address",
+    "setitimer",
+    "setsockopt",
+    "socket",
+    "symlink",
+    "sysinfo",
+    "tgkill",
+    "uname",
+    "unlink",
+    "write",
+    "writev"
+   ],
+   "kernel": "Linux 6.12.111+deb13-amd64 x86_64",
+   "killed": false,
+   "layers_bytes": 52848184,
+   "manifest": "sha256:dfb838e40392b4142485b89a51241c635e9e04e4f30bd9d3db4dabf1c1429e00",
+   "milestone": "M1",
+   "programs": [
+    "/usr/bin/bash",
+    "/usr/bin/find",
+    "/usr/bin/grep",
+    "/usr/bin/id",
+    "/usr/bin/ls",
+    "/usr/bin/readlink",
+    "/usr/bin/setpriv",
+    "/usr/bin/test",
+    "/usr/local/bin/redis-server"
+   ],
+   "static_all": [
+    "accept",
+    "accept4",
+    "access",
+    "alarm",
+    "bind",
+    "brk",
+    "capget",
+    "capset",
+    "chdir",
+    "chmod",
+    "chown",
+    "chroot",
+    "clock_getres",
+    "clock_gettime",
+    "clock_settime",
+    "clone",
+    "close",
+    "close_range",
+    "connect",
+    "copy_file_range",
+    "creat",
+    "dup",
+    "dup2",
+    "dup3",
+    "epoll_create",
+    "epoll_create1",
+    "epoll_ctl",
+    "epoll_pwait",
+    "epoll_wait",
+    "eventfd2",
+    "execve",
+    "exit_group",
+    "faccessat",
+    "fadvise64",
+    "fallocate",
+    "fchdir",
+    "fchmod",
+    "fchmodat",
+    "fchown",
+    "fchownat",
+    "fcntl",
+    "fdatasync",
+    "fgetxattr",
+    "flistxattr",
+    "flock",
+    "fork",
+    "fremovexattr",
+    "fsetxattr",
+    "fstat",
+    "fstatfs",
+    "fsync",
+    "ftruncate",
+    "futex",
+    "futimesat",
+    "getcpu",
+    "getcwd",
+    "getdents64",
+    "getegid",
+    "geteuid",
+    "getgid",
+    "getgroups",
+    "getpeername",
+    "getpgid",
+    "getpgrp",
+    "getpid",
+    "getppid",
+    "getpriority",
+    "getrandom",
+    "getresgid",
+    "getresuid",
+    "getrlimit",
+    "getrusage",
+    "getsid",
+    "getsockname",
+    "getsockopt",
+    "gettid",
+    "gettimeofday",
+    "getuid",
+    "getxattr",
+    "inotify_add_watch",
+    "inotify_init",
+    "inotify_init1",
+    "inotify_rm_watch",
+    "ioctl",
+    "iopl",
+    "kill",
+    "lchown",
+    "lgetxattr",
+    "link",
+    "linkat",
+    "listen",
+    "listxattr",
+    "llistxattr",
+    "lremovexattr",
+    "lseek",
+    "lsetxattr",
+    "lstat",
+    "madvise",
+    "memfd_create",
+    "mincore",
+    "mkdir",
+    "mkdirat",
+    "mknod",
+    "mknodat",
+    "mlock",
+    "mlockall",
+    "mmap",
+    "mount",
+    "mprotect",
+    "mq_getsetattr",
+    "mremap",
+    "msgctl",
+    "msgget",
+    "msgrcv",
+    "msgsnd",
+    "msync",
+    "munlock",
+    "munmap",
+    "name_to_handle_at",
+    "nanosleep",
+    "newfstatat",
+    "open",
+    "openat",
+    "pause",
+    "personality",
+    "pipe",
+    "pipe2",
+    "poll",
+    "ppoll",
+    "prctl",
+    "pread64",
+    "preadv",
+    "prlimit64",
+    "pselect6",
+    "ptrace",
+    "pwrite64",
+    "pwritev",
+    "quotactl",
+    "read",
+    "readlink",
+    "readlinkat",
+    "readv",
+    "reboot",
+    "recvfrom",
+    "recvmmsg",
+    "recvmsg",
+    "removexattr",
+    "rename",
+    "renameat",
+    "renameat2",
+    "rmdir",
+    "rt_sigaction",
+    "rt_sigpending",
+    "rt_sigprocmask",
+    "rt_sigsuspend",
+    "rt_sigtimedwait",
+    "sched_get_priority_max",
+    "sched_get_priority_min",
+    "sched_getaffinity",
+    "sched_getparam",
+    "sched_getscheduler",
+    "sched_setaffinity",
+    "sched_setscheduler",
+    "sched_yield",
+    "select",
+    "semctl",
+    "semget",
+    "semop",
+    "sendfile",
+    "sendmmsg",
+    "sendmsg",
+    "sendto",
+    "setdomainname",
+    "setfsgid",
+    "setfsuid",
+    "setgid",
+    "setgroups",
+    "sethostname",
+    "setitimer",
+    "setns",
+    "setpgid",
+    "setpriority",
+    "setregid",
+    "setresgid",
+    "setresuid",
+    "setreuid",
+    "setrlimit",
+    "setsid",
+    "setsockopt",
+    "settimeofday",
+    "setuid",
+    "setxattr",
+    "shmat",
+    "shmctl",
+    "shmdt",
+    "shmget",
+    "shutdown",
+    "sigaltstack",
+    "signalfd4",
+    "socket",
+    "socketpair",
+    "splice",
+    "stat",
+    "statfs",
+    "statx",
+    "swapoff",
+    "swapon",
+    "symlink",
+    "symlinkat",
+    "sync",
+    "sync_file_range",
+    "syncfs",
+    "sysinfo",
+    "syslog",
+    "tgkill",
+    "timer_create",
+    "timer_delete",
+    "timer_settime",
+    "timerfd_create",
+    "timerfd_settime",
+    "truncate",
+    "umask",
+    "umount2",
+    "uname",
+    "unlink",
+    "unlinkat",
+    "unshare",
+    "utime",
+    "utimensat",
+    "utimes",
+    "vfork",
+    "vhangup",
+    "wait4",
+    "waitid",
+    "write",
+    "writev"
+   ],
+   "static_closure": [
+    "accept",
+    "accept4",
+    "access",
+    "alarm",
+    "bind",
+    "brk",
+    "capget",
+    "capset",
+    "chdir",
+    "chmod",
+    "chown",
+    "clock_gettime",
+    "clone",
+    "close",
+    "connect",
+    "dup",
+    "dup2",
+    "epoll_create",
+    "epoll_ctl",
+    "epoll_wait",
+    "eventfd2",
+    "execve",
+    "exit_group",
+    "faccessat",
+    "fadvise64",
+    "fchdir",
+    "fchmod",
+    "fchmodat",
+    "fcntl",
+    "fdatasync",
+    "fgetxattr",
+    "flock",
+    "fork",
+    "fremovexattr",
+    "fsetxattr",
+    "fstat",
+    "fstatfs",
+    "fsync",
+    "ftruncate",
+    "futex",
+    "getcpu",
+    "getcwd",
+    "getdents64",
+    "getegid",
+    "geteuid",
+    "getgid",
+    "getgroups",
+    "getpeername",
+    "getpgrp",
+    "getpid",
+    "getppid",
+    "getrandom",
+    "getresgid",
+    "getresuid",
+    "getrlimit",
+    "getrusage",
+    "getsockname",
+    "getsockopt",
+    "gettid",
+    "gettimeofday",
+    "getuid",
+    "getxattr",
+    "ioctl",
+    "kill",
+    "lgetxattr",
+    "link",
+    "listen",
+    "lseek",
+    "lsetxattr",
+    "lstat",
+    "madvise",
+    "mincore",
+    "mkdir",
+    "mlock",
+    "mmap",
+    "mount",
+    "mprotect",
+    "munmap",
+    "nanosleep",
+    "newfstatat",
+    "open",
+    "openat",
+    "pipe",
+    "pipe2",
+    "poll",
+    "prctl",
+    "pselect6",
+    "read",
+    "readlink",
+    "readlinkat",
+    "readv",
+    "recvfrom",
+    "recvmsg",
+    "removexattr",
+    "rename",
+    "rmdir",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "sched_getaffinity",
+    "sched_setaffinity",
+    "sched_yield",
+    "select",
+    "sendfile",
+    "sendmsg",
+    "sendto",
+    "setgroups",
+    "setitimer",
+    "setpgid",
+    "setresgid",
+    "setresuid",
+    "setrlimit",
+    "setsid",
+    "setsockopt",
+    "setxattr",
+    "shmat",
+    "shmdt",
+    "shmget",
+    "shutdown",
+    "sigaltstack",
+    "socket",
+    "splice",
+    "stat",
+    "statfs",
+    "statx",
+    "symlink",
+    "sync_file_range",
+    "syslog",
+    "tgkill",
+    "truncate",
+    "umask",
+    "umount2",
+    "uname",
+    "unlink",
+    "unlinkat",
+    "utimensat",
+    "wait4",
+    "write",
+    "writev"
+   ],
+   "static_programs": [
+    "usr/sbin/ldconfig"
+   ],
+   "tag": "redis:8.2",
+   "threads": 5,
+   "traced": [
+    "accept4",
+    "access",
+    "arch_prctl",
+    "bind",
+    "brk",
+    "capget",
+    "capset",
+    "clone",
+    "clone3",
+    "close",
+    "connect",
+    "dup",
+    "dup2",
+    "epoll_create",
+    "epoll_create1",
+    "epoll_ctl",
+    "epoll_wait",
+    "eventfd2",
+    "execve",
+    "exit_group",
+    "faccessat2",
+    "fadvise64",
+    "fchdir",
+    "fcntl",
+    "fdatasync",
+    "fstatfs",
+    "fsync",
+    "futex",
+    "getcwd",
+    "getdents64",
+    "getegid",
+    "geteuid",
+    "getgid",
+    "getgroups",
+    "getpgrp",
+    "getpid",
+    "getppid",
+    "getrandom",
+    "getresgid",
+    "getresuid",
+    "gettid",
+    "getuid",
+    "io_uring_setup",
+    "ioctl",
+    "listen",
+    "lseek",
+    "madvise",
+    "mmap",
+    "mprotect",
+    "munmap",
+    "newfstatat",
+    "open",
+    "openat",
+    "pipe2",
+    "prctl",
+    "pread64",
+    "prlimit64",
+    "read",
+    "readlink",
+    "rename",
+    "rseq",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "rt_sigreturn",
+    "sched_getaffinity",
+    "set_robust_list",
+    "set_tid_address",
+    "setgroups",
+    "setitimer",
+    "setresgid",
+    "setresuid",
+    "setsockopt",
+    "shutdown",
+    "sigaltstack",
+    "socket",
+    "statfs",
+    "statx",
+    "sysinfo",
+    "umask",
+    "uname",
+    "wait4",
+    "write"
+   ],
+   "workload": "setpriv entrypoint, SET and INCRBY, BGSAVE (fork), SIGTERM (save on shutdown)"
+  },
+  "rust-static": {
+   "closure_objects": 1,
+   "driver": [
+    "wait-tcp 80 60: ok",
+    "http 80 / 20: fresh {\"200\": 20} keep-alive {\"200\": 20}",
+    "signal 3: sent"
+   ],
+   "elf_objects": 1,
+   "execs": 1,
+   "exit": 0,
+   "forks": 0,
+   "image": "docker.io/joseluisq/static-web-server@sha256:54345a59d7dfd54c1d8d5e14322b73eff5daa5ad6d06998e67ff53e149d93981",
+   "inline": [
+    "arch_prctl",
+    "bind",
+    "brk",
+    "clock_gettime",
+    "close",
+    "epoll_create",
+    "epoll_create1",
+    "epoll_ctl",
+    "epoll_pwait",
+    "eventfd",
+    "eventfd2",
+    "exit",
+    "exit_group",
+    "fcntl",
+    "fstat",
+    "futex",
+    "getcpu",
+    "getcwd",
+    "getdents64",
+    "getpeername",
+    "getpid",
+    "getrlimit",
+    "getsockname",
+    "getsockopt",
+    "gettimeofday",
+    "listen",
+    "lseek",
+    "madvise",
+    "mkdir",
+    "mmap",
+    "mremap",
+    "munmap",
+    "newfstatat",
+    "pipe",
+    "pipe2",
+    "readlink",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "sched_getaffinity",
+    "sched_setaffinity",
+    "sched_setscheduler",
+    "sched_yield",
+    "set_robust_list",
+    "set_tid_address",
+    "setsockopt",
+    "shutdown",
+    "sigaltstack",
+    "socket",
+    "stat",
+    "sysinfo",
+    "tkill",
+    "ustat",
+    "write"
+   ],
+   "kernel": "Linux 6.12.111+deb13-amd64 x86_64",
+   "killed": false,
+   "layers_bytes": 4111204,
+   "manifest": "sha256:d09248133187796270de218650912aa3e67b264e3d7e3a9d75bbdfd6e84466e2",
+   "milestone": "M1",
+   "programs": [
+    "/static-web-server"
+   ],
+   "static_all": [],
+   "static_closure": [],
+   "static_programs": [
+    "static-web-server"
+   ],
+   "tag": "joseluisq/static-web-server:2.38",
+   "threads": 2,
+   "traced": [
+    "accept4",
+    "arch_prctl",
+    "bind",
+    "brk",
+    "clone",
+    "close",
+    "epoll_create1",
+    "epoll_ctl",
+    "epoll_pwait",
+    "eventfd2",
+    "exit",
+    "exit_group",
+    "fcntl",
+    "fstat",
+    "futex",
+    "getrandom",
+    "getsockname",
+    "ioctl",
+    "listen",
+    "lseek",
+    "madvise",
+    "mmap",
+    "mprotect",
+    "munmap",
+    "open",
+    "poll",
+    "prctl",
+    "read",
+    "readlink",
+    "recvfrom",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "rt_sigreturn",
+    "sched_getaffinity",
+    "sendto",
+    "set_tid_address",
+    "setsockopt",
+    "shutdown",
+    "sigaltstack",
+    "socket",
+    "socketpair",
+    "stat",
+    "write",
+    "writev"
+   ],
+   "workload": "static Rust (musl) HTTP server, 40 requests, SIGQUIT"
+  },
+  "temurin-jwebserver": {
+   "closure_objects": 14,
+   "driver": [
+    "wait-tcp 8000 180: ok",
+    "http 8000 / 20: fresh {\"200\": 20} keep-alive {\"200\": 20}",
+    "signal 15: sent"
+   ],
+   "elf_objects": 859,
+   "execs": 3,
+   "exit": 143,
+   "forks": 0,
+   "image": "docker.io/library/eclipse-temurin@sha256:23cc5734ff46e776f51ce66eb9ee08444fd47caabec0a95b7eb6e94be2d3696d",
+   "inline": [
+    "access",
+    "alarm",
+    "arch_prctl",
+    "bind",
+    "brk",
+    "chdir",
+    "chmod",
+    "chroot",
+    "clock_gettime",
+    "clone",
+    "close",
+    "dup2",
+    "exit",
+    "exit_group",
+    "fcntl",
+    "fstat",
+    "ftruncate",
+    "futex",
+    "getcwd",
+    "getdents64",
+    "getpeername",
+    "getpid",
+    "getrandom",
+    "getsockname",
+    "gettid",
+    "ioctl",
+    "kill",
+    "lseek",
+    "madvise",
+    "mincore",
+    "mkdir",
+    "mmap",
+    "mprotect",
+    "mremap",
+    "munmap",
+    "nanosleep",
+    "newfstatat",
+    "openat",
+    "prctl",
+    "pread64",
+    "prlimit64",
+    "read",
+    "readlink",
+    "readlinkat",
+    "rename",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "sched_get_priority_max",
+    "sched_get_priority_min",
+    "sched_getaffinity",
+    "sched_getparam",
+    "sched_getscheduler",
+    "sched_setscheduler",
+    "sched_yield",
+    "set_tid_address",
+    "setsockopt",
+    "sigaltstack",
+    "socket",
+    "symlink",
+    "sysinfo",
+    "tgkill",
+    "timer_create",
+    "timer_delete",
+    "timer_settime",
+    "uname",
+    "unlink",
+    "write",
+    "writev"
+   ],
+   "kernel": "Linux 6.12.111+deb13-amd64 x86_64",
+   "killed": false,
+   "layers_bytes": 224331312,
+   "manifest": "sha256:3b3021d7e64bffd34cd5a61c102802e64e3c7e91aa867b1e9c2a7323f21c6f69",
+   "milestone": "M2",
+   "programs": [
+    "/opt/java/openjdk/bin/jwebserver",
+    "/usr/bin/bash",
+    "/usr/lib/cargo/bin/coreutils/env"
+   ],
+   "static_all": [
+    "accept",
+    "accept4",
+    "access",
+    "add_key",
+    "alarm",
+    "bind",
+    "brk",
+    "capget",
+    "capset",
+    "chdir",
+    "chmod",
+    "chown",
+    "chroot",
+    "clock_getres",
+    "clock_gettime",
+    "clock_settime",
+    "clone",
+    "close",
+    "close_range",
+    "connect",
+    "copy_file_range",
+    "creat",
+    "dup",
+    "dup2",
+    "dup3",
+    "epoll_create",
+    "epoll_create1",
+    "epoll_ctl",
+    "epoll_pwait2",
+    "epoll_wait",
+    "eventfd2",
+    "execve",
+    "exit_group",
+    "faccessat",
+    "fadvise64",
+    "fallocate",
+    "fchdir",
+    "fchmod",
+    "fchmodat",
+    "fchown",
+    "fchownat",
+    "fcntl",
+    "fdatasync",
+    "fgetxattr",
+    "flistxattr",
+    "flock",
+    "fork",
+    "fremovexattr",
+    "fsetxattr",
+    "fstat",
+    "fstatfs",
+    "fsync",
+    "ftruncate",
+    "futex",
+    "futimesat",
+    "getcwd",
+    "getdents64",
+    "getegid",
+    "geteuid",
+    "getgid",
+    "getgroups",
+    "getitimer",
+    "getpeername",
+    "getpgid",
+    "getpgrp",
+    "getpid",
+    "getppid",
+    "getpriority",
+    "getrandom",
+    "getresgid",
+    "getresuid",
+    "getrlimit",
+    "getrusage",
+    "getsid",
+    "getsockname",
+    "getsockopt",
+    "gettid",
+    "gettimeofday",
+    "getuid",
+    "getxattr",
+    "inotify_add_watch",
+    "inotify_init",
+    "inotify_init1",
+    "inotify_rm_watch",
+    "ioctl",
+    "kill",
+    "lchown",
+    "lgetxattr",
+    "link",
+    "linkat",
+    "listen",
+    "listxattr",
+    "llistxattr",
+    "lremovexattr",
+    "lseek",
+    "lsetxattr",
+    "lstat",
+    "madvise",
+    "memfd_create",
+    "mincore",
+    "mkdir",
+    "mkdirat",
+    "mknod",
+    "mknodat",
+    "mlock",
+    "mlockall",
+    "mmap",
+    "mount",
+    "mount_setattr",
+    "move_mount",
+    "mprotect",
+    "mq_getsetattr",
+    "mq_open",
+    "mq_unlink",
+    "mremap",
+    "msgctl",
+    "msgget",
+    "msgrcv",
+    "msgsnd",
+    "msync",
+    "munlock",
+    "munmap",
+    "name_to_handle_at",
+    "nanosleep",
+    "newfstatat",
+    "open",
+    "open_tree",
+    "openat",
+    "openat2",
+    "pause",
+    "personality",
+    "pidfd_getfd",
+    "pidfd_open",
+    "pidfd_send_signal",
+    "pipe",
+    "pipe2",
+    "poll",
+    "ppoll",
+    "prctl",
+    "pread64",
+    "prlimit64",
+    "pselect6",
+    "ptrace",
+    "pwrite64",
+    "quotactl",
+    "read",
+    "readlink",
+    "readlinkat",
+    "readv",
+    "recvfrom",
+    "recvmmsg",
+    "recvmsg",
+    "removexattr",
+    "rename",
+    "renameat",
+    "renameat2",
+    "rmdir",
+    "rt_sigaction",
+    "rt_sigpending",
+    "rt_sigprocmask",
+    "rt_sigqueueinfo",
+    "rt_sigsuspend",
+    "rt_sigtimedwait",
+    "sched_get_priority_max",
+    "sched_get_priority_min",
+    "sched_getaffinity",
+    "sched_getattr",
+    "sched_getparam",
+    "sched_getscheduler",
+    "sched_setaffinity",
+    "sched_setattr",
+    "sched_setscheduler",
+    "sched_yield",
+    "select",
+    "semctl",
+    "semget",
+    "semop",
+    "sendfile",
+    "sendmmsg",
+    "sendmsg",
+    "sendto",
+    "setdomainname",
+    "setfsgid",
+    "setfsuid",
+    "setgid",
+    "setgroups",
+    "sethostname",
+    "setitimer",
+    "setns",
+    "setpgid",
+    "setpriority",
+    "setregid",
+    "setresgid",
+    "setresuid",
+    "setreuid",
+    "setrlimit",
+    "setsid",
+    "setsockopt",
+    "settimeofday",
+    "setuid",
+    "setxattr",
+    "shmat",
+    "shmctl",
+    "shmdt",
+    "shmget",
+    "shutdown",
+    "sigaltstack",
+    "signalfd4",
+    "socket",
+    "socketpair",
+    "splice",
+    "stat",
+    "statfs",
+    "statx",
+    "swapoff",
+    "swapon",
+    "symlink",
+    "symlinkat",
+    "sync",
+    "sync_file_range",
+    "syncfs",
+    "sysinfo",
+    "syslog",
+    "tee",
+    "tgkill",
+    "timer_create",
+    "timer_delete",
+    "timer_settime",
+    "timerfd_create",
+    "timerfd_settime",
+    "truncate",
+    "umask",
+    "umount2",
+    "uname",
+    "unlink",
+    "unlinkat",
+    "unshare",
+    "utime",
+    "utimensat",
+    "utimes",
+    "vfork",
+    "vhangup",
+    "wait4",
+    "waitid",
+    "write",
+    "writev"
+   ],
+   "static_closure": [
+    "accept4",
+    "access",
+    "alarm",
+    "bind",
+    "chdir",
+    "chmod",
+    "chown",
+    "chroot",
+    "clock_gettime",
+    "clone",
+    "close",
+    "close_range",
+    "connect",
+    "dup",
+    "dup2",
+    "dup3",
+    "epoll_create1",
+    "epoll_ctl",
+    "epoll_pwait2",
+    "epoll_wait",
+    "execve",
+    "exit_group",
+    "faccessat",
+    "fallocate",
+    "fchdir",
+    "fchmod",
+    "fchmodat",
+    "fcntl",
+    "fgetxattr",
+    "fork",
+    "fsetxattr",
+    "fstat",
+    "fstatfs",
+    "fsync",
+    "ftruncate",
+    "futex",
+    "getcwd",
+    "getdents64",
+    "getegid",
+    "geteuid",
+    "getgid",
+    "getgroups",
+    "getpeername",
+    "getpgrp",
+    "getpid",
+    "getppid",
+    "getrandom",
+    "getresgid",
+    "getresuid",
+    "getrlimit",
+    "getrusage",
+    "getsockname",
+    "getsockopt",
+    "gettid",
+    "gettimeofday",
+    "getuid",
+    "getxattr",
+    "inotify_add_watch",
+    "inotify_init1",
+    "inotify_rm_watch",
+    "ioctl",
+    "kill",
+    "lgetxattr",
+    "listen",
+    "lseek",
+    "lsetxattr",
+    "lstat",
+    "madvise",
+    "memfd_create",
+    "mkdir",
+    "mkdirat",
+    "mmap",
+    "mount",
+    "mq_getsetattr",
+    "munmap",
+    "name_to_handle_at",
+    "nanosleep",
+    "newfstatat",
+    "open",
+    "open_tree",
+    "openat",
+    "pause",
+    "pidfd_open",
+    "pidfd_send_signal",
+    "pipe",
+    "pipe2",
+    "poll",
+    "ppoll",
+    "prctl",
+    "pselect6",
+    "pwrite64",
+    "read",
+    "readlink",
+    "readlinkat",
+    "readv",
+    "recvfrom",
+    "recvmsg",
+    "removexattr",
+    "rename",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "sched_yield",
+    "select",
+    "sendmsg",
+    "sendto",
+    "setfsgid",
+    "setfsuid",
+    "setgroups",
+    "setitimer",
+    "setns",
+    "setpgid",
+    "setresgid",
+    "setresuid",
+    "setrlimit",
+    "setsockopt",
+    "setxattr",
+    "shutdown",
+    "signalfd4",
+    "socket",
+    "socketpair",
+    "stat",
+    "statfs",
+    "statx",
+    "tgkill",
+    "timerfd_create",
+    "timerfd_settime",
+    "umask",
+    "umount2",
+    "uname",
+    "unlink",
+    "unlinkat",
+    "wait4",
+    "waitid",
+    "write",
+    "writev"
+   ],
+   "static_programs": [
+    "usr/bin/pebble",
+    "usr/sbin/ldconfig"
+   ],
+   "tag": "eclipse-temurin:21-jdk",
+   "threads": 22,
+   "traced": [
+    "accept",
+    "access",
+    "arch_prctl",
+    "bind",
+    "brk",
+    "clock_getres",
+    "clock_nanosleep",
+    "clone3",
+    "close",
+    "connect",
+    "dup",
+    "dup2",
+    "epoll_create1",
+    "epoll_ctl",
+    "epoll_wait",
+    "eventfd2",
+    "execve",
+    "exit",
+    "exit_group",
+    "fchdir",
+    "fcntl",
+    "flock",
+    "fstat",
+    "ftruncate",
+    "futex",
+    "getcwd",
+    "getdents64",
+    "getegid",
+    "geteuid",
+    "getgid",
+    "getpgrp",
+    "getpid",
+    "getppid",
+    "getrandom",
+    "getresgid",
+    "getresuid",
+    "getrusage",
+    "getsockname",
+    "gettid",
+    "getuid",
+    "ioctl",
+    "listen",
+    "lseek",
+    "lstat",
+    "madvise",
+    "mkdir",
+    "mmap",
+    "mprotect",
+    "munmap",
+    "newfstatat",
+    "openat",
+    "poll",
+    "prctl",
+    "pread64",
+    "prlimit64",
+    "read",
+    "readlink",
+    "readlinkat",
+    "rseq",
+    "rt_sigaction",
+    "rt_sigprocmask",
+    "rt_sigreturn",
+    "sched_getaffinity",
+    "sched_yield",
+    "set_robust_list",
+    "set_tid_address",
+    "setsockopt",
+    "sigaltstack",
+    "socket",
+    "socketpair",
+    "stat",
+    "statfs",
+    "statx",
+    "sysinfo",
+    "uname",
+    "unlink",
+    "write"
+   ],
+   "workload": "`jwebserver`, 40 requests, SIGTERM (shutdown hooks)"
+  }
+ },
+ "paths": {
+  "alpine-sh": {
+   "lstat /etc": 1,
+   "lstat /etc/alpine-release": 1,
+   "lstat /etc/apk": 1,
+   "lstat /etc/apk/arch": 1,
+   "lstat /etc/apk/keys": 1,
+   "lstat /etc/apk/keys/alpine-devel@lists.alpinelinux.org-4a6aN.rsa.pub": 1,
+   "lstat /etc/apk/keys/alpine-devel@lists.alpinelinux.org-Ncecb.rsa.pub": 1,
+   "lstat /etc/apk/keys/alpine-devel@lists.alpinelinux.org-Ne3f.rsa.pub": 1,
+   "lstat /etc/apk/keys/alpine-devel@lists.alpinelinux.org-Nee59.rsa.pub": 1,
+   "lstat /etc/apk/keys/alpine-devel@lists.alpinelinux.org-Nef4b.rsa.pub": 1,
+   "lstat /etc/apk/protected_paths.d": 1,
+   "lstat /etc/apk/repositories": 1,
+   "lstat /etc/apk/world": 1,
+   "lstat /etc/busybox-paths.d": 1,
+   "lstat /etc/busybox-paths.d/busybox": 1,
+   "lstat /etc/crontabs": 1,
+   "lstat /etc/crontabs/root": 1,
+   "lstat /etc/fstab": 1,
+   "lstat /etc/group": 1,
+   "lstat /etc/hostname": 1,
+   "lstat /etc/hosts": 1,
+   "lstat /etc/inittab": 1,
+   "lstat /etc/issue": 1,
+   "lstat /etc/logrotate.d": 1,
+   "lstat /etc/logrotate.d/acpid": 1,
+   "lstat /etc/modprobe.d": 1,
+   "lstat /etc/modprobe.d/aliases.conf": 1,
+   "lstat /etc/modprobe.d/blacklist.conf": 1,
+   "lstat /etc/modprobe.d/i386.conf": 1,
+   "lstat /etc/modules": 1,
+   "lstat /etc/modules-load.d": 1,
+   "lstat /etc/motd": 1,
+   "lstat /etc/mtab": 1,
+   "lstat /etc/network": 1,
+   "lstat /etc/network/if-down.d": 1,
+   "lstat /etc/network/if-post-down.d": 1,
+   "lstat /etc/network/if-post-up.d": 1,
+   "lstat /etc/network/if-pre-down.d": 1,
+   "lstat /etc/network/if-pre-up.d": 1,
+   "lstat /etc/network/if-up.d": 1,
+   "lstat /etc/network/if-up.d/dad": 1,
+   "lstat /etc/nsswitch.conf": 1,
+   "lstat /etc/opt": 1,
+   "lstat /etc/os-release": 1,
+   "lstat /etc/passwd": 1,
+   "lstat /etc/periodic": 1,
+   "lstat /etc/periodic/15min": 1,
+   "lstat /etc/periodic/daily": 1,
+   "lstat /etc/periodic/hourly": 1,
+   "lstat /etc/periodic/monthly": 1,
+   "lstat /etc/periodic/weekly": 1,
+   "lstat /etc/profile": 1,
+   "lstat /etc/profile.d": 1,
+   "lstat /etc/profile.d/20locale.sh": 1,
+   "lstat /etc/profile.d/README": 1,
+   "lstat /etc/profile.d/color_prompt.sh.disabled": 1,
+   "lstat /etc/protocols": 1,
+   "lstat /etc/resolv.conf": 1,
+   "lstat /etc/secfixes.d": 1,
+   "lstat /etc/secfixes.d/alpine": 1,
+   "lstat /etc/securetty": 1,
+   "lstat /etc/services": 1,
+   "lstat /etc/shadow": 1,
+   "lstat /etc/shells": 1,
+   "lstat /etc/ssl": 1,
+   "lstat /etc/ssl/cert.pem": 1,
+   "lstat /etc/ssl/certs": 1,
+   "lstat /etc/ssl/certs/ca-certificates.crt": 1,
+   "lstat /etc/ssl/ct_log_list.cnf": 1,
+   "lstat /etc/ssl/ct_log_list.cnf.dist": 1,
+   "lstat /etc/ssl/openssl.cnf": 1,
+   "lstat /etc/ssl/openssl.cnf.dist": 1,
+   "lstat /etc/ssl/private": 1,
+   "lstat /etc/ssl1.1": 1,
+   "lstat /etc/ssl1.1/cert.pem": 1,
+   "lstat /etc/ssl1.1/certs": 1,
+   "lstat /etc/sysctl.conf": 1,
+   "lstat /etc/sysctl.d": 1,
+   "lstat /etc/udhcpc": 1,
+   "lstat /etc/udhcpc/udhcpc.conf": 1,
+   "open /dev/null": 6,
+   "open /etc": 1,
+   "open /etc/apk": 1,
+   "open /etc/apk/keys": 1,
+   "open /etc/apk/protected_paths.d": 1,
+   "open /etc/busybox-paths.d": 1,
+   "open /etc/crontabs": 1,
+   "open /etc/group": 4,
+   "open /etc/localtime": 58,
+   "open /etc/logrotate.d": 1,
+   "open /etc/modprobe.d": 1,
+   "open /etc/modules-load.d": 1,
+   "open /etc/network": 1,
+   "open /etc/network/if-down.d": 1,
+   "open /etc/network/if-post-down.d": 1,
+   "open /etc/network/if-post-up.d": 1,
+   "open /etc/network/if-pre-down.d": 1,
+   "open /etc/network/if-pre-up.d": 1,
+   "open /etc/network/if-up.d": 1,
+   "open /etc/opt": 1,
+   "open /etc/passwd": 5,
+   "open /etc/periodic": 1,
+   "open /etc/periodic/15min": 1,
+   "open /etc/periodic/daily": 1,
+   "open /etc/periodic/hourly": 1,
+   "open /etc/periodic/monthly": 1,
+   "open /etc/periodic/weekly": 1,
+   "open /etc/profile.d": 1,
+   "open /etc/secfixes.d": 1,
+   "open /etc/ssl": 1,
+   "open /etc/ssl/certs": 1,
+   "open /etc/ssl/private": 1,
+   "open /etc/ssl1.1": 1,
+   "open /etc/sysctl.d": 1,
+   "open /etc/udhcpc": 1,
+   "open /proc": 1,
+   "open /proc/N/cmdline": 61,
+   "open /proc/N/stat": 61,
+   "open /proc/meminfo": 1,
+   "open /proc/mounts": 1,
+   "stat /dev": 1,
+   "stat /dev/mqueue": 1,
+   "stat /dev/pts": 1,
+   "stat /dev/shm": 1,
+   "stat /proc": 1,
+   "stat /proc/N/": 61,
+   "stat /sys": 1,
+   "stat /sys/fs/cgroup": 1
+  },
+  "go-static": {
+   "openat /etc/localtime": 1,
+   "openat /proc/sys/net/core/somaxconn": 1,
+   "openat /sys/kernel/mm/transparent_hugepage/hpage_pmd_size": 1
+  },
+  "nginx": {
+   "access /etc/ld.so.preload": 19,
+   "access /etc/selinux/config": 3,
+   "newfstatat /etc/localtime": 1,
+   "newfstatat /etc/nginx/conf.d/default.conf": 1,
+   "newfstatat /etc/nginx/templates": 1,
+   "newfstatat /etc/nsswitch.conf": 6,
+   "newfstatat /etc/os-release": 1,
+   "newfstatat /proc/net/if_inet6": 1,
+   "openat /dev/null": 4,
+   "openat /etc/group": 3,
+   "openat /etc/ld.so.cache": 19,
+   "openat /etc/localtime": 1,
+   "openat /etc/nginx/conf.d": 1,
+   "openat /etc/nginx/conf.d/default.conf": 5,
+   "openat /etc/nginx/conf.d/sedfk8s5i": 1,
+   "openat /etc/nginx/mime.types": 1,
+   "openat /etc/nginx/nginx.conf": 1,
+   "openat /etc/nsswitch.conf": 1,
+   "openat /etc/os-release": 1,
+   "openat /etc/passwd": 1,
+   "openat /proc/filesystems": 3,
+   "openat /proc/self/maps": 2,
+   "openat /proc/sys/kernel/ngroups_max": 2,
+   "openat /sys/devices/system/cpu/online": 1,
+   "rename /etc/nginx/conf.d/sedfk8s5i": 1,
+   "statfs /sys/fs/selinux": 3
+  },
+  "node-http": {
+   "access /etc/ld.so.preload": 2,
+   "openat /dev/null": 1,
+   "openat /etc/hostname": 40,
+   "openat /etc/ld.so.cache": 2,
+   "openat /etc/localtime": 1,
+   "openat /etc/ssl/openssl.cnf": 1,
+   "openat /proc/meminfo": 1,
+   "openat /proc/self/cgroup": 1,
+   "openat /proc/self/maps": 2,
+   "openat /proc/version_signature": 1,
+   "openat /sys/fs/cgroup//memory.high": 1,
+   "openat /sys/fs/cgroup//memory.max": 1,
+   "readlink /etc": 1,
+   "readlink /etc/localtime": 1,
+   "readlink /proc/self/exe": 1
+  },
+  "postgres": {
+   "access /etc/ld.so.preload": 45,
+   "access /etc/selinux/config": 12,
+   "newfstatat /etc/localtime": 5203,
+   "newfstatat /etc/nsswitch.conf": 7,
+   "newfstatat /etc/perl/Carp.pm": 1,
+   "newfstatat /etc/perl/Carp.pmc": 1,
+   "newfstatat /etc/perl/Exporter.pm": 1,
+   "newfstatat /etc/perl/Exporter.pmc": 1,
+   "newfstatat /etc/perl/Exporter/Heavy.pm": 1,
+   "newfstatat /etc/perl/Exporter/Heavy.pmc": 1,
+   "newfstatat /etc/perl/Fcntl.pm": 1,
+   "newfstatat /etc/perl/Fcntl.pmc": 1,
+   "newfstatat /etc/perl/IPC/Open3.pm": 1,
+   "newfstatat /etc/perl/IPC/Open3.pmc": 1,
+   "newfstatat /etc/perl/POSIX.pm": 1,
+   "newfstatat /etc/perl/POSIX.pmc": 1,
+   "newfstatat /etc/perl/PgCommon.pm": 1,
+   "newfstatat /etc/perl/PgCommon.pmc": 1,
+   "newfstatat /etc/perl/Socket.pm": 1,
+   "newfstatat /etc/perl/Socket.pmc": 1,
+   "newfstatat /etc/perl/Symbol.pm": 1,
+   "newfstatat /etc/perl/Symbol.pmc": 1,
+   "newfstatat /etc/perl/Tie/Hash.pm": 1,
+   "newfstatat /etc/perl/Tie/Hash.pmc": 1,
+   "newfstatat /etc/perl/XSLoader.pm": 1,
+   "newfstatat /etc/perl/XSLoader.pmc": 1,
+   "newfstatat /etc/perl/constant.pm": 1,
+   "newfstatat /etc/perl/constant.pmc": 1,
+   "newfstatat /etc/perl/overloading.pm": 1,
+   "newfstatat /etc/perl/overloading.pmc": 1,
+   "newfstatat /etc/perl/strict.pm": 1,
+   "newfstatat /etc/perl/strict.pmc": 1,
+   "newfstatat /etc/perl/warnings.pm": 1,
+   "newfstatat /etc/perl/warnings.pmc": 1,
+   "newfstatat /etc/perl/warnings/register.pm": 1,
+   "newfstatat /etc/perl/warnings/register.pmc": 1,
+   "newfstatat /proc/self/exe": 1,
+   "openat /dev/fd/N": 1,
+   "openat /dev/null": 8,
+   "openat /dev/shm/PostgreSQL.N": 19,
+   "openat /dev/tty": 2,
+   "openat /dev/urandom": 2,
+   "openat /etc/gai.conf": 1,
+   "openat /etc/group": 1,
+   "openat /etc/ld.so.cache": 45,
+   "openat /etc/localtime": 1,
+   "openat /etc/nsswitch.conf": 7,
+   "openat /etc/passwd": 8,
+   "openat /proc/filesystems": 12,
+   "openat /proc/meminfo": 9,
+   "openat /proc/sys/kernel/cap_last_cap": 9,
+   "openat /sys/kernel/mm/transparent_hugepage/hpage_pmd_size": 1,
+   "readlink /etc/localtime": 1,
+   "readlink /proc/self/exe": 1,
+   "statfs /sys/fs/selinux": 12,
+   "unlink /dev/shm/PostgreSQL.N": 11
+  },
+  "python-http": {
+   "access /etc/ld.so.preload": 1,
+   "newfstatat /etc/nsswitch.conf": 2,
+   "newfstatat /etc/resolv.conf": 2,
+   "open /proc/sys/vm/overcommit_memory": 1,
+   "openat /etc/gai.conf": 1,
+   "openat /etc/host.conf": 1,
+   "openat /etc/hosts": 2,
+   "openat /etc/ld.so.cache": 5,
+   "openat /etc/localtime": 1,
+   "openat /etc/nsswitch.conf": 1,
+   "openat /etc/resolv.conf": 1,
+   "readlinkat /proc/self/exe": 1
+  },
+  "redis": {
+   "access /etc/ld.so.preload": 19,
+   "access /etc/selinux/config": 5,
+   "access /sys/fs/selinux": 3,
+   "access /sys/kernel/security/apparmor": 3,
+   "newfstatat /etc/nsswitch.conf": 6,
+   "open /proc/sys/vm/overcommit_memory": 1,
+   "open /sys/kernel/mm/transparent_hugepage/enabled": 1,
+   "openat /dev/null": 3,
+   "openat /dev/tty": 2,
+   "openat /dev/urandom": 1,
+   "openat /etc/group": 2,
+   "openat /etc/ld.so.cache": 19,
+   "openat /etc/localtime": 1,
+   "openat /etc/nsswitch.conf": 4,
+   "openat /etc/passwd": 4,
+   "openat /proc/N/status": 13,
+   "openat /proc/filesystems": 5,
+   "openat /proc/self/maps": 3,
+   "openat /proc/self/smaps": 2,
+   "openat /proc/self/stat": 3,
+   "openat /proc/sys/kernel/cap_last_cap": 9,
+   "openat /proc/sys/net/core/somaxconn": 1,
+   "openat /proc/sys/vm/overcommit_memory": 1,
+   "openat /proc/version_signature": 1,
+   "openat /sys/devices/system/clocksource/clocksource0/current_clocksource": 1,
+   "openat /sys/kernel/mm/transparent_hugepage/enabled": 1,
+   "readlink /etc/je_malloc.conf": 1,
+   "statfs /sys/fs/selinux": 5
+  },
+  "rust-static": {
+   "open /proc/self/cgroup": 1,
+   "open /proc/sys/vm/overcommit_memory": 1,
+   "open /sys/fs/cgroup/cpu.max": 1,
+   "open /sys/kernel/mm/transparent_hugepage/enabled": 1,
+   "readlink /etc/_rjem_malloc.conf": 1,
+   "stat /sys/fs/cgroup/cgroup.controllers": 1
+  },
+  "temurin-jwebserver": {
+   "access /etc/ld.so.preload": 3,
+   "access /etc/selinux/config": 1,
+   "lstat /etc/localtime": 1,
+   "newfstatat /etc/localtime": 1,
+   "newfstatat /etc/nsswitch.conf": 4,
+   "newfstatat /etc/resolv.conf": 1,
+   "openat /dev/tty": 1,
+   "openat /etc/host.conf": 1,
+   "openat /etc/hosts": 1,
+   "openat /etc/ld.so.cache": 4,
+   "openat /etc/localtime": 1,
+   "openat /etc/nsswitch.conf": 2,
+   "openat /etc/passwd": 3,
+   "openat /etc/resolv.conf": 1,
+   "openat /proc/cpuinfo": 1,
+   "openat /proc/filesystems": 1,
+   "openat /proc/meminfo": 1,
+   "openat /proc/net/if_inet6": 1,
+   "openat /proc/self/cgroup": 1,
+   "openat /proc/self/coredump_filter": 2,
+   "openat /proc/self/maps": 1,
+   "openat /proc/self/mountinfo": 1,
+   "openat /proc/stat": 1,
+   "openat /proc/sys/vm/overcommit_memory": 1,
+   "openat /sys/devices/system/cpu/cpu0/microcode/version": 1,
+   "openat /sys/devices/system/cpu/online": 1,
+   "openat /sys/devices/system/cpu/possible": 1,
+   "openat /sys/fs/cgroup/cgroup.controllers": 1,
+   "openat /sys/fs/cgroup/cpu.max": 2,
+   "openat /sys/fs/cgroup/memory.max": 1,
+   "openat /sys/kernel/mm/hugepages": 1,
+   "openat /sys/kernel/mm/transparent_hugepage/enabled": 1,
+   "openat /sys/kernel/mm/transparent_hugepage/hpage_pmd_size": 1,
+   "readlink /etc/localtime": 1,
+   "readlink /proc/self/exe": 2,
+   "readlinkat /proc/self/exe": 1,
+   "statfs /sys/fs/cgroup": 1,
+   "statfs /sys/fs/selinux": 1
+  }
+ },
+ "signals": {
+  "alpine-sh": {
+   "SIGCHLD": 99,
+   "SIGTERM": 1
+  },
+  "go-static": {
+   "SIGTERM": 3,
+   "SIGURG": 1
+  },
+  "nginx": {
+   "SIGCHLD": 24,
+   "SIGIO": 1,
+   "SIGQUIT": 1
+  },
+  "node-http": {
+   "SIGCHLD": 1,
+   "SIGTERM": 1
+  },
+  "postgres": {
+   "SIGCHLD": 53,
+   "SIGINT": 3,
+   "SIGRTMIN+1": 8,
+   "SIGTERM": 10,
+   "SIGUSR1": 1,
+   "SIGUSR2": 2
+  },
+  "python-http": {
+   "SIGTERM": 1
+  },
+  "redis": {
+   "SIGCHLD": 16,
+   "SIGTERM": 1
+  },
+  "rust-static": {
+   "SIGPIPE": 1,
+   "SIGQUIT": 1
+  },
+  "temurin-jwebserver": {
+   "SIGSEGV": 2,
+   "SIGTERM": 1
+  }
+ },
+ "syscalls": {
+  "accept": {
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 3
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 22
+   }
+  },
+  "accept4": {
+   "go-static": {
+    "args": {
+     "NONBLOCK|CLOEXEC": 44
+    },
+    "err": {
+     "EAGAIN": 22
+    },
+    "n": 44
+   },
+   "nginx": {
+    "args": {
+     "NONBLOCK": 22
+    },
+    "err": {},
+    "n": 22
+   },
+   "node-http": {
+    "args": {
+     "NONBLOCK|CLOEXEC": 22
+    },
+    "err": {},
+    "n": 22
+   },
+   "python-http": {
+    "args": {
+     "CLOEXEC": 41
+    },
+    "err": {},
+    "n": 41
+   },
+   "redis": {
+    "args": {
+     "NONBLOCK|CLOEXEC": 14
+    },
+    "err": {
+     "EAGAIN": 7
+    },
+    "n": 14
+   },
+   "rust-static": {
+    "args": {
+     "NONBLOCK|CLOEXEC": 43
+    },
+    "err": {
+     "EAGAIN": 21
+    },
+    "n": 43
+   }
+  },
+  "access": {
+   "nginx": {
+    "args": {
+     "F_OK": 3,
+     "R_OK": 19
+    },
+    "err": {
+     "ENOENT": 22
+    },
+    "n": 22
+   },
+   "node-http": {
+    "args": {
+     "R_OK": 2
+    },
+    "err": {
+     "ENOENT": 2
+    },
+    "n": 2
+   },
+   "postgres": {
+    "args": {
+     "F_OK": 174,
+     "R_OK": 90,
+     "X_OK": 45
+    },
+    "err": {
+     "ENOENT": 216
+    },
+    "n": 309
+   },
+   "python-http": {
+    "args": {
+     "R_OK": 1
+    },
+    "err": {
+     "ENOENT": 1
+    },
+    "n": 1
+   },
+   "redis": {
+    "args": {
+     "F_OK": 11,
+     "R_OK": 33,
+     "W_OK": 1,
+     "X_OK": 13
+    },
+    "err": {
+     "ENOENT": 30
+    },
+    "n": 58
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "F_OK": 123,
+     "R_OK": 446,
+     "X_OK": 2
+    },
+    "err": {
+     "ENOENT": 84
+    },
+    "n": 571
+   }
+  },
+  "arch_prctl": {
+   "alpine-sh": {
+    "args": {
+     "ARCH_SET_FS": 95
+    },
+    "err": {},
+    "n": 95
+   },
+   "go-static": {
+    "args": {
+     "ARCH_SET_FS": 1
+    },
+    "err": {},
+    "n": 1
+   },
+   "nginx": {
+    "args": {
+     "ARCH_SET_FS": 19
+    },
+    "err": {},
+    "n": 19
+   },
+   "node-http": {
+    "args": {
+     "ARCH_SET_FS": 2
+    },
+    "err": {},
+    "n": 2
+   },
+   "postgres": {
+    "args": {
+     "ARCH_SET_FS": 46
+    },
+    "err": {},
+    "n": 46
+   },
+   "python-http": {
+    "args": {
+     "ARCH_SET_FS": 1
+    },
+    "err": {},
+    "n": 1
+   },
+   "redis": {
+    "args": {
+     "ARCH_SET_FS": 19
+    },
+    "err": {},
+    "n": 19
+   },
+   "rust-static": {
+    "args": {
+     "ARCH_SET_FS": 1
+    },
+    "err": {},
+    "n": 1
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "ARCH_SET_FS": 3
+    },
+    "err": {},
+    "n": 3
+   }
+  },
+  "bind": {
+   "go-static": {
+    "args": {
+     "AF_INET6": 3,
+     "AF_NETLINK": 80
+    },
+    "err": {},
+    "n": 83
+   },
+   "nginx": {
+    "args": {
+     "AF_INET": 1,
+     "AF_INET6": 1
+    },
+    "err": {},
+    "n": 2
+   },
+   "node-http": {
+    "args": {
+     "AF_INET6": 1
+    },
+    "err": {},
+    "n": 1
+   },
+   "postgres": {
+    "args": {
+     "AF_INET": 1,
+     "AF_INET6": 1,
+     "AF_NETLINK": 1,
+     "AF_UNIX": 2
+    },
+    "err": {},
+    "n": 5
+   },
+   "python-http": {
+    "args": {
+     "AF_INET": 1,
+     "AF_NETLINK": 1
+    },
+    "err": {},
+    "n": 2
+   },
+   "redis": {
+    "args": {
+     "AF_INET": 1,
+     "AF_INET6": 1
+    },
+    "err": {},
+    "n": 2
+   },
+   "rust-static": {
+    "args": {
+     "AF_INET6": 1
+    },
+    "err": {},
+    "n": 1
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "AF_INET6": 1
+    },
+    "err": {},
+    "n": 1
+   }
+  },
+  "brk": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 190
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 84
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 19
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 319
+   },
+   "python-http": {
+    "args": {},
+    "err": {},
+    "n": 84
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 66
+   },
+   "rust-static": {
+    "args": {},
+    "err": {},
+    "n": 3
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 11
+   }
+  },
+  "capget": {
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 15
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 11
+   }
+  },
+  "capset": {
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 5
+   }
+  },
+  "chdir": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 16
+   }
+  },
+  "chmod": {
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 7
+   }
+  },
+  "chown": {
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 5
+   }
+  },
+  "clock_getres": {
+   "temurin-jwebserver": {
+    "args": {
+     "CPUCLOCK(pid/tid)": 1
+    },
+    "err": {},
+    "n": 1
+   }
+  },
+  "clock_nanosleep": {
+   "postgres": {
+    "args": {
+     "CLOCK_REALTIME 0": 2
+    },
+    "err": {},
+    "n": 2
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "CLOCK_REALTIME 0": 2
+    },
+    "err": {},
+    "n": 2
+   }
+  },
+  "clone": {
+   "go-static": {
+    "args": {
+     "VM|FS|FILES|SIGHAND|THREAD|SYSVSEM|SETTLS": 3
+    },
+    "err": {},
+    "n": 3
+   },
+   "nginx": {
+    "args": {
+     "CHILD_CLEARTID|CHILD_SETTID|SIGCHLD": 18
+    },
+    "err": {},
+    "n": 18
+   },
+   "node-http": {
+    "args": {
+     "CHILD_CLEARTID|CHILD_SETTID|SIGCHLD": 1
+    },
+    "err": {},
+    "n": 1
+   },
+   "postgres": {
+    "args": {
+     "CHILD_CLEARTID|CHILD_SETTID|SIGCHLD": 42,
+     "VM|FS|FILES|SIGHAND|THREAD|SYSVSEM|SETTLS": 4
+    },
+    "err": {},
+    "n": 46
+   },
+   "redis": {
+    "args": {
+     "CHILD_CLEARTID|CHILD_SETTID|SIGCHLD": 20
+    },
+    "err": {},
+    "n": 20
+   },
+   "rust-static": {
+    "args": {
+     "VM|FS|FILES|SIGHAND|THREAD|SYSVSEM|SETTLS|PARENT_SETTID|CHILD_CLEARTID|DETACHED": 2
+    },
+    "err": {},
+    "n": 2
+   }
+  },
+  "clone3": {
+   "node-http": {
+    "args": {
+     "VM|FS|FILES|SIGHAND|THREAD|SYSVSEM|SETTLS|PARENT_SETTID|CHILD_CLEARTID": 10
+    },
+    "err": {},
+    "n": 10
+   },
+   "postgres": {
+    "args": {
+     "VM|VFORK|CLEAR_SIGHAND": 7
+    },
+    "err": {},
+    "n": 7
+   },
+   "python-http": {
+    "args": {
+     "VM|FS|FILES|SIGHAND|THREAD|SYSVSEM|SETTLS|PARENT_SETTID|CHILD_CLEARTID": 41
+    },
+    "err": {},
+    "n": 41
+   },
+   "redis": {
+    "args": {
+     "VM|FS|FILES|SIGHAND|THREAD|SYSVSEM|SETTLS|PARENT_SETTID|CHILD_CLEARTID": 5
+    },
+    "err": {},
+    "n": 5
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "VM|FS|FILES|SIGHAND|THREAD|SYSVSEM|SETTLS|PARENT_SETTID|CHILD_CLEARTID": 22
+    },
+    "err": {},
+    "n": 22
+   }
+  },
+  "close": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 655
+   },
+   "go-static": {
+    "args": {},
+    "err": {},
+    "n": 106
+   },
+   "nginx": {
+    "args": {},
+    "err": {
+     "EBADF": 4
+    },
+    "n": 294
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 96
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 9179
+   },
+   "python-http": {
+    "args": {},
+    "err": {},
+    "n": 267
+   },
+   "redis": {
+    "args": {},
+    "err": {
+     "EBADF": 8
+    },
+    "n": 280
+   },
+   "rust-static": {
+    "args": {},
+    "err": {},
+    "n": 72
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 188
+   }
+  },
+  "connect": {
+   "alpine-sh": {
+    "args": {
+     "AF_UNIX": 1
+    },
+    "err": {
+     "ENOENT": 1
+    },
+    "n": 1
+   },
+   "nginx": {
+    "args": {
+     "AF_UNIX": 4
+    },
+    "err": {
+     "ENOENT": 4
+    },
+    "n": 4
+   },
+   "postgres": {
+    "args": {
+     "AF_INET": 1,
+     "AF_INET6": 1,
+     "AF_UNIX": 15,
+     "AF_UNSPEC": 1
+    },
+    "err": {
+     "ENOENT": 14
+    },
+    "n": 18
+   },
+   "python-http": {
+    "args": {
+     "AF_INET": 1,
+     "AF_INET6": 1,
+     "AF_UNIX": 2,
+     "AF_UNSPEC": 1
+    },
+    "err": {
+     "ENOENT": 2
+    },
+    "n": 5
+   },
+   "redis": {
+    "args": {
+     "AF_UNIX": 12
+    },
+    "err": {
+     "ENOENT": 12
+    },
+    "n": 12
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "AF_UNIX": 6
+    },
+    "err": {
+     "ENOENT": 6
+    },
+    "n": 6
+   }
+  },
+  "dup": {
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 2000
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 6
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 40
+   }
+  },
+  "dup2": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 204
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 26
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 41
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 24
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 1
+   }
+  },
+  "epoll_create": {
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 3
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 1
+   }
+  },
+  "epoll_create1": {
+   "go-static": {
+    "args": {
+     "CLOEXEC": 1
+    },
+    "err": {},
+    "n": 1
+   },
+   "node-http": {
+    "args": {
+     "CLOEXEC": 3
+    },
+    "err": {},
+    "n": 3
+   },
+   "postgres": {
+    "args": {
+     "CLOEXEC": 27
+    },
+    "err": {},
+    "n": 27
+   },
+   "python-http": {
+    "args": {
+     "CLOEXEC": 1
+    },
+    "err": {},
+    "n": 1
+   },
+   "redis": {
+    "args": {
+     "CLOEXEC": 2
+    },
+    "err": {},
+    "n": 2
+   },
+   "rust-static": {
+    "args": {
+     "CLOEXEC": 1
+    },
+    "err": {},
+    "n": 1
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "CLOEXEC": 1
+    },
+    "err": {},
+    "n": 1
+   }
+  },
+  "epoll_ctl": {
+   "go-static": {
+    "args": {
+     "EPOLL_CTL_ADD": 25,
+     "EPOLL_CTL_DEL": 22
+    },
+    "err": {},
+    "n": 47
+   },
+   "nginx": {
+    "args": {
+     "EPOLL_CTL_ADD": 36,
+     "EPOLL_CTL_DEL": 6
+    },
+    "err": {},
+    "n": 42
+   },
+   "node-http": {
+    "args": {
+     "EPOLL_CTL_DEL": 23
+    },
+    "err": {},
+    "n": 23
+   },
+   "postgres": {
+    "args": {
+     "EPOLL_CTL_ADD": 54,
+     "EPOLL_CTL_MOD": 1
+    },
+    "err": {
+     "EPERM": 2
+    },
+    "n": 55
+   },
+   "redis": {
+    "args": {
+     "EPOLL_CTL_ADD": 13,
+     "EPOLL_CTL_DEL": 7
+    },
+    "err": {},
+    "n": 20
+   },
+   "rust-static": {
+    "args": {
+     "EPOLL_CTL_ADD": 27,
+     "EPOLL_CTL_DEL": 25
+    },
+    "err": {},
+    "n": 52
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "EPOLL_CTL_ADD": 44,
+     "EPOLL_CTL_DEL": 42
+    },
+    "err": {},
+    "n": 86
+   }
+  },
+  "epoll_pwait": {
+   "go-static": {
+    "args": {},
+    "err": {},
+    "n": 94
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 381
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 3
+   },
+   "rust-static": {
+    "args": {},
+    "err": {},
+    "n": 112
+   }
+  },
+  "epoll_wait": {
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 68
+   },
+   "postgres": {
+    "args": {},
+    "err": {
+     "EINTR": 25
+    },
+    "n": 47
+   },
+   "redis": {
+    "args": {},
+    "err": {
+     "EINTR": 1
+    },
+    "n": 23
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 169
+   }
+  },
+  "eventfd2": {
+   "go-static": {
+    "args": {
+     "NONBLOCK|CLOEXEC": 1
+    },
+    "err": {},
+    "n": 1
+   },
+   "nginx": {
+    "args": {
+     "0": 4
+    },
+    "err": {},
+    "n": 4
+   },
+   "node-http": {
+    "args": {
+     "NONBLOCK|CLOEXEC": 3
+    },
+    "err": {},
+    "n": 3
+   },
+   "postgres": {
+    "args": {
+     "NONBLOCK|CLOEXEC": 1
+    },
+    "err": {},
+    "n": 1
+   },
+   "redis": {
+    "args": {
+     "NONBLOCK|CLOEXEC": 2
+    },
+    "err": {},
+    "n": 2
+   },
+   "rust-static": {
+    "args": {
+     "NONBLOCK|CLOEXEC": 1
+    },
+    "err": {},
+    "n": 1
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "0": 1
+    },
+    "err": {},
+    "n": 1
+   }
+  },
+  "execve": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 94
+   },
+   "nginx": {
+    "args": {},
+    "err": {
+     "ENOENT": 2
+    },
+    "n": 20
+   },
+   "node-http": {
+    "args": {},
+    "err": {
+     "ENOENT": 1
+    },
+    "n": 2
+   },
+   "postgres": {
+    "args": {},
+    "err": {
+     "ENOENT": 6
+    },
+    "n": 51
+   },
+   "redis": {
+    "args": {},
+    "err": {
+     "ENOENT": 3
+    },
+    "n": 21
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {
+     "ENOENT": 4
+    },
+    "n": 6
+   }
+  },
+  "exit": {
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 9
+   },
+   "python-http": {
+    "args": {},
+    "err": {},
+    "n": 40
+   },
+   "rust-static": {
+    "args": {},
+    "err": {},
+    "n": 2
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 5
+   }
+  },
+  "exit_group": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 100
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 25
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 2
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 57
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 21
+   },
+   "rust-static": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 1
+   }
+  },
+  "faccessat2": {
+   "nginx": {
+    "args": {
+     "X_OK AT_REMOVEDIR/EACCESS": 4
+    },
+    "err": {},
+    "n": 4
+   },
+   "postgres": {
+    "args": {
+     "X_OK AT_REMOVEDIR/EACCESS": 1
+    },
+    "err": {},
+    "n": 1
+   },
+   "redis": {
+    "args": {
+     "R_OK AT_REMOVEDIR/EACCESS": 4,
+     "X_OK AT_REMOVEDIR/EACCESS": 4
+    },
+    "err": {},
+    "n": 8
+   }
+  },
+  "fadvise64": {
+   "nginx": {
+    "args": {
+     "SEQUENTIAL": 3
+    },
+    "err": {
+     "ESPIPE": 2
+    },
+    "n": 3
+   },
+   "postgres": {
+    "args": {
+     "SEQUENTIAL": 1
+    },
+    "err": {
+     "ESPIPE": 1
+    },
+    "n": 1
+   },
+   "redis": {
+    "args": {
+     "DONTNEED": 1
+    },
+    "err": {},
+    "n": 1
+   }
+  },
+  "fallocate": {
+   "postgres": {
+    "args": {
+     "0": 10
+    },
+    "err": {},
+    "n": 10
+   }
+  },
+  "fchdir": {
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 2
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 2
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 2
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 4
+   }
+  },
+  "fchmod": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 1
+   }
+  },
+  "fchmodat": {
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 4
+   }
+  },
+  "fchown": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 1
+   }
+  },
+  "fcntl": {
+   "alpine-sh": {
+    "args": {
+     "F_DUPFD_CLOEXEC": 68,
+     "F_SETFD FD_CLOEXEC": 121
+    },
+    "err": {},
+    "n": 189
+   },
+   "go-static": {
+    "args": {
+     "F_GETFD": 3,
+     "F_GETFL": 4,
+     "F_SETFL O_RDONLY|O_NONBLOCK|O_LARGEFILE": 1
+    },
+    "err": {},
+    "n": 8
+   },
+   "nginx": {
+    "args": {
+     "F_DUPFD": 11,
+     "F_DUPFD_CLOEXEC": 2,
+     "F_GETFD": 1,
+     "F_GETFL": 3,
+     "F_SETFD FD_CLOEXEC": 20,
+     "F_SETOWN": 2
+    },
+    "err": {},
+    "n": 39
+   },
+   "node-http": {
+    "args": {
+     "F_DUPFD": 1,
+     "F_GETFL": 7,
+     "F_SETFD FD_CLOEXEC": 18,
+     "F_SETFL O_WRONLY": 1
+    },
+    "err": {
+     "EBADF": 14
+    },
+    "n": 27
+   },
+   "postgres": {
+    "args": {
+     "F_DUPFD": 11,
+     "F_DUPFD_CLOEXEC": 2,
+     "F_GETFD": 14,
+     "F_GETFL": 14,
+     "F_GETPIPE_SZ": 2,
+     "F_SETFD 0x0": 8,
+     "F_SETFD FD_CLOEXEC": 37,
+     "F_SETFL O_RDONLY|O_LARGEFILE": 2,
+     "F_SETFL O_RDONLY|O_NONBLOCK": 2,
+     "F_SETFL O_RDONLY|O_NONBLOCK|O_LARGEFILE": 2,
+     "F_SETFL O_RDWR|O_NONBLOCK": 3
+    },
+    "err": {
+     "EBADF": 3
+    },
+    "n": 97
+   },
+   "python-http": {
+    "args": {
+     "F_GETFD": 4
+    },
+    "err": {},
+    "n": 4
+   },
+   "redis": {
+    "args": {
+     "F_DUPFD": 2,
+     "F_DUPFD_CLOEXEC": 2,
+     "F_GETFD": 15,
+     "F_GETFL": 6,
+     "F_SETFD FD_CLOEXEC": 9,
+     "F_SETFL O_RDONLY|O_NONBLOCK": 1,
+     "F_SETFL O_RDWR|O_NONBLOCK": 2
+    },
+    "err": {
+     "EBADF": 2
+    },
+    "n": 37
+   },
+   "rust-static": {
+    "args": {
+     "F_DUPFD_CLOEXEC": 2,
+     "F_SETFD FD_CLOEXEC": 43
+    },
+    "err": {},
+    "n": 45
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "F_GETFD": 5,
+     "F_GETFL": 152,
+     "F_SETFD FD_CLOEXEC": 41,
+     "F_SETFL O_RDWR": 42,
+     "F_SETFL O_RDWR|O_NONBLOCK": 44
+    },
+    "err": {
+     "EBADF": 1
+    },
+    "n": 284
+   }
+  },
+  "fdatasync": {
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 5
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 2
+   }
+  },
+  "fgetxattr": {
+   "nginx": {
+    "args": {
+     "system.posix_acl_access": 1
+    },
+    "err": {
+     "ENODATA": 1
+    },
+    "n": 1
+   }
+  },
+  "flock": {
+   "temurin-jwebserver": {
+    "args": {
+     "LOCK_EX|LOCK_NB": 1
+    },
+    "err": {},
+    "n": 1
+   }
+  },
+  "fork": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 100
+   }
+  },
+  "fsetxattr": {
+   "nginx": {
+    "args": {
+     "system.posix_acl_access": 1
+    },
+    "err": {},
+    "n": 1
+   }
+  },
+  "fstat": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 3
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 147
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 11
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 804
+   },
+   "python-http": {
+    "args": {},
+    "err": {},
+    "n": 296
+   },
+   "rust-static": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 140
+   }
+  },
+  "fstatfs": {
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 11
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 11
+   }
+  },
+  "fsync": {
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 1086
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 2
+   }
+  },
+  "ftruncate": {
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 2
+   }
+  },
+  "futex": {
+   "go-static": {
+    "args": {
+     "FUTEX_WAIT|PRIVATE": 105,
+     "FUTEX_WAKE|PRIVATE": 104
+    },
+    "err": {
+     "EAGAIN": 2
+    },
+    "n": 209
+   },
+   "nginx": {
+    "args": {
+     "FUTEX_WAKE|PRIVATE": 21
+    },
+    "err": {},
+    "n": 21
+   },
+   "node-http": {
+    "args": {
+     "FUTEX_WAIT_BITSET|CLOCK_REALTIME": 2,
+     "FUTEX_WAIT_BITSET|PRIVATE|CLOCK_REALTIME": 180,
+     "FUTEX_WAIT|PRIVATE": 18,
+     "FUTEX_WAKE|PRIVATE": 396
+    },
+    "err": {
+     "EAGAIN": 12
+    },
+    "n": 596
+   },
+   "postgres": {
+    "args": {
+     "FUTEX_WAIT|PRIVATE": 19,
+     "FUTEX_WAKE|PRIVATE": 158
+    },
+    "err": {
+     "EAGAIN": 3,
+     "ERESTARTSYS": 6,
+     "ERESTART_RESTARTBLOCK": 1
+    },
+    "n": 177
+   },
+   "python-http": {
+    "args": {
+     "FUTEX_WAIT_BITSET|PRIVATE": 133,
+     "FUTEX_WAIT_BITSET|PRIVATE|CLOCK_REALTIME": 41,
+     "FUTEX_WAIT|PRIVATE": 107,
+     "FUTEX_WAKE|PRIVATE": 413
+    },
+    "err": {
+     "EAGAIN": 119
+    },
+    "n": 694
+   },
+   "redis": {
+    "args": {
+     "FUTEX_WAIT_BITSET|PRIVATE|CLOCK_REALTIME": 5,
+     "FUTEX_WAKE|PRIVATE": 16
+    },
+    "err": {},
+    "n": 21
+   },
+   "rust-static": {
+    "args": {
+     "FUTEX_WAIT": 2,
+     "FUTEX_WAIT_BITSET|PRIVATE": 49,
+     "FUTEX_WAIT|PRIVATE": 2,
+     "FUTEX_WAKE|PRIVATE": 53
+    },
+    "err": {
+     "ERESTARTSYS": 1
+    },
+    "n": 106
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "FUTEX_WAIT_BITSET|CLOCK_REALTIME": 2,
+     "FUTEX_WAIT_BITSET|PRIVATE": 710,
+     "FUTEX_WAIT_BITSET|PRIVATE|CLOCK_REALTIME": 132,
+     "FUTEX_WAIT|PRIVATE": 424,
+     "FUTEX_WAKE|PRIVATE": 1825
+    },
+    "err": {
+     "EAGAIN": 235,
+     "ERESTARTSYS": 1,
+     "ETIMEDOUT": 74
+    },
+    "n": 3093
+   }
+  },
+  "getcwd": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 2
+   },
+   "python-http": {
+    "args": {},
+    "err": {},
+    "n": 2
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 2
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 3
+   }
+  },
+  "getdents64": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 69
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 8
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 298
+   },
+   "python-http": {
+    "args": {},
+    "err": {},
+    "n": 104
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 8
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 84
+   }
+  },
+  "getegid": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 4
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 16
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 62
+   },
+   "python-http": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 34
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 4
+   }
+  },
+  "geteuid": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 11
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 17
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 100
+   },
+   "python-http": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 36
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 8
+   }
+  },
+  "getgid": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 4
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 16
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 61
+   },
+   "python-http": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 34
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 4
+   }
+  },
+  "getgroups": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 4
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 6
+   }
+  },
+  "getpgrp": {
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 2
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 2
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 1
+   }
+  },
+  "getpid": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 2
+   },
+   "go-static": {
+    "args": {},
+    "err": {},
+    "n": 3
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 12
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 28
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 228
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 193
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 7
+   }
+  },
+  "getppid": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 5
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 23
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 6
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 3
+   }
+  },
+  "getrandom": {
+   "nginx": {
+    "args": {
+     "0": 2,
+     "GRND_NONBLOCK": 19
+    },
+    "err": {},
+    "n": 21
+   },
+   "node-http": {
+    "args": {
+     "0": 1,
+     "GRND_NONBLOCK": 2
+    },
+    "err": {},
+    "n": 3
+   },
+   "postgres": {
+    "args": {
+     "0": 37,
+     "GRND_NONBLOCK": 45
+    },
+    "err": {},
+    "n": 82
+   },
+   "python-http": {
+    "args": {
+     "0": 1,
+     "GRND_NONBLOCK": 2
+    },
+    "err": {},
+    "n": 3
+   },
+   "redis": {
+    "args": {
+     "0": 2,
+     "GRND_INSECURE": 2,
+     "GRND_NONBLOCK": 19
+    },
+    "err": {},
+    "n": 23
+   },
+   "rust-static": {
+    "args": {
+     "GRND_INSECURE": 3
+    },
+    "err": {},
+    "n": 3
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "GRND_NONBLOCK": 3
+    },
+    "err": {},
+    "n": 3
+   }
+  },
+  "getresgid": {
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 5
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 1
+   }
+  },
+  "getresuid": {
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 5
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 1
+   }
+  },
+  "getrusage": {
+   "temurin-jwebserver": {
+    "args": {
+     "RUSAGE_THREAD": 8
+    },
+    "err": {},
+    "n": 8
+   }
+  },
+  "getsockname": {
+   "go-static": {
+    "args": {},
+    "err": {},
+    "n": 103
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 7
+   },
+   "python-http": {
+    "args": {},
+    "err": {},
+    "n": 46
+   },
+   "rust-static": {
+    "args": {},
+    "err": {},
+    "n": 23
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 46
+   }
+  },
+  "getsockopt": {
+   "postgres": {
+    "args": {
+     "SOL_SOCKET SO_ERROR": 1
+    },
+    "err": {},
+    "n": 1
+   }
+  },
+  "gettid": {
+   "go-static": {
+    "args": {},
+    "err": {},
+    "n": 9
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 21
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 3
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 9
+   },
+   "python-http": {
+    "args": {},
+    "err": {},
+    "n": 84
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 5
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 29
+   }
+  },
+  "getuid": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 97
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 4
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 16
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 67
+   },
+   "python-http": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 34
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 5
+   }
+  },
+  "io_setup": {
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 2
+   }
+  },
+  "io_uring_enter": {
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 25
+   }
+  },
+  "io_uring_setup": {
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 3
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 2
+   }
+  },
+  "ioctl": {
+   "alpine-sh": {
+    "args": {
+     "TIOCGWINSZ fd:/dev/null": 2,
+     "TIOCGWINSZ fd:file": 7,
+     "TIOCGWINSZ fd:pipe": 76
+    },
+    "err": {
+     "ENOTTY": 85
+    },
+    "n": 85
+   },
+   "nginx": {
+    "args": {
+     "FIOASYNC fd:socket": 2,
+     "FIONBIO fd:eventfd": 2,
+     "FIONBIO fd:socket": 6,
+     "TCGETS fd:/dev/null": 4,
+     "TCGETS fd:file": 1,
+     "TCGETS fd:pipe": 3
+    },
+    "err": {
+     "ENOTTY": 8
+    },
+    "n": 18
+   },
+   "node-http": {
+    "args": {
+     "FIONBIO fd:pipe": 1,
+     "TCGETS fd:/dev/null": 1,
+     "TCGETS fd:pipe": 4
+    },
+    "err": {
+     "ENOTTY": 5
+    },
+    "n": 6
+   },
+   "postgres": {
+    "args": {
+     "TCGETS fd:/dev/null": 7,
+     "TCGETS fd:file": 19,
+     "TCGETS fd:pipe": 11018,
+     "TIOCGPGRP fd:pipe": 5,
+     "TIOCGWINSZ fd:pipe": 16
+    },
+    "err": {
+     "ENOTTY": 11065
+    },
+    "n": 11065
+   },
+   "python-http": {
+    "args": {
+     "TCGETS fd:/dev/null": 2,
+     "TCGETS fd:file": 134,
+     "TCGETS fd:pipe": 4,
+     "TIOCGWINSZ fd:pipe": 6
+    },
+    "err": {
+     "ENOTTY": 146
+    },
+    "n": 146
+   },
+   "redis": {
+    "args": {
+     "TCGETS fd:/dev/null": 4,
+     "TCGETS fd:/dev/urandom": 1,
+     "TCGETS fd:file": 2,
+     "TCGETS fd:pipe": 7,
+     "TIOCGPGRP fd:pipe": 5,
+     "TIOCGWINSZ fd:pipe": 4
+    },
+    "err": {
+     "EINVAL": 1,
+     "ENOTTY": 22
+    },
+    "n": 23
+   },
+   "rust-static": {
+    "args": {
+     "FIONBIO fd:socket": 2
+    },
+    "err": {},
+    "n": 2
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "SIOCGIFCONF fd:socket": 2,
+     "SIOCGIFFLAGS fd:socket": 1,
+     "SIOCGIFINDEX fd:socket": 1,
+     "SIOCGIFNETMASK fd:socket": 1,
+     "TCGETS2 fd:/dev/null": 1,
+     "TCGETS2 fd:file": 1,
+     "TCGETS2 fd:pipe": 3,
+     "TIOCGPGRP fd:pipe": 2
+    },
+    "err": {
+     "ENOTTY": 7
+    },
+    "n": 12
+   }
+  },
+  "kill": {
+   "alpine-sh": {
+    "args": {
+     "SIGTERM": 1
+    },
+    "err": {},
+    "n": 1
+   },
+   "postgres": {
+    "args": {
+     "0": 1,
+     "SIGINT": 2,
+     "SIGTERM": 16,
+     "SIGURG": 27,
+     "SIGUSR1": 1,
+     "SIGUSR2": 2
+    },
+    "err": {},
+    "n": 49
+   }
+  },
+  "listen": {
+   "go-static": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 4
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 4
+   },
+   "python-http": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 2
+   },
+   "rust-static": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 1
+   }
+  },
+  "lseek": {
+   "alpine-sh": {
+    "args": {
+     "SEEK_CUR": 11,
+     "SEEK_END": 1
+    },
+    "err": {
+     "ESPIPE": 3
+    },
+    "n": 12
+   },
+   "nginx": {
+    "args": {
+     "SEEK_CUR": 6,
+     "SEEK_SET": 6
+    },
+    "err": {
+     "ESPIPE": 4
+    },
+    "n": 12
+   },
+   "node-http": {
+    "args": {
+     "SEEK_CUR": 1
+    },
+    "err": {},
+    "n": 1
+   },
+   "postgres": {
+    "args": {
+     "SEEK_CUR": 34,
+     "SEEK_END": 4747,
+     "SEEK_SET": 19
+    },
+    "err": {
+     "ESPIPE": 3
+    },
+    "n": 4800
+   },
+   "python-http": {
+    "args": {
+     "SEEK_CUR": 205,
+     "SEEK_SET": 2
+    },
+    "err": {
+     "ESPIPE": 2
+    },
+    "n": 207
+   },
+   "redis": {
+    "args": {
+     "SEEK_CUR": 18,
+     "SEEK_SET": 11
+    },
+    "err": {
+     "ESPIPE": 5
+    },
+    "n": 29
+   },
+   "rust-static": {
+    "args": {
+     "SEEK_CUR": 1,
+     "SEEK_SET": 40
+    },
+    "err": {},
+    "n": 41
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "SEEK_CUR": 29,
+     "SEEK_END": 2,
+     "SEEK_SET": 40
+    },
+    "err": {},
+    "n": 71
+   }
+  },
+  "lstat": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 87
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 2
+   }
+  },
+  "madvise": {
+   "go-static": {
+    "args": {
+     "MADV_NOHUGEPAGE": 2
+    },
+    "err": {},
+    "n": 2
+   },
+   "node-http": {
+    "args": {
+     "MADV_DONTFORK": 33,
+     "MADV_DONTNEED": 13
+    },
+    "err": {},
+    "n": 46
+   },
+   "postgres": {
+    "args": {
+     "MADV_NOHUGEPAGE": 2
+    },
+    "err": {},
+    "n": 2
+   },
+   "python-http": {
+    "args": {
+     "MADV_DONTNEED": 40
+    },
+    "err": {},
+    "n": 40
+   },
+   "redis": {
+    "args": {
+     "MADV_DONTNEED": 3,
+     "MADV_FREE": 1
+    },
+    "err": {},
+    "n": 4
+   },
+   "rust-static": {
+    "args": {
+     "MADV_DONTNEED": 4,
+     "MADV_FREE": 1
+    },
+    "err": {},
+    "n": 5
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "MADV_DONTNEED": 8,
+     "MADV_GUARD_INSTALL": 1,
+     "MADV_POPULATE_WRITE": 1
+    },
+    "err": {
+     "EINVAL": 1
+    },
+    "n": 10
+   }
+  },
+  "mkdir": {
+   "alpine-sh": {
+    "args": {},
+    "err": {
+     "EEXIST": 5
+    },
+    "n": 7
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 5
+   },
+   "postgres": {
+    "args": {},
+    "err": {
+     "EEXIST": 14
+    },
+    "n": 40
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {
+     "EEXIST": 1
+    },
+    "n": 1
+   }
+  },
+  "mmap": {
+   "alpine-sh": {
+    "args": {
+     "NONE PRIVATE|FIXED|ANONYMOUS": 95,
+     "READ|WRITE PRIVATE|ANONYMOUS": 47
+    },
+    "err": {},
+    "n": 142
+   },
+   "go-static": {
+    "args": {
+     "NONE PRIVATE|ANONYMOUS": 7,
+     "READ|WRITE PRIVATE|ANONYMOUS": 8,
+     "READ|WRITE PRIVATE|FIXED|ANONYMOUS": 7
+    },
+    "err": {},
+    "n": 22
+   },
+   "nginx": {
+    "args": {
+     "READ PRIVATE": 19,
+     "READ PRIVATE|DENYWRITE": 41,
+     "READ PRIVATE|FIXED|DENYWRITE": 41,
+     "READ|EXEC PRIVATE|FIXED|DENYWRITE": 41,
+     "READ|WRITE DROPPABLE|ANONYMOUS": 1,
+     "READ|WRITE PRIVATE|ANONYMOUS": 50,
+     "READ|WRITE PRIVATE|FIXED|ANONYMOUS": 25,
+     "READ|WRITE PRIVATE|FIXED|DENYWRITE": 41,
+     "READ|WRITE SHARED|ANONYMOUS": 1
+    },
+    "err": {},
+    "n": 260
+   },
+   "node-http": {
+    "args": {
+     "NONE PRIVATE|ANONYMOUS|NORESERVE": 38,
+     "NONE PRIVATE|ANONYMOUS|STACK": 10,
+     "READ PRIVATE": 2,
+     "READ PRIVATE|DENYWRITE": 7,
+     "READ PRIVATE|FIXED|DENYWRITE": 7,
+     "READ|EXEC PRIVATE|FIXED|DENYWRITE": 7,
+     "READ|WRITE PRIVATE|ANONYMOUS": 9,
+     "READ|WRITE PRIVATE|FIXED|ANONYMOUS": 3,
+     "READ|WRITE PRIVATE|FIXED|DENYWRITE": 7,
+     "READ|WRITE SHARED|POPULATE": 6
+    },
+    "err": {},
+    "n": 96
+   },
+   "postgres": {
+    "args": {
+     "NONE PRIVATE|ANONYMOUS": 7,
+     "READ PRIVATE": 83,
+     "READ PRIVATE|DENYWRITE": 380,
+     "READ PRIVATE|FIXED|DENYWRITE": 380,
+     "READ SHARED": 5,
+     "READ|EXEC PRIVATE|FIXED|DENYWRITE": 380,
+     "READ|WRITE PRIVATE|ANONYMOUS": 206,
+     "READ|WRITE PRIVATE|ANONYMOUS|STACK": 7,
+     "READ|WRITE PRIVATE|FIXED|ANONYMOUS": 155,
+     "READ|WRITE PRIVATE|FIXED|DENYWRITE": 380,
+     "READ|WRITE SHARED": 18,
+     "READ|WRITE SHARED|ANONYMOUS": 6,
+     "READ|WRITE SHARED|ANONYMOUS|HUGETLB": 6
+    },
+    "err": {
+     "ENOMEM": 6
+    },
+    "n": 2013
+   },
+   "python-http": {
+    "args": {
+     "NONE PRIVATE|ANONYMOUS": 2,
+     "NONE PRIVATE|ANONYMOUS|STACK": 2,
+     "READ PRIVATE": 6,
+     "READ PRIVATE|DENYWRITE": 21,
+     "READ PRIVATE|FIXED|DENYWRITE": 21,
+     "READ SHARED": 1,
+     "READ|EXEC PRIVATE|FIXED|DENYWRITE": 21,
+     "READ|WRITE DROPPABLE|ANONYMOUS": 1,
+     "READ|WRITE PRIVATE|ANONYMOUS": 59,
+     "READ|WRITE PRIVATE|FIXED|ANONYMOUS": 3,
+     "READ|WRITE PRIVATE|FIXED|DENYWRITE": 21
+    },
+    "err": {},
+    "n": 158
+   },
+   "redis": {
+    "args": {
+     "NONE PRIVATE|ANONYMOUS|NORESERVE": 1,
+     "NONE PRIVATE|ANONYMOUS|STACK": 5,
+     "READ PRIVATE": 19,
+     "READ PRIVATE|DENYWRITE": 50,
+     "READ PRIVATE|FIXED|DENYWRITE": 50,
+     "READ|EXEC PRIVATE|FIXED|DENYWRITE": 50,
+     "READ|WRITE PRIVATE|ANONYMOUS": 44,
+     "READ|WRITE PRIVATE|ANONYMOUS|NORESERVE": 6,
+     "READ|WRITE PRIVATE|FIXED|ANONYMOUS": 29,
+     "READ|WRITE PRIVATE|FIXED|DENYWRITE": 50,
+     "READ|WRITE SHARED|POPULATE": 4
+    },
+    "err": {},
+    "n": 308
+   },
+   "rust-static": {
+    "args": {
+     "NONE PRIVATE|ANONYMOUS": 2,
+     "NONE PRIVATE|FIXED|ANONYMOUS": 1,
+     "READ|WRITE PRIVATE|ANONYMOUS": 3,
+     "READ|WRITE PRIVATE|ANONYMOUS|NORESERVE": 7,
+     "READ|WRITE PRIVATE|ANONYMOUS|STACK": 3
+    },
+    "err": {},
+    "n": 16
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "NONE PRIVATE|ANONYMOUS": 16,
+     "NONE PRIVATE|ANONYMOUS|NORESERVE": 13,
+     "NONE PRIVATE|ANONYMOUS|NORESERVE|FIXED_NOREPLACE": 1,
+     "NONE PRIVATE|ANONYMOUS|STACK": 20,
+     "NONE PRIVATE|FIXED|ANONYMOUS|NORESERVE": 2,
+     "READ PRIVATE": 7,
+     "READ PRIVATE|DENYWRITE": 13,
+     "READ PRIVATE|FIXED|DENYWRITE": 13,
+     "READ SHARED": 2,
+     "READ|EXEC PRIVATE|DENYWRITE": 7,
+     "READ|EXEC PRIVATE|FIXED|DENYWRITE": 13,
+     "READ|WRITE PRIVATE|ANONYMOUS": 21,
+     "READ|WRITE PRIVATE|ANONYMOUS|STACK": 3,
+     "READ|WRITE PRIVATE|FIXED": 3,
+     "READ|WRITE PRIVATE|FIXED|ANONYMOUS": 96,
+     "READ|WRITE PRIVATE|FIXED|DENYWRITE": 20,
+     "READ|WRITE SHARED": 1,
+     "READ|WRITE|EXEC PRIVATE|FIXED|ANONYMOUS": 3
+    },
+    "err": {},
+    "n": 254
+   }
+  },
+  "mprotect": {
+   "alpine-sh": {
+    "args": {
+     "READ": 190
+    },
+    "err": {},
+    "n": 190
+   },
+   "nginx": {
+    "args": {
+     "READ": 79
+    },
+    "err": {},
+    "n": 79
+   },
+   "node-http": {
+    "args": {
+     "NONE": 4,
+     "READ": 12,
+     "READ|WRITE": 49,
+     "READ|WRITE|EXEC": 2
+    },
+    "err": {},
+    "n": 67
+   },
+   "postgres": {
+    "args": {
+     "READ": 470
+    },
+    "err": {},
+    "n": 470
+   },
+   "python-http": {
+    "args": {
+     "READ": 23,
+     "READ|WRITE": 4
+    },
+    "err": {},
+    "n": 27
+   },
+   "redis": {
+    "args": {
+     "READ": 88,
+     "READ|WRITE": 6
+    },
+    "err": {},
+    "n": 94
+   },
+   "rust-static": {
+    "args": {
+     "NONE": 3,
+     "READ|WRITE": 2
+    },
+    "err": {},
+    "n": 5
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "NONE": 20,
+     "READ": 27,
+     "READ|WRITE": 386,
+     "READ|WRITE|EXEC": 1
+    },
+    "err": {},
+    "n": 434
+   }
+  },
+  "mremap": {
+   "python-http": {
+    "args": {
+     "MAYMOVE": 6
+    },
+    "err": {},
+    "n": 6
+   }
+  },
+  "munmap": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 26
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 23
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 55
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 85
+   },
+   "python-http": {
+    "args": {},
+    "err": {},
+    "n": 53
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 26
+   },
+   "rust-static": {
+    "args": {},
+    "err": {},
+    "n": 7
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 24
+   }
+  },
+  "nanosleep": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 9
+   },
+   "go-static": {
+    "args": {},
+    "err": {
+     "ERESTART_RESTARTBLOCK": 1
+    },
+    "n": 161
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 28
+   }
+  },
+  "newfstatat": {
+   "nginx": {
+    "args": {
+     "0": 112,
+     "AT_SYMLINK_NOFOLLOW": 1
+    },
+    "err": {
+     "ENOENT": 37
+    },
+    "n": 113
+   },
+   "node-http": {
+    "args": {
+     "0": 3,
+     "AT_EMPTY_PATH": 13
+    },
+    "err": {
+     "ENOENT": 2
+    },
+    "n": 16
+   },
+   "postgres": {
+    "args": {
+     "0": 6094,
+     "AT_SYMLINK_NOFOLLOW": 5
+    },
+    "err": {
+     "ENOENT": 341
+    },
+    "n": 6099
+   },
+   "python-http": {
+    "args": {
+     "0": 827,
+     "AT_SYMLINK_NOFOLLOW": 200
+    },
+    "err": {
+     "ENOENT": 117
+    },
+    "n": 1027
+   },
+   "redis": {
+    "args": {
+     "0": 116,
+     "AT_EMPTY_PATH": 139,
+     "AT_SYMLINK_NOFOLLOW": 4
+    },
+    "err": {
+     "ENOENT": 34
+    },
+    "n": 259
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "0": 28
+    },
+    "err": {
+     "ENOENT": 10
+    },
+    "n": 28
+   }
+  },
+  "open": {
+   "alpine-sh": {
+    "args": {
+     "O_RDONLY|O_LARGEFILE": 137,
+     "O_RDONLY|O_LARGEFILE|O_CLOEXEC": 10,
+     "O_RDONLY|O_LARGEFILE|O_DIRECTORY|O_CLOEXEC": 34,
+     "O_RDONLY|O_NONBLOCK|O_LARGEFILE|O_CLOEXEC": 58,
+     "O_RDWR|O_CREAT|O_EXCL|O_LARGEFILE": 1,
+     "O_WRONLY|O_CREAT|O_APPEND|O_LARGEFILE": 55,
+     "O_WRONLY|O_CREAT|O_EXCL|O_LARGEFILE": 1,
+     "O_WRONLY|O_CREAT|O_TRUNC|O_LARGEFILE": 7
+    },
+    "err": {
+     "ENOENT": 58
+    },
+    "n": 303
+   },
+   "python-http": {
+    "args": {
+     "O_RDONLY": 1
+    },
+    "err": {},
+    "n": 1
+   },
+   "redis": {
+    "args": {
+     "O_RDONLY": 1,
+     "O_RDONLY|O_CLOEXEC": 1
+    },
+    "err": {},
+    "n": 2
+   },
+   "rust-static": {
+    "args": {
+     "O_RDONLY": 1,
+     "O_RDONLY|O_CLOEXEC": 1,
+     "O_RDONLY|O_LARGEFILE|O_CLOEXEC": 42
+    },
+    "err": {
+     "ENOENT": 1
+    },
+    "n": 44
+   }
+  },
+  "openat": {
+   "go-static": {
+    "args": {
+     "O_RDONLY": 3,
+     "O_RDONLY|O_CLOEXEC": 1
+    },
+    "err": {
+     "ENOENT": 2
+    },
+    "n": 4
+   },
+   "nginx": {
+    "args": {
+     "O_RDONLY": 19,
+     "O_RDONLY|O_CLOEXEC": 74,
+     "O_RDONLY|O_NOCTTY": 1,
+     "O_RDONLY|O_NOCTTY|O_NONBLOCK|O_DIRECTORY|O_CLOEXEC": 1,
+     "O_RDONLY|O_NOCTTY|O_NONBLOCK|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC": 1,
+     "O_RDONLY|O_NONBLOCK": 40,
+     "O_RDONLY|O_NONBLOCK|O_DIRECTORY|O_CLOEXEC": 2,
+     "O_RDWR|O_CREAT|O_EXCL": 1,
+     "O_RDWR|O_CREAT|O_TRUNC": 1,
+     "O_WRONLY|O_CREAT|O_APPEND": 3,
+     "O_WRONLY|O_CREAT|O_NOCTTY|O_NONBLOCK": 1,
+     "O_WRONLY|O_CREAT|O_TRUNC": 3
+    },
+    "err": {
+     "ENOENT": 1
+    },
+    "n": 147
+   },
+   "node-http": {
+    "args": {
+     "O_RDONLY": 3,
+     "O_RDONLY|O_CLOEXEC": 59
+    },
+    "err": {
+     "ENOENT": 5
+    },
+    "n": 62
+   },
+   "postgres": {
+    "args": {
+     "O_RDONLY": 1869,
+     "O_RDONLY|O_CLOEXEC": 526,
+     "O_RDONLY|O_NOCTTY|O_NONBLOCK|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC": 2,
+     "O_RDONLY|O_NONBLOCK|O_DIRECTORY|O_CLOEXEC": 158,
+     "O_RDWR": 1046,
+     "O_RDWR|O_CLOEXEC": 3274,
+     "O_RDWR|O_CREAT": 19,
+     "O_RDWR|O_CREAT|O_EXCL": 606,
+     "O_RDWR|O_CREAT|O_EXCL|O_CLOEXEC": 361,
+     "O_RDWR|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC": 11,
+     "O_RDWR|O_NOFOLLOW|O_CLOEXEC": 8,
+     "O_RDWR|O_NONBLOCK": 2,
+     "O_WRONLY|O_CREAT|O_APPEND": 1,
+     "O_WRONLY|O_CREAT|O_EXCL": 9,
+     "O_WRONLY|O_CREAT|O_TRUNC": 24
+    },
+    "err": {
+     "ENOENT": 788,
+     "ENXIO": 2
+    },
+    "n": 7916
+   },
+   "python-http": {
+    "args": {
+     "O_RDONLY": 5,
+     "O_RDONLY|O_CLOEXEC": 175,
+     "O_RDONLY|O_NONBLOCK|O_DIRECTORY|O_CLOEXEC": 52,
+     "O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC": 67
+    },
+    "err": {
+     "ENOENT": 78
+    },
+    "n": 299
+   },
+   "redis": {
+    "args": {
+     "O_RDONLY": 28,
+     "O_RDONLY|O_CLOEXEC": 101,
+     "O_RDONLY|O_NOCTTY|O_NONBLOCK|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC": 2,
+     "O_RDONLY|O_NONBLOCK|O_DIRECTORY|O_CLOEXEC": 2,
+     "O_RDWR|O_NONBLOCK": 2,
+     "O_WRONLY|O_CREAT|O_TRUNC": 5
+    },
+    "err": {
+     "ENOENT": 3,
+     "ENXIO": 2
+    },
+    "n": 140
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "O_RDONLY": 55,
+     "O_RDONLY|O_CLOEXEC": 80,
+     "O_RDONLY|O_NOFOLLOW": 2,
+     "O_RDONLY|O_NONBLOCK|O_DIRECTORY|O_CLOEXEC": 5,
+     "O_RDWR|O_CLOEXEC": 2,
+     "O_RDWR|O_CREAT|O_NOFOLLOW|O_CLOEXEC": 1,
+     "O_RDWR|O_NONBLOCK": 1
+    },
+    "err": {
+     "ENOENT": 29,
+     "ENXIO": 1
+    },
+    "n": 146
+   }
+  },
+  "pipe": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 63
+   }
+  },
+  "pipe2": {
+   "nginx": {
+    "args": {
+     "0": 12
+    },
+    "err": {},
+    "n": 12
+   },
+   "node-http": {
+    "args": {
+     "0": 1,
+     "CLOEXEC": 1,
+     "NONBLOCK|CLOEXEC": 3
+    },
+    "err": {},
+    "n": 5
+   },
+   "postgres": {
+    "args": {
+     "0": 13,
+     "CLOEXEC": 5
+    },
+    "err": {},
+    "n": 18
+   },
+   "redis": {
+    "args": {
+     "0": 13,
+     "CLOEXEC": 3,
+     "NONBLOCK|CLOEXEC": 5
+    },
+    "err": {},
+    "n": 21
+   }
+  },
+  "poll": {
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 3
+   },
+   "python-http": {
+    "args": {},
+    "err": {
+     "ERESTART_RESTARTBLOCK": 1
+    },
+    "n": 42
+   },
+   "rust-static": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 1
+   }
+  },
+  "prctl": {
+   "nginx": {
+    "args": {
+     "PR_SET_DUMPABLE": 2
+    },
+    "err": {},
+    "n": 2
+   },
+   "node-http": {
+    "args": {
+     "PR_SET_NAME": 5
+    },
+    "err": {},
+    "n": 5
+   },
+   "postgres": {
+    "args": {
+     "PR_CAPBSET_READ": 69,
+     "PR_CAP_AMBIENT": 9,
+     "PR_GET_NO_NEW_PRIVS": 9,
+     "PR_GET_SECUREBITS": 9,
+     "PR_SET_PDEATHSIG": 15
+    },
+    "err": {
+     "EINVAL": 40
+    },
+    "n": 111
+   },
+   "redis": {
+    "args": {
+     "PR_CAPBSET_DROP": 40,
+     "PR_CAPBSET_READ": 9,
+     "PR_CAP_AMBIENT": 170,
+     "PR_GET_NO_NEW_PRIVS": 8,
+     "PR_GET_PDEATHSIG": 3,
+     "PR_GET_SECUREBITS": 8,
+     "PR_SET_KEEPCAPS": 2,
+     "PR_SET_NAME": 5,
+     "PR_SET_NO_NEW_PRIVS": 1,
+     "PR_SET_THP_DISABLE": 1
+    },
+    "err": {
+     "EINVAL": 4
+    },
+    "n": 247
+   },
+   "rust-static": {
+    "args": {
+     "PR_SET_NAME": 2
+    },
+    "err": {},
+    "n": 2
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "PR_SET_NAME": 21
+    },
+    "err": {},
+    "n": 21
+   }
+  },
+  "pread64": {
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 42
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 4
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 820
+   },
+   "python-http": {
+    "args": {},
+    "err": {},
+    "n": 2
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 38
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 243
+   }
+  },
+  "prlimit64": {
+   "go-static": {
+    "args": {
+     "RLIMIT_NOFILE": 2
+    },
+    "err": {},
+    "n": 2
+   },
+   "nginx": {
+    "args": {
+     "RLIMIT_AS": 1,
+     "RLIMIT_DATA": 1,
+     "RLIMIT_NOFILE": 2,
+     "RLIMIT_RSS": 1,
+     "RLIMIT_STACK": 19
+    },
+    "err": {},
+    "n": 24
+   },
+   "node-http": {
+    "args": {
+     "RLIMIT_NOFILE": 2,
+     "RLIMIT_STACK": 8
+    },
+    "err": {},
+    "n": 10
+   },
+   "postgres": {
+    "args": {
+     "RLIMIT_NOFILE": 18,
+     "RLIMIT_NPROC": 2,
+     "RLIMIT_STACK": 54
+    },
+    "err": {},
+    "n": 74
+   },
+   "python-http": {
+    "args": {
+     "RLIMIT_STACK": 1
+    },
+    "err": {},
+    "n": 1
+   },
+   "redis": {
+    "args": {
+     "RLIMIT_NOFILE": 4,
+     "RLIMIT_NPROC": 2,
+     "RLIMIT_STACK": 19
+    },
+    "err": {},
+    "n": 25
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "RLIMIT_AS": 1,
+     "RLIMIT_NOFILE": 4,
+     "RLIMIT_NPROC": 1,
+     "RLIMIT_STACK": 4
+    },
+    "err": {},
+    "n": 10
+   }
+  },
+  "pwrite64": {
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 2807
+   }
+  },
+  "pwritev": {
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 108
+   }
+  },
+  "read": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 309
+   },
+   "go-static": {
+    "args": {},
+    "err": {
+     "EAGAIN": 40
+    },
+    "n": 104
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 354
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 273
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 2601
+   },
+   "python-http": {
+    "args": {},
+    "err": {},
+    "n": 168
+   },
+   "redis": {
+    "args": {},
+    "err": {
+     "EAGAIN": 1
+    },
+    "n": 302
+   },
+   "rust-static": {
+    "args": {},
+    "err": {},
+    "n": 44
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 202
+   }
+  },
+  "readlink": {
+   "node-http": {
+    "args": {},
+    "err": {
+     "EINVAL": 6
+    },
+    "n": 8
+   },
+   "postgres": {
+    "args": {},
+    "err": {
+     "EINVAL": 132
+    },
+    "n": 134
+   },
+   "python-http": {
+    "args": {},
+    "err": {
+     "EINVAL": 1
+    },
+    "n": 2
+   },
+   "redis": {
+    "args": {},
+    "err": {
+     "EINVAL": 8,
+     "ENOENT": 1
+    },
+    "n": 9
+   },
+   "rust-static": {
+    "args": {},
+    "err": {
+     "ENOENT": 1
+    },
+    "n": 1
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {
+     "EINVAL": 41
+    },
+    "n": 44
+   }
+  },
+  "readlinkat": {
+   "python-http": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 1
+   }
+  },
+  "recvfrom": {
+   "go-static": {
+    "args": {
+     "0": 160
+    },
+    "err": {},
+    "n": 160
+   },
+   "nginx": {
+    "args": {
+     "0": 42
+    },
+    "err": {},
+    "n": 42
+   },
+   "postgres": {
+    "args": {
+     "0": 14
+    },
+    "err": {
+     "EAGAIN": 4
+    },
+    "n": 14
+   },
+   "python-http": {
+    "args": {
+     "0": 41
+    },
+    "err": {},
+    "n": 41
+   },
+   "rust-static": {
+    "args": {
+     "0": 43,
+     "DONTWAIT": 2
+    },
+    "err": {
+     "EAGAIN": 2
+    },
+    "n": 45
+   }
+  },
+  "recvmsg": {
+   "nginx": {
+    "args": {
+     "0": 6
+    },
+    "err": {
+     "EAGAIN": 3
+    },
+    "n": 6
+   },
+   "postgres": {
+    "args": {
+     "0": 2
+    },
+    "err": {},
+    "n": 2
+   },
+   "python-http": {
+    "args": {
+     "0": 2
+    },
+    "err": {},
+    "n": 2
+   }
+  },
+  "rename": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 20
+   },
+   "python-http": {
+    "args": {},
+    "err": {},
+    "n": 67
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 2
+   }
+  },
+  "restart_syscall": {
+   "go-static": {
+    "args": {},
+    "err": {},
+    "n": 1
+   }
+  },
+  "rseq": {
+   "nginx": {
+    "args": {
+     "0x0": 19
+    },
+    "err": {},
+    "n": 19
+   },
+   "node-http": {
+    "args": {
+     "0x0": 12
+    },
+    "err": {},
+    "n": 12
+   },
+   "postgres": {
+    "args": {
+     "0x0": 45
+    },
+    "err": {},
+    "n": 45
+   },
+   "python-http": {
+    "args": {
+     "0x0": 42
+    },
+    "err": {},
+    "n": 42
+   },
+   "redis": {
+    "args": {
+     "0x0": 24
+    },
+    "err": {},
+    "n": 24
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "0x0": 25
+    },
+    "err": {},
+    "n": 25
+   }
+  },
+  "rt_sigaction": {
+   "alpine-sh": {
+    "args": {
+     "SIGCHLD": 1,
+     "SIGINT": 3,
+     "SIGQUIT": 86,
+     "SIGTERM": 1
+    },
+    "err": {},
+    "n": 91
+   },
+   "go-static": {
+    "args": {
+     "SIGABRT": 2,
+     "SIGALRM": 2,
+     "SIGBUS": 2,
+     "SIGCHLD": 2,
+     "SIGFPE": 2,
+     "SIGHUP": 2,
+     "SIGILL": 2,
+     "SIGINT": 2,
+     "SIGIO": 2,
+     "SIGPIPE": 2,
+     "SIGPROF": 2,
+     "SIGPWR": 2,
+     "SIGQUIT": 2,
+     "SIGRTMIN+0": 1,
+     "SIGRTMIN+1": 2,
+     "SIGRTMIN+10": 2,
+     "SIGRTMIN+11": 2,
+     "SIGRTMIN+12": 2,
+     "SIGRTMIN+13": 2,
+     "SIGRTMIN+14": 2,
+     "SIGRTMIN+15": 2,
+     "SIGRTMIN+16": 2,
+     "SIGRTMIN+17": 2,
+     "SIGRTMIN+18": 2,
+     "SIGRTMIN+19": 2,
+     "SIGRTMIN+2": 1,
+     "SIGRTMIN+20": 2,
+     "SIGRTMIN+21": 2,
+     "SIGRTMIN+22": 2,
+     "SIGRTMIN+23": 2,
+     "SIGRTMIN+24": 2,
+     "SIGRTMIN+25": 2,
+     "SIGRTMIN+26": 2,
+     "SIGRTMIN+27": 2,
+     "SIGRTMIN+28": 2,
+     "SIGRTMIN+29": 2,
+     "SIGRTMIN+3": 2,
+     "SIGRTMIN+30": 2,
+     "SIGRTMIN+31": 2,
+     "SIGRTMIN+32": 2,
+     "SIGRTMIN+4": 2,
+     "SIGRTMIN+5": 2,
+     "SIGRTMIN+6": 2,
+     "SIGRTMIN+7": 2,
+     "SIGRTMIN+8": 2,
+     "SIGRTMIN+9": 2,
+     "SIGSEGV": 2,
+     "SIGSTKFLT": 2,
+     "SIGSYS": 2,
+     "SIGTERM": 3,
+     "SIGTRAP": 2,
+     "SIGURG": 2,
+     "SIGUSR1": 2,
+     "SIGUSR2": 2,
+     "SIGVTALRM": 2,
+     "SIGWINCH": 2,
+     "SIGXCPU": 2,
+     "SIGXFSZ": 2
+    },
+    "err": {},
+    "n": 115
+   },
+   "nginx": {
+    "args": {
+     "SIGALRM": 3,
+     "SIGCHLD": 6,
+     "SIGHUP": 3,
+     "SIGINT": 11,
+     "SIGIO": 3,
+     "SIGPIPE": 2,
+     "SIGPROF": 2,
+     "SIGQUIT": 11,
+     "SIGSEGV": 4,
+     "SIGSYS": 1,
+     "SIGTERM": 11,
+     "SIGUSR1": 1,
+     "SIGUSR2": 1,
+     "SIGVTALRM": 2,
+     "SIGWINCH": 1,
+     "SIGXCPU": 2,
+     "SIGXFSZ": 2
+    },
+    "err": {},
+    "n": 66
+   },
+   "node-http": {
+    "args": {
+     "SIGABRT": 1,
+     "SIGALRM": 1,
+     "SIGBUS": 1,
+     "SIGCHLD": 2,
+     "SIGCONT": 1,
+     "SIGFPE": 1,
+     "SIGHUP": 1,
+     "SIGILL": 1,
+     "SIGINT": 4,
+     "SIGIO": 1,
+     "SIGPIPE": 1,
+     "SIGPROF": 1,
+     "SIGPWR": 1,
+     "SIGQUIT": 3,
+     "SIGRTMIN+1": 1,
+     "SIGSEGV": 2,
+     "SIGSTKFLT": 1,
+     "SIGSYS": 1,
+     "SIGTERM": 5,
+     "SIGTRAP": 1,
+     "SIGTSTP": 1,
+     "SIGTTIN": 1,
+     "SIGTTOU": 1,
+     "SIGURG": 1,
+     "SIGUSR1": 2,
+     "SIGUSR2": 1,
+     "SIGVTALRM": 1,
+     "SIGWINCH": 1,
+     "SIGXCPU": 1,
+     "SIGXFSZ": 1
+    },
+    "err": {},
+    "n": 42
+   },
+   "postgres": {
+    "args": {
+     "SIGABRT": 2,
+     "SIGALRM": 24,
+     "SIGBUS": 2,
+     "SIGCHLD": 88,
+     "SIGFPE": 11,
+     "SIGHUP": 24,
+     "SIGILL": 2,
+     "SIGINT": 144,
+     "SIGIO": 2,
+     "SIGPIPE": 24,
+     "SIGPROF": 2,
+     "SIGPWR": 17,
+     "SIGQUIT": 88,
+     "SIGRTMIN+0": 1,
+     "SIGRTMIN+1": 2,
+     "SIGRTMIN+10": 2,
+     "SIGRTMIN+11": 2,
+     "SIGRTMIN+12": 2,
+     "SIGRTMIN+13": 2,
+     "SIGRTMIN+14": 2,
+     "SIGRTMIN+15": 2,
+     "SIGRTMIN+16": 2,
+     "SIGRTMIN+17": 2,
+     "SIGRTMIN+18": 2,
+     "SIGRTMIN+19": 2,
+     "SIGRTMIN+2": 1,
+     "SIGRTMIN+20": 2,
+     "SIGRTMIN+21": 2,
+     "SIGRTMIN+22": 2,
+     "SIGRTMIN+23": 2,
+     "SIGRTMIN+24": 2,
+     "SIGRTMIN+25": 2,
+     "SIGRTMIN+26": 2,
+     "SIGRTMIN+27": 2,
+     "SIGRTMIN+28": 2,
+     "SIGRTMIN+29": 2,
+     "SIGRTMIN+3": 2,
+     "SIGRTMIN+30": 2,
+     "SIGRTMIN+31": 2,
+     "SIGRTMIN+32": 2,
+     "SIGRTMIN+4": 2,
+     "SIGRTMIN+5": 2,
+     "SIGRTMIN+6": 2,
+     "SIGRTMIN+7": 2,
+     "SIGRTMIN+8": 2,
+     "SIGRTMIN+9": 2,
+     "SIGSEGV": 2,
+     "SIGSTKFLT": 2,
+     "SIGSYS": 3,
+     "SIGTERM": 43,
+     "SIGTRAP": 2,
+     "SIGTSTP": 30,
+     "SIGTTIN": 33,
+     "SIGTTOU": 33,
+     "SIGURG": 2,
+     "SIGUSR1": 20,
+     "SIGUSR2": 20,
+     "SIGVTALRM": 2,
+     "SIGWINCH": 2,
+     "SIGXCPU": 2,
+     "SIGXFSZ": 5
+    },
+    "err": {},
+    "n": 695
+   },
+   "python-http": {
+    "args": {
+     "SIGABRT": 1,
+     "SIGALRM": 1,
+     "SIGBUS": 1,
+     "SIGCHLD": 1,
+     "SIGCONT": 1,
+     "SIGFPE": 1,
+     "SIGHUP": 1,
+     "SIGILL": 1,
+     "SIGINT": 2,
+     "SIGIO": 1,
+     "SIGKILL": 1,
+     "SIGPIPE": 2,
+     "SIGPROF": 1,
+     "SIGPWR": 1,
+     "SIGQUIT": 1,
+     "SIGRTMIN+1": 1,
+     "SIGRTMIN+10": 1,
+     "SIGRTMIN+11": 1,
+     "SIGRTMIN+12": 1,
+     "SIGRTMIN+13": 1,
+     "SIGRTMIN+14": 1,
+     "SIGRTMIN+15": 1,
+     "SIGRTMIN+16": 1,
+     "SIGRTMIN+17": 1,
+     "SIGRTMIN+18": 1,
+     "SIGRTMIN+19": 1,
+     "SIGRTMIN+2": 1,
+     "SIGRTMIN+20": 1,
+     "SIGRTMIN+21": 1,
+     "SIGRTMIN+22": 1,
+     "SIGRTMIN+23": 1,
+     "SIGRTMIN+24": 1,
+     "SIGRTMIN+25": 1,
+     "SIGRTMIN+26": 1,
+     "SIGRTMIN+27": 1,
+     "SIGRTMIN+28": 1,
+     "SIGRTMIN+29": 1,
+     "SIGRTMIN+3": 1,
+     "SIGRTMIN+30": 1,
+     "SIGRTMIN+31": 1,
+     "SIGRTMIN+32": 1,
+     "SIGRTMIN+4": 1,
+     "SIGRTMIN+5": 1,
+     "SIGRTMIN+6": 1,
+     "SIGRTMIN+7": 1,
+     "SIGRTMIN+8": 1,
+     "SIGRTMIN+9": 1,
+     "SIGSEGV": 1,
+     "SIGSTKFLT": 1,
+     "SIGSTOP": 1,
+     "SIGSYS": 1,
+     "SIGTERM": 1,
+     "SIGTRAP": 1,
+     "SIGTSTP": 1,
+     "SIGTTIN": 1,
+     "SIGTTOU": 1,
+     "SIGURG": 1,
+     "SIGUSR1": 1,
+     "SIGUSR2": 1,
+     "SIGVTALRM": 1,
+     "SIGWINCH": 1,
+     "SIGXCPU": 1,
+     "SIGXFSZ": 2
+    },
+    "err": {},
+    "n": 66
+   },
+   "redis": {
+    "args": {
+     "SIGABRT": 1,
+     "SIGALRM": 1,
+     "SIGBUS": 1,
+     "SIGCHLD": 51,
+     "SIGFPE": 1,
+     "SIGHUP": 1,
+     "SIGILL": 1,
+     "SIGINT": 71,
+     "SIGPIPE": 1,
+     "SIGQUIT": 32,
+     "SIGRTMIN+1": 1,
+     "SIGSEGV": 7,
+     "SIGTERM": 1,
+     "SIGTSTP": 23,
+     "SIGTTIN": 23,
+     "SIGTTOU": 23,
+     "SIGUSR1": 1,
+     "SIGUSR2": 1
+    },
+    "err": {},
+    "n": 241
+   },
+   "rust-static": {
+    "args": {
+     "SIGBUS": 2,
+     "SIGHUP": 2,
+     "SIGINT": 2,
+     "SIGPIPE": 1,
+     "SIGQUIT": 2,
+     "SIGSEGV": 2,
+     "SIGTERM": 2
+    },
+    "err": {},
+    "n": 13
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "SIGBUS": 5,
+     "SIGCHLD": 4,
+     "SIGFPE": 2,
+     "SIGHUP": 3,
+     "SIGILL": 2,
+     "SIGINT": 6,
+     "SIGPIPE": 4,
+     "SIGQUIT": 5,
+     "SIGRTMIN+1": 1,
+     "SIGRTMIN+30": 1,
+     "SIGSEGV": 5,
+     "SIGTERM": 3,
+     "SIGTSTP": 2,
+     "SIGTTIN": 2,
+     "SIGTTOU": 2,
+     "SIGUSR2": 1,
+     "SIGXFSZ": 2
+    },
+    "err": {},
+    "n": 50
+   }
+  },
+  "rt_sigprocmask": {
+   "alpine-sh": {
+    "args": {
+     "SIG_BLOCK": 200,
+     "SIG_SETMASK": 402,
+     "SIG_UNBLOCK": 1
+    },
+    "err": {},
+    "n": 603
+   },
+   "go-static": {
+    "args": {
+     "SIG_SETMASK": 11,
+     "SIG_UNBLOCK": 2
+    },
+    "err": {},
+    "n": 13
+   },
+   "nginx": {
+    "args": {
+     "SIG_BLOCK": 20,
+     "SIG_SETMASK": 57
+    },
+    "err": {},
+    "n": 77
+   },
+   "node-http": {
+    "args": {
+     "SIG_BLOCK": 19,
+     "SIG_SETMASK": 25,
+     "SIG_UNBLOCK": 2
+    },
+    "err": {},
+    "n": 46
+   },
+   "postgres": {
+    "args": {
+     "SIG_BLOCK": 248,
+     "SIG_SETMASK": 337
+    },
+    "err": {},
+    "n": 585
+   },
+   "python-http": {
+    "args": {
+     "SIG_BLOCK": 83,
+     "SIG_SETMASK": 84,
+     "SIG_UNBLOCK": 1
+    },
+    "err": {},
+    "n": 168
+   },
+   "redis": {
+    "args": {
+     "SIG_BLOCK": 129,
+     "SIG_SETMASK": 102,
+     "SIG_UNBLOCK": 1
+    },
+    "err": {},
+    "n": 232
+   },
+   "rust-static": {
+    "args": {
+     "SIG_BLOCK": 4,
+     "SIG_SETMASK": 4,
+     "SIG_UNBLOCK": 2
+    },
+    "err": {},
+    "n": 10
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "SIG_BLOCK": 76,
+     "SIG_SETMASK": 46,
+     "SIG_UNBLOCK": 28
+    },
+    "err": {},
+    "n": 150
+   }
+  },
+  "rt_sigreturn": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 99
+   },
+   "go-static": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 26
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 2
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 70
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 16
+   },
+   "rust-static": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 3
+   }
+  },
+  "rt_sigsuspend": {
+   "alpine-sh": {
+    "args": {},
+    "err": {
+     "ERESTARTNOHAND": 1
+    },
+    "n": 1
+   },
+   "nginx": {
+    "args": {},
+    "err": {
+     "ERESTARTNOHAND": 4
+    },
+    "n": 4
+   }
+  },
+  "sched_getaffinity": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "go-static": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "rust-static": {
+    "args": {},
+    "err": {},
+    "n": 2
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 60
+   }
+  },
+  "sched_yield": {
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 20
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 6
+   }
+  },
+  "sendfile": {
+   "alpine-sh": {
+    "args": {},
+    "err": {
+     "EINVAL": 1
+    },
+    "n": 2
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 40
+   }
+  },
+  "sendmsg": {
+   "nginx": {
+    "args": {
+     "0": 4
+    },
+    "err": {},
+    "n": 4
+   }
+  },
+  "sendto": {
+   "go-static": {
+    "args": {
+     "0": 80
+    },
+    "err": {},
+    "n": 80
+   },
+   "postgres": {
+    "args": {
+     "0": 6,
+     "NOSIGNAL": 3
+    },
+    "err": {},
+    "n": 9
+   },
+   "python-http": {
+    "args": {
+     "0": 81
+    },
+    "err": {},
+    "n": 81
+   },
+   "rust-static": {
+    "args": {
+     "DONTWAIT": 2
+    },
+    "err": {
+     "EPIPE": 1
+    },
+    "n": 2
+   }
+  },
+  "set_robust_list": {
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 37
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 13
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 87
+   },
+   "python-http": {
+    "args": {},
+    "err": {},
+    "n": 42
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 44
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 25
+   }
+  },
+  "set_tid_address": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 195
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 19
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 2
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 45
+   },
+   "python-http": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 19
+   },
+   "rust-static": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 3
+   }
+  },
+  "setgid": {
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 2
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 5
+   }
+  },
+  "setgroups": {
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 2
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 2
+   }
+  },
+  "setitimer": {
+   "postgres": {
+    "args": {
+     "ITIMER_REAL": 6
+    },
+    "err": {},
+    "n": 6
+   },
+   "redis": {
+    "args": {
+     "ITIMER_REAL": 1
+    },
+    "err": {},
+    "n": 1
+   }
+  },
+  "setresgid": {
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 2
+   }
+  },
+  "setresuid": {
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 2
+   }
+  },
+  "setsid": {
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 16
+   }
+  },
+  "setsockopt": {
+   "go-static": {
+    "args": {
+     "IPPROTO_IPV6 IPV6_V6ONLY": 3,
+     "IPPROTO_TCP TCP_KEEPCNT": 22,
+     "IPPROTO_TCP TCP_KEEPIDLE": 22,
+     "IPPROTO_TCP TCP_KEEPINTVL": 22,
+     "IPPROTO_TCP TCP_NODELAY": 22,
+     "SOL_SOCKET SO_KEEPALIVE": 22,
+     "SOL_SOCKET SO_REUSEADDR": 1
+    },
+    "err": {},
+    "n": 114
+   },
+   "nginx": {
+    "args": {
+     "IPPROTO_IPV6 IPV6_V6ONLY": 1,
+     "IPPROTO_TCP TCP_NODELAY": 1,
+     "SOL_SOCKET SO_REUSEADDR": 2
+    },
+    "err": {},
+    "n": 4
+   },
+   "node-http": {
+    "args": {
+     "IPPROTO_IPV6 IPV6_V6ONLY": 1,
+     "IPPROTO_TCP TCP_NODELAY": 22,
+     "SOL_SOCKET SO_REUSEADDR": 1
+    },
+    "err": {},
+    "n": 24
+   },
+   "postgres": {
+    "args": {
+     "IPPROTO_IPV6 IPV6_V6ONLY": 1,
+     "IPPROTO_TCP TCP_NODELAY": 2,
+     "SOL_SOCKET SO_KEEPALIVE": 2,
+     "SOL_SOCKET SO_REUSEADDR": 2
+    },
+    "err": {},
+    "n": 7
+   },
+   "python-http": {
+    "args": {
+     "IPPROTO_IPV6 IPV6_V6ONLY": 1,
+     "SOL_SOCKET SO_REUSEADDR": 1
+    },
+    "err": {
+     "ENOPROTOOPT": 1
+    },
+    "n": 2
+   },
+   "redis": {
+    "args": {
+     "IPPROTO_IPV6 IPV6_V6ONLY": 1,
+     "IPPROTO_TCP TCP_KEEPCNT": 7,
+     "IPPROTO_TCP TCP_KEEPIDLE": 7,
+     "IPPROTO_TCP TCP_KEEPINTVL": 7,
+     "IPPROTO_TCP TCP_NODELAY": 7,
+     "SOL_SOCKET SO_KEEPALIVE": 7,
+     "SOL_SOCKET SO_REUSEADDR": 2
+    },
+    "err": {},
+    "n": 38
+   },
+   "rust-static": {
+    "args": {
+     "IPPROTO_TCP TCP_NODELAY": 22,
+     "SOL_SOCKET SO_REUSEADDR": 1
+    },
+    "err": {},
+    "n": 23
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "IPPROTO_IPV6 IPV6_V6ONLY": 1,
+     "SOL_SOCKET SO_REUSEADDR": 1,
+     "SOL_SOCKET SO_REUSEPORT": 1
+    },
+    "err": {},
+    "n": 3
+   }
+  },
+  "setuid": {
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 2
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 5
+   }
+  },
+  "shmat": {
+   "postgres": {
+    "args": {
+     "0": 6
+    },
+    "err": {},
+    "n": 6
+   }
+  },
+  "shmctl": {
+   "postgres": {
+    "args": {
+     "IPC_RMID": 6
+    },
+    "err": {},
+    "n": 6
+   }
+  },
+  "shmdt": {
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 6
+   }
+  },
+  "shmget": {
+   "postgres": {
+    "args": {
+     "IPC_CREAT|IPC_EXCL|0600": 6
+    },
+    "err": {},
+    "n": 6
+   }
+  },
+  "shutdown": {
+   "node-http": {
+    "args": {
+     "SHUT_WR": 21
+    },
+    "err": {},
+    "n": 21
+   },
+   "python-http": {
+    "args": {
+     "SHUT_WR": 40
+    },
+    "err": {},
+    "n": 40
+   },
+   "redis": {
+    "args": {
+     "SHUT_RDWR": 2
+    },
+    "err": {},
+    "n": 2
+   },
+   "rust-static": {
+    "args": {
+     "SHUT_WR": 22
+    },
+    "err": {},
+    "n": 22
+   }
+  },
+  "sigaltstack": {
+   "go-static": {
+    "args": {},
+    "err": {},
+    "n": 8
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 2
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 10
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 3
+   },
+   "rust-static": {
+    "args": {},
+    "err": {},
+    "n": 9
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 2
+   }
+  },
+  "signalfd4": {
+   "postgres": {
+    "args": {
+     "NONBLOCK|CLOEXEC": 22
+    },
+    "err": {},
+    "n": 22
+   }
+  },
+  "socket": {
+   "alpine-sh": {
+    "args": {
+     "AF_UNIX STREAM|NONBLOCK|CLOEXEC 0": 1
+    },
+    "err": {},
+    "n": 1
+   },
+   "go-static": {
+    "args": {
+     "AF_INET STREAM|NONBLOCK|CLOEXEC TCP": 1,
+     "AF_INET6 STREAM|NONBLOCK|CLOEXEC 0": 1,
+     "AF_INET6 STREAM|NONBLOCK|CLOEXEC TCP": 2,
+     "AF_NETLINK RAW|CLOEXEC 0": 80
+    },
+    "err": {},
+    "n": 84
+   },
+   "nginx": {
+    "args": {
+     "AF_INET STREAM 0": 1,
+     "AF_INET6 STREAM 0": 1,
+     "AF_UNIX STREAM|NONBLOCK|CLOEXEC 0": 4
+    },
+    "err": {},
+    "n": 6
+   },
+   "node-http": {
+    "args": {
+     "AF_INET6 STREAM|NONBLOCK|CLOEXEC 0": 1
+    },
+    "err": {},
+    "n": 1
+   },
+   "postgres": {
+    "args": {
+     "AF_INET STREAM 0": 1,
+     "AF_INET6 DGRAM|CLOEXEC 0": 1,
+     "AF_INET6 STREAM 0": 1,
+     "AF_NETLINK RAW|CLOEXEC 0": 1,
+     "AF_UNIX STREAM 0": 2,
+     "AF_UNIX STREAM|NONBLOCK|CLOEXEC 0": 15
+    },
+    "err": {},
+    "n": 21
+   },
+   "python-http": {
+    "args": {
+     "AF_INET STREAM|CLOEXEC 0": 1,
+     "AF_INET6 DGRAM|CLOEXEC 0": 1,
+     "AF_NETLINK RAW|CLOEXEC 0": 1,
+     "AF_UNIX STREAM|NONBLOCK|CLOEXEC 0": 2
+    },
+    "err": {},
+    "n": 5
+   },
+   "redis": {
+    "args": {
+     "AF_INET STREAM TCP": 1,
+     "AF_INET6 STREAM TCP": 1,
+     "AF_UNIX STREAM|NONBLOCK|CLOEXEC 0": 12
+    },
+    "err": {},
+    "n": 14
+   },
+   "rust-static": {
+    "args": {
+     "AF_INET6 STREAM|CLOEXEC 0": 1
+    },
+    "err": {},
+    "n": 1
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "AF_INET DGRAM 0": 1,
+     "AF_INET STREAM 0": 1,
+     "AF_INET6 STREAM 0": 3,
+     "AF_UNIX STREAM|NONBLOCK|CLOEXEC 0": 6
+    },
+    "err": {},
+    "n": 11
+   }
+  },
+  "socketpair": {
+   "nginx": {
+    "args": {
+     "AF_UNIX STREAM": 4
+    },
+    "err": {},
+    "n": 4
+   },
+   "rust-static": {
+    "args": {
+     "AF_UNIX STREAM|NONBLOCK|CLOEXEC": 2
+    },
+    "err": {},
+    "n": 2
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "AF_UNIX STREAM": 1
+    },
+    "err": {},
+    "n": 1
+   }
+  },
+  "stat": {
+   "alpine-sh": {
+    "args": {},
+    "err": {
+     "ENOENT": 349
+    },
+    "n": 500
+   },
+   "rust-static": {
+    "args": {},
+    "err": {
+     "ENOENT": 4
+    },
+    "n": 89
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {
+     "ENOENT": 3
+    },
+    "n": 18
+   }
+  },
+  "statfs": {
+   "nginx": {
+    "args": {},
+    "err": {
+     "ENOENT": 6
+    },
+    "n": 6
+   },
+   "postgres": {
+    "args": {},
+    "err": {
+     "ENOENT": 24
+    },
+    "n": 24
+   },
+   "redis": {
+    "args": {},
+    "err": {
+     "ENOENT": 10
+    },
+    "n": 10
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {
+     "ENOENT": 2
+    },
+    "n": 3
+   }
+  },
+  "statx": {
+   "node-http": {
+    "args": {
+     "0 ALL": 3,
+     "AT_EMPTY_PATH ALL": 40,
+     "AT_SYMLINK_NOFOLLOW ALL": 2
+    },
+    "err": {
+     "ENOENT": 2
+    },
+    "n": 45
+   },
+   "postgres": {
+    "args": {
+     "AT_NO_AUTOMOUNT MODE": 1
+    },
+    "err": {},
+    "n": 1
+   },
+   "redis": {
+    "args": {
+     "AT_NO_AUTOMOUNT MODE": 1
+    },
+    "err": {},
+    "n": 1
+   },
+   "temurin-jwebserver": {
+    "args": {
+     "0 ALL": 804,
+     "AT_EMPTY_PATH ALL": 1,
+     "AT_SYMLINK_NOFOLLOW ALL": 440
+    },
+    "err": {},
+    "n": 1245
+   }
+  },
+  "sync_file_range": {
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 1034
+   }
+  },
+  "sysinfo": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 2
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 2
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 3
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 1
+   }
+  },
+  "tgkill": {
+   "go-static": {
+    "args": {
+     "SIGTERM": 2,
+     "SIGURG": 1
+    },
+    "err": {},
+    "n": 3
+   },
+   "postgres": {
+    "args": {
+     "SIGRTMIN+1": 8
+    },
+    "err": {},
+    "n": 8
+   }
+  },
+  "umask": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 4
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 3
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 26
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 5
+   }
+  },
+  "uname": {
+   "go-static": {
+    "args": {},
+    "err": {},
+    "n": 40
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 4
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 4
+   },
+   "python-http": {
+    "args": {},
+    "err": {},
+    "n": 2
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 6
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 4
+   }
+  },
+  "unlink": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 1
+   },
+   "postgres": {
+    "args": {},
+    "err": {
+     "ENOENT": 557
+    },
+    "n": 583
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 1
+   }
+  },
+  "utimensat": {
+   "nginx": {
+    "args": {
+     "0": 1
+    },
+    "err": {},
+    "n": 1
+   }
+  },
+  "vfork": {
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 6
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 7
+   }
+  },
+  "wait4": {
+   "alpine-sh": {
+    "args": {
+     "0": 99,
+     "WNOHANG": 95
+    },
+    "err": {
+     "ECHILD": 84,
+     "ERESTARTSYS": 1
+    },
+    "n": 194
+   },
+   "nginx": {
+    "args": {
+     "0": 22,
+     "WNOHANG": 20
+    },
+    "err": {
+     "ECHILD": 17
+    },
+    "n": 42
+   },
+   "node-http": {
+    "args": {
+     "0": 1,
+     "WNOHANG": 1
+    },
+    "err": {
+     "ECHILD": 1
+    },
+    "n": 2
+   },
+   "postgres": {
+    "args": {
+     "0": 35,
+     "WNOHANG": 66
+    },
+    "err": {
+     "ECHILD": 35
+    },
+    "n": 101
+   },
+   "redis": {
+    "args": {
+     "0": 13,
+     "WNOHANG": 22
+    },
+    "err": {
+     "ECHILD": 15
+    },
+    "n": 35
+   }
+  },
+  "write": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 63
+   },
+   "go-static": {
+    "args": {},
+    "err": {},
+    "n": 41
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 84
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 169
+   },
+   "postgres": {
+    "args": {},
+    "err": {},
+    "n": 19963
+   },
+   "python-http": {
+    "args": {},
+    "err": {},
+    "n": 107
+   },
+   "redis": {
+    "args": {},
+    "err": {},
+    "n": 105
+   },
+   "rust-static": {
+    "args": {},
+    "err": {},
+    "n": 24
+   },
+   "temurin-jwebserver": {
+    "args": {},
+    "err": {},
+    "n": 171
+   }
+  },
+  "writev": {
+   "alpine-sh": {
+    "args": {},
+    "err": {},
+    "n": 89
+   },
+   "nginx": {
+    "args": {},
+    "err": {},
+    "n": 40
+   },
+   "node-http": {
+    "args": {},
+    "err": {},
+    "n": 40
+   },
+   "rust-static": {
+    "args": {},
+    "err": {},
+    "n": 40
+   }
+  }
+ }
+}

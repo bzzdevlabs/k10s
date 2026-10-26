@@ -1,0 +1,18 @@
+[package]
+name = "lxtrace"
+description = "ptrace syscall tracer and guest /init for the k10-lx syscall sizing (bench/oci/trace.sh)"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+# Standalone: built for x86_64-unknown-linux-musl by bench/oci/trace.sh, outside the main and metal workspaces.
+[workspace]
+
+[dependencies]
+libc = "0.2"
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true
+codegen-units = 1
