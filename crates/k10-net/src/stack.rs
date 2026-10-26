@@ -1072,9 +1072,15 @@ impl Stack {
         self.free.push(slot);
     }
 
-    /// Bookkeeping after anything touched a connection: unlink closed flows, free orphans, TIME-WAIT caps,
+    /// Bookkeeping after an event touched a connection: unlink closed flows, free orphans, TIME-WAIT caps,
     /// timers, transmit and notification queues.
     fn settle(&mut self, slot: u32) {
+        self.settle_with(slot, true);
+    }
+
+    /// `output`: queue the connection for transmission if it has something to send. An output pass itself does
+    /// not (a connection limited by its windows waits for the next event instead of spinning).
+    fn settle_with(&mut self, slot: u32, output: bool) {
         let Some(t) = self.slots[slot as usize].tcb.as_ref() else { return };
         let state = t.state;
         let rst = t.rst_pending();
@@ -1106,16 +1112,20 @@ impl Stack {
                     return;
                 }
                 t.state = State::Closed;
-                return self.settle(slot);
+                return self.settle_with(slot, output);
             }
             if orphan {
                 self.slots[slot as usize].tcb.as_mut().unwrap().release_buffers();
             }
         }
-        self.touch(slot);
+        self.touch_with(slot, output);
     }
 
     fn touch(&mut self, slot: u32) {
+        self.touch_with(slot, true);
+    }
+
+    fn touch_with(&mut self, slot: u32, output: bool) {
         let s = &mut self.slots[slot as usize];
         let Some(t) = s.tcb.as_ref() else { return };
         if let Some(d) = t.deadline() {
@@ -1124,7 +1134,7 @@ impl Stack {
                 self.timers.push(Reverse((d, slot, s.gen)));
             }
         }
-        if t.wants_output() && !s.dirty {
+        if output && t.wants_output() && !s.dirty {
             s.dirty = true;
             self.dirty.push_back(slot);
         }
@@ -1264,6 +1274,7 @@ impl Stack {
             let route = self.route(now, t.key.remote);
             let mut budget = 64usize;
             let mut emitted = 0usize;
+            let mut refused = false;
             {
                 let mac = self.iface.mac;
                 let ttl = self.cfg.ttl;
@@ -1275,6 +1286,7 @@ impl Stack {
                 let ip_id = &mut self.ip_id;
                 let mut emit = |o: &OutSeg, ring: &crate::buf::Ring| -> bool {
                     if budget == 0 {
+                        refused = true;
                         return false;
                     }
                     let len = ethernet::HEADER_LEN + ip_header_len(key.is_v6()) + o.hdr.len() + o.data_len;
@@ -1284,6 +1296,7 @@ impl Stack {
                     match route {
                         Route::Mac(dst) => {
                             if !tx.ready() {
+                                refused = true;
                                 return false;
                             }
                             tx.send(len, &mut |b| write_tcp_frame(b, mac, dst, &key, &o.hdr, data, ttl, hop, id, label));
@@ -1303,10 +1316,10 @@ impl Stack {
                 t.poll_output(now, &mut emit);
             }
             sent += emitted;
-            let again = emitted > 0 && t.wants_output();
             self.slots[slot as usize].tcb = Some(t);
-            self.settle(slot);
-            if again && !self.slots[slot as usize].dirty && self.slots[slot as usize].tcb.is_some() {
+            self.settle_with(slot, false);
+            // Only a pass cut short (budget, full transmit queue) goes around again.
+            if refused && !self.slots[slot as usize].dirty && self.slots[slot as usize].tcb.is_some() {
                 self.slots[slot as usize].dirty = true;
                 self.dirty.push_back(slot);
             }

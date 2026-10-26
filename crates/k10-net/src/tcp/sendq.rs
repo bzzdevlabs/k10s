@@ -135,11 +135,48 @@ pub struct AckResult {
 #[derive(Debug, Default)]
 pub struct SentQueue {
     segs: VecDeque<Seg>,
+    /// Transmissions in time order (sequence number, time): RACK walks it from the oldest (RFC 8985 §6.2).
+    /// Entries for segments since acknowledged, SACKed or sent again are skipped and dropped lazily.
+    tsorted: VecDeque<(u32, Instant)>,
+    /// No segment before this index is marked lost.
+    lost_hint: usize,
+    /// The previous ACK's SACK blocks: their ranges are already marked.
+    sack_seen: [(u32, u32); 4],
+    sack_seen_n: usize,
     total: u64,
     sacked: u64,
     lost: u64,
     sacked_segs: u32,
     pub max_segs: usize,
+}
+
+/// `[l, r)` minus the blocks in `seen`: at most five pieces.
+fn uncovered(l: u32, r: u32, seen: &[(u32, u32)]) -> ([(u32, u32); 5], usize) {
+    let mut out = [(0, 0); 5];
+    out[0] = (l, r);
+    let mut n = 1;
+    for &(cl, cr) in seen {
+        let mut next = [(0, 0); 5];
+        let mut m = 0;
+        for &(a, b) in &out[..n] {
+            if seq::le(cr, a) || seq::ge(cl, b) {
+                next[m] = (a, b);
+                m += 1;
+                continue;
+            }
+            if seq::lt(a, cl) && m < 5 {
+                next[m] = (a, cl);
+                m += 1;
+            }
+            if seq::lt(cr, b) && m < 5 {
+                next[m] = (cr, b);
+                m += 1;
+            }
+        }
+        out = next;
+        n = m;
+    }
+    (out, n)
 }
 
 impl SentQueue {
@@ -184,6 +221,9 @@ impl SentQueue {
 
     pub fn clear(&mut self) {
         self.segs.clear();
+        self.tsorted.clear();
+        self.lost_hint = 0;
+        self.sack_seen_n = 0;
         self.total = 0;
         self.sacked = 0;
         self.lost = 0;
@@ -192,7 +232,16 @@ impl SentQueue {
 
     pub fn push(&mut self, seq: u32, len: u32, now: Instant, fin: bool) {
         self.segs.push_back(Seg { seq, len, xmit: now, flags: if fin { FIN } else { 0 } });
+        self.tsorted.push_back((seq, now));
         self.total += len as u64;
+    }
+
+    /// Index of the segment starting at `seq`.
+    fn find(&self, seq_: u32) -> Option<usize> {
+        let base = self.segs.front()?.seq;
+        let key = seq_.wrapping_sub(base);
+        let i = self.segs.partition_point(|s| s.seq.wrapping_sub(base) < key);
+        (i < self.segs.len() && self.segs[i].seq == seq_).then_some(i)
     }
 
     fn unflag(&mut self, s: &Seg) {
@@ -211,6 +260,7 @@ impl SentQueue {
         while let Some(&s) = self.segs.front() {
             if seq::le(s.end(), ack) {
                 self.segs.pop_front();
+                self.lost_hint = self.lost_hint.saturating_sub(1);
                 self.total -= s.len as u64;
                 self.unflag(&s);
                 if !s.has(SACKED) {
@@ -228,51 +278,79 @@ impl SentQueue {
                 let f = &mut self.segs[0];
                 f.seq = ack;
                 f.len -= cut;
+                let (sacked, lost, xmit) = (f.has(SACKED), f.has(LOST), f.xmit);
                 self.total -= cut as u64;
-                if f.has(SACKED) {
+                if sacked {
                     self.sacked -= cut as u64;
                 } else {
                     r.delivered += cut;
                 }
-                if f.has(LOST) {
+                if lost {
                     self.lost -= cut as u64;
                 }
                 r.acked_data += cut;
+                if !sacked && !lost {
+                    self.tsorted.push_back((ack, xmit));
+                }
                 break;
             } else {
                 break;
             }
         }
+        // Drop time-order entries of acknowledged segments from the front.
+        let base = self.segs.front().map(|s| s.seq);
+        while let Some(&(s, _)) = self.tsorted.front() {
+            match base {
+                Some(b) if seq::ge(s, b) => break,
+                _ => {
+                    self.tsorted.pop_front();
+                }
+            }
+        }
         r
     }
 
-    /// Applies SACK blocks within (snd_una, snd_max]; returns the sequence space newly SACKed.
+    /// Applies SACK blocks within (snd_una, snd_max]; returns the sequence space newly SACKed. Ranges reported
+    /// by the previous ACK are skipped (they stay marked), so a long-lived block costs only its growth.
     pub fn sack(&mut self, blocks: &[(u32, u32)], snd_una: u32, snd_max: u32, now: Instant, rack: &mut Rack, min_rtt_ns: u64) -> u32 {
         let mut newly = 0;
+        let seen = self.sack_seen;
+        let seen_n = self.sack_seen_n;
+        let mut keep = [(0u32, 0u32); 4];
+        let mut keep_n = 0;
         for &(l, r) in blocks {
             if !(seq::lt(l, r) && seq::gt(r, snd_una) && seq::le(r, snd_max)) {
                 continue;
             }
-            let start = self.segs.partition_point(|s| seq::le(s.end(), l));
-            for i in start..self.segs.len() {
-                let s = self.segs[i];
-                if seq::ge(s.seq, r) {
-                    break;
+            if keep_n < 4 {
+                keep[keep_n] = (l, r);
+                keep_n += 1;
+            }
+            let (parts, n) = uncovered(l, r, &seen[..seen_n]);
+            for &(a, b) in &parts[..n] {
+                let start = self.segs.partition_point(|s| seq::le(s.end(), a));
+                for i in start..self.segs.len() {
+                    let s = self.segs[i];
+                    if seq::ge(s.seq, b) {
+                        break;
+                    }
+                    if s.has(SACKED) || seq::lt(s.seq, l) || seq::gt(s.end(), r) {
+                        continue;
+                    }
+                    if s.has(LOST) {
+                        self.lost -= s.len as u64;
+                    }
+                    let f = &mut self.segs[i];
+                    f.flags = (f.flags | SACKED) & !LOST;
+                    self.sacked += s.len as u64;
+                    self.sacked_segs += 1;
+                    newly += s.len;
+                    rack.delivered(&s, now, min_rtt_ns);
                 }
-                if s.has(SACKED) || seq::lt(s.seq, l) || seq::gt(s.end(), r) {
-                    continue;
-                }
-                if s.has(LOST) {
-                    self.lost -= s.len as u64;
-                }
-                let f = &mut self.segs[i];
-                f.flags = (f.flags | SACKED) & !LOST;
-                self.sacked += s.len as u64;
-                self.sacked_segs += 1;
-                newly += s.len;
-                rack.delivered(&s, now, min_rtt_ns);
             }
         }
+        self.sack_seen = keep;
+        self.sack_seen_n = keep_n;
         newly
     }
 
@@ -283,6 +361,7 @@ impl SentQueue {
         }
         self.segs[i].flags |= LOST;
         self.lost += s.len as u64;
+        self.lost_hint = self.lost_hint.min(i);
         true
     }
 
@@ -296,11 +375,13 @@ impl SentQueue {
     }
 
     /// Index of the lowest segment marked lost.
-    pub fn first_lost(&self) -> Option<usize> {
+    pub fn first_lost(&mut self) -> Option<usize> {
         if self.lost == 0 {
             return None;
         }
-        self.segs.iter().position(|s| s.has(LOST))
+        let i = self.lost_hint + self.segs.range(self.lost_hint..).position(|s| s.has(LOST))?;
+        self.lost_hint = i;
+        Some(i)
     }
 
     pub fn on_retransmit(&mut self, i: usize, now: Instant) {
@@ -310,12 +391,14 @@ impl SentQueue {
         }
         s.flags = (s.flags & !LOST) | RETRANS;
         s.xmit = now;
+        let seq_ = s.seq;
+        self.tsorted.push_back((seq_, now));
     }
 
-    /// Splits segment `i` so its first part carries `first` bytes of sequence space.
+    /// Splits lost segment `i` so its first part carries `first` bytes of sequence space.
     pub fn split(&mut self, i: usize, first: u32) {
         let s = self.segs[i];
-        debug_assert!(first > 0 && first < s.len);
+        debug_assert!(first > 0 && first < s.len && s.has(LOST));
         let mut a = s;
         a.len = first;
         a.flags &= !FIN;
@@ -324,42 +407,38 @@ impl SentQueue {
         b.len = s.len - first;
         self.segs[i] = a;
         self.segs.insert(i + 1, b);
-        if s.has(SACKED) {
-            self.sacked_segs += 1;
-        }
     }
 
     /// RACK loss detection (RFC 8985 §6.2 step 5): marks lost every in-flight segment sent before the most
-    /// recently delivered one by more than its RTT plus the reordering window. Returns bytes newly marked lost
-    /// and the earliest time another segment would be.
+    /// recently delivered one by more than its RTT plus the reordering window, walking transmissions oldest
+    /// first. Returns bytes newly marked lost and when the next one would be.
     pub fn rack_detect(&mut self, rack: &Rack, now: Instant, reo_wnd_ns: u64) -> (u64, Option<Instant>) {
         if !rack.valid {
             return (0, None);
         }
         let mut lost = 0;
-        let mut timeout: Option<Instant> = None;
-        for i in 0..self.segs.len() {
-            let s = self.segs[i];
-            if s.has(SACKED) || s.has(LOST) {
+        while let Some(&(sq, xmit)) = self.tsorted.front() {
+            let live = self.find(sq).filter(|&i| {
+                let s = self.segs[i];
+                s.xmit == xmit && !s.has(SACKED) && !s.has(LOST)
+            });
+            let Some(i) = live else {
+                self.tsorted.pop_front();
                 continue;
-            }
+            };
+            let s = self.segs[i];
             if sent_after(s.xmit, s.end(), rack.xmit, rack.end_seq) {
-                if s.has(RETRANS) {
-                    continue;
-                }
-                break;
+                return (lost, None);
             }
             let deadline = s.xmit.0.saturating_add(rack.rtt_ns).saturating_add(reo_wnd_ns);
-            if deadline <= now.0 {
-                if self.mark_lost(i) {
-                    lost += s.len as u64;
-                }
-            } else {
-                let t = Instant(deadline);
-                timeout = Some(timeout.map_or(t, |x| x.min(t)));
+            if deadline > now.0 {
+                return (lost, Some(Instant(deadline)));
             }
+            self.mark_lost(i);
+            lost += s.len as u64;
+            self.tsorted.pop_front();
         }
-        (lost, timeout)
+        (lost, None)
     }
 }
 

@@ -1034,7 +1034,8 @@ impl Tcb {
         if self.tx.free() >= want || cap >= self.tx_target() {
             return;
         }
-        let new = (cap * 2).max(cap + want).min(self.tx_target());
+        // Doubling keeps the number of copies logarithmic while the window grows.
+        let new = (cap * 2).min(self.cfg.tx_max);
         if new > cap && self.account.try_bytes(new - cap) {
             self.tx.resize(new);
         }

@@ -195,6 +195,7 @@ fn zero_window_is_probed_until_it_opens() {
     b.tcp(hdr(5000, 80, c.pseq, c.sseq, ACK, 0), &[]);
     b.h.stack.tcp_send(c.h, &[9u8; 100]).unwrap();
     assert!(b.segs().is_empty(), "zero window: nothing sent");
+    assert!(b.h.stack.poll_at(b.now).unwrap() > b.now, "a blocked connection waits for an event, it does not spin");
     let mut probes = Vec::new();
     for _ in 0..30 {
         b.advance(Duration::from_millis(100));
@@ -398,6 +399,7 @@ fn peer_window_scale_bounds_sending() {
     // 30 << 7 = 3840 bytes of window: two full segments; the 920-byte rest waits (sender SWS avoidance).
     let sent: usize = b.segs().iter().map(|s| s.data.len()).sum();
     assert_eq!(sent, 2 * 1460);
+    assert!(!b.h.stack.has_output() && b.h.stack.poll_at(b.now).unwrap() > b.now);
     b.tcp(hdr(5000, 80, c.pseq, c.sseq + 2920, ACK, 100), &[]);
     let sent: usize = b.segs().iter().map(|s| s.data.len()).sum();
     assert_eq!(sent, 10000 - 2920);

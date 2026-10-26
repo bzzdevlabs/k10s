@@ -1,0 +1,20 @@
+# Throughput and CPU-per-byte of k10-net against smoltcp, both driven through k10-net's simulator.
+# A standalone tool (its own workspace): smoltcp is only a comparison baseline and never a dependency of k10-net.
+[package]
+name = "k10-net-bench"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+
+[dependencies]
+k10-net = { path = ".." }
+smoltcp = { version = "0.14", default-features = false, features = ["std", "alloc", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-tcp-cubic", "socket-tcp-reno"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = 1
