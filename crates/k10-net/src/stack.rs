@@ -1172,6 +1172,15 @@ impl Stack {
             s.notify_queued = true;
             self.notes.push_back(Note::Tcp(slot, s.gen));
         }
+        if self.timers.len() > 2 * self.slots.len() + 1024 {
+            // Superseded entries are bounded: rebuild from each connection's current deadline.
+            self.timers = self
+                .slots
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| s.sched.map(|d| Reverse((d, i as u32, s.gen))))
+                .collect();
+        }
     }
 
     // ---- timers and output ----
@@ -1583,7 +1592,8 @@ impl Stack {
 
     /// Ingress handoff: moves a connection to `to`'s accept queue (another view), putting `unread` back in
     /// front of its receive stream (the bytes the kernel already consumed, e.g. a request head). The memory is
-    /// recharged to the target's account; `h` is no longer the caller's.
+    /// recharged to the target's account; `h` is no longer the caller's. On `NoMemory` the connection stays the
+    /// caller's with `unread` back in its stream; on the other errors nothing changed.
     pub fn tcp_hand_off(&mut self, now: Instant, h: TcpHandle, to: ListenerId, unread: &[u8]) -> Result<(), Error> {
         let l = self.ports.listener(to).cloned().ok_or(Error::NotFound)?;
         {
@@ -1596,14 +1606,14 @@ impl Stack {
             return Err(Error::WouldBlock);
         }
         let t = self.tcb_mut(h)?;
-        let bytes = t.buffer_bytes() + unread.len();
-        if !transfer(&mut t.account, &l.account, bytes) {
-            l.drop_accept();
-            return Err(Error::NoMemory);
-        }
         if let Err(e) = t.unread(unread) {
             l.drop_accept();
             return Err(e);
+        }
+        let bytes = t.buffer_bytes();
+        if !transfer(&mut t.account, &l.account, bytes) {
+            l.drop_accept();
+            return Err(Error::NoMemory);
         }
         t.view = l.view;
         t.orphan = true;

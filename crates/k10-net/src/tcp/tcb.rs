@@ -328,6 +328,7 @@ impl Tcb {
 
     fn negotiate(&mut self, now: Instant, o: &Options) {
         self.sack_ok = self.cfg.sack && o.sack_perm;
+        self.sendq.track_time = self.sack_ok && self.cfg.rack;
         self.ts_ok = self.cfg.timestamps && o.ts.is_some();
         if let Some((v, _)) = o.ts {
             self.ts_recent = v;
@@ -1147,6 +1148,10 @@ impl Tcb {
         if data.is_empty() {
             return Ok(());
         }
+        // Out-of-order data sits at offsets past the in-order bytes, which putting bytes back would shift.
+        if !self.asm.is_empty() {
+            return Err(Error::InvalidState);
+        }
         self.ensure_rx()?;
         if self.rx.free() < data.len() {
             let grow = data.len() - self.rx.free();
@@ -1155,10 +1160,6 @@ impl Tcb {
             }
             let cap = self.rx.capacity() + grow;
             self.rx.resize(cap);
-        }
-        // Received out-of-order data sits past the in-order bytes: shift it along with them.
-        if !self.asm.is_empty() {
-            return Err(Error::InvalidState);
         }
         self.rx.unread(data);
         self.notify |= ready::READABLE;

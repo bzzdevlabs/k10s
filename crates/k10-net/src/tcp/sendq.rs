@@ -148,6 +148,8 @@ pub struct SentQueue {
     lost: u64,
     sacked_segs: u32,
     pub max_segs: usize,
+    /// Keep the time-ordered list (RACK with SACK).
+    pub track_time: bool,
 }
 
 /// `[l, r)` minus the blocks in `seen`: at most five pieces.
@@ -232,8 +234,21 @@ impl SentQueue {
 
     pub fn push(&mut self, seq: u32, len: u32, now: Instant, fin: bool) {
         self.segs.push_back(Seg { seq, len, xmit: now, flags: if fin { FIN } else { 0 } });
-        self.tsorted.push_back((seq, now));
+        self.note_xmit(seq, now);
         self.total += len as u64;
+    }
+
+    fn note_xmit(&mut self, seq_: u32, now: Instant) {
+        if !self.track_time {
+            return;
+        }
+        self.tsorted.push_back((seq_, now));
+        // Stale entries (segments acknowledged, SACKed or sent again) are bounded by the live ones.
+        if self.tsorted.len() > 2 * self.segs.len() + 16 {
+            let mut t = core::mem::take(&mut self.tsorted);
+            t.retain(|&(s, x)| self.find(s).is_some_and(|i| self.segs[i].xmit == x && self.segs[i].flags & (SACKED | LOST) == 0));
+            self.tsorted = t;
+        }
     }
 
     /// Index of the segment starting at `seq`.
@@ -290,7 +305,7 @@ impl SentQueue {
                 }
                 r.acked_data += cut;
                 if !sacked && !lost {
-                    self.tsorted.push_back((ack, xmit));
+                    self.note_xmit(ack, xmit);
                 }
                 break;
             } else {
@@ -400,7 +415,7 @@ impl SentQueue {
         s.flags = (s.flags & !LOST) | RETRANS;
         s.xmit = now;
         let seq_ = s.seq;
-        self.tsorted.push_back((seq_, now));
+        self.note_xmit(seq_, now);
     }
 
     /// Splits lost segment `i` so its first part carries `first` bytes of sequence space.
@@ -460,6 +475,7 @@ mod tests {
 
     fn queue(n: u32, mss: u32) -> SentQueue {
         let mut q = SentQueue::new(1024);
+        q.track_time = true;
         for i in 0..n {
             q.push(1000 + i * mss, mss, t(i as u64), false);
         }
