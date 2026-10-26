@@ -1,0 +1,17 @@
+# /init of the Linux guest that k10-net's interop test talks to (built static for x86_64-unknown-linux-musl).
+[package]
+name = "k10-net-guest"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+
+[dependencies]
+libc = "0.2"
+k10-net = { path = "../.." }
+
+[profile.release]
+opt-level = 2
+panic = "abort"
