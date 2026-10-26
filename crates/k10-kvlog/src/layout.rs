@@ -162,7 +162,8 @@ impl Super {
             return Err(Decode::Foreign);
         }
         let (kv_segments, index_segments) = if version >= 2 { (u32_at(b, 180), u32_at(b, 184)) } else { (0, 0) };
-        if version >= 2 && (kv_segments == 0 || 3 * (kv_segments as u64 + index_segments as u64) + 2 > segments as u64) {
+        let log = 3 * (kv_segments as u64 + index_segments as u64) + 2;
+        if version >= 2 && (kv_segments == 0 || log > segments as u64) {
             return Err(Decode::Foreign);
         }
         let mut slots = [Slot::default(); 2];

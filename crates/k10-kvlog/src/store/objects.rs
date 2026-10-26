@@ -140,7 +140,10 @@ fn entry(size: u64, refs: u32, ext: &[Extent]) -> Vec<u8> {
 }
 
 fn entry_object(v: &[u8]) -> Object {
-    Object { size: u64::from_le_bytes(v[..8].try_into().unwrap()), refs: u32::from_le_bytes(v[8..12].try_into().unwrap()) }
+    Object {
+        size: u64::from_le_bytes(v[..8].try_into().unwrap()),
+        refs: u32::from_le_bytes(v[8..12].try_into().unwrap()),
+    }
 }
 
 fn entry_extents(v: &[u8]) -> impl Iterator<Item = Extent> + '_ {
@@ -359,7 +362,8 @@ impl Upload {
     /// [`Upload::write`]'s verification alone (a caller that shares the disk verifies before taking it).
     pub fn verify<'a>(&self, offset: u64, data: &'a [u8], h: &mut dyn Hasher) -> Result<Verified<'a>, Error> {
         let end = offset.checked_add(data.len() as u64).ok_or(Error::Missing)?;
-        if data.is_empty() || !offset.is_multiple_of(UNIT) || end > self.size || (!end.is_multiple_of(UNIT) && end != self.size) {
+        let whole = end.is_multiple_of(UNIT) || end == self.size;
+        if data.is_empty() || !offset.is_multiple_of(UNIT) || end > self.size || !whole {
             return Err(Error::Missing);
         }
         let first = offset / UNIT;
@@ -611,9 +615,8 @@ impl Store {
             }
         }
         while need > 0 && out.len() <= MAX_EXTENTS {
-            let Some((seg, u)) = self.area.partial.iter().enumerate().find_map(|(s, u)| Some((s as u32, u.as_ref()?))) else {
-                break;
-            };
+            let first = self.area.partial.iter().enumerate().find_map(|(s, u)| Some((s as u32, u.as_ref()?)));
+            let Some((seg, u)) = first else { break };
             let (at, len) = u.runs().next().expect("a segment with free units");
             let k = (len as u64).min(need) as u32;
             self.claim(seg, at, k);
@@ -631,7 +634,13 @@ impl Store {
 
     /// Starts writing object `root` of `size` bytes whose leaf hashes are `leaves`: checks them against the root,
     /// reserves its units and index entry.
-    pub fn object_begin(&mut self, root: [u8; 32], size: u64, leaves: &[u8], h: &mut dyn Hasher) -> Result<Upload, Error> {
+    pub fn object_begin(
+        &mut self,
+        root: [u8; 32],
+        size: u64,
+        leaves: &[u8],
+        h: &mut dyn Hasher,
+    ) -> Result<Upload, Error> {
         if self.sb.version < 2 {
             return Err(Error::NoObjects);
         }
@@ -668,8 +677,10 @@ impl Store {
         })
     }
 
+    /// Where the store keeps `up` (an upload of this store, not indexed yet).
     fn held(&self, up: &Upload) -> Result<usize, Error> {
-        self.area.uploads.iter().position(|h| h.id == up.id && h.root == up.root).ok_or(Error::Missing)
+        let mine = |h: &Held| h.id == up.id && h.root == up.root && h.ext == up.map.ext;
+        self.area.uploads.iter().position(mine).ok_or(Error::Missing)
     }
 
     /// Indexes a whole upload whose data and leaf hashes ([`Upload::hash_writes`]) the caller wrote and flushed:
@@ -779,7 +790,8 @@ impl Store {
     pub fn object_space(&self) -> Space {
         let area = self.sb.object_segments() as u64 * SEG_BYTES;
         let free = (self.sb.object_segments() - self.area.segs) as u64 * SEG_BYTES + self.area.partial_free * UNIT;
-        Space { bytes: area, used: area - free, index_bytes: self.index_room(), index_used: self.area.live + self.area.pending }
+        let index_used = self.area.live + self.area.pending;
+        Space { bytes: area, used: area - free, index_bytes: self.index_room(), index_used }
     }
 
     /// The disk offset of data unit `unit` of an object, and how many of its data units follow contiguously.
@@ -870,7 +882,8 @@ impl Store {
         let live = self.area.index.values().map(|v| record::size(HASH, v.len()) as u64).sum::<u64>();
         assert_eq!(self.area.live, if self.area.index.is_empty() { 0 } else { live + ns_len() });
         assert_eq!(self.area.pending, self.area.uploads.iter().map(|h| h.entry).sum::<u64>());
-        assert_eq!(self.area.partial.iter().filter(|p| p.is_some()).count(), units.values().filter(|u| u.free > 0).count());
+        let with_free = units.values().filter(|u| u.free > 0).count();
+        assert_eq!(self.area.partial.iter().filter(|p| p.is_some()).count(), with_free);
         assert!(self.area.live.max(ns_len()) + self.area.pending <= self.index_room().max(ns_len()));
     }
 }

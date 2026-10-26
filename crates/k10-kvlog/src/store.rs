@@ -92,7 +92,9 @@ impl fmt::Display for Error {
             Error::Io => f.write_str("I/O error"),
             Error::Blank => f.write_str("no store (blank partition)"),
             Error::Foreign => f.write_str("not a k10s store"),
-            Error::Newer(v) => write!(f, "a store of format version {v} (this build reads versions up to {})", layout::VERSION),
+            Error::Newer(v) => {
+                write!(f, "a store of format version {v} (this build reads versions up to {})", layout::VERSION)
+            }
             Error::Corrupt(what) => write!(f, "corrupt store ({what})"),
             Error::TooSmall => write!(f, "partition smaller than {} MiB", MIN_SIZE >> 20),
             Error::Shrunk => f.write_str("partition smaller than its store"),
@@ -749,7 +751,8 @@ impl Store {
         } else {
             (None, None)
         };
-        Writes { first, runs: self.runs.drain(..).map(|r| (r.offset, r.buf)).collect(), generation, batch: self.batches }
+        let runs = self.runs.drain(..).map(|r| (r.offset, r.buf)).collect();
+        Writes { first, runs, generation, batch: self.batches }
     }
 
     /// The caller wrote and flushed `w.first` (the runs may still fail: the superblock is on disk regardless).
