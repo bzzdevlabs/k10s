@@ -67,7 +67,7 @@ test('manifests', () => {
     assert.strictEqual(app.services.length, 8);
     assert.deepStrictEqual(app.services[0], { name: 'hello', code: 'hello.ten', line: 4 });
     const bad = checker.checkK10s('service a { code = "a.ten" }\n\nservice b { code = "b.ten" memory = 3KiB }\n');
-    assert.deepStrictEqual(bad.error, { line: 3, message: 'memory must be a power of two, got 3072 bytes' });
+    assert.deepStrictEqual(bad.error, { line: 3, message: 'memory must be a power of two (a multiple of 4KiB for image services), got 3072 bytes' });
     const callee = checker.checkK10s('service a { code = "a.ten" calls = ["nope"] }');
     assert.match(callee.error.message, /not declared in this manifest/);
 });
