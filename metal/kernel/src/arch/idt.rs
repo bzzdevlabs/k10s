@@ -15,6 +15,8 @@ pub const VEC_NET: u8 = 0x21;
 pub const VEC_WAKE: u8 = 0x22;
 /// Disk completions (MSI-X): the handler only acknowledges; the point is leaving `hlt` on CPU 0.
 pub const VEC_DISK: u8 = 0x23;
+/// The ACPI SCI (I/O APIC line): the power button (power.rs).
+pub const VEC_SCI: u8 = 0x24;
 pub const VEC_SPURIOUS: u8 = 0xFF;
 /// NMIs that were not the stop NMI, and the last one's NMI status (port 0x61).
 pub static NMIS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -216,6 +218,10 @@ extern "C" fn isr_dispatch(f: &mut Frame) {
         }
         VEC_WAKE => {
             crate::percpu::this().wakeups.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            super::apic::eoi();
+        }
+        VEC_SCI => {
+            crate::power::on_sci();
             super::apic::eoi();
         }
         VEC_SPURIOUS => {}

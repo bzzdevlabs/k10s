@@ -28,4 +28,13 @@ smoltcp = { version = "0.14", default-features = false, features = [
     "socket-dhcpv4",
     "socket-tcp",
     "socket-udp",
+    "proto-dns",
+    "socket-dns",
+    "dns-max-server-count-3",
+    "dns-max-result-count-4",
+    "proto-ipv6",
+    "proto-ipv6-slaac",
+    "iface-max-addr-count-4",
+    "iface-max-route-count-4",
+    "auto-icmp-echo-reply",
 ] }

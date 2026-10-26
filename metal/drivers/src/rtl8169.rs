@@ -276,9 +276,10 @@ impl<H: Hw> Rtl8169<H> {
         } else {
             RX128_INT_EN
         };
-        hw.write32(RX_CONFIG, fetch | DMA_BURST | RX_ACCEPT_BROADCAST | RX_ACCEPT_MY_PHYS);
-        hw.write32(MAR0, 0);
-        hw.write32(MAR0 + 4, 0);
+        // Every multicast frame (the hash filter all ones): IPv6 neighbor discovery and router advertisements.
+        hw.write32(RX_CONFIG, fetch | DMA_BURST | RX_ACCEPT_BROADCAST | RX_ACCEPT_MULTICAST | RX_ACCEPT_MY_PHYS);
+        hw.write32(MAR0, u32::MAX);
+        hw.write32(MAR0 + 4, u32::MAX);
         hw.write8(CFG9346, CFG9346_LOCK);
 
         let phy = Phy { hw: &hw, chip };

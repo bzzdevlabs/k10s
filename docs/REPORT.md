@@ -198,8 +198,8 @@ Platform decisions for both tiers (rationale in research/universal-os.md §10 an
 - **One installed image for both tiers:** the Tier 1 builder owns the ESP, the UEFI loader picks the tier from the PCI
   device list (`tier=auto|linux|metal`), and both tiers share one raw segmented-log `K10S-DATA` format.
 - **Disks:** k10s uses only its own GPT partitions (ESP and `K10S-DATA`) and leaves other partitions alone.
-- **Addressing:** DHCPv4 by default, static `ip=` in `k10s.conf` or on the command line; IPv6 by kernel SLAAC on
-  Tier 1, IPv4 only on Tier 2.
+- **Addressing:** DHCPv4 by default, static `ip=` in `k10s.conf` or on the command line; IPv6 by SLAAC on both tiers
+  (Tier 1: Linux's; Tier 2: smoltcp's), cluster addresses IPv4 on Tier 2.
 - **Entropy:** `GRND_INSECURE` only for non-key seeds; keys, nonces and node secrets use blocking `getrandom`;
   hardware RNG drivers are built into the kernels.
 - **Drivers:** `NetDevice`/`BlockDevice` traits and slot-like DMA regions from M1 so TIR drivers can implement them

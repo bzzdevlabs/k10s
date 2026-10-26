@@ -1,5 +1,6 @@
 //! The hardware side of the native kernel's drivers for real machines: Ethernet controllers (Intel e1000e and the
-//! igb/igc family, Realtek r8169-class) and watchdog timers (ACPI WDAT, Intel TCO, i6300ESB).
+//! igb/igc family, Realtek r8169-class), watchdog timers (ACPI WDAT, Intel TCO, i6300ESB) and control-method power
+//! buttons (found in the ACPI tables' AML).
 //!
 //! Drivers are written against small traits — [`Hw`] for a PCI function's registers, configuration space, delays
 //! and DMA memory, [`watchdog::Platform`] for port I/O and chipset registers — that the kernel implements
@@ -17,6 +18,7 @@ extern crate std;
 pub mod e1000e;
 pub mod igc;
 pub mod ids;
+pub mod power_button;
 pub mod ring;
 pub mod rtl8169;
 pub mod watchdog;

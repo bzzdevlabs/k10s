@@ -266,7 +266,7 @@ fn e82574_brings_up_and_moves_frames() {
         assert_eq!(m.mdio_without_semaphore, 0);
         assert_eq!(m.regs.get(EXTCNF_CTRL) & EXTCNF_SWFLAG, 0, "semaphore released");
         assert_ne!(m.regs.get(CTRL_EXT) & CTRL_EXT_DRV_LOAD, 0);
-        assert_eq!(m.regs.get(RCTL), RCTL_EN | RCTL_BAM | RCTL_SECRC);
+        assert_eq!(m.regs.get(RCTL), RCTL_EN | RCTL_MPE | RCTL_BAM | RCTL_SECRC);
         assert_eq!(m.regs.get(TCTL) & (TCTL_EN | TCTL_PSP), TCTL_EN | TCTL_PSP);
         assert_eq!(m.regs.get(RDT), 31, "all but one receive descriptor given to the device");
         assert_eq!(m.regs.get(RDLEN), 32 * 16);

@@ -208,7 +208,9 @@ fn rtl8168_older_revision_uses_phyar() {
         assert!(m.locked, "configuration registers locked again");
         assert_eq!(m.writes_while_locked, 0);
         assert_eq!(m.regs.read(INTR_MASK_8168, 2), INT_LINK_CHG);
-        assert_eq!(m.regs.get(RX_CONFIG) & (RX_ACCEPT_BROADCAST | RX_ACCEPT_MY_PHYS), RX_ACCEPT_BROADCAST | RX_ACCEPT_MY_PHYS);
+        let accept = RX_ACCEPT_BROADCAST | RX_ACCEPT_MULTICAST | RX_ACCEPT_MY_PHYS;
+        assert_eq!(m.regs.get(RX_CONFIG) & accept, accept);
+        assert_eq!((m.regs.get(MAR0), m.regs.get(MAR0 + 4)), (u32::MAX, u32::MAX));
         assert_eq!(m.regs.read(RX_MAX_SIZE, 2), 2048);
     }
     assert!(d.link().up);

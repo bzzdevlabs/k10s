@@ -51,6 +51,8 @@ SMP=4 ./run.sh             # four CPUs: CPU 0 runs the network, CPU-heavy reques
                            # key, unauthenticated links), leave + power off
 tools/storage_test.py --kernel out/k10-metal.elf --bundle out/bundle.k10b   # K10S-DATA on virtio-blk, NVMe and AHCI:
                            # growth, power cuts during a write stream (prefix checks), clean power off
+tools/platform_test.py --kernel out/k10-metal.elf   # SNTP and DNS on a scripted LAN, the clock stepped from 2001,
+                           # the power button (fixed-feature, GPE), single-node applies kept, IPv6 (SLAAC, HTTP, ping)
 ./vmm-test.sh              # Firecracker and Cloud Hypervisor (KVM, a tap device; tools/get-vmms.sh downloads them)
 tools/linux-compare.sh     # builds the Linux comparison guest (host kernel + tiny initramfs)
 tools/measure.py           # measurements -> out/results/*.json (see RESULTS.md); `engines` = JIT vs interpreter,
@@ -64,7 +66,8 @@ Kernel command line (`APPEND=` for run.sh): `k10.verbose` (boot banner, ACPI sum
 modes),
 `k10.exit_on_ready` (power off once ready), `k10.spin_us=N` (busy-poll window before halting, default 50),
 `k10.engine=jit|interp` (default jit), `k10.smp=N` (use at most N CPUs), `k10.ip=A.B.C.D/PREFIX[,GATEWAY]` (static
-IPv4; default DHCP, `k10.ip=dhcp`), `k10.console=ITEM[,ITEM…]` with at most one serial port among
+IPv4; default DHCP, `k10.ip=dhcp`), `k10.ntp=HOST[:PORT],…|none` (SNTP servers; default the DHCP lease's, else
+`pool.ntp.org`), `k10.dns=A.B.C.D,…` (name servers; default the lease's), `k10.console=ITEM[,ITEM…]` with at most one serial port among
 `com1|com2|com3|com4|io:0xPORT|mmio:0xADDR|mmio32:0xADDR|none` (default: the ACPI SPCR table's UART, else COM1),
 `udp:A.B.C.D[:PORT]` (the UDP log console, default port 6666) and `nofb` (no framebuffer console; it is on whenever
 k10boot hands over the screen), `k10.watchdog=SECONDS|on|off` (the hardware watchdog's timeout, default 60; `off`
@@ -80,7 +83,7 @@ Cluster mode: `k10.join=HOST:PORT[,…]`, `k10.gossip=`, `k10.rpc=`, `k10.http=`
 is given. Storage and updates: `k10.data=none` (no K10S-DATA: KV in memory), `k10.grow=0` (keep K10S-DATA's size),
 `k10.os_commit_grace=S` (30), `k10.os_trial=S` (600). The advertised addresses default to the interface's (DHCP or static) address. An invalid `k10.spin_us`,
 `k10.engine`, `k10.smp`, `k10.jit_indirect`, `k10.timer_res_us`, `k10.ip`, `k10.console`, `k10.watchdog`, `k10.panic`
-or `k10.gossip_max_skew_s` value stops the boot.
+or `k10.gossip_max_skew_s` or `k10.dns` value stops the boot.
 
 Booted by k10boot or GRUB, the kernel also takes these from `k10s.conf` on the disk's `K10S-BOOT` ("Booting").
 
@@ -98,6 +101,9 @@ with `k10s keygen -o FILE` (mode 0600). The kernel wipes the raw bytes after par
 The deployment bundle comes from QEMU's `-initrd` (PVH module 0), or from the loader (`/k10s/bundle.k10b` on
 `K10S-BOOT`). If there is none, the kernel uses the bundle baked in at build time (`K10_EMBED_BUNDLE=path`). If neither
 exists, the node starts empty and waits for `POST /_k10s/apply` (or, in a cluster, takes the cluster's desired state).
+A single node with `K10S-DATA` keeps the last bundle it installed there (`bundle.k10b`, Tier 1's file: a machine that
+changes tiers keeps it), written before the apply's 200: the next boot installs it first, and a boot bundle then goes
+on top like an apply (an older manifest version is refused, the same one changes nothing).
 
 ## Layout
 
@@ -110,9 +116,10 @@ metal/                    its own cargo workspace (own target dir); path-depends
     src/arch/             port I/O, MSRs, per-CPU GDT+TSS (IST for #DF), IDT + asm entry stubs, local APIC (x2APIC or
                           xAPIC: timer, IPIs, INIT/STARTUP, NMI), I/O APIC routing, paging.rs (the identity map: all
                           RAM, uncached device ranges, NX, W^X for the kernel image and JIT code, TLB generations)
-    src/acpi.rs           ACPI tables without AML: MADT, FADT, MCFG, HPET, SPCR, \_S5 and virtio-mmio by DSDT scan;
-                          MP table fallback
-    src/power.rs          ACPI S5 power off, reset chain, the fatal-error path (stop the other CPUs, reboot)
+    src/acpi.rs           ACPI tables without AML: MADT, FADT, MCFG, HPET, SPCR, \_S5, virtio-mmio and power button
+                          GPEs by DSDT/SSDT scan; MP table fallback
+    src/power.rs          ACPI S5 power off, reset chain, the power button (SCI), the fatal-error path (stop the other
+                          CPUs, reboot)
     src/percpu.rs         per-CPU state through the GS base (preemption request, idle flag, load, counters)
     src/smp.rs            application processors from the MADT: real-mode trampoline, targeted INIT-SIPI-SIPI, AP entry
     src/pvh.rs            hvm_start_info: E820 map (merged), command line, ACPI RSDP, named modules
@@ -126,6 +133,7 @@ metal/                    its own cargo workspace (own target dir); path-depends
     src/mem/              memory map (sorted, disjoint), frame allocator (bitmap), kernel heap, instance slots
     src/time.rs           TSC clock (kvmclock / CPUID 0x15 / HPET / PM timer / PIT), wall clock (kvmclock resync), guest
                           clock, preemption flag + JIT preemption word
+    src/sntp.rs           SNTP client (without kvmclock): servers, DNS names, step or slew
     src/pci.rs            config space via ECAM (MCFG) or 0xCF8/0xCFC, bus scan, 64-bit BARs, MSI and MSI-X, bridges
     src/dev/              NetDevice and BlockDevice traits, DMA regions, device probe, virtio-mmio slots; nvme.rs
                           (NVMe), ahci.rs (AHCI SATA); nic.rs: the drivers of metal/drivers behind NetDevice
@@ -133,8 +141,8 @@ metal/                    its own cargo workspace (own target dir); path-depends
     src/console/          the framebuffer text console (fb.rs, font.rs) and the UDP log console (udp.rs)
     src/watchdog.rs       the hardware watchdog: found at boot, armed by the main loop, petted every second
     src/virtio/           virtio transports (PCI modern + legacy, MMIO v1 + v2), split virtqueues, net and blk drivers
-    src/net.rs            smoltcp interface (DHCPv4 or static), listener pool, HTTP connections, UDP + extra listeners
-                          + TCP dial, smoltcp glue for any NetDevice
+    src/net.rs            smoltcp interface (DHCPv4 or static, IPv6 SLAAC, DNS), listener pool, HTTP connections, UDP
+                          + extra listeners + TCP dial, smoltcp glue for any NetDevice
     src/cluster.rs        cluster mode: gossip over UDP, peer links over TCP, desired-state fetch, placement, routing
     src/http.rs           HTTP/1.1 framing
     src/coro.rs           coroutines (context switch in asm), stack pool
@@ -147,7 +155,8 @@ metal/                    its own cargo workspace (own target dir); path-depends
                           ExitBootServices, jump), slots.rs (K10S-DATA's kernel slots through Block I/O)
   drivers/                k10-drivers (no_std + alloc, host tests against register models of the chips): the NIC
                           drivers (e1000e.rs, igc.rs, rtl8169.rs; ring.rs, the descriptor rings; ids.rs, the PCI
-                          ids) and the watchdog drivers (watchdog/: wdat.rs, itco.rs, esb.rs)
+                          ids), the watchdog drivers (watchdog/: wdat.rs, itco.rs, esb.rs) and power_button.rs
+                          (control-method power buttons' GPEs in AML)
   bootproto/              k10-bootproto (no_std, host unit tests): what k10boot, the Multiboot2 shim and the kernel
                           agree on: module names, framebuffer and EFI records, k10s.conf, the tier file, the boot
                           counter, E820; devices.rs, the supported-device table
@@ -156,7 +165,8 @@ metal/                    its own cargo workspace (own target dir); path-depends
                           mkinitramfs.py, linux-compare.sh, admin_auth.py (signs admin requests for curl),
                           dhcp_test.py (DHCP client against a scripted server), get-vmms.sh (pinned Firecracker and
                           Cloud Hypervisor), storage_test.py (K10S-DATA through power cuts), wdat.py (an ACPI WDAT
-                          table for q35's TCO watchdog)
+                          table for q35's TCO watchdog), platform_test.py (SNTP, DNS, power button, kept applies,
+                          IPv6: a scripted LAN over a QEMU socket netdev)
   build.sh run.sh test.sh cluster-test.sh vmm-test.sh qemu.sh (the QEMU platforms the scripts share)
 ```
 
@@ -183,9 +193,11 @@ the RSDP from `hvm_start_info` (else the EBDA and BIOS-area scan), then the XSDT
   the I/O APICs and the ISA interrupt overrides;
 * FADT: PM1a/PM1b control and event blocks, the GPE blocks, SMI_CMD/ACPI_ENABLE, the PM timer, the reset register,
   the hardware-reduced flag and sleep control register — always the 64-bit (X_) form when present;
-* DSDT and SSDTs, scanned byte by byte: `Name (_S5, Package () {a, b, ...})` for the S5 sleep types, and
+* DSDT and SSDTs, scanned byte by byte: `Name (_S5, Package () {a, b, ...})` for the S5 sleep types,
   `_HID "LNRO0005"` devices (virtio-mmio slots: the Memory32Fixed base and the Extended Interrupt of their `_CRS`),
-  which is how QEMU microvm and Firecracker describe them;
+  which is how QEMU microvm and Firecracker describe them, and the GPEs of control-method power buttons (a `_Lxx` or
+  `_Exx` method of `\_GPE` that runs `Notify (B, 0x80)` for a device B whose `_HID` is PNP0C0C;
+  `k10_drivers::power_button`);
 * MCFG (PCI Express ECAM windows), HPET (the timer block), SPCR (the console UART: 16550 in I/O or memory space).
 Without ACPI (QEMU `microvm,acpi=off`) an Intel MultiProcessor table gives the CPUs and I/O APICs, walked to its
 length (QEMU leaves its entry count at 0). Tables with a bad checksum are used, as Linux does. Parsing takes a few
@@ -199,7 +211,15 @@ OVMF `pc`). Firecracker has no ACPI power off; there a reset ends the VM, so pow
 reset register, then the 8042 reset line, then port 0xCF9, then a triple fault. Both first stop the other CPUs with
 an NMI. They are reached through `POST /_k10s/power` (body `off` or `reboot`; a signed admin request), which answers
 202, leaves the cluster (gossip `Left`, so peers do not wait for failure detection), waits 300 ms and acts, through
-`k10.exit_on_ready`, and after `k10.selftest`. A panic, a CPU exception or a configuration error prints its message,
+`k10.exit_on_ready`, and after `k10.selftest`. The power button does the same as `POST /_k10s/power off` (Tier 1's
+power button stops its node, which leaves the cluster, then powers off): the fixed-feature button (PM1 PWRBTN; the
+FADT's PWR_BUTTON flag clear) and the GPEs of control-method buttons are the only SCI sources the kernel enables
+(every other PM1 event and GPE off, statuses cleared); the SCI (FADT SCI_INT through the interrupt overrides; level,
+active low by default) goes to CPU 0, whose handler clears the event (and disables a level-triggered GPE, whose method
+would have cleared its source) and requests the power off; the console says `power: button pressed (fixed-feature)`
+or `(GPE 0x1d)`. Not covered: hardware-reduced platforms (the Generic Event Device's `_EVT` reads a register through
+AML: QEMU microvm, Cloud Hypervisor; Firecracker has no button), buttons whose notify is reached through other
+methods or an embedded controller's query (`_Qxx`, laptops). A panic, a CPU exception or a configuration error prints its message,
 stops the other CPUs and reboots after `k10.panic` seconds (default 10; 0 halts), so a boot-counting loader can fall
 back to another image. There is no QEMU-specific exit device anywhere.
 
@@ -282,8 +302,12 @@ remapping, in xAPIC mode, as Linux does (`k10.apic=xapic` keeps xAPIC wherever i
 kernel's own stop signal is counted and reported, not fatal. The TSC frequency comes from kvmclock (exact, with no
 calibration wait), else CPUID 0x15 when it states the crystal frequency, else 20 ms against the HPET, else the ACPI PM
 timer, else CPUID 0x16's nominal frequency, else 20 ms of PIT channel 0 (read back by latch commands: microVMs have no
-port 0x61 gate). A CPU without an invariant TSC is reported. Wall time comes from the kvmclock wall clock, else the
-CMOS RTC. The LAPIC timer is one-shot and tickless: TSC-deadline mode, or count mode calibrated against the TSC. It is
+port 0x61 gate). A CPU without an invariant TSC is reported. Wall time comes from the kvmclock wall clock (re-read
+every 10 s), else the CMOS RTC, which SNTP then corrects (sntp.rs, Tier 1's client: `k10.ntp` / k10s.conf `ntp`
+servers, else the lease's (option 42), else `pool.ntp.org`, names through DNS; first query once the interface has an
+address, then every 17 minutes, 1 s doubling to 64 s while none answers; offsets of 128 ms or more step the clock,
+smaller ones are slewed at 500 ppm; a reply must come from the address asked and echo the request's random transmit
+timestamp). With kvmclock the client stays off: the hypervisor's clock is followed. The LAPIC timer is one-shot and tickless: TSC-deadline mode, or count mode calibrated against the TSC. It is
 armed only for the next deadline: the end of the running invocation's slice or budget, a TCP timer, or a queue
 timeout. When idle the CPU `hlt`s, so an idle node takes no timer interrupts.
 
@@ -387,7 +411,11 @@ counts against k10boot's native boots, so the machine falls back to Tier 1.
 
 **TCP/IP and HTTP.** The interface address comes from DHCPv4 (smoltcp's client: renewal by unicast at T1,
 rebinding by broadcast at T2, a NAK or the end of the lease starts over; a lost lease removes the address) or from
-`k10.ip=` (static). The DISCOVER goes out as soon as the NIC is up; a single node applies its bundle meanwhile and
+`k10.ip=` (static). IPv6 is configured as Tier 1's Linux kernel does: the link-local address from the MAC (EUI-64),
+then SLAAC (router solicitations; the address of an advertised prefix, the router as default route; the console says
+`net: IPv6 ADDR/64 (SLAAC)`). Listening sockets take both families, so the services answer on IPv6 too; echo
+requests are answered in both. The NICs receive all multicast (IPv6 neighbor discovery). Names (the SNTP servers')
+resolve through smoltcp's DNS client (A records) against `k10.dns`, else the lease's name servers (option 6). The DISCOVER goes out as soon as the NIC is up; a single node applies its bundle meanwhile and
 waits up to 30 s for the lease before its ready line, a cluster member waits for it before it starts (it sends from
 that address, and advertises it unless told otherwise). Ingress is
 processed one packet at a time (`poll_ingress_single`), and the listening sockets are topped up after every
@@ -560,8 +588,9 @@ native kernel boots from the `metal` image of a release, the same image as Tier 
 falls back to Tier 1 by itself after two unhealthy native boots, so nothing here can leave the machine unbootable.
 
 1. **Find the Ethernet controller.** The board's specification, or `lspci -nn | grep -i ethernet` from any Linux
-   live USB, or let k10boot tell you: with `tier=auto` (step 4) it prints `tier auto: e1000e 8086:15bc at … is
-   supported: native kernel` or `tier auto: no supported network adapter (10ec:8126 at …): linux`. Supported:
+   live USB, or let k10boot tell you: the image's `tier=auto` prints `tier auto: e1000e 8086:15bc at … is
+   supported: native kernel` or `tier auto: no supported network adapter (10ec:8126 at …): linux` (from a USB stick
+   it then boots Tier 1 anyway: `K10S-DATA`'s controller is USB, which the native kernel does not drive). Supported:
    `metal/drivers/src/ids.rs` (Intel 82574L, I217/I218, I219, 82576, I350, I210/I211, I225/I226; Realtek
    RTL8111/8168/8411, RTL8125). Others boot Tier 1 (its `metal` kernel has Linux's drivers and the NIC firmware).
 2. **Firmware setup.** UEFI boot (CSM off: the screen console needs a UEFI GOP mode), Secure Boot off (or the
@@ -613,7 +642,9 @@ What only real hardware tells (STATUS.md step 13c): every item of the drivers' "
 exit, SMBus/MDIO handover and ME interplay on a live ME, K1 off, the descriptor-ring flush; I225/I226 PHY and EEE
 behaviour; Realtek revisions without their PHY tables and firmware; link up/down on a real cable; MSI delivery on
 real chipsets; the GOP framebuffer's format and write-combining on real GPUs; the TCO generations 2/4/6 (NO_REBOOT
-locks, the P2SB sideband) and firmware WDAT tables; booting the stick on real UEFI and BIOS firmware.
+locks, the P2SB sideband) and firmware WDAT tables; booting the stick on real UEFI and BIOS firmware; the power
+button on real firmware (the fixed-feature PWRBTN after the switch to ACPI mode, or the GPE of a control-method
+button; `k10.verbose` prints which one is armed); SNTP from a real NTP pool and IPv6 from a real router.
 
 ## Dependencies and why
 
@@ -695,9 +726,9 @@ and k10boot (UEFI); GRUB's Multiboot2 path boots `/k10s/metal.elf` only.
   one instance per placed service, `docs/NODE.md`); placement, shared with hosted nodes, charges each replica
   `2^memory` + 4 KiB against the guest's capacity, so placed services fit, but a busy service can take the frames
   another one needs for its first instance.
-* **Storage needs `K10S-DATA`.** Without it (or with `k10.data=none`) KV, the node id and the desired state live in
-  memory: a rebooted node fetches the desired state again from its peers. A single node outside cluster mode keeps
-  KV but not what `POST /_k10s/apply` installed (its bundle comes from the loader at each boot). Storage I/O and
+* **Storage needs `K10S-DATA`.** Without it (or with `k10.data=none`) KV, the node id, the desired state and a
+  single node's applied bundle live in memory: a rebooted node fetches the desired state again from its peers, a
+  single node starts again from its boot bundle. Storage I/O and
   checkpoints run on CPU 0 (a checkpoint of a large store stalls its network loop meanwhile); NVMe uses one I/O
   queue, AHCI no NCQ. Volatile write caches, firmware quirks and power loss on real disks are untested (QEMU only).
 * **Cluster mode.** A guest that is killed rather than powered off is detected as failed. KV is node-local, as on
@@ -708,7 +739,9 @@ and k10boot (UEFI); GRUB's Multiboot2 path boots `/k10s/metal.elf` only.
   leaving the cluster.
 * **JIT code is page-granular per module** (W^X forbids appending to an executable page): a 300-byte module takes a
   4 KiB page; modules deployed several times share one copy by code hash.
-* **IPv4 only, no TLS.** No DNS resolver (addresses are given as IPs).
+* **No TLS; IPv6 by SLAAC only.** No DHCPv6 and no RDNSS (name servers come from DHCPv4 or `k10.dns`); names
+  resolve to IPv4 addresses (A records) and cluster addresses are IPv4 (`advertise`, `join`); one SLAAC prefix;
+  neighbor discovery without duplicate address detection; the UDP console is IPv4.
 * **NICs: virtio, Intel e1000e/igb/igc, Realtek r8169-class; disks: virtio-blk, NVMe and AHCI.** Broadcom tg3, 10 GbE
   and cloud NICs later (M3, M4). One queue pair, no offloads, no jumbo frames, no VLANs. The Intel and Realtek
   drivers are tested under QEMU (82574L, 82576) and against register models (I219 with ULP and the ME, I225,
@@ -716,11 +749,13 @@ and k10boot (UEFI); GRUB's Multiboot2 path boots `/k10s/metal.elf` only.
   APIC lines; PCI devices need MSI-X or MSI (INTx routing would need `_PRT`, which is AML): a device without them is
   polled.
 * **ACPI without AML.** `_PTS`, `_PRT`, `_OSC` and every other method are never run: S5 works where `\_S5` is a plain
-  package (QEMU's, and most firmware's), the power button and other ACPI events are not handled, devices described
-  only in AML other than virtio-mmio slots are not found. Real-firmware quirks (x2APIC handover, broken tables,
+  package (QEMU's, and most firmware's); of the ACPI events only the power button is handled (fixed-feature, or a GPE
+  whose own method notifies it: "Power"); devices described only in AML other than virtio-mmio slots are not found. Real-firmware quirks (x2APIC handover, broken tables,
   MTRR/PAT setups, `_PTS`-dependent S5) are untested (QEMU only).
-* **Wall-clock accuracy.** Without kvmclock (bare metal), the wall clock runs on the TSC calibrated at boot (20 ms
-  against the HPET or PM timer, tens of ppm) from the CMOS RTC; there is no NTP client yet.
+* **Wall-clock accuracy.** Without kvmclock (bare metal), the wall clock starts from the CMOS RTC (whole seconds; the
+  RTC is never written back) and runs on the TSC calibrated at boot (20 ms against the HPET or PM timer, tens of
+  ppm) between SNTP corrections (every 17 minutes). SNTP is unauthenticated (as on Tier 1): an on-path attacker can
+  move the clock.
 * **Slow serial console.** Logging costs about 15 µs per byte under QEMU (one host `write()` per byte), so boot is
   quiet unless `k10.verbose` is given. The framebuffer console has no scrollback and no keyboard; the UDP console
   loses what a panic prints before its first datagram went out (no destination MAC address yet).

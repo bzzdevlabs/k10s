@@ -9,10 +9,17 @@
 //!   control), then a triple fault.
 //! * Fatal errors and panics stop the other CPUs (NMI), print, wait `k10.panic` seconds (default 10; 0 = halt
 //!   forever) and reboot, so a boot-counting loader can fall back to another image.
+//! * The power button, as Tier 1's: the main loop leaves the cluster, then powers off. The fixed-feature button (PM1
+//!   PWRBTN, unless the FADT says the button is a control method) and the GPEs whose AML method notifies a power
+//!   button device (`k10_drivers::power_button`) are the only SCI sources enabled; the SCI handler takes their events
+//!   without running AML (a level-triggered GPE is disabled once taken, as its method would have cleared its source).
+//!   Hardware-reduced platforms (Generic Event Device) and buttons behind an embedded controller are not covered.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::acpi::{self, Gas};
+use crate::sync::SetOnce;
+use k10_drivers::power_button::Gpe;
 use crate::arch::{self, inb, outb};
 use crate::kprintln;
 
@@ -22,6 +29,7 @@ pub static STOPPING: AtomicBool = AtomicBool::new(false);
 static PANIC_REBOOT_S: AtomicU64 = AtomicU64::new(10);
 
 const PM1_SCI_EN: u64 = 1;
+const PM1_PWRBTN: u64 = 1 << 8;
 const PM1_SLP_EN: u64 = 1 << 13;
 const SLP_TYP_SHIFT: u32 = 10;
 
@@ -167,6 +175,142 @@ fn disable_gpes(blk: Gas, len: u8) {
 fn clear_pm1_status(evt: Gas) {
     if evt.valid() {
         Gas { bits: 16, access: 2, ..evt }.write(0xFFFF);
+    }
+}
+
+/// The power button's events the SCI handler takes: the fixed-feature button, the GPEs of control-method ones.
+struct Button {
+    fixed: bool,
+    gpes: alloc::vec::Vec<Gpe>,
+}
+
+static BUTTON: SetOnce<Button> = SetOnce::new();
+/// Set by the SCI handler on a press: 1 + the GPE number, or u32::MAX for the fixed-feature button; 0 = none.
+static PRESSED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// The PM1 status and enable registers of an event block (16 bits each, the enable half after the status half).
+fn pm1(evt: Gas, len: u8) -> (Gas, Gas) {
+    let sts = Gas { bits: 16, access: 2, ..evt };
+    (sts, Gas { addr: evt.addr + (len / 2).max(2) as u64, ..sts })
+}
+
+/// GPE `n`'s status and enable bytes and its bit, in the GPE0 block or else the GPE1 block (numbered from
+/// GPE1_BASE).
+fn gpe_reg(f: &acpi::Fadt, n: u16) -> Option<(Gas, Gas, u8)> {
+    let (blk, len, i) = if (n as usize) < f.gpe0_len as usize / 2 * 8 {
+        (f.gpe0, f.gpe0_len, n as usize)
+    } else {
+        let i = (n as usize).checked_sub(f.gpe1_base as usize)?;
+        (f.gpe1, f.gpe1_len, i)
+    };
+    let half = len as usize / 2;
+    if !blk.valid() || blk.space == acpi::SPACE_PCI || i >= half * 8 {
+        return None;
+    }
+    let byte = |at: usize| Gas { addr: blk.addr + at as u64, bits: 8, access: 1, ..blk };
+    Some((byte(i / 8), byte(half + i / 8), 1 << (i % 8)))
+}
+
+/// Enables the power button's events and routes the SCI to this CPU (CPU 0, once the I/O APICs are up).
+pub fn init_button() {
+    let Some(t) = acpi::get() else { return };
+    let Some(f) = t.fadt.filter(|f| f.pm1a_evt.valid() && !t.hw_reduced()) else {
+        if crate::verbose() {
+            kprintln!("power button: none (no ACPI PM1 event block{})", if t.hw_reduced() { ": hardware-reduced ACPI" } else { "" });
+        }
+        return;
+    };
+    let fixed = f.flags & acpi::FADT_PWR_BUTTON == 0;
+    let gpes: alloc::vec::Vec<Gpe> = t.power_gpes.iter().filter(|g| gpe_reg(&f, g.number).is_some()).copied().collect();
+    if !fixed && gpes.is_empty() {
+        kprintln!("power button: a control method one whose GPE the ACPI tables do not show: not handled");
+        return;
+    }
+    acpi_mode(&f);
+    // Nothing else raises the SCI: every PM1 event and GPE off, their status cleared, then the button's on.
+    for (evt, len) in [(f.pm1a_evt, f.pm1_evt_len), (f.pm1b_evt, f.pm1_evt_len)] {
+        if evt.valid() {
+            pm1(evt, len).1.write(0);
+            clear_pm1_status(evt);
+        }
+    }
+    for (blk, len) in [(f.gpe0, f.gpe0_len), (f.gpe1, f.gpe1_len)] {
+        disable_gpes(blk, len);
+        if blk.valid() && blk.space != acpi::SPACE_PCI {
+            for i in 0..len as u64 / 2 {
+                Gas { addr: blk.addr + i, bits: 8, access: 1, ..blk }.write(0xFF);
+            }
+        }
+    }
+    // The SCI is shared, level-triggered and active low unless an interrupt override says otherwise.
+    let (gsi, mut flags) = t.isa_irq(f.sci_int as u8);
+    if flags & 3 == 0 {
+        flags |= 3;
+    }
+    if (flags >> 2) & 3 == 0 {
+        flags |= 3 << 2;
+    }
+    if !crate::arch::ioapic::route(gsi, crate::arch::idt::VEC_SCI, crate::arch::apic::id(), flags) {
+        kprintln!("power button: cannot route the SCI (IRQ {}, GSI {gsi}): not handled", f.sci_int);
+        return;
+    }
+    BUTTON.set(Button { fixed, gpes });
+    let b = BUTTON.get().expect("just set");
+    if fixed {
+        for evt in [f.pm1a_evt, f.pm1b_evt].into_iter().filter(Gas::valid) {
+            pm1(evt, f.pm1_evt_len).1.write(PM1_PWRBTN);
+        }
+    }
+    for g in &b.gpes {
+        if let Some((_, en, bit)) = gpe_reg(&f, g.number) {
+            en.write(en.read() | bit as u64);
+        }
+    }
+    if crate::verbose() {
+        let mut what = alloc::string::String::from(if fixed { "fixed-feature" } else { "" });
+        for g in &b.gpes {
+            what.push_str(&alloc::format!("{}GPE {:#04x} ({})", if what.is_empty() { "" } else { ", " }, g.number, if g.level { "level" } else { "edge" }));
+        }
+        kprintln!("power button: {what}, SCI on IRQ {} (GSI {gsi})", f.sci_int);
+    }
+}
+
+/// The SCI (interrupt context, CPU 0): takes the button's events and asks the main loop to power off.
+pub fn on_sci() {
+    let (Some(b), Some(f)) = (BUTTON.get(), acpi::get().and_then(|t| t.fadt)) else { return };
+    let mut pressed = 0;
+    if b.fixed {
+        for evt in [f.pm1a_evt, f.pm1b_evt].into_iter().filter(Gas::valid) {
+            let (sts, en) = pm1(evt, f.pm1_evt_len);
+            if sts.read() & en.read() & PM1_PWRBTN != 0 {
+                sts.write(PM1_PWRBTN);
+                pressed = u32::MAX;
+            }
+        }
+    }
+    for g in &b.gpes {
+        let Some((sts, en, bit)) = gpe_reg(&f, g.number) else { continue };
+        let bit = bit as u64;
+        if sts.read() & en.read() & bit != 0 {
+            if g.level {
+                en.write(en.read() & !bit);
+            }
+            sts.write(bit);
+            pressed = 1 + g.number as u32;
+        }
+    }
+    if pressed != 0 {
+        PRESSED.store(pressed, Ordering::Relaxed);
+        request(false);
+    }
+}
+
+/// A press since the last call, described for the console.
+pub fn take_button_press() -> Option<alloc::string::String> {
+    match PRESSED.swap(0, Ordering::Relaxed) {
+        0 => None,
+        u32::MAX => Some("fixed-feature".into()),
+        n => Some(alloc::format!("GPE {:#04x}", n - 1)),
     }
 }
 

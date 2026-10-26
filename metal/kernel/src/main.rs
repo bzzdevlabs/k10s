@@ -44,6 +44,7 @@ mod osupdate;
 mod storage;
 mod serial;
 mod smp;
+mod sntp;
 mod sync;
 mod time;
 mod virtio;
@@ -239,6 +240,7 @@ extern "C" fn kmain() -> ! {
 
     watchdog::init(bi.arg("k10.watchdog"), tables.and_then(|t| t.wdat.as_deref()))
         .unwrap_or_else(|e| fatal(format_args!("k10.watchdog={}: {e}", bi.arg("k10.watchdog").unwrap_or(""))));
+    power::init_button();
     // Test modes: `k10.selftest` runs the self tests; `=watchdog` hangs with the watchdog armed; `=panic` panics
     // once the UDP console has sent a datagram (its panic path).
     let test_mode = bi.arg("k10.selftest");
@@ -291,6 +293,11 @@ extern "C" fn kmain() -> ! {
     let seed = arch::rdrand().unwrap_or(arch::rdtsc());
     let mut net = net::Net::new(nic, limits, seed, ip);
     console::udp::set_nic(&mut net.dev);
+    if let Some(v) = bi.arg("k10.dns") {
+        let servers = v.split(',').map(|a| a.trim().parse()).collect::<Result<_, _>>();
+        net.set_dns(servers.unwrap_or_else(|_| fatal(format_args!("k10.dns={v}: want A.B.C.D,…"))));
+    }
+    sntp::init(bi.arg("k10.ntp"));
     // DHCP: the DISCOVER goes out now; the lease arrives while the bundle is applied. A cluster member waits for it
     // before it starts (it sends from, and may advertise, that address); a single node before the ready line.
     let cluster_cfg = cluster::config(&bi);
@@ -330,32 +337,41 @@ extern "C" fn kmain() -> ! {
         None => false,
     };
     bootcfg::wipe_unused_keys(&bi);
-    let apply_boot = |bytes: &[u8]| -> Result<(), alloc::string::String> {
+    let apply_boot = |bytes: &[u8]| -> Result<alloc::string::String, alloc::string::String> {
         if clustered {
             match cluster::operator_apply(bytes) {
-                Some((200, _)) => Ok(()),
+                Some((200, r)) => Ok(r),
                 Some((_, e)) => Err(e),
                 None => Err("cluster not running".into()),
             }
         } else {
-            runtime::apply(bytes).map(|_| ())
+            runtime::apply(bytes)
         }
     };
 
-    // Deployment: the loader's bundle (k10s.bundle, or QEMU's -initrd), else the embedded one, else wait for
-    // POST /_k10s/apply.
+    // Deployment: a single node first installs the bundle K10S-DATA kept from its last apply; then the loader's
+    // bundle (k10s.bundle, or QEMU's -initrd), else the embedded one, goes on top as an apply would (an older one is
+    // refused), else the node waits for POST /_k10s/apply.
     let t_apply0 = arch::rdtsc();
     let mut source = if clustered { "cluster" } else { "none" };
+    if let Some(kept) = storage::file(runtime::BUNDLE_FILE).filter(|_| !clustered) {
+        match runtime::reload(&kept) {
+            Ok(_) => source = "data",
+            Err(e) => kprintln!("K10S-DATA's {} not installed: {e}", runtime::BUNDLE_FILE),
+        }
+    }
     if let Some(m) = bootcfg::bundle(&bi) {
         // SAFETY: the module range is reserved in the frame allocator until released below.
         let bytes = unsafe { core::slice::from_raw_parts(m.paddr as *const u8, m.size as usize) };
         match apply_boot(bytes) {
+            Ok(r) if r.contains("\"unchanged\":true") => {}
             Ok(_) => source = if m.name().is_empty() { "initrd" } else { "loader" },
             Err(e) => kprintln!("boot bundle ({}) rejected: {e}", if m.name().is_empty() { "initrd" } else { m.name() }),
         }
         frames::release_module(m.paddr, m.size);
     } else if !EMBEDDED_BUNDLE.is_empty() {
         match apply_boot(EMBEDDED_BUNDLE) {
+            Ok(r) if r.contains("\"unchanged\":true") => {}
             Ok(_) => source = "embedded",
             Err(e) => kprintln!("embedded bundle rejected: {e}"),
         }
@@ -467,6 +483,9 @@ fn main_loop(net: &mut net::Net, spin_ns: u64, advertised: Option<smoltcp::wire:
             }
         }
         if let Some((reboot, at)) = power::requested() {
+            if let Some(b) = power::take_button_press() {
+                kprintln!("power: button pressed ({b}): leaving the cluster, then powering off");
+            }
             if !core::mem::replace(&mut leaving, true) {
                 cluster::leave();
             }
@@ -480,6 +499,7 @@ fn main_loop(net: &mut net::Net, spin_ns: u64, advertised: Option<smoltcp::wire:
         }
         time::resync_wall_if_due();
         net.poll_ingress();
+        sntp::poll(net);
         net.service(&mut runtime::submit);
         cluster::poll(net);
         runtime::run_cpu0();
@@ -533,6 +553,9 @@ fn idle(net: &mut net::Net) {
         wait_ns = wait_ns.min(t.saturating_sub(time::now_ns()));
     }
     if let Some(t) = storage::next_deadline_ns() {
+        wait_ns = wait_ns.min(t.saturating_sub(time::now_ns()));
+    }
+    if let Some(t) = sntp::next_deadline_ns() {
         wait_ns = wait_ns.min(t.saturating_sub(time::now_ns()));
     }
     // A NIC without interrupts is polled every millisecond.

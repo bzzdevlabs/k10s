@@ -16,7 +16,9 @@
 #                   in an ACPI power off; the hardware watchdogs (i6300ESB, ICH9 TCO, ACPI WDAT) reset a kernel that
 #                   hangs on purpose; the boot protocol's unit tests (metal/bootproto: k10s.conf, the tier file, boot
 #                   counter, E820) and the drivers' register-model tests (metal/drivers: e1000e/I219, igb/igc,
-#                   r8169/r8125, TCO/ESB/WDAT)
+#                   r8169/r8125, TCO/ESB/WDAT, control-method power buttons); the platform services
+#                   (metal/tools/platform_test.py: SNTP and DNS on a scripted LAN, the clock stepped from 2001, the
+#                   fixed-feature and GPE power buttons, single-node applies kept, IPv6 SLAAC)
 #   metal           metal/test.sh and metal/cluster-test.sh end-to-end (TEST_PORT, default 18090)
 #   metal-vmm       metal/vmm-test.sh: the kernel on Firecracker and Cloud Hypervisor (pinned downloads; sudo creates
 #                   the tap device the guests use)
@@ -197,6 +199,8 @@ for suite in "$@"; do
         qemu_watchdog esb pc 3 "i6300ESB" -device i6300esb
         qemu_watchdog tco q35 5 "Intel TCO (ICH/PCH, LPC)"
         qemu_watchdog wdat q35 5 "ACPI WDAT" -acpitable file=metal/out/wdat.bin
+        run python3 metal/tools/platform_test.py --kernel metal/out/k10-metal.elf --bundle metal/out/bundle.k10b \
+            --mkbundle metal/target/release/mkbundle --out metal/out
         ;;
     metal)
         run env -u CARGO_TARGET_DIR EMBED=1 metal/build.sh

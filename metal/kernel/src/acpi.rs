@@ -5,7 +5,8 @@
 //! * DSDT/SSDT: `\_S5` sleep type values, found by a byte-pattern scan (`Name (_S5, Package () {a, b, ...})`);
 //! * MCFG: PCI Express ECAM windows; HPET: the timer block; SPCR: the console UART;
 //! * DSDT/SSDT: virtio-mmio slots (`_HID "LNRO0005"` devices: the first Memory32Fixed and Extended Interrupt
-//!   descriptors of their `_CRS`), also by pattern scan, for QEMU microvm and Firecracker.
+//!   descriptors of their `_CRS`), also by pattern scan, for QEMU microvm and Firecracker;
+//! * DSDT/SSDT: the GPEs of control-method power buttons (`k10_drivers::power_button`).
 //! Without ACPI, an Intel MultiProcessor table (QEMU `microvm,acpi=off`, old hypervisors) gives the CPUs and I/O
 //! APICs. Tables with a bad checksum are used anyway (as Linux does) and reported with `k10.verbose`.
 
@@ -148,11 +149,14 @@ impl Gas {
 /// FADT flags.
 pub const FADT_TMR_VAL_EXT: u32 = 1 << 8;
 pub const FADT_RESET_REG_SUP: u32 = 1 << 10;
+/// Set: the power button is a control method device (or there is none); clear: the fixed-feature one.
+pub const FADT_PWR_BUTTON: u32 = 1 << 4;
 pub const FADT_HW_REDUCED: u32 = 1 << 20;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Fadt {
     pub flags: u32,
+    pub sci_int: u16,
     pub smi_cmd: u32,
     pub acpi_enable: u8,
     pub pm1a_evt: Gas,
@@ -165,6 +169,7 @@ pub struct Fadt {
     pub gpe0_len: u8,
     pub gpe1: Gas,
     pub gpe1_len: u8,
+    pub gpe1_base: u8,
     pub reset: Gas,
     pub reset_value: u8,
     pub sleep_control: Gas,
@@ -199,6 +204,7 @@ pub struct Tables {
     /// `\_S5` SLP_TYPa / SLP_TYPb.
     pub s5: Option<(u8, u8)>,
     pub virtio_mmio: Vec<crate::dev::mmio::MmioSlot>,
+    pub power_gpes: Vec<k10_drivers::power_button::Gpe>,
     /// The Watchdog Action Table (watchdog.rs).
     pub wdat: Option<Vec<u8>>,
     pub bad_checksums: usize,
@@ -333,7 +339,7 @@ fn parse(rsdp: u64, t: &mut Tables) {
     let Some((rt, entry)) = root.or_else(|| table(u32_at(r, 16) as u64, &mut bad).filter(|t| &t[..4] == b"RSDT").map(|t| (t, 4))) else {
         return;
     };
-    let mut ssdts = Vec::new();
+    let mut ssdts: Vec<&[u8]> = Vec::new();
     for o in (36..rt.len()).step_by(entry) {
         let a = if entry == 8 { u64_at(rt, o) } else { u32_at(rt, o) as u64 };
         let Some(b) = table(a, &mut bad) else { continue };
@@ -368,13 +374,16 @@ fn parse(rsdp: u64, t: &mut Tables) {
             _ => {}
         }
     }
+    let mut aml: Vec<&[u8]> = ssdts.iter().map(|b| &b[36..]).collect();
     if let Some(f) = t.fadt {
         if let Some(d) = table(f.dsdt, &mut bad) {
             t.signatures.push(*b"DSDT");
             t.s5 = find_s5(&d[36..]);
             find_virtio_mmio(&d[36..], &mut t.virtio_mmio);
+            aml.push(&d[36..]);
         }
     }
+    t.power_gpes = k10_drivers::power_button::gpes(&aml);
     if t.s5.is_none() {
         t.s5 = ssdts.iter().find_map(|b| find_s5(&b[36..]));
     }
@@ -443,6 +452,7 @@ fn fadt(b: &[u8]) -> Fadt {
     let pm1_cnt_len = b.get(89).copied().unwrap_or(2).min(2);
     let mut f = Fadt {
         flags,
+        sci_int: u16_at(b, 46),
         smi_cmd: u32_at(b, 48),
         acpi_enable: b.get(52).copied().unwrap_or(0),
         pm1_evt_len: b.get(88).copied().unwrap_or(0),
@@ -451,6 +461,7 @@ fn fadt(b: &[u8]) -> Fadt {
         pm_tmr: reg(208, 76, 4),
         gpe0_len: b.get(92).copied().unwrap_or(0),
         gpe1_len: b.get(93).copied().unwrap_or(0),
+        gpe1_base: b.get(94).copied().unwrap_or(0),
         dsdt: if has(148) && u64_at(b, 140) != 0 { u64_at(b, 140) } else { u32_at(b, 40) as u64 },
         ..Fadt::default()
     };

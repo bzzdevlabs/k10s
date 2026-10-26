@@ -1,8 +1,12 @@
 //! TCP/IP (smoltcp over a [`NetDevice`]) and the HTTP/1.1 ingress connections on port 80.
 //!
-//! * IPv4 only: DHCPv4 by default (smoltcp's client: renews at T1, rebinds at T2, starts over on a NAK or when
-//!   the lease ends), or a static `k10.ip=A.B.C.D/P[,GATEWAY]`. Boot waits up to 30 s for the first lease (main.rs),
-//!   since a cluster node sends from, and advertises, its address.
+//! * IPv4: DHCPv4 by default (smoltcp's client: renews at T1, rebinds at T2, starts over on a NAK or when the lease
+//!   ends), or a static `k10.ip=A.B.C.D/P[,GATEWAY]`. Boot waits up to 30 s for the first lease (main.rs), since a
+//!   cluster node sends from, and advertises, its address. The lease's name servers and NTP servers (options 6 and
+//!   42) are kept for the SNTP client (sntp.rs); `k10.dns=A.B.C.D,…` replaces the name servers.
+//! * IPv6, as Tier 1's kernel does it: the link-local address from the MAC (EUI-64), and SLAAC: router
+//!   solicitations, then the address of an advertised prefix and the router as default route (smoltcp). Listening
+//!   sockets take both families; cluster addresses and names stay IPv4. Echo requests are answered in both.
 //! * smoltcp needs one socket in LISTEN state per connection it can accept. Instead of a large idle pool, the
 //!   kernel processes ingress one packet at a time (`poll_ingress_single`) and tops the listening sockets back
 //!   up after every packet, so a burst of SYNs never meets an empty backlog.
@@ -19,9 +23,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use alloc::boxed::Box;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
-use smoltcp::socket::{dhcpv4, tcp, udp};
+use smoltcp::socket::{dhcpv4, dns, tcp, udp};
 use smoltcp::time::{Duration, Instant};
-use smoltcp::wire::{EthernetAddress, HardwareAddress, IpCidr, Ipv4Address, Ipv4Cidr};
+use smoltcp::wire::{EthernetAddress, HardwareAddress, IpCidr, Ipv4Address, Ipv4Cidr, Ipv6Address, Ipv6Cidr};
 
 use crate::dev::{NetDevice, NetRx, NetTx};
 use crate::http::{self, Method, Parse};
@@ -234,19 +238,32 @@ pub struct Net {
     link_at: u64,
     /// When the link went down after having been up (`None`: up, or never up yet).
     link_down_since: Option<u64>,
+    /// Name servers: `k10.dns`, else the lease's; NTP servers of the lease.
+    dns_conf: Option<Vec<Ipv4Address>>,
+    lease_dns: Vec<Ipv4Address>,
+    lease_ntp: Vec<Ipv4Address>,
+    /// The DNS client's socket (made by the first query).
+    dns: Option<SocketHandle>,
+    /// IPv6 addresses beyond the link-local one, as last reported.
+    ipv6: Vec<Ipv6Cidr>,
 }
+
+/// DHCP options asked for: netmask, router, name servers, NTP servers.
+const DHCP_PARAMS: &[u8] = &[1, 3, 6, 42];
 
 /// How often the link state is read (a register read; a VM exit under QEMU).
 const LINK_POLL_NS: u64 = 500_000_000;
 /// A link that comes back after being down this long may lead to another network: DHCP starts over.
 const LINK_OUTAGE_NS: u64 = 3_000_000_000;
 
-/// smoltcp endpoint of an IPv4 socket address (IPv6 is not configured).
 fn endpoint(a: SocketAddr) -> Option<smoltcp::wire::IpEndpoint> {
-    match a {
-        SocketAddr::V4(v4) => Some(v4.into()),
-        SocketAddr::V6(_) => None,
-    }
+    Some(smoltcp::wire::IpEndpoint::new(a.ip().into(), a.port()))
+}
+
+/// fe80::/64 with the MAC's modified EUI-64 interface identifier.
+fn link_local(mac: [u8; 6]) -> Ipv6Address {
+    let w = |a: u8, b: u8| u16::from_be_bytes([a, b]);
+    Ipv6Address::new(0xfe80, 0, 0, 0, w(mac[0] ^ 2, mac[1]), w(mac[2], 0xff), w(0xfe, mac[3]), w(mac[4], mac[5]))
 }
 
 fn now() -> Instant {
@@ -257,7 +274,11 @@ impl Net {
     pub fn new(mut dev: Box<dyn NetDevice>, limits: Limits, seed: u64, ip: IpConfig) -> Net {
         let mut cfg = Config::new(HardwareAddress::Ethernet(EthernetAddress(dev.mac())));
         cfg.random_seed = seed;
-        let iface = Interface::new(cfg, &mut Phy(&mut *dev), now());
+        cfg.slaac = true;
+        let mut iface = Interface::new(cfg, &mut Phy(&mut *dev), now());
+        iface.update_ip_addrs(|a| {
+            let _ = a.push(IpCidr::Ipv6(Ipv6Cidr::new(link_local(dev.mac()), 64)));
+        });
         let mut net = Net {
             dev,
             iface,
@@ -277,6 +298,11 @@ impl Net {
             link: None,
             link_at: 0,
             link_down_since: None,
+            dns_conf: None,
+            lease_dns: Vec::new(),
+            lease_ntp: Vec::new(),
+            dns: None,
+            ipv6: Vec::new(),
         };
         match ip {
             IpConfig::Static { addr, gateway } => net.configure(Some((addr, gateway))),
@@ -284,6 +310,7 @@ impl Net {
                 let mut d = dhcpv4::Socket::new();
                 // Keeps the last offer/ack, for its lease time (one buffer for the node's lifetime).
                 d.set_receive_packet_buffer(alloc::vec![0u8; 1500].leak());
+                d.set_parameter_request_list(DHCP_PARAMS);
                 net.dhcp = Some(net.sockets.add(d));
             }
         }
@@ -291,10 +318,10 @@ impl Net {
         net
     }
 
-    /// Sets (or with `None` removes) the interface address and default route.
+    /// Sets (or with `None` removes) the interface's IPv4 address and default route.
     fn configure(&mut self, c: Option<(Ipv4Cidr, Option<Ipv4Address>)>) {
         self.iface.update_ip_addrs(|a| {
-            a.clear();
+            a.retain(|c| !matches!(c, IpCidr::Ipv4(_)));
             if let Some((addr, _)) = c {
                 let _ = a.push(IpCidr::Ipv4(addr));
             }
@@ -312,6 +339,29 @@ impl Net {
         self.addr
     }
 
+    /// Reports IPv6 addresses that SLAAC added or that expired.
+    fn poll_ipv6(&mut self) {
+        let now: Vec<Ipv6Cidr> = self
+            .iface
+            .ip_addrs()
+            .iter()
+            .filter_map(|c| match c {
+                IpCidr::Ipv6(c) if !c.address().is_unicast_link_local() => Some(*c),
+                _ => None,
+            })
+            .collect();
+        if now == self.ipv6 {
+            return;
+        }
+        for a in now.iter().filter(|a| !self.ipv6.contains(a)) {
+            kprintln!("net: IPv6 {a} (SLAAC)");
+        }
+        for a in self.ipv6.iter().filter(|a| !now.contains(a)) {
+            kprintln!("net: IPv6 {a} expired");
+        }
+        self.ipv6 = now;
+    }
+
     /// Applies DHCP client events (lease, change of address, lease lost).
     fn poll_dhcp(&mut self) {
         let Some(h) = self.dhcp else { return };
@@ -322,6 +372,13 @@ impl Net {
                     .packet
                     .and_then(|p| smoltcp::wire::DhcpRepr::parse(&p).ok().and_then(|r| r.lease_duration))
                     .map_or(alloc::string::String::new(), |s| alloc::format!(", lease {s} s"));
+                self.lease_dns = c.dns_servers.iter().copied().collect();
+                self.lease_ntp = c.packet.map_or(Vec::new(), |p| {
+                    p.options()
+                        .filter(|o| o.kind == 42)
+                        .flat_map(|o| o.data.chunks_exact(4).map(|a| Ipv4Address::new(a[0], a[1], a[2], a[3])))
+                        .collect()
+                });
                 if self.addr == Some(c.address) && self.gateway == c.router {
                     // A renewal (the packet changed, not the configuration).
                     kprintln!("net: DHCP lease of {} renewed{lease}", c.address.address());
@@ -339,10 +396,57 @@ impl Net {
                 if let Some(a) = self.addr {
                     kprintln!("net: DHCP lease of {} lost", a.address());
                 }
+                self.lease_dns.clear();
+                self.lease_ntp.clear();
                 None
             }
         };
         self.configure(ev);
+    }
+
+    /// `k10.dns`: name servers that replace the lease's.
+    pub fn set_dns(&mut self, servers: Vec<Ipv4Address>) {
+        self.dns_conf = Some(servers);
+    }
+
+    /// The NTP servers of the DHCP lease (option 42).
+    pub fn lease_ntp(&self) -> &[Ipv4Address] {
+        &self.lease_ntp
+    }
+
+    /// Starts resolving `name` (its IPv4 addresses) through the name servers.
+    pub fn resolve(&mut self, name: &str) -> Result<dns::QueryHandle, &'static str> {
+        let servers: Vec<smoltcp::wire::IpAddress> =
+            self.dns_conf.as_ref().unwrap_or(&self.lease_dns).iter().map(|&a| a.into()).collect();
+        if servers.is_empty() {
+            return Err("no name server");
+        }
+        let h = match self.dns {
+            Some(h) => h,
+            None => *self.dns.insert(self.sockets.add(dns::Socket::new(&[], vec![None, None]))),
+        };
+        let s = self.sockets.get_mut::<dns::Socket>(h);
+        s.update_servers(&servers);
+        s.start_query(self.iface.context(), name, smoltcp::wire::DnsQueryType::A).map_err(|e| match e {
+            dns::StartQueryError::NoFreeSlot => "too many queries",
+            _ => "not a valid name",
+        })
+    }
+
+    /// The answer to a query, once there is one (then the query is gone).
+    pub fn resolved(&mut self, q: dns::QueryHandle) -> Option<Result<Vec<core::net::IpAddr>, &'static str>> {
+        let s = self.sockets.get_mut::<dns::Socket>(self.dns?);
+        match s.get_query_result(q) {
+            Ok(a) => Some(Ok(a.iter().map(|&a| a.into()).collect())),
+            Err(dns::GetQueryResultError::Pending) => None,
+            Err(dns::GetQueryResultError::Failed) => Some(Err("no answer")),
+        }
+    }
+
+    pub fn cancel_resolve(&mut self, q: dns::QueryHandle) {
+        if let Some(h) = self.dns {
+            self.sockets.get_mut::<dns::Socket>(h).cancel_query(q);
+        }
     }
 
     pub fn open_conns(&self) -> usize {
@@ -441,6 +545,13 @@ impl Net {
         let mut s = udp::Socket::new(buf(), buf());
         s.bind(port).ok()?;
         Some(self.sockets.add(s))
+    }
+
+    /// A UDP socket on the next ephemeral port, as [`Net::udp_bind`].
+    pub fn udp_bind_ephemeral(&mut self, packets: usize, mtu: usize) -> Option<SocketHandle> {
+        let port = self.next_local_port;
+        self.next_local_port = if port >= 65535 { 49152 } else { port + 1 };
+        self.udp_bind(port, packets, mtu)
     }
 
     /// Next received datagram, handed to `f` with its source.
@@ -580,6 +691,7 @@ impl Net {
             self.refill_extra();
         }
         self.poll_dhcp();
+        self.poll_ipv6();
         any
     }
 

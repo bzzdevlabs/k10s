@@ -1270,9 +1270,27 @@ pub fn housekeeping() {
 
 // --- deployment ----------------------------------------------------------------------------------------------
 
+/// A single node's last applied bundle in K10S-DATA (Tier 1's file: a machine switched between tiers keeps it).
+pub const BUNDLE_FILE: &str = "bundle.k10b";
+
 /// Applies a bundle: decode, validate every module, compute placement, then swap the service table atomically
-/// (in-flight invocations finish on the old services; KV namespaces are kept by service name).
+/// (in-flight invocations finish on the old services; KV namespaces are kept by service name). With K10S-DATA the
+/// bundle is kept there before the call returns, and the next boot installs it again ([`reload`]).
 pub fn apply(bytes: &[u8]) -> Result<String, String> {
+    let r = install_bundle(bytes)?;
+    if crate::storage::available() && !r.contains("\"unchanged\":true") {
+        crate::storage::write_files(&[(BUNDLE_FILE, Some(bytes))])
+            .map_err(|e| alloc::format!("applied, but not kept across reboots: {e}"))?;
+    }
+    Ok(r)
+}
+
+/// Installs the bundle K10S-DATA kept (at boot, before any other).
+pub fn reload(bytes: &[u8]) -> Result<String, String> {
+    install_bundle(bytes)
+}
+
+fn install_bundle(bytes: &[u8]) -> Result<String, String> {
     let bundle = Bundle::decode(bytes).map_err(|e| alloc::format!("bundle: {e:?}"))?;
     let m = &bundle.manifest;
     m.validate()?;

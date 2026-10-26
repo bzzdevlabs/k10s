@@ -9,6 +9,7 @@
 //! | k10s.conf | argument |
 //! |---|---|
 //! | `join`, `backend`, `jit-indirect`, `timer-res-us`, `idle-spin-us`, `probe-ms`, `suspicion-mult`, `gossip-max-skew`, `ip` | `k10.join`, `k10.engine`, `k10.jit_indirect`, `k10.timer_res_us`, `k10.spin_us`, `k10.probe_ms`, `k10.suspicion_mult`, `k10.gossip_max_skew_s`, `k10.ip` (`A.B.C.D/P[,GATEWAY]`; DHCP without it) |
+//! | `data`, `grow`, `os-commit-grace`, `os_trial`, `ntp`, `dns` | `k10.data`, `k10.grow`, `k10.os_commit_grace`, `k10.os_trial`, `k10.ntp` (SNTP servers or `none`), `k10.dns` (name servers) |
 //! | `insecure-unauthenticated-cluster` | `k10.insecure_unauthenticated_cluster` |
 //! | `watchdog` (`0`/`off`: off, anything else: on; Tier 2 arms it unless told not to) | `k10.watchdog=on\|off` |
 //! | any of `gossip`, `rpc`, `join`, `advertise` (cluster mode, as on Tier 1) | `k10.cluster`, and `k10.gossip`, `k10.rpc`, `k10.http`: the port of `gossip`, `rpc`, `http` (default 7946, 7947, 80) at the address `advertise`, else the one configured unless unspecified, else 0.0.0.0: the interface's address (DHCP or `ip`; a changed lease reboots the node, which then advertises the new one) |
@@ -24,7 +25,7 @@ use k10_bootproto::conf;
 use crate::kprintln;
 use crate::pvh::BootInfo;
 
-const MAPPED: [(&str, &str); 13] = [
+const MAPPED: [(&str, &str); 15] = [
     ("k10.join", "join"),
     ("k10.engine", "backend"),
     ("k10.jit_indirect", "jit-indirect"),
@@ -38,6 +39,8 @@ const MAPPED: [(&str, &str); 13] = [
     ("k10.grow", "grow"),
     ("k10.os_commit_grace", "os-commit-grace"),
     ("k10.os_trial", "os_trial"),
+    ("k10.ntp", "ntp"),
+    ("k10.dns", "dns"),
 ];
 
 /// Space-separated words in a fixed buffer (no heap yet when it is filled).

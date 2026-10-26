@@ -118,6 +118,8 @@ pub const ICR_RXO: u32 = 1 << 6;
 pub const ICR_RXT0: u32 = 1 << 7;
 pub const RX_CAUSES: u32 = ICR_RXT0 | ICR_RXO | ICR_RXDMT0;
 pub const RCTL_EN: u32 = 1 << 1;
+/// Multicast promiscuous: every multicast frame (IPv6 neighbor discovery and router advertisements).
+pub const RCTL_MPE: u32 = 1 << 4;
 pub const RCTL_BAM: u32 = 1 << 15;
 pub const RCTL_SECRC: u32 = 1 << 26;
 pub const TCTL_EN: u32 = 1 << 1;
@@ -604,7 +606,7 @@ impl<H: Hw> E1000e<H> {
         c.w(TIPG, TIPG_COPPER);
         let mulr = if family.is_pch() { TCTL_MULR } else { 0 };
         c.w(TCTL, TCTL_EN | TCTL_PSP | TCTL_CT | TCTL_COLD | TCTL_RTLC | mulr);
-        c.w(RCTL, RCTL_EN | RCTL_BAM | RCTL_SECRC);
+        c.w(RCTL, RCTL_EN | RCTL_MPE | RCTL_BAM | RCTL_SECRC);
         c.w(RDT, rx.tail() as u32);
         if irq != IrqMode::Polled {
             c.w(IMS, ICR_LSC);

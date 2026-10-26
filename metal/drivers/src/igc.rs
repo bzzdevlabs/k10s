@@ -92,6 +92,8 @@ pub const SWSM_SMBI: u32 = 1 << 0;
 pub const SWSM_SWESMBI: u32 = 1 << 1;
 pub const SWFW_PHY0: u32 = 1 << 1;
 pub const RCTL_EN: u32 = 1 << 1;
+/// Multicast promiscuous: every multicast frame (IPv6 neighbor discovery and router advertisements).
+pub const RCTL_MPE: u32 = 1 << 4;
 pub const RCTL_BAM: u32 = 1 << 15;
 pub const RCTL_SECRC: u32 = 1 << 26;
 pub const TCTL_EN: u32 = 1 << 1;
@@ -309,7 +311,7 @@ impl<H: Hw> Igc<H> {
             return Err("transmit queue 0 did not enable");
         }
         c.w(TCTL, TCTL_EN | TCTL_PSP | TCTL_CT | TCTL_RTLC);
-        c.w(RCTL, RCTL_EN | RCTL_BAM | RCTL_SECRC);
+        c.w(RCTL, RCTL_EN | RCTL_MPE | RCTL_BAM | RCTL_SECRC);
         c.w(RDT0, rx.tail() as u32);
 
         if irq == IrqMode::MsiX {

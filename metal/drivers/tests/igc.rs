@@ -196,6 +196,7 @@ fn i225_brings_up_with_igc_specifics() {
     assert_eq!(m.regs.get(IMS_IGC), ICR_LSC);
     assert_eq!(m.regs.get(IMS_IGB), 0, "nothing written at igb's IMS");
     assert_eq!(m.regs.get(SRRCTL0), 2 | SRRCTL_DESCTYPE_ADV_ONEBUF | SRRCTL_DROP_EN);
+    assert_eq!(m.regs.get(RCTL), RCTL_EN | RCTL_MPE | RCTL_BAM | RCTL_SECRC);
     assert_eq!(m.regs.get(RDT0), 15);
     assert_ne!(m.regs.get(CTRL_EXT) & CTRL_EXT_DRV_LOAD, 0);
     drop(m);

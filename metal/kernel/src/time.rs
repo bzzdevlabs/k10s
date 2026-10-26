@@ -4,7 +4,8 @@
 //! calibration against the PIT (which modern boards may gate off). Wall-clock time at boot comes from kvmclock's wall
 //! clock (no port I/O), else the CMOS RTC; afterwards it advances with the monotonic clock and, with kvmclock, is
 //! re-read from it every [`RESYNC_NS`] ([`resync_wall_if_due`]), so host clock adjustments and drift do not build
-//! up in gossip and admin-request timestamps. Resyncs step the wall clock only: `now_ns` stays monotonic.
+//! up in gossip and admin-request timestamps. Without kvmclock the SNTP client (sntp.rs) steps and slews it.
+//! Resyncs and corrections move the wall clock only: `now_ns` stays monotonic.
 //!
 //! Also home of the preemption request flag set by the timer interrupt (see `runtime::sched`).
 
@@ -150,6 +151,17 @@ pub fn resync_wall() -> bool {
     WALL_AT_BOOT_NS.store((base + r.system_ns(tsc)).saturating_sub(mono), Ordering::Relaxed);
     NEXT_RESYNC_NS.store(mono + RESYNC_NS, Ordering::Relaxed);
     true
+}
+
+/// Whether the wall clock follows kvmclock (else the SNTP client keeps it right).
+pub fn has_kvmclock() -> bool {
+    KVMCLOCK.load(Ordering::Relaxed)
+}
+
+/// Moves the wall clock by `delta_ns` (SNTP: a step, or a slew's increment). CPU 0 only.
+pub fn adjust_wall(delta_ns: i64) {
+    let w = WALL_AT_BOOT_NS.load(Ordering::Relaxed);
+    WALL_AT_BOOT_NS.store(w.saturating_add_signed(delta_ns), Ordering::Relaxed);
 }
 
 pub fn tsc_hz() -> u64 {
