@@ -79,6 +79,36 @@ pub fn parse(b: &[u8]) -> Result<Packet<'_>, Error> {
     })
 }
 
+/// The header of a packet quoted in an ICMP error: its total length may exceed the bytes quoted.
+pub fn parse_quoted(b: &[u8]) -> Result<Packet<'_>, Error> {
+    if b.len() < HEADER_LEN {
+        return Err(Error::Truncated);
+    }
+    let hl = (b[0] & 0xf) as usize * 4;
+    let total = u16::from_be_bytes([b[2], b[3]]) as usize;
+    if b[0] >> 4 != 4 || hl < HEADER_LEN || hl > b.len() || total < hl {
+        return Err(Error::Length);
+    }
+    if !checksum::valid(checksum::add(0, &b[..hl])) {
+        return Err(Error::Checksum);
+    }
+    let flags = u16::from_be_bytes([b[6], b[7]]);
+    Ok(Packet {
+        header_len: hl,
+        tos: b[1],
+        ident: u16::from_be_bytes([b[4], b[5]]),
+        dont_frag: flags & 0x4000 != 0,
+        more_frags: flags & 0x2000 != 0,
+        frag_offset: (flags & 0x1fff) as usize * 8,
+        ttl: b[8],
+        proto: b[9],
+        src: Ipv4Addr::new(b[12], b[13], b[14], b[15]),
+        dst: Ipv4Addr::new(b[16], b[17], b[18], b[19]),
+        header: &b[..hl],
+        payload: &b[hl..total.min(b.len())],
+    })
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Header {
     pub src: Ipv4Addr,

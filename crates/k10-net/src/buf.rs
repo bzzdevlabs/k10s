@@ -136,11 +136,12 @@ impl Ring {
         self.buf.len() - self.len
     }
 
-    /// Resizes the storage to `cap` (≥ len), keeping the data. The caller charges or releases the difference.
+    /// Resizes the storage to `cap` (≥ len), keeping the data and the bytes placed past it (out-of-order data).
+    /// The caller charges or releases the difference.
     pub fn resize(&mut self, cap: usize) {
         debug_assert!(cap >= self.len);
         let mut nb = vec![0u8; cap];
-        let (a, b) = self.slices(0, self.len);
+        let (a, b) = self.slices(0, self.buf.len().min(cap));
         nb[..a.len()].copy_from_slice(a);
         nb[a.len()..a.len() + b.len()].copy_from_slice(b);
         self.buf = nb;
@@ -224,9 +225,6 @@ impl Ring {
         debug_assert!(n <= self.len);
         self.head = self.idx(n);
         self.len -= n;
-        if self.len == 0 {
-            self.head = 0;
-        }
     }
 
     /// Puts `data` back in front of the head (needs that much free space).
