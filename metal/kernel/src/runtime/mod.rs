@@ -7,6 +7,11 @@
 //!   invocation at a time; idle instances are pooled per service *and per CPU*, created on demand up to
 //!   `max_instances` (node-wide), and discarded after a trap (their memory may be inconsistent). Idle ones beyond one
 //!   warm instance per CPU are reclaimed.
+//! * **Memory budget** ([`BUDGET`], `k10_mesh::memory`, as on hosted nodes): every service placed here reserves one
+//!   instance of the limit (`k10.mem`); burst instances share the rest. A request that finds no room waits for one
+//!   of the service's instances, or fails at once (503) when the service has none. After an apply that adds
+//!   reservations while bursts hold the pool, idle burst instances are destroyed at once and busy ones when their
+//!   request ends.
 //! * **Invocations** run in coroutines (`coro`), round-robin, preempted every [`TIME_SLICE_NS`] at TIR
 //!   safepoints and trapped with `Interrupted` when they exceed their service's `cpu_ms` budget (CPU time, not
 //!   wall time). Service-to-service `call`s run the callee on one of its instances inside the caller's coroutine.
@@ -36,6 +41,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering
 
 use k10_ir::Trap;
 use k10_mesh::admin_auth::{AdminReject, AdminVerifier};
+use k10_mesh::memory::{Charge, MemBudget, Reservation};
 use k10_mesh::{Bundle, Manifest, NodeId, ServiceSpec};
 
 use self::engine::{Prepared, Scratch};
@@ -57,8 +63,10 @@ const LOG_LINES: usize = 64;
 /// Idle instances beyond one per service and CPU are dropped after this long without requests.
 const IDLE_RECLAIM_NS: u64 = 10_000_000_000;
 
-/// Bumped whenever an instance is released or destroyed or a forwarded call completes (wakes waiting invocations).
+/// Bumped whenever an instance or its memory is given back or a forwarded call completes (wakes waiting invocations).
 static RELEASE_EPOCH: AtomicU64 = AtomicU64::new(0);
+/// Instance memory: per-service reservations and the shared pool for burst instances (limit set at boot).
+pub static BUDGET: MemBudget = MemBudget::new(0);
 /// CPUs that run invocations (set at boot, after the application processors are up).
 static NCPU: AtomicUsize = AtomicUsize::new(1);
 static LAST_HOUSEKEEPING_NS: AtomicU64 = AtomicU64::new(0);
@@ -69,6 +77,16 @@ pub fn set_cpus(n: usize) {
 
 pub fn cpus() -> usize {
     NCPU.load(Ordering::Relaxed)
+}
+
+/// Sets the instance memory limit (`k10.mem`), before any bundle is installed.
+pub fn set_mem_limit(bytes: u64) {
+    BUDGET.set_limit(bytes);
+}
+
+/// The instance memory limit: what placement may charge this node (its advertised capacity in a cluster).
+pub fn mem_limit() -> u64 {
+    BUDGET.limit()
 }
 
 // --- node-wide state ----------------------------------------------------------------------------------------
@@ -263,6 +281,31 @@ struct Io {
 
 static IO: IrqLock<Io> = IrqLock::new(Io { outbox: Vec::new(), forwards: Vec::new(), peer_out: Vec::new() });
 
+/// CPUs halted with queued or waiting invocations (bit per CPU, set by [`note_halting`]).
+static BLOCKED: AtomicU64 = AtomicU64::new(0);
+
+/// An instance or its memory was given back: invocations waiting for one look again, on CPUs halted with queued
+/// work too (each checks the epoch after announcing its halt). Without such CPUs: one increment and one load.
+fn released() {
+    RELEASE_EPOCH.fetch_add(1, Ordering::SeqCst);
+    let mut m = BLOCKED.load(Ordering::SeqCst);
+    while m != 0 {
+        wake(m.trailing_zeros() as usize);
+        m &= m - 1;
+    }
+}
+
+/// Before halting: records whether this CPU leaves invocations queued or waiting (then [`released`] wakes it).
+pub fn note_halting() {
+    let s = sched().borrow();
+    let bit = 1u64 << percpu::id();
+    if !s.pending.is_empty() || !s.waiting.is_empty() {
+        BLOCKED.fetch_or(bit, Ordering::SeqCst);
+    } else if BLOCKED.load(Ordering::Relaxed) & bit != 0 {
+        BLOCKED.fetch_and(!bit, Ordering::SeqCst);
+    }
+}
+
 /// Wakes `cpu` if it is halted waiting for work.
 fn wake(cpu: usize) {
     if cpu != percpu::id() {
@@ -307,6 +350,14 @@ pub struct Instance {
     slot: slots::Slot,
     initialized: bool,
     dirty: bool,
+    charge: Charge,
+    res: Arc<Reservation>,
+}
+
+impl Drop for Instance {
+    fn drop(&mut self) {
+        BUDGET.refund(&self.res, self.slot.footprint() as u64, self.charge);
+    }
 }
 
 /// A service's state on one CPU: its idle instances there and what that CPU ran.
@@ -331,6 +382,8 @@ pub struct Service {
     /// Shared by every service deployed with the same code hash.
     pub prep: Arc<Prepared>,
     pub placement: Placement,
+    /// One instance of the memory budget when placed here.
+    mem_res: Arc<Reservation>,
     /// Instances in existence on all CPUs (idle + busy + being created): `max_instances` is node-wide.
     live: AtomicU32,
     retired: AtomicBool,
@@ -342,19 +395,30 @@ pub struct Service {
     cores: Box<[IrqLock<CoreSvc>]>,
 }
 
-/// Permission to run on an instance: an idle one, or the right to create one (already counted in `live`).
+/// Permission to run on an instance: an idle one, or the right to create one (counted in `live`, memory charged).
 pub enum Grant {
     Idle(Instance),
-    New,
+    New(Charge),
+}
+
+/// Why [`Service::acquire`] gave nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NoGrant {
+    /// Every instance is busy, at `max_instances`, short of frames (heap reserve), or the service was replaced.
+    Busy,
+    /// The memory budget has no room for another instance.
+    Budget,
 }
 
 impl Service {
     fn new(spec: &ServiceSpec, prep: Arc<Prepared>, placement: Placement) -> Service {
+        let reserve = if placement == Placement::Local { k10_mesh::instance_bytes(spec) } else { 0 };
         Service {
             name: spec.name.clone(),
             spec: spec.clone(),
             prep,
             placement,
+            mem_res: Arc::new(Reservation::new(reserve)),
             live: AtomicU32::new(0),
             retired: AtomicBool::new(false),
             snapshot: IrqLock::new(None),
@@ -380,32 +444,58 @@ impl Service {
         !self.here().idle.is_empty()
             || (!self.retired.load(Ordering::Relaxed)
                 && self.live.load(Ordering::Relaxed) < self.spec.max_instances
-                && self.memory_ok())
+                && self.memory_ok()
+                && BUDGET.admits(&self.mem_res, self.footprint()))
             || self.cores.iter().any(|c| !c.lock().idle.is_empty())
     }
 
-    /// An idle instance of this CPU, else the right to create one, else (at `max_instances`) an idle instance of
-    /// another CPU — instances are just memory and may move between CPUs.
-    fn acquire(&self) -> Option<Grant> {
+    /// An idle instance of this CPU, else the right to create one (its memory charged to the service's reservation
+    /// or the shared pool), else an idle instance of another CPU — instances are just memory and may move between
+    /// CPUs.
+    fn acquire(&self) -> Result<Grant, NoGrant> {
         {
             let mut c = self.here();
             c.last_active_ns = time::now_ns();
             if let Some(i) = c.idle.pop() {
-                return Some(Grant::Idle(i));
+                return Ok(Grant::Idle(i));
             }
         }
         if self.retired.load(Ordering::Relaxed) {
-            return None;
+            return Err(NoGrant::Busy);
         }
         let max = self.spec.max_instances;
+        let mut why = NoGrant::Busy;
         if self.memory_ok() && self.live.fetch_update(Ordering::AcqRel, Ordering::Relaxed, |l| (l < max).then_some(l + 1)).is_ok() {
-            return Some(Grant::New);
+            if let Some(c) = BUDGET.charge(&self.mem_res, self.footprint()) {
+                return Ok(Grant::New(c));
+            }
+            self.live.fetch_sub(1, Ordering::AcqRel);
+            why = NoGrant::Budget;
         }
-        self.cores.iter().find_map(|c| c.lock().idle.pop()).map(Grant::Idle)
+        self.cores.iter().find_map(|c| c.lock().idle.pop()).map(Grant::Idle).ok_or(why)
     }
 
-    fn create_instance(&self) -> Option<Instance> {
-        let mut slot = slots::alloc(self.spec.mem_log2)?;
+    /// The budget refused an instance and none is alive to wait for: requests fail now (hosted semantics).
+    fn starved(&self, why: NoGrant) -> bool {
+        why == NoGrant::Budget && self.live.load(Ordering::Acquire) == 0
+    }
+
+    /// Gives back a grant that was not used.
+    fn ungrant(&self, g: Grant) {
+        match g {
+            Grant::Idle(inst) => self.release(inst),
+            Grant::New(c) => {
+                BUDGET.refund(&self.mem_res, self.footprint(), c);
+                self.discard(None);
+            }
+        }
+    }
+
+    fn create_instance(&self, charge: Charge) -> Option<Instance> {
+        let Some(mut slot) = slots::alloc(self.spec.mem_log2) else {
+            BUDGET.refund(&self.mem_res, self.footprint(), charge);
+            return None;
+        };
         let snap = self.snapshot.lock().clone();
         let initialized = match snap {
             Some(snap) => {
@@ -418,23 +508,56 @@ impl Service {
             }
         };
         self.here().stats.instances_created += 1;
-        Some(Instance { slot, initialized, dirty: false })
+        Some(Instance { slot, initialized, dirty: false, charge, res: self.mem_res.clone() })
     }
 
-    fn release(&self, inst: Instance) {
-        if self.retired.load(Ordering::Relaxed) {
+    /// An instance is done: back to this CPU's idle pool, unless the service was replaced or it is a burst instance
+    /// while the budget is over (one that finds the reservation free moves into it).
+    fn release(&self, mut inst: Instance) {
+        let mut keep = !self.retired.load(Ordering::Relaxed);
+        if keep && inst.charge == Charge::Shared {
+            if BUDGET.promote(&self.mem_res, self.footprint()) {
+                inst.charge = Charge::Reserved;
+            } else if BUDGET.reclaim_over(self.footprint()) {
+                inst.charge = Charge::None;
+                keep = false;
+            }
+        }
+        if keep {
+            self.here().idle.push(inst);
+        } else {
             self.live.fetch_sub(1, Ordering::AcqRel);
             drop(inst);
-        } else {
-            self.here().idle.push(inst);
         }
-        RELEASE_EPOCH.fetch_add(1, Ordering::Relaxed);
+        released();
+    }
+
+    /// While the budget is over, destroys idle burst instances of this service (on every CPU); returns whether it
+    /// still is.
+    fn relieve(&self) -> bool {
+        for c in self.cores.iter() {
+            loop {
+                let inst = {
+                    let mut c = c.lock();
+                    let Some(i) = c.idle.iter().position(|i| i.charge == Charge::Shared) else { break };
+                    if !BUDGET.reclaim_over(self.footprint()) {
+                        return false;
+                    }
+                    let mut inst = c.idle.swap_remove(i);
+                    inst.charge = Charge::None;
+                    inst
+                };
+                drop(inst);
+                self.live.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+        BUDGET.over()
     }
 
     fn discard(&self, inst: Option<Instance>) {
         self.live.fetch_sub(1, Ordering::AcqRel);
         drop(inst);
-        RELEASE_EPOCH.fetch_add(1, Ordering::Relaxed);
+        released();
     }
 
     /// Marks the service replaced: no new instances; idle ones are dropped on every CPU.
@@ -562,7 +685,7 @@ pub fn deliver(to: ReplyTo, status: i64, body: Vec<u8>) {
         }
         ReplyTo::Slot(slot) => {
             *slot.result.lock() = Some((status, body));
-            RELEASE_EPOCH.fetch_add(1, Ordering::Relaxed);
+            RELEASE_EPOCH.fetch_add(1, Ordering::SeqCst);
             wake(slot.cpu);
         }
     }
@@ -623,14 +746,24 @@ impl Level<'_> {
             return -2;
         }
         let until = time::now_ns() + CALL_WAIT_TIMEOUT_NS;
+        let mut refused = false;
         let grant = loop {
-            if let Some(g) = svc.acquire() {
-                break g;
+            let epoch = RELEASE_EPOCH.load(Ordering::SeqCst);
+            match svc.acquire() {
+                Ok(g) => break g,
+                Err(why) => {
+                    if why == NoGrant::Budget && !core::mem::replace(&mut refused, true) {
+                        BUDGET.refuse();
+                    }
+                    if svc.starved(why) {
+                        return CALL_UNAVAILABLE;
+                    }
+                }
             }
             if time::now_ns() >= until {
                 return -3;
             }
-            coro::yield_now(Yield::Wait(Arc::as_ptr(&svc) as usize));
+            coro::yield_now(Yield::Wait { epoch, until });
         };
         let req = ReqData { method: Method::Post.code(), path: name_path[split..].to_vec(), body };
         let saved = self.cpu.deadline.get();
@@ -667,16 +800,18 @@ impl Level<'_> {
             reply: ReplyTo::Slot(slot.clone()),
         });
         wake(0);
+        // The cluster answers -3 at the deadline; this is the backstop.
+        let until = deadline_ns + 1_000_000_000;
         loop {
+            let epoch = RELEASE_EPOCH.load(Ordering::SeqCst);
             if let Some((status, body)) = slot.result.lock().take() {
                 self.last_call = body;
                 return status;
             }
-            // The cluster answers -3 at the deadline; this is the backstop.
-            if time::now_ns() >= deadline_ns + 1_000_000_000 {
+            if time::now_ns() >= until {
                 return CALL_TIMEOUT;
             }
-            coro::yield_now(Yield::Wait(Arc::as_ptr(&slot) as usize));
+            coro::yield_now(Yield::Wait { epoch, until });
         }
     }
 }
@@ -686,7 +821,7 @@ fn run_on(svc: &Arc<Service>, grant: Grant, req: &ReqData, cpu: &Cpu, depth: u32
     let t0 = cpu.used();
     let mut inst = match grant {
         Grant::Idle(i) => i,
-        Grant::New => match svc.create_instance() {
+        Grant::New(c) => match svc.create_instance(c) {
             Some(i) => i,
             None => {
                 svc.discard(None);
@@ -764,8 +899,8 @@ struct Task {
     co: Coroutine,
     core: Box<TaskCore>,
     reply: ReplyTo,
-    /// Waiting for an instance: (release epoch when it yielded).
-    wait_epoch: Option<u64>,
+    /// Waiting (`Yield::Wait`): the release epoch it saw and its deadline.
+    wait: Option<(u64, u64)>,
 }
 
 extern "C" fn task_entry(arg: usize) -> ! {
@@ -784,14 +919,19 @@ fn run_task_body(core: &TaskCore) -> Result<RespData, Failure> {
     let mut samples = Vec::new();
     let (wall0, steal0) = (time::now_ns(), time::steal_ns());
     let mut r = Err(Failure::NoMemory);
-    for _ in 0..core.bench.max(1) {
+    'runs: for _ in 0..core.bench.max(1) {
         let g = match grant.take() {
             Some(g) => g,
             None => loop {
-                if let Some(g) = core.svc.acquire() {
-                    break g;
+                let epoch = RELEASE_EPOCH.load(Ordering::SeqCst);
+                match core.svc.acquire() {
+                    Ok(g) => break g,
+                    Err(why) if core.svc.starved(why) => {
+                        r = Err(Failure::NoMemory);
+                        break 'runs;
+                    }
+                    Err(_) => coro::yield_now(Yield::Wait { epoch, until: u64::MAX }),
                 }
-                coro::yield_now(Yield::Wait(Arc::as_ptr(&core.svc) as usize));
             },
         };
         let t0 = core.cpu.used();
@@ -842,6 +982,8 @@ struct Pending {
     /// Answered "unavailable" if it could not start by then.
     deadline_ns: u64,
     bench: u32,
+    /// The memory budget refused it an instance (counted once).
+    refused: bool,
 }
 
 /// One CPU's scheduler state (only that CPU touches it).
@@ -851,10 +993,19 @@ struct Sched {
     long: VecDeque<Task>,
     waiting: Vec<Task>,
     in_flight: usize,
+    /// Release epoch at the start of the last round: a later release makes queued and waiting work worth a look.
+    epoch_seen: u64,
 }
 
 static SCHED: [Global<Sched>; MAX_CPUS] = [const {
-    Global::new(Sched { pending: VecDeque::new(), runq: VecDeque::new(), long: VecDeque::new(), waiting: Vec::new(), in_flight: 0 })
+    Global::new(Sched {
+        pending: VecDeque::new(),
+        runq: VecDeque::new(),
+        long: VecDeque::new(),
+        waiting: Vec::new(),
+        in_flight: 0,
+        epoch_seen: 0,
+    })
 }; MAX_CPUS];
 /// Requests dispatched to a CPU by CPU 0, taken by that CPU's scheduler.
 static INBOX: [IrqLock<Vec<Pending>>; MAX_CPUS] = [const { IrqLock::new(Vec::new()) }; MAX_CPUS];
@@ -869,7 +1020,11 @@ impl Sched {
         self.pending.iter().any(|p| p.svc.available())
     }
     fn busy(&self) -> bool {
-        !self.runq.is_empty() || !self.long.is_empty() || self.startable()
+        !self.runq.is_empty()
+            || !self.long.is_empty()
+            || self.startable()
+            || ((!self.pending.is_empty() || !self.waiting.is_empty())
+                && RELEASE_EPOCH.load(Ordering::SeqCst) != self.epoch_seen)
     }
 }
 
@@ -975,14 +1130,14 @@ pub fn submit(req: Request) {
         IO.lock().forwards.push(Forward { service: svc.name.clone(), nodes, req: r, deadline_ns, reply: ReplyTo::Http(req.conn) });
         return;
     }
-    dispatch(Pending { svc, req: r, reply: ReplyTo::Http(req.conn), deadline_ns, bench });
+    dispatch(Pending { svc, req: r, reply: ReplyTo::Http(req.conn), deadline_ns, bench, refused: false });
 }
 
 /// Runs `service` on this node whatever its placement (cluster: calls forwarded by peers, and the router's local
 /// fallback). Unknown service: `Err` with the reply target (nothing ran; the peer may try elsewhere).
 pub fn submit_local(service: &str, req: ReqData, deadline_ns: u64, reply: ReplyTo) -> Result<(), ReplyTo> {
     let Some(svc) = NODE.lock().services.get(service).cloned() else { return Err(reply) };
-    dispatch(Pending { svc, req, reply, deadline_ns, bench: 0 });
+    dispatch(Pending { svc, req, reply, deadline_ns, bench: 0, refused: false });
     Ok(())
 }
 
@@ -1013,9 +1168,23 @@ fn start_one(s: &mut Sched) -> Option<Task> {
                 }
             }
         }
-        let Some(grant) = s.pending[i].svc.acquire() else {
-            i += 1;
-            continue;
+        let grant = match s.pending[i].svc.acquire() {
+            Ok(g) => g,
+            Err(why) => {
+                let p = &mut s.pending[i];
+                if why == NoGrant::Budget && !core::mem::replace(&mut p.refused, true) {
+                    BUDGET.refuse();
+                }
+                if p.svc.starved(why) {
+                    let p = s.pending.remove(i).unwrap();
+                    unload();
+                    let msg = alloc::format!("service `{}` has no memory for an instance\n", p.svc.name);
+                    deliver(p.reply, CALL_UNAVAILABLE, msg.into_bytes());
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
         };
         let p = s.pending.remove(i).unwrap();
         p.svc.here().stats.requests += 1;
@@ -1030,14 +1199,15 @@ fn start_one(s: &mut Sched) -> Option<Task> {
         let Some(co) = Coroutine::new(task_entry, &*core as *const TaskCore as usize) else {
             // No stack: put everything back and retry later.
             match core.grant.take() {
-                Some(Grant::Idle(inst)) => p.svc.release(inst),
-                Some(Grant::New) | None => p.svc.discard(None),
+                Some(g) => p.svc.ungrant(g),
+                None => p.svc.discard(None),
             }
-            s.pending.insert(i, Pending { svc: p.svc, req: core.req, reply: p.reply, deadline_ns: p.deadline_ns, bench: p.bench });
+            let (deadline_ns, bench, refused) = (p.deadline_ns, p.bench, p.refused);
+            s.pending.insert(i, Pending { svc: p.svc, req: core.req, reply: p.reply, deadline_ns, bench, refused });
             return None;
         };
         s.in_flight += 1;
-        return Some(Task { co, core, reply: p.reply, wait_epoch: None });
+        return Some(Task { co, core, reply: p.reply, wait: None });
     }
     None
 }
@@ -1078,6 +1248,7 @@ fn resume(task: &mut Task, long: bool) -> Yield {
 /// a packet arrives (RX interrupt → preemption request). The main loop polls the network between rounds, so
 /// CPU-bound invocations, however many, delay network I/O and short requests by microseconds, not slices.
 pub fn run_round() {
+    sched().borrow_mut().epoch_seen = RELEASE_EPOCH.load(Ordering::SeqCst);
     let n = sched().borrow().pending.len();
     for _ in 0..n {
         let Some(task) = start_one(&mut sched().borrow_mut()) else { break };
@@ -1085,13 +1256,15 @@ pub fn run_round() {
     }
     {
         let mut s = sched().borrow_mut();
-        // Wake tasks waiting for an instance (or a forwarded call) if one was released since they yielded.
-        let epoch = RELEASE_EPOCH.load(Ordering::Relaxed);
+        // Wake tasks waiting for an instance (or a forwarded call) if one was released since they looked, or at
+        // their deadline.
+        let epoch = RELEASE_EPOCH.load(Ordering::SeqCst);
+        let now = if s.waiting.is_empty() { 0 } else { time::now_ns() };
         let mut i = 0;
         while i < s.waiting.len() {
-            if s.waiting[i].wait_epoch.is_none_or(|e| e != epoch) {
+            if s.waiting[i].wait.is_none_or(|(e, until)| e != epoch || now >= until) {
                 let mut t = s.waiting.swap_remove(i);
-                t.wait_epoch = None;
+                t.wait = None;
                 s.runq.push_back(t);
             } else {
                 i += 1;
@@ -1107,12 +1280,6 @@ pub fn run_round() {
     if let Some(task) = long {
         run_task(task, true);
     }
-    // Waiters whose epoch did not change get a chance to observe their timeout when nothing else runs.
-    let mut s = sched().borrow_mut();
-    if s.runq.is_empty() && s.long.is_empty() && !s.waiting.is_empty() {
-        let t = s.waiting.pop().unwrap();
-        s.runq.push_back(t);
-    }
 }
 
 fn run_task(mut task: Task, long: bool) {
@@ -1124,8 +1291,8 @@ fn run_task(mut task: Task, long: bool) {
             bump(&STATS.preemptions);
             sched().borrow_mut().long.push_back(task);
         }
-        Yield::Wait(_) => {
-            task.wait_epoch = Some(RELEASE_EPOCH.load(Ordering::Relaxed));
+        Yield::Wait { epoch, until } => {
+            task.wait = Some((epoch, until));
             sched().borrow_mut().waiting.push(task);
         }
         Yield::Finished => {
@@ -1176,7 +1343,7 @@ pub fn has_work() -> bool {
 pub fn next_deadline_ns() -> Option<u64> {
     let s = sched().borrow();
     let p = s.pending.iter().map(|p| p.deadline_ns).min();
-    let w = (!s.waiting.is_empty()).then(|| time::now_ns() + 10_000_000);
+    let w = s.waiting.iter().filter_map(|t| t.wait).map(|(_, until)| until).filter(|&u| u != u64::MAX).min();
     match (p, w) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
@@ -1217,6 +1384,7 @@ pub fn worker_main() -> ! {
         // Idle. Producers push to the inbox, then check `idle` (SeqCst); we set `idle`, then check the inbox,
         // with interrupts off until `sti; hlt`: a wake-up IPI either finds `idle` set or its work is seen here.
         arch::interrupts_disable();
+        note_halting();
         me.idle.store(true, Ordering::SeqCst);
         if INBOX[me.id as usize].lock().is_empty() && !sched().borrow().busy() {
             if let Some(t) = next_deadline_ns() {
@@ -1250,6 +1418,8 @@ pub fn housekeeping() {
                 let mut c = c.lock();
                 if c.idle.len() > keep && now > c.last_active_ns + IDLE_RECLAIM_NS {
                     let n = c.idle.len() - keep;
+                    // The warm instance kept is the reserved one.
+                    c.idle.sort_unstable_by_key(|i| i.charge != Charge::Reserved);
                     let tail = c.idle.split_off(keep);
                     Some((n, tail))
                 } else {
@@ -1259,13 +1429,30 @@ pub fn housekeeping() {
             if let Some((n, tail)) = dropped {
                 drop(tail);
                 svc.live.fetch_sub(n as u32, Ordering::AcqRel);
+                released();
             }
         }
     }
+    relieve_memory();
     if frames::free_bytes() < 2 * crate::reserve_bytes() {
         slots::trim_cache();
         coro::trim_pool();
     }
+}
+
+/// While the budget is over (an apply added reservations while burst instances held the pool), destroys idle burst
+/// instances; busy ones go when their request ends ([`Service::release`]).
+fn relieve_memory() {
+    if !BUDGET.over() {
+        return;
+    }
+    let services: Vec<Arc<Service>> = NODE.lock().services.values().cloned().collect();
+    for svc in services {
+        if !svc.relieve() {
+            break;
+        }
+    }
+    released();
 }
 
 // --- deployment ----------------------------------------------------------------------------------------------
@@ -1302,13 +1489,10 @@ fn install_bundle(bytes: &[u8]) -> Result<String, String> {
     if m.version == version && hash == cur_hash {
         return Ok(alloc::format!("{{\"version\":{},\"unchanged\":true}}", m.version));
     }
-    // Placement over a one-node cluster: this node's capacity is the memory available for instances.
+    // Placement over a one-node cluster: this node's capacity is its instance memory limit.
     let me = k10_mesh::NodeId(1);
     let addr = core::net::SocketAddr::new(core::net::IpAddr::V4(core::net::Ipv4Addr::new(10, 0, 2, 15)), 80);
-    let capacity = k10_mesh::Capacity {
-        mem_bytes: frames::free_bytes().saturating_sub(crate::reserve_bytes()),
-        cores: cpus() as u32,
-    };
+    let capacity = k10_mesh::Capacity { mem_bytes: mem_limit(), cores: cpus() as u32 };
     let placement = k10_mesh::place(m, &[k10_mesh::Member::new(me, addr, addr, addr, capacity)]);
     let local: Vec<&str> = placement.on_node(me).into_iter().filter(|(_, r)| *r == 0).map(|(n, _)| n).collect();
     install(m, &|h| bundle.blob(h), &|spec| local.contains(&spec.name.as_str()).then_some(Placement::Local))
@@ -1373,6 +1557,10 @@ pub fn install<'b>(
     let total = new.len();
     let local = new.values().filter(|s| s.placement == Placement::Local).count();
     let names: Vec<String> = new.values().filter(|s| s.placement == Placement::Local).map(|s| s.name.clone()).collect();
+    // Reserve, publish, then retire and release what was replaced (live instances keep their bytes until freed).
+    for s in new.values() {
+        BUDGET.install(&s.mem_res);
+    }
     let (old, changed) = {
         let mut node = NODE.lock();
         let changed = node.manifest_version != m.version || node.manifest_hash != m.hash() || kept != total;
@@ -1384,7 +1572,13 @@ pub fn install<'b>(
     for svc in old.values() {
         if !current.get(&svc.name).is_some_and(|n| Arc::ptr_eq(n, svc)) {
             svc.retire();
+            BUDGET.release(&svc.mem_res);
         }
+    }
+    relieve_memory();
+    released();
+    if BUDGET.overcommit() > 0 {
+        kprintln!("apply: DEGRADED: reservations exceed k10.mem by {} bytes: no burst instance until they fit", BUDGET.overcommit());
     }
     let applies = STATS.applies.fetch_add(1, Ordering::Relaxed) + 1;
     if changed && (crate::verbose() || applies > 1) {
@@ -1638,6 +1832,19 @@ fn status_json() -> String {
     for (i, name) in frames::TAG_NAMES.iter().enumerate() {
         let _ = write!(s, ",\"frames_{}\":{}", name, fs.by_tag[i]);
     }
+    let b = &BUDGET;
+    let _ = write!(
+        s,
+        ",\"mem_limit\":{},\"mem_reserved\":{},\"mem_shared_used\":{},\"mem_shared_limit\":{},\"mem_committed\":{},\"mem_retiring\":{},\"mem_overcommit\":{},\"mem_refused\":{}",
+        b.limit(),
+        b.reserved(),
+        b.shared_used(),
+        b.limit().saturating_sub(b.reserved()),
+        b.committed(),
+        b.retiring(),
+        b.overcommit(),
+        b.refused()
+    );
     let (pending, in_flight) = {
         let sc = sched().borrow();
         (sc.pending.len(), sc.in_flight)
@@ -1662,12 +1869,13 @@ fn status_json() -> String {
     s.push_str("},\"services\":[");
     for (i, svc) in services.iter().enumerate() {
         let (st, idle) = svc.stats();
+        let live = svc.live.load(Ordering::Relaxed);
         if i > 0 {
             s.push(',');
         }
         let _ = write!(
             s,
-            "{{\"name\":\"{}\",\"placement\":{},\"engine\":\"{}\",\"mem_log2\":{},\"instance_bytes\":{},\"instances\":{},\"idle\":{},\"max_instances\":{},\"cpu_ms\":{},\"fresh\":{},\"code_bytes\":{},\"native_bytes\":{},\"compile_us\":{},\"requests\":{},\"calls\":{},\"ok\":{},\"errors\":{},\"traps\":{},\"interrupted\":{},\"instances_created\":{},\"cpu_ns\":{}}}",
+            "{{\"name\":\"{}\",\"placement\":{},\"engine\":\"{}\",\"mem_log2\":{},\"instance_bytes\":{},\"mem_reserved\":{},\"mem_used\":{},\"mem_shared\":{},\"instances\":{},\"idle\":{},\"max_instances\":{},\"cpu_ms\":{},\"fresh\":{},\"code_bytes\":{},\"native_bytes\":{},\"compile_us\":{},\"requests\":{},\"calls\":{},\"ok\":{},\"errors\":{},\"traps\":{},\"interrupted\":{},\"instances_created\":{},\"cpu_ns\":{}}}",
             svc.name,
             match &svc.placement {
                 Placement::Local => String::from("\"local\""),
@@ -1679,7 +1887,10 @@ fn status_json() -> String {
             svc.prep.engine_name(),
             svc.spec.mem_log2,
             svc.footprint(),
-            svc.live.load(Ordering::Relaxed),
+            svc.mem_res.bytes(),
+            live as u64 * svc.footprint(),
+            live.saturating_sub(svc.mem_res.in_use() as u32) as u64 * svc.footprint(),
+            live,
             idle,
             svc.spec.max_instances,
             svc.spec.cpu_ms,

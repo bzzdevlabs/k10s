@@ -59,7 +59,8 @@ After three consecutive traps, instance creation for that service version is ref
 
 ## Memory reservations
 
-`--mem` (default: physical RAM) caps the address space handed to live instances.
+`--mem` (default: physical RAM) caps the address space handed to live instances; a bare-metal node applies the same
+budget with `k10.mem`.
 
 - Every service placed on the node **reserves one instance** (`2^memory + 4 KiB`). Burst instances share the rest,
   so a busy service can exhaust the shared pool but never another service's reservation.

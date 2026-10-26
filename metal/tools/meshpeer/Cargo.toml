@@ -1,0 +1,9 @@
+[package]
+name = "meshpeer"
+description = "Test tool (cluster-test.sh): a cluster key holder that asks a node for its manifest without ever reading the replies"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+k10-mesh = { path = "../../../crates/k10-mesh" }

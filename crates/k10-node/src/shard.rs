@@ -1384,6 +1384,7 @@ impl Shard {
         // Charge the budget first (atomic across shards): the service's reservation, else the shared pool.
         let bytes = svc.instance_bytes();
         let Some(charge) = self.node.budget.charge(&svc.mem_res, bytes) else {
+            self.node.budget.refuse();
             return Err(format!("cannot allocate instance memory: node memory budget (--mem) exhausted for `{}`", svc.name()));
         };
         let slot = match self.pools.alloc(svc.mem_log2()) {

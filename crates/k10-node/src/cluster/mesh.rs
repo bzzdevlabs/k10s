@@ -49,7 +49,7 @@ use crate::host::{Request, CALL_TIMEOUT, CALL_UNAVAILABLE};
 use crate::router::Completion;
 use crate::sys::{self, mono_ns, Epoll, Fd};
 use k10_mesh::driver::UdpDriver;
-use k10_mesh::secure::{self, LinkError, LinkEvent};
+use k10_mesh::secure::{self, link_hard_cap, LinkError, LinkEvent, LINK_BUDGET, LINK_SOFT_CAP};
 use k10_mesh::sha256::sha256;
 use k10_mesh::wire::{Msg, DEFAULT_MAX_FRAME, HEADER_LEN};
 use k10_mesh::{DesiredState, Event, Manifest, Member, MemberState, NodeId};
@@ -73,13 +73,8 @@ const BACKOFF_MAX_MS: u64 = 5_000;
 /// Extra peers tried beyond the placed replicas.
 const MAX_EXTRA_ATTEMPTS: usize = 3;
 const VIEW_EVERY_NS: u64 = 250_000_000;
-/// Bytes read from, plus replies queued to, one link per loop iteration (then it is served again on the next one).
-const LINK_BUDGET: usize = 1 << 20;
-/// Unsent bytes beyond which a link gets no new calls (the peer is avoided like a backed-off one).
-const LINK_SOFT_CAP: usize = 16 << 20;
-/// Unsent bytes a link may hold at most: a frame that would exceed it closes the link (the peer stopped reading).
-/// Leaves room for one maximum-size frame queued below the soft cap (a blob or a 16 MiB call).
-const LINK_HARD_CAP: usize = LINK_SOFT_CAP + DEFAULT_MAX_FRAME;
+/// Unsent bytes a link may hold at most (room for one maximum-size frame, a blob or a 16 MiB call, below the soft cap).
+const LINK_HARD_CAP: usize = link_hard_cap(LINK_SOFT_CAP, DEFAULT_MAX_FRAME);
 /// The written prefix of a write buffer is dropped once it is this large (and at least half the buffer), so a
 /// peer that reads slowly but steadily does not make the buffer grow with bytes already sent.
 const WBUF_COMPACT: usize = 1 << 20;
@@ -1016,8 +1011,7 @@ impl Mesh {
         if l.doomed {
             return Err(QueueError::Overflow);
         }
-        let bound = m.frame_len_bound();
-        if l.unsent() + bound + l.sec.overhead(bound) > LINK_HARD_CAP {
+        if l.unsent() + l.sec.growth(m) > LINK_HARD_CAP {
             l.doomed = true;
             self.doomed.push((li, l.gen));
             self.cs.stats.links_overflowed.fetch_add(1, Relaxed);

@@ -14,7 +14,10 @@
 #   6. the same functional checks with a tiny guest (MEM_SMALL, default 8M).
 #   Admin API: requests signed (K10s-HMAC) with an admin key passed as fw_cfg `opt/k10s/admin_key`, for the guest's
 #   per-boot audience; unsigned, wrongly signed, replayed, body-mismatched requests and requests signed for an earlier
-#   boot are refused, health and audience are open, and a guest without an admin key serves health only.
+#   boot are refused, health and audience are open, a full nonce cache answers 429 (self test), and a guest without an
+#   admin key serves health only. Memory reservations (k10.mem): a bursting service gets its reserved instance plus the
+#   shared pool while another one serves from its reservation; an apply that adds a reservation while bursts hold the
+#   pool gives a burst instance back.
 #   Then (PLATFORMS, default every platform of qemu.sh): on each machine a self test with a disk, then a boot that
 #   serves, reboots on a signed `POST /_k10s/power` (`reboot`: the firmware runs again, the kernel boots a second
 #   time) and powers off on another (`off`: QEMU exits 0) — no isa-debug-exit device anywhere; the console moved
@@ -238,6 +241,7 @@ selftest() {
 echo "== selftest"
 selftest "$PLATFORM" "$PLATFORM"
 grep -aq "ok   fw_cfg: file opt/k10s/selftest read" "$OUT/selftest-$PLATFORM.log" && ok "selftest read a fw_cfg file" || ko "selftest did not read the fw_cfg file"
+grep -aq "ok   admin: nonce cache full (65536 in the window) -> 429" "$OUT/selftest-$PLATFORM.log" && ok "selftest: admin nonce cache full -> 429" || ko "selftest: no 429 from a full admin nonce cache"
 
 echo "== admin API without an admin key"
 if NO_ADMIN_KEY=1 boot "$MEM" out/bundle.k10b "$OUT/serial-nokey.log"; then
@@ -248,6 +252,43 @@ if NO_ADMIN_KEY=1 boot "$MEM" out/bundle.k10b "$OUT/serial-nokey.log"; then
     expect "services served without an admin key" "$U/hello/" 200 '^hello from k10-metal$'
 else
     ko "boot without an admin key (no ready line)"
+fi
+shutdown
+
+echo "== memory reservations (k10.mem = 6 instances: compute and hello reserve one each, 4 shared for bursts)"
+# st PYEXPR...: prints PYEXPR on the guest's status (`m` its memory section, `s` its services by name).
+st() {
+    curl -s -m 5 -H "Authorization: $(sign GET /_k10s/status)" "$U/_k10s/status" |
+        python3 -c "import json,sys; d=json.load(sys.stdin); m=d['mem']; s={x['name']: x for x in d['services']}; print($1)" 2>&1
+}
+INST=$(((1 << 16) + 4096))
+"$MKBUNDLE" -o "$OUT/mem1.k10b" --no-ten --services compute,hello 2>/dev/null
+"$MKBUNDLE" -o "$OUT/mem2.k10b" --no-ten --version 2 --services compute,hello,echo 2>/dev/null
+if boot "$MEM" "$OUT/mem1.k10b" "$OUT/serial-mem.log" "k10.mem=$((6 * INST))"; then
+    r=$(st "m['mem_limit'], m['mem_reserved'], m['mem_shared_limit'], s['hello']['mem_reserved'], s['compute']['mem_reserved']")
+    [[ "$r" == "$((6 * INST)) $((2 * INST)) $((4 * INST)) $INST $INST" ]] && ok "limit, reservations and shared pool: $r" || ko "memory status: $r"
+    hogs=()
+    for _ in $(seq 1 16); do
+        curl -s -m 120 -o /dev/null -w '%{http_code}\n' "$U/compute?n=50000000" >> "$OUT/mem-hogs.txt" &
+        hogs+=($!)
+    done
+    for _ in $(seq 1 200); do
+        [[ $(st "s['compute']['instances']") == 5 ]] && break
+        sleep 0.05
+    done
+    expect "hello served from its reservation while compute bursts" "$U/hello/" 200 '^hello from k10-metal$'
+    r=$(st "s['compute']['instances'], m['mem_committed']")
+    [[ "$r" == "5 $((6 * INST))" ]] && ok "compute capped at 1 reserved + 4 shared instances, budget full ($r)" || ko "compute instances, committed during the burst: $r"
+    expect "apply adding a reservation while bursts hold the pool" "$U/_k10s/apply" 200 '"version":2,"services":3' -X POST --data-binary "@$OUT/mem2.k10b"
+    wait "${hogs[@]}"
+    r=$(sort "$OUT/mem-hogs.txt" | uniq -c | tr -s ' ')
+    [[ "$r" == " 16 200" ]] && ok "16 compute requests beyond its memory waited for its instances: all 200" || ko "compute burst: $r"
+    expect "echo served from its new reservation" "$U/echo/x" 200 '^/x$'
+    r=$(st "s['compute']['instances'], s['compute']['instances_created'], s['compute']['mem_shared'], m['mem_reserved'], m['mem_committed'] <= m['mem_limit'], m['mem_refused'] > 0")
+    [[ "$r" == "4 5 $((3 * INST)) $((3 * INST)) True True" ]] && ok "one burst instance given back for echo's reservation, within the limit ($r)" || ko "after the apply: $r"
+    rm -f "$OUT/mem-hogs.txt"
+else
+    ko "boot with k10.mem (no ready line)"
 fi
 shutdown
 

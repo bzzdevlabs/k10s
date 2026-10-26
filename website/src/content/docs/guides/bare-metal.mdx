@@ -136,10 +136,11 @@ from it; a failed RDRAND fails the link).
 | `k10.spin_us=N` | busy-poll window before halting (default 50) |
 | `k10.jit_indirect=jump\|lfence\|retpoline` | Spectre v2 hardening of JIT indirect branches |
 | `k10.timer_res_us=N` | guest clock resolution (default 100; 0 = full; any other value needs RDRAND) |
+| `k10.mem=BYTES` | instance memory budget: one reserved instance per placed service, bursts share the rest (default: free memory at boot less four heap reserves; a cluster member's advertised capacity) |
 | `k10.join=HOST:PORT,…` | cluster seeds; with `k10.gossip=`, `k10.rpc=`, `k10.http=` (advertised addresses, default the interface's address). `k10.join`, `k10.gossip` or `k10.cluster` turns cluster mode on |
 | `k10.insecure_unauthenticated_cluster` | cluster mode without a key (isolated test networks only) |
 | `k10.gossip_max_skew_s=N` | clock skew allowed on gossip, seconds (default 300, at least 1) |
-| `k10.node_id=HEX`, `k10.probe_ms=N`, `k10.suspicion_mult=N`, `k10.mem=BYTES`, `k10.host_alias=IP` | identity and tuning (`k10.host_alias`: the address through which the guest reaches host loopback addresses, default `10.0.2.2`) |
+| `k10.node_id=HEX`, `k10.probe_ms=N`, `k10.suspicion_mult=N`, `k10.host_alias=IP` | identity and tuning (`k10.host_alias`: the address through which the guest reaches host loopback addresses, default `10.0.2.2`) |
 | `k10.selftest`, `k10.exit_on_ready` | test modes (both end in an ACPI power off; `k10.selftest=watchdog` and `=panic` test the watchdog and the UDP console) |
 
 An invalid `k10.engine`, `k10.smp`, `k10.spin_us`, `k10.jit_indirect`, `k10.timer_res_us`, `k10.ip`, `k10.console`,

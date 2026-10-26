@@ -43,12 +43,13 @@ curl -H "Authorization: $(tools/admin_auth.py 127.0.0.1:8090 POST /_k10s/apply @
 curl -H "Authorization: $(tools/admin_auth.py 127.0.0.1:8090 POST /_k10s/power reboot)" --data-binary reboot \
      localhost:8090/_k10s/power                  # reboot (body `off`: power off) through ACPI
 SMP=4 ./run.sh             # four CPUs: CPU 0 runs the network, CPU-heavy requests are spread over all four
-./test.sh                  # in-kernel self tests + end-to-end checks: JIT, interpreter, JIT on 4 CPUs, admin API signing,
-                           # every QEMU platform and NIC (power off/reboot, disks), SPCR console, static address, DHCP
-                           # renew, watchdogs, UDP console, 16 GiB + 32 vCPUs (TEST_PORT=18090, PLATFORM=, ACCEL=kvm|tcg)
+./test.sh                  # in-kernel self tests + end-to-end checks: JIT, interpreter, JIT on 4 CPUs, admin API signing
+                           # (a full nonce cache -> 429), memory reservations (k10.mem), every QEMU platform and NIC
+                           # (power off/reboot, disks), SPCR console, static address, DHCP renew, watchdogs, UDP
+                           # console, 16 GiB + 32 vCPUs (TEST_PORT=18090, PLATFORM=, ACCEL=kvm|tcg)
 ./cluster-test.sh          # 2 hosted `k10s node` + 1 k10-metal guest: join, apply, routing, failover, rejoin with a next
                            # cluster key, KV on the guest's NVMe K10S-DATA through a power cut, refused peers (wrong
-                           # key, unauthenticated links), leave + power off
+                           # key, unauthenticated links, a key holder that stops reading), leave + power off
 tools/storage_test.py --kernel out/k10-metal.elf --bundle out/bundle.k10b   # K10S-DATA on virtio-blk, NVMe and AHCI:
                            # growth, power cuts during a write stream (prefix checks), clean power off
 tools/platform_test.py --kernel out/k10-metal.elf   # SNTP and DNS on a scripted LAN, the clock stepped from 2001,
@@ -76,9 +77,10 @@ leaves it alone), `k10.panic=N` (seconds before a fatal error reboots, default 1
 Linux syntax; also read from the ACPI DSDT),
 `k10.jit_indirect=jump|lfence|retpoline` (Spectre v2 hardening of JIT indirect branches, default jump),
 `k10.timer_res_us=N` (resolution of the guests' `now_ns`/`time_ms`, default 100, 0 = full; any other value needs
-RDRAND for its key; SECURITY.md),
+RDRAND for its key; SECURITY.md), `k10.mem=BYTES` (the instance memory budget, "Memory"; in a cluster also the
+advertised capacity),
 Cluster mode: `k10.join=HOST:PORT[,…]`, `k10.gossip=`, `k10.rpc=`, `k10.http=` (advertised addresses),
-`k10.node_id=HEX`, `k10.probe_ms=N`, `k10.suspicion_mult=N`, `k10.mem=BYTES`, `k10.host_alias=IP`,
+`k10.node_id=HEX`, `k10.probe_ms=N`, `k10.suspicion_mult=N`, `k10.host_alias=IP`,
 `k10.gossip_max_skew_s=N` (default 300, at least 1), and `k10.insecure_unauthenticated_cluster` when no cluster key
 is given. Storage and updates: `k10.data=none` (no K10S-DATA: KV in memory), `k10.grow=0` (keep K10S-DATA's size),
 `k10.os_commit_grace=S` (30), `k10.os_trial=S` (600). The advertised addresses default to the interface's (DHCP or static) address. An invalid `k10.spin_us`,
@@ -166,7 +168,8 @@ metal/                    its own cargo workspace (own target dir); path-depends
                           dhcp_test.py (DHCP client against a scripted server), get-vmms.sh (pinned Firecracker and
                           Cloud Hypervisor), storage_test.py (K10S-DATA through power cuts), wdat.py (an ACPI WDAT
                           table for q35's TCO watchdog), platform_test.py (SNTP, DNS, power button, kept applies,
-                          IPv6: a scripted LAN over a QEMU socket netdev)
+                          IPv6: a scripted LAN over a QEMU socket netdev), meshpeer (cluster-test.sh: a key holder
+                          that never reads its replies)
   build.sh run.sh test.sh cluster-test.sh vmm-test.sh qemu.sh (the QEMU platforms the scripts share)
 ```
 
@@ -271,8 +274,21 @@ module until the bundle has been decoded. Each allocation is tagged, so `/_k10s/
 heap small/large, slots, stacks, net, kernel. There is no fixed heap region. The global allocator takes
 power-of-two size classes up to 2 KiB from 4 KiB frames, and larger blocks directly from the frame allocator. So
 the heap and the instance slots share all of RAM. An instance slot is `2^k + 4096` bytes of contiguous frames.
-Slots are cached per size class for reuse. Instance creation, coroutine stacks and socket buffers are refused when
-they would eat into a heap reserve (max(256 KiB, RAM/16)), and requests then queue instead.
+Slots are cached per size class for reuse. Instance creation, coroutine stacks, socket buffers and peer-link write
+buffers are refused when they would eat into a heap reserve (max(256 KiB, RAM/16)); requests then queue instead.
+
+Instances are also bounded by a memory budget, with the hosted node's semantics and code (`k10_mesh::memory`,
+docs/NODE.md "Memory"): the limit is `k10.mem=BYTES`, else the free memory at boot less four heap reserves (room for
+code, KV, stacks and buffers); placement charges each replica `2^memory` + 4 KiB against it (it is the capacity a
+cluster member advertises, and a single node's placement leaves what does not fit unplaced). Every service placed on
+the node reserves one instance; burst instances share the rest, so a busy service can exhaust the shared pool but
+never another service's reservation. A request that finds no room waits for one of the service's instances, or gets
+503 at once when the service has none. After an apply that adds reservations while bursts hold the pool, idle burst
+instances are destroyed at once and busy ones when their request ends; a burst instance that finds its service's
+reservation free moves into it; idle-instance reclaim keeps the reserved one. Giving back an instance or its memory
+wakes (IPI) the halted CPUs that hold queued or waiting invocations, which look again. `/_k10s/status` reports
+`mem.mem_{limit,reserved,shared_used,shared_limit,committed,retiring,overcommit,refused}` and per service
+`mem_{reserved,used,shared}`.
 
 The memory map is kept sorted and disjoint (the more restrictive type wins where firmware entries overlap), with
 adjacent regions merged, so UEFI maps of 100+ descriptors take a few entries.
@@ -431,7 +447,7 @@ HTTP/1.1 supports keep-alive, pipelining (one request in flight per connection),
   bytes drawn at boot and served open as hex at `GET /_k10s/audience`: a request is accepted by one boot of one
   node only, at most once (nodes sharing the admin key, or the same guest after a restart, refuse it). The head is
   checked before the body is read (unsigned, wrong key or audience, more than 60 s from the guest's clock, replayed
-  nonce → 401 with `WWW-Authenticate: K10s-HMAC`; too many requests in the window → 429), then the body against
+  nonce → 401 with `WWW-Authenticate: K10s-HMAC`; more than 65 536 nonces in the window → 429), then the body against
   the hash it signed. That covers everything else under `/_k10s` (there is no separate admin listener).
 * `/_k10s/status` returns JSON with memory per tag, counters, network and per-service stats.
 * `/_k10s/apply` takes a bundle. `/_k10s/logs/<service>` returns the last 64 `log` lines.
@@ -528,7 +544,7 @@ code. The engine is chosen at boot: the JIT unless `k10.engine=interp`. Both rea
 cluster, speaking the hosted node's protocols (docs/NODE.md "Cluster mode", crates/k10-mesh/README.md):
 * *Membership*: the sans-IO `k10_mesh::Gossip` (SWIM) over a smoltcp UDP socket (port 7946), clocked by the
   kernel's monotonic time and driven from the main loop (its next deadline bounds the idle `hlt`). The member
-  advertises `k10.gossip`/`k10.rpc`/`k10.http` and a capacity of `k10.mem` (default: free memory at boot), with
+  advertises `k10.gossip`/`k10.rpc`/`k10.http` and its instance memory budget (`k10.mem`, "Memory") as capacity, with
   the wall clock as starting incarnation (a guest rebooted with the same `k10.node_id` refutes its old Dead record).
 * *Authentication*: as on hosted nodes (docs/NODE.md "Cluster authentication"), with the same code
   (`k10_mesh::secure`): gossip datagrams sealed with the cluster key (opened with it or the next key; timestamps
@@ -542,7 +558,14 @@ cluster, speaking the hosted node's protocols (docs/NODE.md "Cluster mode", crat
   dropped, and at most 16 accepted links (two socket buffers each) may be in their handshake (the oldest is
   evicted). One link per peer pair (dial members with a larger id when they come up, others lazily; when both ends
   dialed, the connection dialed by the smaller id wins), requests multiplexed by id, write buffers flushed every
-  main-loop iteration, 200 ms…5 s dial backoff, 1 s connect timeout.
+  main-loop iteration, 200 ms…5 s dial backoff, 1 s connect timeout. Bounded buffering as on hosted nodes (shared
+  limits in `k10_mesh::secure`): a link's received frames are handled before more is read, and each link gets
+  `LINK_BUDGET` (1 MiB) per poll, counting bytes read and replies queued to it, the rest waiting for the next poll;
+  a link holding more than the soft cap of unsent bytes (`LINK_SOFT_CAP`, 16 MiB, at most RAM/16) gets no new calls
+  (`congested_skips`: the router takes the next candidate); a frame that would take it past the hard cap (soft cap
+  + the largest frame, RAM/4 at most) or grow its write buffer into the heap reserve closes the link and backs the
+  peer off (`links_overflowed`), so a key holder that stops reading cannot exhaust the guest's memory. Status reports
+  each link's `unsent` bytes.
 * *Desired state*: a newer `DesiredState` from gossip is fetched (`GetManifest`, then the missing blobs with
   `GetBlob`, pipelined; the origin first, then the other live members; 10 s without progress → next one), checked
   with SHA-256 and kept in memory, and in `K10S-DATA` when there is one (`manifest.k10m` and `blobs/<sha256>`, as on
@@ -722,10 +745,10 @@ and k10boot (UEFI); GRUB's Multiboot2 path boots `/k10s/metal.elf` only.
   no device interrupts (the NIC is then polled every millisecond).
 * **No demand paging.** A slot is fully backed (64 KiB + 4 KiB for the test services). There are no CoW snapshots;
   `fresh` restores with `memcpy`.
-* **No per-service memory reservations.** Instances take free frames first come, first served (hosted nodes reserve
-  one instance per placed service, `docs/NODE.md`); placement, shared with hosted nodes, charges each replica
-  `2^memory` + 4 KiB against the guest's capacity, so placed services fit, but a busy service can take the frames
-  another one needs for its first instance.
+* **Reservations share RAM with the kernel heap.** The memory budget ("Memory") bounds instances, but KV, prepared
+  code and buffers take frames from the same RAM (down to the heap reserve): a reserved instance waits for frames
+  if they took them (the default `k10.mem` leaves four heap reserves for that; a larger `k10.mem` is the operator's
+  over-commit).
 * **Storage needs `K10S-DATA`.** Without it (or with `k10.data=none`) KV, the node id, the desired state and a
   single node's applied bundle live in memory: a rebooted node fetches the desired state again from its peers, a
   single node starts again from its boot bundle. Storage I/O and

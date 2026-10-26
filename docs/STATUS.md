@@ -25,10 +25,12 @@ verified against the key built into k10s; `SHA256SUMS`).
   bounds (`k10-nospec`), per-node SipHash-keyed fuzzy guest clock; one host ABI crate (`k10-host`) for hosted and metal.
 - Defense in depth: two-phase start (bind, then `--user` drop, capability check, Landlock, seccomp, then workloads),
   root refused without `--user`, `--sandbox on|seccomp-only|log|off`.
-- DoS: per-service memory reservations, bounded overshoot, placement versioned in gossip (1000 nodes × 10k services
-  in ≈ 80 ms, output pinned by a test), rejoin through tombstone addresses and `DATA/peers`, KV store with ordered
-  flushes and rewrite-from-memory on I/O errors; each peer link gets 1 MiB per mesh-loop iteration (bytes read plus
-  replies queued), so a peer flooding requests cannot stall gossip.
+- DoS: per-service memory reservations and bounded overshoot (`k10_mesh::memory`, hosted and metal, `k10.mem`),
+  placement versioned in gossip (1000 nodes × 10k services in ≈ 80 ms, output pinned by a test), rejoin through
+  tombstone addresses and `DATA/peers`, KV store with ordered flushes and rewrite-from-memory on I/O errors; peer
+  links on both get 1 MiB per iteration/poll (bytes read plus replies queued) and capped unsent bytes
+  (`k10_mesh::secure`; metal: soft cap ≤ RAM/16, never into the heap reserve), so a peer flooding requests or not
+  reading cannot stall gossip or grow memory.
 - Tier 1 PID 1 mode (U0, docs/OS.md): `k10s` as `/init` of a Linux image: modalias cold/hotplug and modprobe helper,
   `K10S-BOOT` config and `K10S-DATA` data partitions, RFC 2131 DHCP (renew, rebind, NAK), SNTP, hostname, health-gated
   watchdog, power button; the node runs as a sandboxed child (`--user 65532:65532`), restarted with backoff. k10s
@@ -338,11 +340,8 @@ seek privileges on this machine.
 
 ## Open items
 - Untested here (needs root): `k10s node --user U --data NEW_DIR` without `--admin-token-file` creates the data
-  directory and `admin.key` owned by U. Metal has no test of the admin nonce-cache 429.
+  directory and `admin.key` owned by U.
 - Multi-hour soak to rule out the ~40 KB/min RSS drift seen once on a cluster node.
-- Metal has no per-service memory reservations (it shares placement, not the accounting), and its peer links have no
-  unsent-byte cap or per-iteration budget (a key holder that stops reading grows the write buffer): port the hosted
-  ones (`LINK_BUDGET`, `LINK_SOFT_CAP`, `LINK_HARD_CAP` in `crates/k10-node/src/cluster/mesh.rs`).
 - Hosted aarch64 nodes on 16 KiB-page kernels are unsupported until step 16; the k10s arm64 kernel uses 4 KiB pages.
 - 32-bit nodes (U5): `k10-nospec` clamps are plain code there (`GUARANTEED = false`, docs/OS.md Limits); placement
   does not know a node's word size, so a 32-bit node refuses the whole desired state if a service over 256 MiB is

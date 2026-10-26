@@ -298,6 +298,9 @@ extern "C" fn kmain() -> ! {
         net.set_dns(servers.unwrap_or_else(|_| fatal(format_args!("k10.dns={v}: want A.B.C.D,…"))));
     }
     sntp::init(bi.arg("k10.ntp"));
+    // Instance memory: `k10.mem`, else what is free now less four heap reserves (code, KV and buffers grow there).
+    let mem = bi.arg("k10.mem").and_then(|v| v.parse().ok());
+    runtime::set_mem_limit(mem.unwrap_or_else(|| frames::free_bytes().saturating_sub(4 * reserve_bytes())));
     // DHCP: the DISCOVER goes out now; the lease arrives while the bundle is applied. A cluster member waits for it
     // before it starts (it sends from, and may advertise, that address); a single node before the ready line.
     let cluster_cfg = cluster::config(&bi);
@@ -569,6 +572,7 @@ fn idle(net: &mut net::Net) {
     arch::interrupts_disable();
     // Other CPUs post replies and forwards, then wake us with an IPI if we are idle (see runtime::worker_main).
     let me = percpu::this();
+    runtime::note_halting();
     me.idle.store(true, Ordering::SeqCst);
     net.dev.rx_interrupts(true);
     if !net.rx_pending() && !runtime::has_work() {

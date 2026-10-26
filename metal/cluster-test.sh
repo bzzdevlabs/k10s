@@ -15,7 +15,9 @@
 #   6. apply a new version through the guest → the hosted nodes fetch it from the guest and apply it;
 #   7. refused peers: a hosted node with another cluster key joining through the guest (its gossip is dropped, it
 #      never becomes a member), raw connections to the guest's peer port that never authenticate (at most 16 are kept
-#      in their handshake, oldest evicted, all closed after the 5 s handshake timeout).
+#      in their handshake, oldest evicted, all closed after the 5 s handshake timeout), and a key holder that asks for
+#      the manifest without ever reading the replies (tools/meshpeer: far more than the guest's RAM): the guest closes
+#      that link at its cap and keeps serving.
 #   Keys (`k10s keygen -o`, mode 0600): a shared cluster key (guest: fw_cfg opt/k10s/cluster_key), a next key (guest:
 #   opt/k10s/cluster_next_key), a shared admin key (hosted: --admin-token-file; guest: opt/k10s/admin_key); every
 #   admin request is signed for the receiving node process's audience (tools/admin_auth.py, bench/k10s/k10s.py); one
@@ -35,6 +37,7 @@ cd "$(dirname "$0")"
 PLATFORM="${PLATFORM:-pc}"
 ACCEL_ARGS=$(k10_accel) || exit 1
 MKBUNDLE="${CARGO_TARGET_DIR:-target}/release/mkbundle"
+MESHPEER="${CARGO_TARGET_DIR:-target}/release/meshpeer"
 BASE="${BASE:-19400}"
 PROBE_MS="${PROBE_MS:-100}"
 SUSP="${SUSPICION_MULT:-2}"
@@ -49,6 +52,7 @@ if [[ -z "${K10S:-}" ]]; then
     (cd .. && CARGO_TARGET_DIR=target/metal-host cargo build --release -q -p k10s) || exit 1
 fi
 [[ -f out/k10-metal.elf ]] || ./build.sh >/dev/null
+cargo build --release -q -p meshpeer || exit 1
 for k in cluster cluster-next wrong admin; do
     "$K10S" keygen -o "$OUT/$k.key" 2>/dev/null || exit 1
 done
@@ -402,6 +406,18 @@ F1=$(st "$H3" "c['stats']['link_auth_failures']")
 wait $RAW
 n3=$(st "$H3" "c.get('live_members')")
 [[ "$n3" == 3 ]] && ok "cluster unaffected (3 live members)" || ko "live members after refused peers: $n3"
+O0=$(st "$H3" "c['stats']['links_overflowed']")
+r=$(timeout 300 "$MESHPEER" "127.0.0.1:$R3" "$OUT/cluster.key" 2000000)
+sent=${r#sent=} && sent=${sent%% *}
+r2=$(st "$H3" "*(c['stats']['links_overflowed'], d['mem']['peak_used'] >> 20, d['mem']['total_ram'] >> 20, len(c['links']))")
+read -r O1 peak ram nlinks <<< "$r2"
+if ((${O1:-0} == O0 + 1 && ${sent:-2000000} < 2000000)); then
+    ok "guest closed a non-reading key holder's link at its cap after $sent manifest requests ($r; peak $peak of $ram MiB)"
+else
+    ko "non-reading peer: '$r', links_overflowed $O0 -> $O1"
+fi
+[[ "$nlinks" == 2 && "$(st "$H3" "c.get('live_members')")" == 3 ]] && ok "guest keeps its 2 member links and 3 live members" || ko "after the non-reading peer: $r2"
+kv_all && ok "all 12 kv values read through n1 afterwards (the guest's replicas through its links)" || ko "kv values after the non-reading peer"
 echo "== power off the guest through its admin API (it leaves the cluster first)"
 r=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H "Authorization: $(sign "$H3" POST /_k10s/power off)" --data-binary off "127.0.0.1:$H3/_k10s/power")
 [[ "$r" == 202 ]] && ok "signed POST /_k10s/power off -> 202" || ko "power off request: $r"

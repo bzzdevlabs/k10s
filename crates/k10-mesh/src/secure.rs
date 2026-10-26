@@ -337,6 +337,16 @@ pub const RECORD_TARGET: usize = 64 << 10;
 /// Plaintext bytes of the first record each side sends (its `Hello` alone): the most a link buffers unauthenticated.
 pub const FIRST_RECORD_MAX: usize = 256;
 const RECORD_HEADER: usize = 4;
+/// Bytes read from, plus replies queued to, one link per loop iteration (then it is served again on the next one).
+pub const LINK_BUDGET: usize = 1 << 20;
+/// Unsent bytes beyond which a link gets no new calls (the peer is avoided like a backed-off one).
+pub const LINK_SOFT_CAP: usize = 16 << 20;
+
+/// Unsent bytes a link may hold at most: a frame that would exceed it closes the link (the peer stopped reading).
+/// Leaves room for one maximum-size frame queued below the soft cap.
+pub const fn link_hard_cap(soft_cap: usize, max_frame: usize) -> usize {
+    soft_cap + max_frame
+}
 
 fn frame_nonce(ctr: u64) -> [u8; 12] {
     let mut n = [0u8; 12];
@@ -559,6 +569,12 @@ impl Link {
         } else {
             0
         }
+    }
+
+    /// Upper bound of what queuing `m` adds to the write buffer (frame and record overhead): checked against caps.
+    pub fn growth(&self, m: &Msg<'_>) -> usize {
+        let bound = m.frame_len_bound();
+        bound + self.overhead(bound)
     }
 
     /// Bytes received but not yet returned as frames.
@@ -1068,6 +1084,25 @@ mod tests {
         let mut b = End::new(Some(k2), 2, None, 0xb);
         pump(&mut a, &mut b);
         (a, b)
+    }
+
+    #[test]
+    fn write_buffer_cap_bounds_what_a_frame_adds() {
+        let (mut a, mut b) = established(&keys(5), &keys(5));
+        let blob = vec![7u8; 3 * RECORD_TARGET + 5];
+        for (i, m) in [Msg::Ping, Msg::Blob { hash: [1; 32], bytes: &blob }, Msg::GetBlob { hash: [2; 32] }].iter().enumerate() {
+            let need = a.link.growth(m);
+            assert!(need > m.frame_len_bound());
+            let before = a.out.len();
+            a.link.push(m, i as u64, &mut a.out).unwrap();
+            a.link.seal(&mut a.out);
+            assert!(a.out.len() - before <= need, "frame {i} grew the buffer past its bound");
+        }
+        pump(&mut a, &mut b);
+        assert_eq!(b.got.len(), 3);
+        let m = Msg::Blob { hash: [1; 32], bytes: &blob };
+        assert_eq!(End::new(None, 1, None, 0).link.growth(&m), m.frame_len_bound(), "plain links add no records");
+        assert_eq!(link_hard_cap(LINK_SOFT_CAP, DEFAULT_MAX_FRAME), LINK_SOFT_CAP + DEFAULT_MAX_FRAME);
     }
 
     #[test]

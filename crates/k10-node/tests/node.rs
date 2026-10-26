@@ -846,7 +846,7 @@ fn apply_cluster_orders_by_version_and_hash_and_updates_placement_only() {
 }
 
 // ------------------------------------------------------------------------------------------------------------------
-// Memory reservations (`slot::MemBudget`)
+// Memory reservations (`k10_mesh::memory::MemBudget`)
 // ------------------------------------------------------------------------------------------------------------------
 
 /// A field of the node-wide `"memory"` status object.

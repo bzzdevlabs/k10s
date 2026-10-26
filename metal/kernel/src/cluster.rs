@@ -12,6 +12,11 @@
 //!   [`HANDSHAKE_TIMEOUT_NS`] is dropped, and at most [`UNAUTH_LINKS_MAX`] accepted links may be in that state (the
 //!   oldest is evicted). A node dials members with a larger id as soon as they come up and any member lazily;
 //!   when both ends dialed, the connection dialed by the smaller id is kept (same rule as the hosted node).
+//! * **Bounded buffering** (as hosted): a link's received frames are handled before more is read, and each link gets
+//!   `LINK_BUDGET` bytes per poll (bytes read plus replies queued to it; the rest waits for the next poll). A link
+//!   holding more than the soft cap of unsent bytes (`LINK_SOFT_CAP`, at most RAM/16) gets no new calls (the router
+//!   skips the peer like a backed-off one); a frame that would push it past the hard cap (soft cap + largest frame),
+//!   or grow its write buffer into the heap reserve, closes the link (the peer stopped reading) and backs the peer off.
 //! * **Desired state**: a newer `DesiredState{version, hash, origin}` from gossip is fetched over the links
 //!   (`GetManifest`, then `GetBlob` for missing blobs; the origin first, then the other live members), checked with
 //!   SHA-256 and kept in memory (no disk: a rebooted guest fetches it again). It is installed with the placement
@@ -31,7 +36,7 @@
 //! Kernel command line: `k10.join=HOST:PORT[,…]` (gossip addresses of members), `k10.gossip=ADDR`,
 //! `k10.rpc=ADDR`, `k10.http=ADDR` (advertised addresses; default 127.0.0.1:7946/7947/80), `k10.node_id=HEX`
 //! (default random; reuse it to rejoin as the same member), `k10.probe_ms=N`, `k10.suspicion_mult=N`,
-//! `k10.mem=BYTES` (advertised capacity; default the free memory at boot), `k10.host_alias=IP` (10.0.2.2),
+//! `k10.mem=BYTES` (the instance memory limit, main.rs, is the advertised capacity), `k10.host_alias=IP` (10.0.2.2),
 //! `k10.insecure_unauthenticated_cluster` (no cluster key), `k10.gossip_max_skew_s=N` (300, at least 1).
 //! Any of `k10.join`, `k10.gossip` or `k10.cluster` turns cluster mode on; k10s.conf sets them too (bootcfg.rs).
 
@@ -43,7 +48,9 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use k10_mesh::secure::{self, ClusterKey, ClusterKeys, GossipCipher, LinkError, LinkEvent, GOSSIP_OVERHEAD};
+use k10_mesh::secure::{
+    self, link_hard_cap, ClusterKey, ClusterKeys, GossipCipher, LinkError, LinkEvent, GOSSIP_OVERHEAD, LINK_BUDGET, LINK_SOFT_CAP,
+};
 use k10_mesh::sha256::{sha256, to_hex};
 use k10_mesh::wire::Msg;
 use k10_mesh::{place, Bundle, Capacity, DesiredState, Event, Gossip, Manifest, Member, MemberState, NodeId, Output};
@@ -88,7 +95,6 @@ pub struct Config {
     pub host_alias: Ipv4Addr,
     pub probe_ms: Option<u64>,
     pub suspicion_mult: Option<u64>,
-    pub mem_bytes: Option<u64>,
     /// `None`: unauthenticated (only with `k10.insecure_unauthenticated_cluster`).
     pub keys: Option<ClusterKeys>,
     pub max_skew_ms: u64,
@@ -168,7 +174,6 @@ pub fn config(bi: &BootInfo) -> Option<Config> {
         host_alias: bi.arg("k10.host_alias").and_then(|v| v.parse().ok()).unwrap_or(Ipv4Addr::new(10, 0, 2, 2)),
         probe_ms: bi.arg("k10.probe_ms").and_then(|v| v.parse().ok()).filter(|&n| n >= 10),
         suspicion_mult: bi.arg("k10.suspicion_mult").and_then(|v| v.parse().ok()).filter(|&n| n >= 1),
-        mem_bytes: bi.arg("k10.mem").and_then(|v| v.parse().ok()),
         keys,
         max_skew_ms: max_skew_s * 1000,
     })
@@ -235,6 +240,26 @@ struct Link {
     outstanding: u32,
     bytes_in: u64,
     bytes_out: u64,
+    /// Received input left when its budget ran out (served again on the next poll).
+    again: bool,
+    /// Scheduled for closing (a frame overflowed the hard cap).
+    doomed: bool,
+}
+
+impl Link {
+    /// Bytes queued but not yet handed to the socket.
+    fn unsent(&self) -> usize {
+        self.wbuf.len() - self.wpos
+    }
+}
+
+/// Why [`Cluster::queue`] did not queue a frame.
+#[derive(Debug, PartialEq, Eq)]
+enum QueueError {
+    /// A field is over the wire limits (nothing was written).
+    Encode,
+    /// The link would exceed its cap: it is being closed.
+    Overflow,
 }
 
 /// A request forwarded to a peer (or about to be).
@@ -321,6 +346,8 @@ struct Stats {
     served_for_peers: u64,
     not_here: u64,
     dial_failures: u64,
+    congested_skips: u64,
+    links_overflowed: u64,
     peer_bytes_in: u64,
     peer_bytes_out: u64,
     gossip_rejected: u64,
@@ -364,6 +391,11 @@ pub struct Cluster {
     last_error: Option<String>,
     max_frame: usize,
     link_buf: usize,
+    /// Unsent bytes beyond which a link gets no new calls, and the most it may hold.
+    soft_cap: usize,
+    hard_cap: usize,
+    /// Links whose write buffer overflowed, closed at the next safe point.
+    doomed: Vec<(u32, u32)>,
     stats: Stats,
     /// The next OS update step (osupdate.rs), ns.
     os_next: u64,
@@ -397,8 +429,9 @@ pub fn start(mut cfg: Config, net: &mut Net) -> bool {
     // Link buffers: calls carry request/response bodies, fetches carry code blobs.
     let link_buf = if ram >= 48 << 20 { 64 << 10 } else { 16 << 10 };
     net.listen_extra(RPC_PORT, link_buf, link_buf, 2);
-    let mem_bytes =
-        cfg.mem_bytes.unwrap_or_else(|| crate::mem::frames::free_bytes().saturating_sub(4 * crate::reserve_bytes()));
+    let max_frame = k10_mesh::wire::DEFAULT_MAX_FRAME.min((ram / 4) as usize);
+    let soft_cap = LINK_SOFT_CAP.min((ram / 16) as usize);
+    let mem_bytes = runtime::mem_limit();
     let mut me = Member::new(cfg.id, cfg.gossip, cfg.rpc, cfg.http, Capacity { mem_bytes, cores: runtime::cpus() as u32 });
     // A rebooted guest that reuses its id must start above any incarnation it used before.
     me.incarnation = time::unix_ms();
@@ -468,8 +501,11 @@ pub fn start(mut cfg: Config, net: &mut Net) -> bool {
         unplaced: 0,
         last_error: None,
         // A frame holds at most one code blob or one call body; never let one claim more than a quarter of RAM.
-        max_frame: k10_mesh::wire::DEFAULT_MAX_FRAME.min((ram / 4) as usize),
+        max_frame,
         link_buf,
+        soft_cap,
+        hard_cap: link_hard_cap(soft_cap, max_frame),
+        doomed: Vec::new(),
         stats: Stats::default(),
         os_next: 0,
         cfg,
@@ -506,9 +542,10 @@ pub fn has_work(net: &mut Net) -> bool {
     let g = CLUSTER.borrow();
     let Some(c) = g.as_ref() else { return false };
     !c.out.is_empty()
+        || !c.doomed.is_empty()
         || c.links.iter().flatten().any(|l| {
             let s = net.tcp(l.sock);
-            (l.wpos < l.wbuf.len() - l.sec.held() && s.can_send()) || s.can_recv()
+            l.again || (l.wpos < l.wbuf.len() - l.sec.held() && s.can_send()) || s.can_recv()
         })
 }
 
@@ -595,6 +632,7 @@ impl Cluster {
         for li in 0..self.links.len() as u32 {
             self.link_io(net, li);
         }
+        self.close_doomed(net);
         // Work from the runtime: requests for services placed elsewhere, answers to peers' calls.
         let (forwards, peer_out) = (runtime::take_forwards(), runtime::take_peer_out());
         for f in forwards {
@@ -616,11 +654,12 @@ impl Cluster {
         for p in peer_out {
             if self.link_live(p.link, p.gen) {
                 let status = if p.status == CALL_UNKNOWN { STATUS_NOT_HERE } else { p.status.clamp(i32::MIN as i64, i32::MAX as i64) as i32 };
-                self.queue(p.link, &Msg::CallResult { status, body: &p.body }, p.id);
+                let _ = self.queue(p.link, &Msg::CallResult { status, body: &p.body }, p.id);
             }
         }
         self.run_timers(net);
         self.on_gossip_events(net);
+        self.close_doomed(net);
         for li in 0..self.links.len() as u32 {
             if self.links[li as usize].is_some() {
                 self.flush(net, li);
@@ -862,7 +901,7 @@ impl Cluster {
                 let version = f.want.version;
                 let id = self.new_id();
                 self.fetch.as_mut().unwrap().reqs.push(id);
-                self.queue(li, &Msg::GetManifest { version }, id);
+                let _ = self.queue(li, &Msg::GetManifest { version }, id);
             } else {
                 self.request_blobs(li);
             }
@@ -875,7 +914,7 @@ impl Cluster {
         for hash in missing {
             let id = self.new_id();
             self.fetch.as_mut().unwrap().reqs.push(id);
-            self.queue(li, &Msg::GetBlob { hash }, id);
+            let _ = self.queue(li, &Msg::GetBlob { hash }, id);
         }
     }
 
@@ -1067,8 +1106,12 @@ impl Cluster {
                     let deadline_ms = (c.deadline.saturating_sub(time::now_ns()) / 1_000_000).clamp(1, u32::MAX as u64) as u32;
                     let method = c.req.method.clamp(0, 4) as u8;
                     let call = Msg::Call { service: &c.service, path: &c.req.path, body: &c.req.body, deadline_ms, method };
-                    let Some(start) = self.queue(li, &call, id) else {
-                        return self.fail_call(c, CALL_UNAVAILABLE, "service name or path too long to forward");
+                    let start = match self.queue(li, &call, id) {
+                        Ok(start) => start,
+                        Err(QueueError::Encode) => {
+                            return self.fail_call(c, CALL_UNAVAILABLE, "service name or path too long to forward")
+                        }
+                        Err(QueueError::Overflow) => continue,
                     };
                     let l = self.links[li as usize].as_mut().unwrap();
                     l.outstanding += 1;
@@ -1100,6 +1143,10 @@ impl Cluster {
             if id == self.me || c.tried.contains(&id) || self.backed_off(id, now) {
                 continue;
             }
+            if self.congested(id) {
+                self.stats.congested_skips += 1;
+                continue;
+            }
             let Some(state) = self.member_state(id) else { continue };
             let out = self.primary.get(&id).and_then(|&li| self.links[li as usize].as_ref()).map_or(0, |l| l.outstanding);
             let key = (state == MemberState::Suspect, out, (i + self.rr) % n);
@@ -1121,6 +1168,10 @@ impl Cluster {
                         return Pick::Local;
                     }
                     if self.member_state(id) == Some(MemberState::Alive) && !self.backed_off(id, now) {
+                        if self.congested(id) {
+                            self.stats.congested_skips += 1;
+                            continue;
+                        }
                         return Pick::Peer(id);
                     }
                 }
@@ -1171,7 +1222,7 @@ impl Cluster {
         let gen = self.links[li as usize].as_ref().unwrap().gen;
         let deadline = time::now_ns() + deadline_ms.max(1) as u64 * 1_000_000;
         if runtime::submit_local(&service, req, deadline, ReplyTo::Peer { link: li, gen, id }).is_err() {
-            self.queue(li, &Msg::CallResult { status: STATUS_NOT_HERE, body: b"unknown service" }, id);
+            let _ = self.queue(li, &Msg::CallResult { status: STATUS_NOT_HERE, body: b"unknown service" }, id);
         }
     }
 
@@ -1187,11 +1238,47 @@ impl Cluster {
         self.links.get(li as usize).and_then(|l| l.as_ref()).is_some_and(|l| l.gen == gen)
     }
 
-    /// Appends a frame to a link's write buffer; returns its offset in the link's byte stream (`None`: the
-    /// message cannot be encoded — a field too long for the wire — and nothing was queued).
-    fn queue(&mut self, li: u32, m: &Msg<'_>, id: u64) -> Option<u64> {
+    /// Appends a frame to a link's write buffer; returns its offset in the link's byte stream.
+    /// [`QueueError::Encode`]: a field is too long for the wire (nothing was queued). [`QueueError::Overflow`]: the
+    /// frame would take the link past its hard cap, or its buffer into the heap reserve — the peer is not reading:
+    /// the frame is dropped and the link is closed at the next safe point (`close_doomed`).
+    fn queue(&mut self, li: u32, m: &Msg<'_>, id: u64) -> Result<u64, QueueError> {
+        let hard_cap = self.hard_cap;
         let l = self.links[li as usize].as_mut().unwrap();
-        l.sec.push(m, id, &mut l.wbuf).ok()
+        if l.doomed {
+            return Err(QueueError::Overflow);
+        }
+        let grow = l.sec.growth(m);
+        if l.unsent() + grow > hard_cap || !make_room(l, grow) {
+            l.doomed = true;
+            self.doomed.push((li, l.gen));
+            self.stats.links_overflowed += 1;
+            kprintln!("cluster: peer link {:?} holds {} KiB unsent: closing it", l.sec.peer(), l.unsent() >> 10);
+            return Err(QueueError::Overflow);
+        }
+        l.sec.push(m, id, &mut l.wbuf).map_err(|_| QueueError::Encode)
+    }
+
+    /// Closes the links whose write buffer overflowed, backing their peer off (calls already sent on them fail with
+    /// −2, the others go to the next candidate).
+    fn close_doomed(&mut self, net: &mut Net) {
+        while let Some((li, gen)) = self.doomed.pop() {
+            if self.link_live(li, gen) {
+                let peer = self.links[li as usize].as_ref().unwrap().sec.peer();
+                self.close_link(net, li, true, false);
+                if let Some(p) = peer {
+                    self.note_dial_failure(p);
+                }
+            }
+        }
+    }
+
+    /// The peer's link holds more than the soft cap of unsent bytes: send it no new calls for now.
+    fn congested(&self, peer: NodeId) -> bool {
+        self.primary
+            .get(&peer)
+            .and_then(|&li| self.links[li as usize].as_ref())
+            .is_some_and(|l| l.doomed || l.unsent() > self.soft_cap)
     }
 
     /// Sets up a link on a connected (or connecting) socket; `None` if RDRAND failed (no handshake nonce): the
@@ -1229,6 +1316,8 @@ impl Cluster {
             outstanding: 0,
             bytes_in: 0,
             bytes_out: 0,
+            again: false,
+            doomed: false,
         });
         Some(li)
     }
@@ -1290,11 +1379,15 @@ impl Cluster {
         self.stats.dial_failures += 1;
     }
 
-    /// Connection state, received bytes → frames.
+    /// Connection state, then received frames: the frames already decoded are handled before more is read, until
+    /// the link is drained or has used [`LINK_BUDGET`] (bytes read plus replies queued to it); then `again` keeps
+    /// the main loop polling it.
     fn link_io(&mut self, net: &mut Net, li: u32) {
         let Some(l) = self.links[li as usize].as_mut() else { return };
-        let s = net.tcp(l.sock);
+        let gen = l.gen;
+        l.again = false;
         if l.connecting {
+            let s = net.tcp(l.sock);
             if s.may_send() {
                 l.connecting = false;
             } else if !s.is_open() || s.state() == tcp::State::Closed {
@@ -1306,59 +1399,62 @@ impl Cluster {
                 return;
             }
         }
-        let mut n_in = 0;
-        while s.can_recv() {
-            let sec = &mut l.sec;
-            match s.recv(|b| {
-                sec.feed(b);
-                (b.len(), b.len())
-            }) {
-                Ok(n) if n > 0 => n_in += n,
-                _ => break,
-            }
-        }
-        l.bytes_in += n_in as u64;
-        self.stats.peer_bytes_in += n_in as u64;
-        let mut frames: Vec<(u64, In)> = Vec::new();
-        let mut bad = false;
-        let mut fail: Option<LinkError> = None;
+        let mut budget = LINK_BUDGET;
         loop {
-            match l.sec.next(&mut l.wbuf) {
-                Ok(Some(LinkEvent::Up(member))) => frames.push((0, In::Hello(member))),
-                Ok(Some(LinkEvent::Frame(f))) => match f.msg() {
-                    Ok(m) => frames.push((f.request_id, In::from(m))),
-                    Err(_) => {
-                        bad = true;
-                        break;
+            loop {
+                let Some(l) = self.links[li as usize].as_mut().filter(|l| l.gen == gen) else { return };
+                if budget == 0 {
+                    l.again = true;
+                    return;
+                }
+                let unsent = l.unsent();
+                let ev = match l.sec.next(&mut l.wbuf) {
+                    Ok(Some(LinkEvent::Up(member))) => Ok(Some((0, In::Hello(member)))),
+                    Ok(Some(LinkEvent::Frame(f))) => f.msg().map(|m| Some((f.request_id, In::from(m)))).map_err(|_| None),
+                    Ok(None) => Ok(None),
+                    Err(e) => Err(Some(e)),
+                };
+                match ev {
+                    Ok(Some((id, m))) => {
+                        self.on_frame(net, li, id, m);
+                        let Some(l) = self.links[li as usize].as_ref().filter(|l| l.gen == gen) else { return };
+                        budget = budget.saturating_sub(l.unsent().saturating_sub(unsent));
                     }
-                },
-                Ok(None) => break,
-                Err(e) => {
-                    fail = Some(e);
-                    bad = true;
-                    break;
+                    Ok(None) => break,
+                    Err(Some(LinkError::WrongPeer(_))) => {
+                        // The dialed address now belongs to another node (restarted with a new id).
+                        return self.close_link(net, li, false, false);
+                    }
+                    Err(Some(e)) => {
+                        if self.links[li as usize].as_ref().unwrap().sec.is_auth_failure(&e) {
+                            self.auth_failed(li, &e.to_string());
+                        }
+                        return self.close_link(net, li, true, false);
+                    }
+                    Err(None) => return self.close_link(net, li, true, false),
                 }
             }
-        }
-        let closed = bad || !s.may_recv();
-        let gen = l.gen;
-        if let Some(e) = fail {
-            if matches!(e, LinkError::WrongPeer(_)) {
-                // The dialed address now belongs to another node (restarted with a new id).
-                return self.close_link(net, li, false, false);
-            }
-            if self.links[li as usize].as_ref().unwrap().sec.is_auth_failure(&e) {
-                self.auth_failed(li, &e.to_string());
-            }
-        }
-        for (id, m) in frames {
-            if !self.link_live(li, gen) {
+            let l = self.links[li as usize].as_mut().unwrap();
+            let s = net.tcp(l.sock);
+            if !s.can_recv() {
+                if !s.may_recv() {
+                    self.close_link(net, li, true, false);
+                }
                 return;
             }
-            self.on_frame(net, li, id, m);
-        }
-        if closed && self.link_live(li, gen) {
-            self.close_link(net, li, true, false);
+            let sec = &mut l.sec;
+            let n = s
+                .recv(|b| {
+                    sec.feed(b);
+                    (b.len(), b.len())
+                })
+                .unwrap_or(0);
+            l.bytes_in += n as u64;
+            self.stats.peer_bytes_in += n as u64;
+            budget = budget.saturating_sub(n);
+            if n == 0 {
+                return;
+            }
         }
     }
 
@@ -1402,14 +1498,14 @@ impl Cluster {
             In::GetManifest => {
                 let cur = self.store.current.clone();
                 let bytes: &[u8] = cur.as_ref().map(|s| s.bytes.as_slice()).unwrap_or(&[]);
-                self.queue(li, &Msg::Manifest { bytes }, id);
+                let _ = self.queue(li, &Msg::Manifest { bytes }, id);
             }
             In::GetBlob(hash) => match self.store.blobs.get(&hash).cloned() {
                 Some(b) => {
-                    self.queue(li, &Msg::Blob { hash, bytes: &b }, id);
+                    let _ = self.queue(li, &Msg::Blob { hash, bytes: &b }, id);
                 }
                 None => {
-                    self.queue(li, &Msg::BlobMissing { hash }, id);
+                    let _ = self.queue(li, &Msg::BlobMissing { hash }, id);
                 }
             },
             m @ (In::Manifest(_) | In::Blob(..) | In::BlobMissing) => self.on_fetch_reply(net, id, m),
@@ -1419,7 +1515,7 @@ impl Cluster {
             }
             In::CallResult { status, body } => self.on_call_result(net, id, status, body),
             In::Ping => {
-                self.queue(li, &Msg::Pong, id);
+                let _ = self.queue(li, &Msg::Pong, id);
             }
             In::Pong => {}
         }
@@ -1647,8 +1743,12 @@ impl Cluster {
             let peer = l.sec.peer().map(|p| alloc::format!("\"{p}\"")).unwrap_or_else(|| "null".into());
             let _ = write!(
                 s,
-                "{{\"peer\":{peer},\"dialed\":{},\"state\":\"{state}\",\"outstanding\":{},\"bytes_in\":{},\"bytes_out\":{}}}",
-                l.dialed, l.outstanding, l.bytes_in, l.bytes_out
+                "{{\"peer\":{peer},\"dialed\":{},\"state\":\"{state}\",\"outstanding\":{},\"bytes_in\":{},\"bytes_out\":{},\"unsent\":{}}}",
+                l.dialed,
+                l.outstanding,
+                l.bytes_in,
+                l.bytes_out,
+                l.unsent()
             );
         }
         let st = &self.stats;
@@ -1658,7 +1758,8 @@ impl Cluster {
                 "],\"stats\":{{\"gossip_packets_sent\":{},\"gossip_bytes_sent\":{},\"gossip_packets_received\":{},",
                 "\"gossip_bytes_received\":{},\"gossip_send_dropped\":{},\"gossip_malformed\":{},\"forwarded\":{},",
                 "\"forward_retries\":{},\"forward_failed\":{},\"forward_local\":{},\"resent_unsent\":{},",
-                "\"served_for_peers\":{},\"not_here\":{},\"dial_failures\":{},\"peer_bytes_in\":{},\"peer_bytes_out\":{},",
+                "\"served_for_peers\":{},\"not_here\":{},\"dial_failures\":{},\"congested_skips\":{},\"links_overflowed\":{},",
+                "\"peer_bytes_in\":{},\"peer_bytes_out\":{},",
                 "\"gossip_rejected\":{},\"link_auth_failures\":{},",
                 "\"pending_calls\":{},\"fetches\":{},\"blobs_fetched\":{},\"blobs\":{},\"store_bytes\":{},\"applies\":{},",
                 "\"apply_errors\":{}}}}}"
@@ -1677,6 +1778,8 @@ impl Cluster {
             st.served_for_peers,
             st.not_here,
             st.dial_failures,
+            st.congested_skips,
+            st.links_overflowed,
             st.peer_bytes_in,
             st.peer_bytes_out,
             st.gossip_rejected,
@@ -1706,6 +1809,25 @@ pub fn status_json() -> Option<String> {
 
 /// Per service, every live member in the order the service's rendezvous hashing prefers them (where it moves when
 /// its hosts fail): the router's fallback order (same computation as the hosted node).
+/// Makes room for `n` more bytes in a link's write buffer without growing it into the heap reserve (false: no room;
+/// an allocation failure must close the link, not stop the kernel).
+fn make_room(l: &mut Link, n: usize) -> bool {
+    if l.wbuf.capacity() - l.wbuf.len() >= n {
+        return true;
+    }
+    if l.wpos > 0 {
+        l.wbuf.drain(..l.wpos);
+        l.wpos = 0;
+    }
+    let len = l.wbuf.len();
+    if l.wbuf.capacity() - len >= n {
+        return true;
+    }
+    let free = crate::mem::frames::free_bytes().saturating_sub(crate::reserve_bytes());
+    let want = [(len + n).max(2 * l.wbuf.capacity()), len + n].into_iter().find(|&c| c as u64 <= free);
+    want.is_some_and(|c| l.wbuf.try_reserve_exact(c - len).is_ok())
+}
+
 fn ranking(m: &Manifest, members: &[Member]) -> BTreeMap<String, Vec<NodeId>> {
     let n = members.iter().filter(|x| x.is_live()).count().max(1) as u32;
     m.services

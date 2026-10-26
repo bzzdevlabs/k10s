@@ -78,7 +78,7 @@ pub struct ServiceRt {
     pub kv: Arc<KvNs>,
     pub log: Arc<LogRing>,
     pub placement: Placement,
-    /// Memory reserved for this version (one instance when placed here; see `slot::MemBudget`).
+    /// Memory reserved for this version (one instance when placed here; see `k10_mesh::memory::MemBudget`).
     pub mem_res: Reservation,
     /// New instances start from a post-`init` snapshot (always for `fresh` services; optional otherwise).
     pub use_snapshot: bool,

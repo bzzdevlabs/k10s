@@ -29,7 +29,7 @@ placement and peer links on top of it.
   slots (measured: 70 KB RSS per instance instead of 4.4 KB). Physical memory = pages actually touched.
   `--mem SIZE` caps the address space handed to live instances (sum of `S + 4 KiB`; default: physical RAM), with
   per-service reservations (below).
-- **Memory reservations** (`slot::MemBudget`):
+- **Memory reservations** (`k10_mesh::memory::MemBudget`; k10-metal uses it with `k10.mem`, metal/README.md "Memory"):
   - every service placed on the node reserves one instance (`S + 4 KiB`) of `--mem`; burst instances share the
     rest, so a busy service can exhaust the shared pool but never another service's reservation;
   - an operator apply whose reservations exceed `--mem` is refused (422) before any code is prepared; the reloaded
@@ -468,7 +468,10 @@ peer, the written prefix of a write buffer is dropped once it reaches 1 MiB, and
 unsent bytes gets no new calls (the router skips that peer like a backed-off one: next candidate, else −2;
 `congested_skips`); a frame that would push it past 16 MiB + the maximum frame size (80 MiB: the peer stopped
 reading) is dropped and the link closed, which fails or re-routes its outstanding calls like any lost connection,
-and backs the peer off (`links_overflowed`). `/_k10s/status` reports each link's `unsent` bytes. Links to a member declared Dead are
+and backs the peer off (`links_overflowed`). `/_k10s/status` reports each link's `unsent` bytes. The limits are
+`k10_mesh::secure`'s (`LINK_BUDGET`, `LINK_SOFT_CAP`, `link_hard_cap`), shared with k10-metal, which serves each link
+once per poll, caps unsent bytes at RAM/16 + the largest frame at most, and also closes a link whose write buffer
+would grow into its heap reserve (metal/README.md). Links to a member declared Dead are
 closed; links to a member that Left stay open until the leaver closes them (it still answers what it was sent).
 
 **Routing.** Shards hand invocations of `Remote` services (ingress requests and `call`s) to `MeshRouter::forward` →

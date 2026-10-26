@@ -4,6 +4,7 @@
 //!   sans-IO state machine (time is an argument, packets and events are return values).
 //! * [`manifest`] — the desired-state document (binary codec + operator text format).
 //! * [`placement`] — `place(manifest, members)`: a pure, deterministic, capacity-aware weighted rendezvous hash.
+//! * [`memory`] — the node-side counterpart: one reserved instance per placed service, a shared pool for bursts.
 //! * [`wire`] — framing codec for the TCP peer protocol (the node runtime owns the sockets).
 //! * [`sha256`] — content addressing.
 //! * [`crypto`] / [`secure`] — cluster authentication: ChaCha20-Poly1305, HKDF, sealed gossip, authenticated peer links.
@@ -23,6 +24,7 @@ pub mod crypto;
 pub mod gossip;
 pub mod manifest;
 pub mod member;
+pub mod memory;
 pub mod osimage;
 pub mod placement;
 pub mod rollout;

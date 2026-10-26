@@ -10,6 +10,8 @@ use super::frames::{self, Tag, FRAME};
 use crate::sync::IrqLock;
 
 pub const TAIL: usize = 4096;
+// Placement and the memory budget charge an instance as `2^mem_log2 + INSTANCE_OVERHEAD`: a slot's footprint.
+const _: () = assert!(TAIL as u64 == k10_mesh::placement::INSTANCE_OVERHEAD);
 /// Cached free slots per size class.
 const CACHE_PER_CLASS: usize = 8;
 

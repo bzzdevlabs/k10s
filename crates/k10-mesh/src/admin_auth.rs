@@ -18,7 +18,7 @@ pub const AUDIENCE_LEN: usize = 16;
 /// Accepted `|request time − node clock|`.
 pub const MAX_SKEW_MS: u64 = 60_000;
 /// Nonces remembered within the skew window; beyond it requests are refused until older ones expire.
-const MAX_NONCES: usize = 65_536;
+pub const MAX_NONCES: usize = 65_536;
 const MIN_KEY_LEN: usize = 32;
 const MAX_KEY_LEN: usize = 512;
 
@@ -248,6 +248,28 @@ mod tests {
         let later = now + 3 * MAX_SKEW_MS;
         let h = header(KEY, "GET", "/_k10s/status", later, 5, b"");
         assert!(v.verify_head("GET", "/_k10s/status", Some(&h), later).is_ok());
+        assert_eq!(v.seen.len(), 1);
+    }
+
+    #[test]
+    fn nonce_cache_full_is_busy_until_the_window_moves() {
+        let key = AdminKey::parse(KEY).unwrap();
+        let mut v = AdminVerifier::new(AdminKey::parse(KEY).unwrap(), AUD);
+        let now = 1_000_000_000;
+        let signed = |i: u32, t: u64| {
+            let mut n = [0u8; 16];
+            n[..4].copy_from_slice(&i.to_le_bytes());
+            key.authorization(&to_hex(&AUD), "GET", "/_k10s/status", t, &n, b"").into_bytes()
+        };
+        for i in 0..MAX_NONCES as u32 {
+            assert!(v.verify_head("GET", "/_k10s/status", Some(&signed(i, now)), now).is_ok());
+        }
+        let next = signed(MAX_NONCES as u32, now);
+        assert_eq!(v.verify_head("GET", "/_k10s/status", Some(&next), now), Err(AdminReject::Busy));
+        assert_eq!(v.verify_head("GET", "/_k10s/status", Some(&signed(0, now)), now), Err(AdminReject::Replay));
+        assert_eq!(v.seen.len(), MAX_NONCES, "a refused request is not remembered");
+        let later = now + MAX_SKEW_MS + 1;
+        assert!(v.verify_head("GET", "/_k10s/status", Some(&signed(MAX_NONCES as u32, later)), later).is_ok());
         assert_eq!(v.seen.len(), 1);
     }
 }

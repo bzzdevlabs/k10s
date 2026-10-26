@@ -4,7 +4,7 @@
 # for `x86_64-unknown-none` with its own rustflags (see .cargo/config.toml) and has its own target dir (metal/target).
 [workspace]
 resolver = "2"
-members = ["kernel", "mkbundle", "tools/linux-guest", "bootproto", "boot", "drivers"]
+members = ["kernel", "mkbundle", "tools/linux-guest", "tools/meshpeer", "bootproto", "boot", "drivers"]
 # A plain `cargo build` builds the host tool only (the kernel needs --target x86_64-unknown-none, the Linux
 # comparison guest --target x86_64-unknown-linux-musl; see build.sh and tools/linux-compare.sh).
 default-members = ["mkbundle"]

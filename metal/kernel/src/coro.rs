@@ -177,8 +177,9 @@ pub fn stats() -> (usize, usize) {
 pub enum Yield {
     /// Time slice over (TIR safepoint saw a preemption request).
     Preempted,
-    /// Waiting for an instance of a busy service (the argument is an opaque wait key).
-    Wait(usize),
+    /// Waiting for an instance, instance memory or a forwarded call's result: resumed once the release epoch
+    /// differs from `epoch` (read before looking) or at `until` (ns; `u64::MAX`: no deadline).
+    Wait { epoch: u64, until: u64 },
     /// The entry function finished; the coroutine must not be resumed again.
     Finished,
 }

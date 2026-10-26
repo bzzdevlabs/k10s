@@ -122,10 +122,10 @@ Out of scope by design (documented in `docs/DESIGN.md`):
 - **Admin API** (`/_k10s/*`: apply, status, logs, cluster, bench): every request is signed with the node's admin
   key (HMAC-SHA256 over the node process's random audience, method, target, time, nonce and the body's SHA-256;
   hosted: `--admin-token-file`, else `DATA/admin.key` created with mode 0600; metal: fw_cfg `opt/k10s/admin_key`).
-  Audience, signature, clock window (60 s) and nonce cache are checked on the request head before any body is read,
-  the body against its signed hash after: the key never travels, and a captured request can be neither altered nor
-  replayed, on that node, another node sharing the key, or the node after a restart. Open without credentials:
-  `health`, `audience` (what requests are signed for), and `metrics` on the dedicated admin listener (`--admin ADDR`,
+  Audience, signature, clock window (60 s) and nonce cache (65 536 per window, then 429) are checked on the request
+  head before any body is read, the body against its signed hash after: the key never travels, and a captured
+  request can be neither altered nor replayed, on that node, another node sharing the key, or the node after a
+  restart. Open without credentials: `health`, `audience` (what requests are signed for), and `metrics` on the dedicated admin listener (`--admin ADDR`,
   which also takes the admin API off the ingress). A metal node without an admin key serves only `health`.
 - **Cluster** (gossip UDP, peer TCP): a shared 32-byte key (`k10s keygen`, `--cluster-key-file`, metal fw_cfg
   `opt/k10s/cluster_key`), plus a next key while rotating (`--cluster-next-key-file`, `opt/k10s/cluster_next_key`);
@@ -212,15 +212,17 @@ Not mitigated (known gaps):
   of a measurement, it does not make one impossible.
 
 ## Denial of service: what bounds one workload (details in `docs/NODE.md`)
-- **Memory**: every service placed on a node reserves one instance (`2^memory` + 4 KiB) of `--mem`; burst instances
-  share the remainder, so a service under heavy concurrency can exhaust the shared pool but never another service's
-  reservation. Operator applies whose reservations do not fit are rejected (reloaded and cluster states run
-  over-committed, reported); placement charges the same footprint.
+- **Memory**: every service placed on a node reserves one instance (`2^memory` + 4 KiB) of `--mem` (k10-metal:
+  `k10.mem`); burst instances share the remainder, so a service under heavy concurrency can exhaust the shared pool
+  but never another service's reservation. Operator applies whose reservations do not fit are rejected (reloaded and
+  cluster states run over-committed, reported; a single k10-metal node leaves what does not fit unplaced); placement
+  charges the same footprint.
   Per service: `max_instances`, KV quota (`--kv-max`), wait queue (10 000), host copies (16 MiB).
 - **CPU**: 2 ms time slices (preemption at JIT safepoints), per-request `cpu_ms` budget, crash-loop backoff.
 - **Connections**: node-wide buffer budget (`--conn-buffer-max`), per-connection head/body limits and timeouts,
-  `max_conns`; each peer link is served at most 1 MiB (bytes read plus replies queued) per mesh-loop iteration, so
-  one busy peer cannot starve the others, and its unsent bytes are capped.
+  `max_conns`; each peer link is served at most 1 MiB (bytes read plus replies queued) per mesh-loop iteration
+  (k10-metal: per poll), so one busy peer cannot starve the others, and its unsent bytes are capped (k10-metal: also
+  short of its heap reserve), so a key holder that stops reading has its link closed.
 - **Not isolated yet**: the shared pool, the connection buffer budget and CPU are first come, first served between
   services (no per-service share or weight); snapshots and prepared code are outside `--mem` (bounded per service
   version by the manifest); KV is bounded per service, not node-wide.

@@ -330,7 +330,7 @@ fn disks() -> bool {
 /// The admin gate with a test key: requests signed for this node's audience pass once, everything else under
 /// `/_k10s` but health and audience is refused.
 fn admin_gate() -> bool {
-    use k10_mesh::admin_auth::{check_body, AdminKey, AdminVerifier};
+    use k10_mesh::admin_auth::{check_body, AdminKey, AdminVerifier, MAX_NONCES};
     let mut ok = true;
     let key = "k10s-selftest-admin-key-0123456789abcdef";
     runtime::admin_init(Some(AdminVerifier::new(AdminKey::parse(key).unwrap(), [0xa5; 16])));
@@ -360,6 +360,18 @@ fn admin_gate() -> bool {
         body.is_some_and(|h| check_body(&h, b"bundle").is_ok() && check_body(&h, b"other").is_err()),
         "admin: body checked against its signed hash"
     );
+    // Two nonces are remembered above; the cache then fills up within the window.
+    let (mut kept, mut nonce, mut last) = (2, [0xc0u8; 16], 0);
+    for i in 0..=MAX_NONCES as u32 {
+        nonce[..4].copy_from_slice(&i.to_le_bytes());
+        last = st(gate("GET", b"/_k10s/status", Some(&signer.authorization(&aud, "GET", "/_k10s/status", now, &nonce, b""))));
+        if last != 200 {
+            break;
+        }
+        kept += 1;
+    }
+    check!(ok, last == 429 && kept == MAX_NONCES, "admin: nonce cache full ({kept} in the window) -> 429");
+    check!(ok, st(gate("GET", b"/_k10s/status", Some(&get))) == 401, "admin: replay with the nonce cache full -> 401");
     runtime::admin_init(None);
     let get = signer.authorization(&aud, "GET", "/_k10s/status", now, &[11; 16], b"");
     check!(
